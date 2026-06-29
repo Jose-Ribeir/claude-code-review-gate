@@ -173,7 +173,7 @@ def _format_reasons(result, limit=20):
         path = f.get("path", "?")
         s, e = f.get("start_line", "?"), f.get("end_line", "?")
         loc = f"{path}:{s}" if s == e else f"{path}:{s}-{e}"
-        lines.append(f"  [{sev}] {loc} — {f.get('content','').strip()}")
+        lines.append(f"  [{sev}] {loc} - {f.get('content','').strip()}")
     return "\n".join(lines[:limit])
 
 
