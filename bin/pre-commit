@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+#
+# subscription-code-review — global git pre-commit gate (the optional "everywhere"
+# wiring, installed by install-git-hook.sh). Reviews staged changes via the
+# official `claude` CLI and blocks confident high-severity findings. Fails open.
+#
+# __SCR_BIN__ is replaced with the plugin's bin/ path at install time.
+set -euo pipefail
+
+SCR_BIN="${SCR_BIN:-__SCR_BIN__}"
+PY="$(command -v python3 || command -v python || true)"
+
+RC=0
+if [ -n "$PY" ] && [ -f "$SCR_BIN/review-gate.py" ]; then
+  "$PY" "$SCR_BIN/review-gate.py" --mode git || RC=$?
+fi
+
+# core.hooksPath overrides a repo's own .git/hooks/pre-commit; don't silently
+# disable it — run it too (only if we didn't already block).
+GITDIR="$(git rev-parse --git-dir 2>/dev/null || echo .git)"
+LOCAL="$GITDIR/hooks/pre-commit"
+if [ "$RC" -eq 0 ] && [ -x "$LOCAL" ] && [ "$LOCAL" -ef "$0" ] 2>/dev/null; then
+  : # guard: never recurse into ourselves
+elif [ "$RC" -eq 0 ] && [ -x "$LOCAL" ]; then
+  "$LOCAL" "$@" || RC=$?
+fi
+
+exit "$RC"

@@ -1,0 +1,10 @@
+# Normalize to LF in the repo so the shell scripts and git hook work on
+# macOS/Linux and under Git Bash on Windows (CRLF would break bash + the hook).
+* text=auto eol=lf
+
+*.sh        text eol=lf
+bin/pre-commit text eol=lf
+*.py        text eol=lf
+*.json      text eol=lf
+*.md        text eol=lf
+*.yml       text eol=lf

@@ -1,0 +1,21 @@
+{
+  "_comment": "Sample project rule override. Copy to your repo root as .ocr/rule.json. The config shape mirrors open-code-review (ocr, Apache-2.0); see the repository NOTICE. Glob patterns map to extra checklist text the reviewer applies to matching files. merge=true prepends the built-in default rubric; merge=false replaces it.",
+  "blocking": true,
+  "rules": [
+    {
+      "globs": ["**/*.{ts,tsx,js,jsx}"],
+      "merge": true,
+      "checklist": "Frontend specifics: flag unhandled promise rejections, missing input validation on user-facing handlers, and direct DOM injection that could enable XSS."
+    },
+    {
+      "globs": ["**/*.{go}"],
+      "merge": true,
+      "checklist": "Go specifics: flag unchecked errors, goroutine leaks, missing context cancellation, and data races on shared state."
+    },
+    {
+      "globs": ["**/migrations/**", "**/*.sql"],
+      "merge": true,
+      "checklist": "Data layer: flag destructive migrations without a guard, missing indexes on new foreign keys, and SQL built via string concatenation."
+    }
+  ]
+}
