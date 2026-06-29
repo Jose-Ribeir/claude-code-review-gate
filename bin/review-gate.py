@@ -19,6 +19,7 @@ import os
 import shutil
 import subprocess
 import sys
+import shlex
 import time
 from pathlib import Path
 
@@ -127,14 +128,26 @@ def _extract_json(text):
 
 
 def _find_claude():
-    """Locate the claude CLI: PATH first, then CLAUDE_CODE_EXECPATH (set when a
-    hook runs inside Claude Code, where `claude` may not be on PATH)."""
+    """Locate the claude CLI so the gate works from any shell, not just inside
+    Claude Code. Order: PATH; then OCR_CLAUDE_BIN / CLAUDE_CODE_EXECPATH; then,
+    on Windows, the Desktop App's bundled claude.exe (a versioned path that is
+    not on PATH) — newest version wins."""
     found = shutil.which("claude")
     if found:
         return found
-    exe = os.environ.get("CLAUDE_CODE_EXECPATH", "")
-    if exe and os.path.isfile(exe):
-        return exe
+    for env in ("OCR_CLAUDE_BIN", "CLAUDE_CODE_EXECPATH"):
+        exe = os.environ.get(env, "")
+        if exe and os.path.isfile(exe):
+            return exe
+    import glob
+
+    roots = [p for p in (os.environ.get("LOCALAPPDATA"), os.path.join(os.path.expanduser("~"), "AppData", "Local")) if p]
+    cands = []
+    for root in roots:
+        cands += glob.glob(os.path.join(root, "Packages", "Claude_*", "LocalCache", "Roaming", "Claude", "claude-code", "*", "claude.exe"))
+    if cands:
+        cands.sort(key=lambda f: os.path.getmtime(f), reverse=True)
+        return cands[0]
     return None
 
 
@@ -145,7 +158,7 @@ def _run_review(repo_root):
         _warn("`claude` CLI not found on PATH or CLAUDE_CODE_EXECPATH — skipping review (fail-open).")
         return None, False
     extra = os.environ.get("OCR_CLAUDE_ARGS")
-    args = extra.split() if extra else DEFAULT_CLAUDE_ARGS
+    args = shlex.split(extra) if extra else DEFAULT_CLAUDE_ARGS
     try:
         proc = subprocess.run(
             [claude, "-p", PROMPT] + args,
