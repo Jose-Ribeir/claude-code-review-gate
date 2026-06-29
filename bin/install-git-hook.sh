@@ -9,6 +9,9 @@
 set -euo pipefail
 
 BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PLUGIN_ROOT="$(cd "$BIN_DIR/.." && pwd)"
+# A path the `claude` binary accepts on this OS (mixed-mode on Windows/Git Bash).
+PLUGIN_ROOT_ARG="$(cygpath -m "$PLUGIN_ROOT" 2>/dev/null || echo "$PLUGIN_ROOT")"
 HOOKS_DIR="${SCR_HOOKS_DIR:-$HOME/.config/review-gate/hooks}"
 
 mkdir -p "$HOOKS_DIR"
@@ -19,8 +22,9 @@ if [ -n "$PREV" ] && [ "$PREV" != "$HOOKS_DIR" ]; then
   echo "Backed up existing global core.hooksPath: $PREV"
 fi
 
-# Materialize the pre-commit with the plugin bin path baked in.
-sed "s|__SCR_BIN__|$BIN_DIR|g" "$BIN_DIR/pre-commit" > "$HOOKS_DIR/pre-commit"
+# Materialize the pre-commit with the plugin bin path + plugin root baked in.
+sed -e "s|__SCR_BIN__|$BIN_DIR|g" -e "s|__PLUGIN_ROOT__|$PLUGIN_ROOT_ARG|g" \
+  "$BIN_DIR/pre-commit" > "$HOOKS_DIR/pre-commit"
 chmod +x "$HOOKS_DIR/pre-commit"
 
 git config --global core.hooksPath "$HOOKS_DIR"

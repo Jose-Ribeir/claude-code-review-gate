@@ -8,6 +8,14 @@
 set -euo pipefail
 
 SCR_BIN="${SCR_BIN:-__SCR_BIN__}"
+
+# Default headless args: load the plugin from disk so /review-gate:review resolves
+# even when the plugin isn't formally installed, and allow the review's read-only
+# tools to run non-interactively. Override by exporting OCR_CLAUDE_ARGS yourself.
+if [ -z "${OCR_CLAUDE_ARGS:-}" ]; then
+  export OCR_CLAUDE_ARGS="--plugin-dir __PLUGIN_ROOT__ --dangerously-skip-permissions"
+fi
+
 PY="$(command -v python3 || command -v python || true)"
 
 RC=0
