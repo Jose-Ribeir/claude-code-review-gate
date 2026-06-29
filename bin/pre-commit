@@ -16,7 +16,14 @@ if [ -z "${OCR_CLAUDE_ARGS:-}" ]; then
   export OCR_CLAUDE_ARGS="--plugin-dir __PLUGIN_ROOT__ --dangerously-skip-permissions"
 fi
 
-PY="$(command -v python3 || command -v python || true)"
+# Pick a WORKING Python interpreter; skip Windows Store alias stubs (which can't
+# execute). If none works, fail open (skip review) rather than block the commit.
+PY=""
+for _c in python3 python py; do
+  _p="$(command -v "$_c" 2>/dev/null)" || continue
+  case "$_p" in *[Ww]indows[Aa]pps*) continue ;; esac
+  if "$_p" -c "import sys" >/dev/null 2>&1; then PY="$_p"; break; fi
+done
 
 RC=0
 if [ -n "$PY" ] && [ -f "$SCR_BIN/review-gate.py" ]; then
