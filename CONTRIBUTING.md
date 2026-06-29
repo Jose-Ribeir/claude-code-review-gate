@@ -5,7 +5,7 @@ Thanks for your interest in improving claude-code-review-gate.
 ## Develop locally
 
 ```bash
-git clone https://github.com/OWNER/claude-code-review-gate
+git clone https://github.com/Jose-Ribeir/claude-code-review-gate
 claude --plugin-dir ./claude-code-review-gate
 ```
 Then try `/review-gate:review --staged` in a repo with staged changes.
