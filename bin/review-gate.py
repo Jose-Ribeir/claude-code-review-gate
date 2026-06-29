@@ -126,11 +126,23 @@ def _extract_json(text):
     return None
 
 
+def _find_claude():
+    """Locate the claude CLI: PATH first, then CLAUDE_CODE_EXECPATH (set when a
+    hook runs inside Claude Code, where `claude` may not be on PATH)."""
+    found = shutil.which("claude")
+    if found:
+        return found
+    exe = os.environ.get("CLAUDE_CODE_EXECPATH", "")
+    if exe and os.path.isfile(exe):
+        return exe
+    return None
+
+
 def _run_review(repo_root):
     """Return (result_dict_or_None, ran_ok_bool)."""
-    claude = shutil.which("claude")
+    claude = _find_claude()
     if not claude:
-        _warn("`claude` CLI not found on PATH — skipping review (fail-open).")
+        _warn("`claude` CLI not found on PATH or CLAUDE_CODE_EXECPATH — skipping review (fail-open).")
         return None, False
     extra = os.environ.get("OCR_CLAUDE_ARGS")
     args = extra.split() if extra else DEFAULT_CLAUDE_ARGS

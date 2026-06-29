@@ -1,3 +1,8 @@
+---
+name: review
+description: AI code review of your changes (open-code-review methodology, run natively in Claude Code). Reviews the working diff or staged changes, or scans whole files, and prints findings plus a block/warn/pass verdict. Use for "review my changes", "review staged", "scan this repo", or as the engine behind the commit gate.
+---
+
 <!--
   The multi-phase review methodology orchestrated here (per-file isolated review,
   plan-for-large-diffs, "falsify, don't verify" filtering, cross-file dedup, and
@@ -7,10 +12,6 @@
   that fans out per-file subagents and emits a severity/confidence verdict.
   See the repository NOTICE file for full attribution.
 -->
----
-name: review
-description: AI code review of your changes (open-code-review methodology, run natively in Claude Code). Reviews the working diff or staged changes, or scans whole files, and prints findings plus a block/warn/pass verdict. Use for "review my changes", "review staged", "scan this repo", or as the engine behind the commit gate.
----
 
 # subscription-code-review — orchestrator
 
