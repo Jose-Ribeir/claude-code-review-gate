@@ -1,0 +1,25 @@
+{
+  "name": "subscription-code-review",
+  "owner": {
+    "name": "José Ribeiro",
+    "url": "https://github.com/OWNER"
+  },
+  "metadata": {
+    "description": "Single-plugin marketplace for subscription-code-review.",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "subscription-code-review",
+      "source": ".",
+      "description": "open-code-review-style AI code review, native to Claude Code, with a blocking commit gate. Subscription-compliant.",
+      "license": "Apache-2.0",
+      "keywords": [
+        "code-review",
+        "ai-code-review",
+        "pre-commit",
+        "git-hook"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,55 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Lint Python (ruff)
+        run: ruff check bin
+
+      - name: Byte-compile Python
+        run: python -m compileall bin
+
+      - name: Validate JSON files
+        run: |
+          python - <<'PY'
+          import json, glob, sys
+          files = [
+              ".claude-plugin/plugin.json",
+              ".claude-plugin/marketplace.json",
+              "schemas/finding.schema.json",
+              "hooks/hooks.json",
+              "examples/.ocr/rule.json",
+          ]
+          bad = []
+          for f in files:
+              try:
+                  json.load(open(f, encoding="utf-8"))
+              except Exception as e:
+                  bad.append(f"{f}: {e}")
+          if bad:
+              print("\n".join(bad)); sys.exit(1)
+          print(f"OK: {len(files)} JSON files valid")
+          PY
+
+      - name: Verdict parser smoke test
+        run: |
+          echo '{"findings":[{"severity":"high","confidence":0.9}]}' | python bin/ocr_verdict.py | grep -qx block
+          echo '{"findings":[{"severity":"high","confidence":0.5}]}' | python bin/ocr_verdict.py | grep -qx warn
+          echo '{"findings":[{"severity":"low","confidence":0.9}]}'  | python bin/ocr_verdict.py | grep -qx pass
+          echo 'not json' | python bin/ocr_verdict.py | grep -qx pass
+          echo "verdict parser OK"

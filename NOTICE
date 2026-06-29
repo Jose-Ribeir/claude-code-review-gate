@@ -1,0 +1,38 @@
+subscription-code-review
+Copyright 2026 José Ribeiro and contributors
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not use
+these files except in compliance with the License. You may obtain a copy of the
+License in the LICENSE file or at http://www.apache.org/licenses/LICENSE-2.0.
+
+------------------------------------------------------------------------------
+Attribution
+------------------------------------------------------------------------------
+
+This product includes review methodology, prompt text, and rubric content
+adapted from open-code-review (ocr):
+
+    https://github.com/alibaba/open-code-review
+    Copyright the open-code-review (Alibaba) authors.
+    Licensed under the Apache License, Version 2.0.
+
+Portions derived from open-code-review and MODIFIED in this project include:
+
+  * the reviewer scope rules (the MAIN_TASK role/capabilities/scope discipline),
+  * the "falsify, don't verify" review-comment filtering rule,
+  * the default review checklist (Correctness, Security, Performance,
+    Maintainability, Test Coverage) and the severity definitions,
+  * the full-file scan, cross-batch dedup, and project-summary methodology,
+  * the project rule-file shape used by examples/.ocr/rule.json.
+
+Modifications made by this project include: re-expressing the methodology to run
+natively inside Claude Code (an orchestrator skill fanning out per-file reviewer
+subagents that read real files via native tools); adding an explicit
+severity/confidence finding schema and a deterministic block/warn/pass verdict
+parser; and removing the original "developed by Alibaba" self-identification,
+which does not apply to this project.
+
+This project is not affiliated with, sponsored by, or endorsed by Alibaba or
+Anthropic. It does not run the open-code-review binary and does not transmit any
+authentication token to any third-party tool; all model inference is performed
+by Claude Code itself.

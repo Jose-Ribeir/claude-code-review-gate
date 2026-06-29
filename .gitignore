@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local Claude Code state (never ship personal settings)
+.claude/settings.local.json
+
+# Editor
+.idea/
+.vscode/
+*.swp
+
+# Note: examples/.ocr/rule.json IS tracked (sample config) — do not ignore it.
