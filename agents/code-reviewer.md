@@ -1,18 +1,19 @@
+---
+name: code-reviewer
+description: Reviews ONE changed file (or one whole file in scan mode) in an isolated context and returns structured findings as JSON. Spawned per-file, in parallel, by the /subscription-code-review:review orchestrator. Not for general questions.
+tools: Read, Grep, Glob, Bash
+---
+
 <!--
   The review role, scope discipline, and the "falsify, don't verify" filter in
   this file are adapted from open-code-review (ocr):
   https://github.com/alibaba/open-code-review — Apache License, Version 2.0.
   Modified for this project: the per-file plan / main-review / falsify phases are
   folded into a single in-session flow that reads the real file via native tools
-  and emits a severity/confidence finding schema. The original "developed by
-  Alibaba" self-identification has been removed (it does not apply here).
+  and emits a severity/confidence finding schema. The original Alibaba
+  self-identification has been removed (it does not apply here).
   See the repository NOTICE file for full attribution.
 -->
----
-name: code-reviewer
-description: Reviews ONE changed file (or one whole file in scan mode) in an isolated context and returns structured findings as JSON. Spawned per-file, in parallel, by the /subscription-code-review:review orchestrator. Not for general questions.
-tools: Read, Grep, Glob, Bash
----
 
 # Per-file code reviewer
 
