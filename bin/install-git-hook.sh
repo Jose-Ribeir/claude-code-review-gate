@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Installs the "everywhere" commit gate: sets a global core.hooksPath whose
-# pre-commit runs subscription-code-review on EVERY commit (terminal, IDE, or
+# pre-commit runs review-gate on EVERY commit (terminal, IDE, or
 # Claude Code), in every repo. This is OPTIONAL — the plugin already gates
 # commits made through Claude Code without it.
 #
@@ -9,13 +9,13 @@
 set -euo pipefail
 
 BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-HOOKS_DIR="${SCR_HOOKS_DIR:-$HOME/.config/subscription-code-review/hooks}"
+HOOKS_DIR="${SCR_HOOKS_DIR:-$HOME/.config/review-gate/hooks}"
 
 mkdir -p "$HOOKS_DIR"
 
 PREV="$(git config --global --get core.hooksPath || true)"
 if [ -n "$PREV" ] && [ "$PREV" != "$HOOKS_DIR" ]; then
-  git config --global subscriptionCodeReview.prevHooksPath "$PREV"
+  git config --global reviewGate.prevHooksPath "$PREV"
   echo "Backed up existing global core.hooksPath: $PREV"
 fi
 

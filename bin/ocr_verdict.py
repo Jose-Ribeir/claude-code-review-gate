@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 #
-# Deterministic verdict parser for subscription-code-review.
+# Deterministic verdict parser for review-gate.
 #
 # The verdict contract (the block/warn/pass tiers and the notion of acting on
 # findings only after a falsification pass) is adapted from the review pipeline

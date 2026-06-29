@@ -1,17 +1,19 @@
-# subscription-code-review
+# claude-code-review-gate — Blocking AI code-review gate for Claude Code
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Claude Code Plugin](https://img.shields.io/badge/Claude%20Code-plugin-8A2BE2.svg)](https://code.claude.com/docs/en/plugins)
 ![Status: beta](https://img.shields.io/badge/status-beta-orange.svg)
 
-> **OCR-style AI code review, native to Claude Code — with a blocking pre-commit gate.**
-> Subscription-compliant: no token borrowing, no external binary. Claude Code reviews your code itself.
+> **AI code review + a blocking pre-commit gate, native to Claude Code.**
+> Runs on your Claude subscription the compliant way — no token borrowing, no external binary.
+
+**claude-code-review-gate** is a Claude Code plugin that adds AI code review and a **blocking pre-commit gate** to your workflow. Claude Code does the inference itself, so review runs **on your Claude subscription** with no token borrowing and no third-party binary. The review methodology is adapted from [open-code-review](https://github.com/alibaba/open-code-review). Install the plugin and review with `/review-gate:review`.
 
 <!-- TODO: add a demo GIF here — a `git commit` blocked on a high-severity finding, then passing after `--no-verify`. -->
 
 ## What it is
 
-- **On-demand review** of your working diff or staged changes, and a **full-file scan** of a repo — run as a skill: `/subscription-code-review:review`.
+- **On-demand review** of your working diff or staged changes, and a **full-file scan** of a repo — run as a skill: `/review-gate:review`.
 - A **blocking commit gate**: reviews staged changes and **blocks confident high-severity findings**. Default gates commits made through Claude Code; an optional installer extends it to **every** commit (terminal, IDE, or Claude Code).
 - A **per-file reviewer subagent** with its own isolated context, fanned out in parallel, that reads the real files and returns a structured **severity + confidence** finding schema.
 - A **deterministic verdict** (`block` / `warn` / `pass`) decided by auditable code, not the model's discretion. **Fails open** — a review hiccup never traps your commit.
@@ -25,7 +27,7 @@ This plugin gives you the **same review methodology the compliant way**: Claude 
 ## How it works
 
 ```
-/subscription-code-review:review  (orchestrator skill, runs on the main agent)
+/review-gate:review  (orchestrator skill, runs on the main agent)
         │  select changed/staged files → apply allowlist + rule hierarchy
         ▼
    fan out, in parallel, one isolated subagent per file
@@ -39,19 +41,19 @@ This plugin gives you the **same review methodology the compliant way**: Claude 
    verdict: block | warn | pass   →   render text, or JSON for the gate
 ```
 
-The commit gate runs `claude -p "/subscription-code-review:review --staged --json"` headlessly and maps the verdict to a decision: a Claude Code **PreToolUse** hook returns allow/deny (default wiring), or a **git pre-commit** hook returns an exit code (the optional "everywhere" wiring).
+The commit gate runs `claude -p "/review-gate:review --staged --json"` headlessly and maps the verdict to a decision: a Claude Code **PreToolUse** hook returns allow/deny (default wiring), or a **git pre-commit** hook returns an exit code (the optional "everywhere" wiring).
 
 ## Install
 
 **1. From the marketplace (recommended).** In Claude Code:
 ```
-/plugin marketplace add OWNER/subscription-code-review
-/plugin install subscription-code-review
+/plugin marketplace add OWNER/claude-code-review-gate
+/plugin install review-gate@claude-code-review-gate
 ```
 
 **2. Local / development install:**
 ```
-claude --plugin-dir /path/to/subscription-code-review
+claude --plugin-dir /path/to/claude-code-review-gate
 ```
 
 **3. (Optional) gate EVERY commit, everywhere.** By default the gate only fires for commits made through Claude Code. To gate terminal/IDE commits in every repo too:
@@ -67,16 +69,16 @@ bash bin/uninstall-git-hook.sh   # reverts it
 
 ```bash
 # Review your current working changes
-/subscription-code-review:review
+/review-gate:review
 
 # Review only staged changes (what the commit gate uses)
-/subscription-code-review:review --staged
+/review-gate:review --staged
 
 # Full-repo scan with a project summary
-/subscription-code-review:review --scan --summary
+/review-gate:review --scan --summary
 
 # Use a specific rule file, output machine-readable JSON
-/subscription-code-review:review --staged --rule ./.ocr/rule.json --json
+/review-gate:review --staged --rule ./.ocr/rule.json --json
 ```
 
 **The commit gate in action:** commit a change containing a confident high-severity bug and the commit is blocked with the findings listed. Fix it, or bypass once:
@@ -100,7 +102,7 @@ Rule precedence (highest first): `--rule` → project `.ocr/rule.json` → globa
 
 ## How it compares to open-code-review
 
-| | open-code-review (ocr) | subscription-code-review |
+| | open-code-review (ocr) | claude-code-review-gate |
 |---|---|---|
 | Runs as | external Go binary | native Claude Code skill + subagents |
 | Auth on a subscription | borrows the token (ToS-blocked) | Claude Code's own auth (compliant) |

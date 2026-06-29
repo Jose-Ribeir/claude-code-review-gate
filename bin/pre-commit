@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# subscription-code-review — global git pre-commit gate (the optional "everywhere"
+# review-gate — global git pre-commit gate (the optional "everywhere"
 # wiring, installed by install-git-hook.sh). Reviews staged changes via the
 # official `claude` CLI and blocks confident high-severity findings. Fails open.
 #

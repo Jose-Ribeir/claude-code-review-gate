@@ -13,7 +13,7 @@ description: AI code review of your changes (open-code-review methodology, run n
   See the repository NOTICE file for full attribution.
 -->
 
-# subscription-code-review — orchestrator
+# review-gate — orchestrator
 
 You are orchestrating an AI code review by fanning out one isolated
 `code-reviewer` subagent per file. Follow these steps exactly.
