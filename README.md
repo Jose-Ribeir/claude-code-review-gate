@@ -47,7 +47,7 @@ The commit gate runs `claude -p "/review-gate:review --staged --json"` headlessl
 
 **1. From the marketplace (recommended).** In Claude Code:
 ```
-/plugin marketplace add OWNER/claude-code-review-gate
+/plugin marketplace add Jose-Ribeir/claude-code-review-gate
 /plugin install review-gate@claude-code-review-gate
 ```
 

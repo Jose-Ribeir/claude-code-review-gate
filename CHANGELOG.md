@@ -21,5 +21,5 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Rule hierarchy, allowlist/exclusions, finding JSON Schema, sample `.ocr/rule.json`.
 - Apache-2.0 license with NOTICE attributing open-code-review.
 
-[Unreleased]: https://github.com/OWNER/claude-code-review-gate/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/OWNER/claude-code-review-gate/releases/tag/v0.1.0
+[Unreleased]: https://github.com/Jose-Ribeir/claude-code-review-gate/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Jose-Ribeir/claude-code-review-gate/releases/tag/v0.1.0

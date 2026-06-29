@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://github.com/OWNER/claude-code-review-gate/schemas/finding.schema.json",
+  "$id": "https://github.com/Jose-Ribeir/claude-code-review-gate/schemas/finding.schema.json",
   "title": "review-gate output",
   "description": "Output of the /review-gate:review skill in --json mode.",
   "type": "object",
