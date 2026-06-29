@@ -9,7 +9,24 @@
 
 **claude-code-review-gate** is a Claude Code plugin that adds AI code review and a **blocking pre-commit gate** to your workflow. Claude Code does the inference itself, so review runs **on your Claude subscription** with no token borrowing and no third-party binary. The review methodology is adapted from [open-code-review](https://github.com/alibaba/open-code-review). Install the plugin and review with `/review-gate:review`.
 
-<!-- TODO: add a demo GIF here — a `git commit` blocked on a high-severity finding, then passing after `--no-verify`. -->
+## Demo
+
+Commit a change containing a confident high-severity bug, and the gate blocks it:
+
+```console
+$ git commit -m "add user lookup"
+[review-gate] review-gate blocked this commit (high-severity issues):
+  [high] db.py:6 - SQL injection: `user_input` is concatenated directly into the
+         query string; an attacker can pass `' OR '1'='1` or `'; DROP TABLE users; --`.
+  [medium] db.py:10-11 - the sqlite3 connection is never closed; callers leak the handle.
+
+Fix the issues, or bypass with: git commit --no-verify
+```
+
+Switch the bug to a parameterized query and the commit sails through (`verdict: pass`).
+Want advisory-only? Set `OCR_ADVISORY=1` and findings are printed but never block.
+
+<!-- A short GIF of the above (block → fix → pass) can replace this console block. -->
 
 ## What it is
 
