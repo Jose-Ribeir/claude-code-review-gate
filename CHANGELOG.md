@@ -9,7 +9,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [0.1.0] - 2026-06-29
 
 ### Added
-- Orchestrator skill `/subscription-code-review:review` — diff review, `--staged`,
+- Orchestrator skill `/review-gate:review` — diff review, `--staged`,
   full-file `--scan`, `--json`, `--rule`, `--summary`.
 - Per-file `code-reviewer` subagent (isolated context, parallel fan-out) that reads
   real files, folds plan → main → "falsify, don't verify" in-session, and emits a
@@ -21,5 +21,5 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Rule hierarchy, allowlist/exclusions, finding JSON Schema, sample `.ocr/rule.json`.
 - Apache-2.0 license with NOTICE attributing open-code-review.
 
-[Unreleased]: https://github.com/OWNER/subscription-code-review/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/OWNER/subscription-code-review/releases/tag/v0.1.0
+[Unreleased]: https://github.com/OWNER/claude-code-review-gate/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/OWNER/claude-code-review-gate/releases/tag/v0.1.0

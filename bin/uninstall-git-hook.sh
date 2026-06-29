@@ -4,10 +4,10 @@
 # unsets it if there was none.
 set -euo pipefail
 
-PREV="$(git config --global --get subscriptionCodeReview.prevHooksPath || true)"
+PREV="$(git config --global --get reviewGate.prevHooksPath || true)"
 if [ -n "$PREV" ]; then
   git config --global core.hooksPath "$PREV"
-  git config --global --unset subscriptionCodeReview.prevHooksPath || true
+  git config --global --unset reviewGate.prevHooksPath || true
   echo "Restored previous global core.hooksPath: $PREV"
 else
   git config --global --unset core.hooksPath || true

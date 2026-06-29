@@ -1,14 +1,14 @@
 # Contributing
 
-Thanks for your interest in improving subscription-code-review.
+Thanks for your interest in improving claude-code-review-gate.
 
 ## Develop locally
 
 ```bash
-git clone https://github.com/OWNER/subscription-code-review
-claude --plugin-dir ./subscription-code-review
+git clone https://github.com/OWNER/claude-code-review-gate
+claude --plugin-dir ./claude-code-review-gate
 ```
-Then try `/subscription-code-review:review --staged` in a repo with staged changes.
+Then try `/review-gate:review --staged` in a repo with staged changes.
 
 ## Test the commit gate
 

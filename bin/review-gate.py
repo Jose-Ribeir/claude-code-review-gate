@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 #
-# subscription-code-review — commit gate core.
+# review-gate — commit gate core.
 #
 # Runs the review skill headlessly via the official `claude` CLI (the compliant,
 # subscription-friendly path — no token leaves Claude Code, no third-party tool),
@@ -25,14 +25,14 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ocr_verdict import compute_verdict  # noqa: E402
 
-PROMPT = "/subscription-code-review:review --staged --json"
+PROMPT = "/review-gate:review --staged --json"
 DEFAULT_CLAUDE_ARGS = ["--allowedTools", "Bash Read Grep Glob Task"]
 TIMEOUT = int(os.environ.get("OCR_TIMEOUT", "240"))
 MARKER_TTL = 3600  # seconds
 
 
 def _warn(msg):
-    sys.stderr.write("[subscription-code-review] " + msg + "\n")
+    sys.stderr.write("[review-gate] " + msg + "\n")
 
 
 def _git(args, cwd=None):
@@ -228,7 +228,7 @@ def main(argv):
     reasons = _format_reasons(result)
 
     if verdict == "block" and not advisory:
-        reason = "subscription-code-review blocked this commit (high-severity issues):\n" + (
+        reason = "review-gate blocked this commit (high-severity issues):\n" + (
             reasons or "  (see review output)"
         ) + "\n\nFix the issues, or bypass with: git commit --no-verify"
         if mode == "hook":

@@ -1,8 +1,8 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://github.com/OWNER/subscription-code-review/schemas/finding.schema.json",
-  "title": "subscription-code-review output",
-  "description": "Output of the /subscription-code-review:review skill in --json mode.",
+  "$id": "https://github.com/OWNER/claude-code-review-gate/schemas/finding.schema.json",
+  "title": "review-gate output",
+  "description": "Output of the /review-gate:review skill in --json mode.",
   "type": "object",
   "required": ["status", "verdict", "summary", "findings"],
   "properties": {

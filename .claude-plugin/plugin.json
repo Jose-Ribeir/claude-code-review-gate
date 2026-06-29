@@ -1,14 +1,15 @@
 {
-  "name": "subscription-code-review",
-  "description": "open-code-review-style AI code review, native to Claude Code: on-demand diff review and full-file scan, plus a blocking commit gate. Uses your Claude subscription compliantly (no token borrowing, no external binary).",
+  "name": "review-gate",
+  "description": "Native Claude Code AI code review + blocking pre-commit gate on your Claude subscription. Per-file reviewer subagents, severity/confidence verdicts. open-code-review, done compliantly.",
   "version": "0.1.0",
   "author": {
     "name": "José Ribeiro"
   },
-  "homepage": "https://github.com/OWNER/subscription-code-review",
-  "repository": "https://github.com/OWNER/subscription-code-review",
+  "homepage": "https://github.com/OWNER/claude-code-review-gate",
+  "repository": "https://github.com/OWNER/claude-code-review-gate",
   "license": "Apache-2.0",
   "keywords": [
+    "claude-code",
     "code-review",
     "ai-code-review",
     "pre-commit",

@@ -1,6 +1,6 @@
 ---
 name: code-reviewer
-description: Reviews ONE changed file (or one whole file in scan mode) in an isolated context and returns structured findings as JSON. Spawned per-file, in parallel, by the /subscription-code-review:review orchestrator. Not for general questions.
+description: Reviews ONE changed file (or one whole file in scan mode) in an isolated context and returns structured findings as JSON. Spawned per-file, in parallel, by the /review-gate:review orchestrator. Not for general questions.
 tools: Read, Grep, Glob, Bash
 ---
 
