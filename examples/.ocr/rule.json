@@ -16,6 +16,16 @@
       "globs": ["**/migrations/**", "**/*.sql"],
       "merge": true,
       "checklist": "Data layer: flag destructive migrations without a guard, missing indexes on new foreign keys, and SQL built via string concatenation."
+    },
+    {
+      "globs": ["**/*.{ftl,ftlh,ftlx}"],
+      "merge": true,
+      "checklist": "FreeMarker templates: flag unescaped interpolations in HTML contexts (missing ?html or auto-escaping), user-controlled data passed to ?new() or ?eval (SSTI/RCE), missing !default or ?? guards on possibly-absent values, and business logic or data-access code in templates."
+    },
+    {
+      "globs": ["**/*.{po,pot}"],
+      "merge": false,
+      "checklist": "Translation files: flag mistranslations (mismatched numbers, dates, units, omitted clauses), format-placeholder mismatches (%s, %(name)s), msgstr[n] plural-form count mismatches, unbalanced quotes, broken escape sequences, and missing msgstr entries. Ignore style preferences and regional wording differences that preserve meaning."
     }
   ]
 }

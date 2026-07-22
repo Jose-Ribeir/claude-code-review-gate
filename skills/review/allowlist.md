@@ -15,11 +15,14 @@ does not match an exclusion. Binary files and deletions are always skipped.
 
 ```
 .c .h .cc .cpp .cxx .hpp .hh .cs .go .rs .java .kt .kts .scala .swift
-.py .rb .php .pl .pm .lua .r .jl .dart .groovy .ex .exs .erl .clj .cljs
-.js .jsx .mjs .cjs .ts .tsx .vue .svelte
-.sql .sh .bash .zsh .ps1 .psm1
-.html .css .scss .sass .less
+.py .pyi .rb .rake .gemspec .php .pl .pm .lua .r .jl .dart .groovy
+.ex .exs .erl .hrl .ets .clj .cljs .vb .fs .m .mm
+.js .jsx .mjs .cjs .ts .tsx .vue .svelte .astro
+.sql .sh .bash .zsh .fish .ps1 .psm1
+.html .htm .css .scss .sass .less
 .tf .hcl .proto .graphql .gql
+.ftl .ftlh .ftlx
+.po .pot
 ```
 Config/markup files (`.json .yaml .yml .toml .xml .md .gradle .properties`) are
 reviewed only when a project rule explicitly opts them in, or in `--scan` mode.

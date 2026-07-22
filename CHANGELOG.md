@@ -6,6 +6,14 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- Extended file-type allowlist to match OCR v1.7.11–v1.7.13: FreeMarker
+  (`.ftl`, `.ftlh`, `.ftlx`), gettext translation files (`.po`, `.pot`),
+  Astro (`.astro`), fish shell (`.fish`), Python stubs (`.pyi`),
+  Objective-C (`.m`, `.mm`), VB.NET/F# (`.vb`, `.fs`), Erlang headers/ETS
+  (`.hrl`, `.ets`), Ruby build files (`.rake`, `.gemspec`), and `.htm`.
+- Sample FreeMarker and PO/POT checklists in `examples/.ocr/rule.json`.
+
 ## [0.1.0] - 2026-06-29
 
 ### Added
