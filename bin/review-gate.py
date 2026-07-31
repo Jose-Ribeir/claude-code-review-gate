@@ -30,7 +30,10 @@ from ocr_verdict import compute_verdict  # noqa: E402
 
 PROMPT = "/review-gate:review --staged --json"
 DEFAULT_CLAUDE_ARGS = ["--allowedTools", "Bash Read Grep Glob Task"]
-TIMEOUT = int(os.environ.get("OCR_TIMEOUT", "300"))
+try:
+    TIMEOUT = int(os.environ.get("OCR_TIMEOUT", "300"))
+except (ValueError, TypeError):
+    TIMEOUT = 300
 MARKER_TTL = 3600  # seconds
 
 
@@ -227,11 +230,38 @@ def _emit_hook(decision, reason=""):
     sys.exit(0)  # hook itself always exits 0; the decision is in the payload
 
 
+def _fail_closed(mode, msg):
+    """Block the commit (or deny the hook) with a clear message.
+
+    Called for ReviewGateError AND for unhandled exceptions anywhere in main()
+    so that any internal crash fails closed rather than open.
+    """
+    if mode == "hook":
+        _emit_hook("deny", msg)  # exits 0; decision is in payload
+    else:
+        _warn(msg)
+        sys.exit(1)
+
+
 def main(argv):
     mode = "git"
     if "--mode" in argv:
         mode = argv[argv.index("--mode") + 1]
 
+    # Top-level safety net: any unhandled exception in main() fails closed.
+    # Without this, a crash in compute_verdict(), _format_reasons(), or any
+    # other helper exits the process with a non-zero code WITHOUT emitting a
+    # deny payload — in hook mode Claude Code would treat that as a non-blocking
+    # error and let the commit through, defeating the fail-closed policy.
+    try:
+        _main_inner(argv, mode)
+    except SystemExit:
+        raise  # propagate intentional exits (allow/deny both use sys.exit)
+    except Exception as exc:  # noqa: BLE001
+        _fail_closed(mode, f"review-gate internal error ({type(exc).__name__}: {exc}) — blocking commit.")
+
+
+def _main_inner(argv, mode):
     # Hook mode: consume the PreToolUse payload on stdin (and only gate commits).
     if mode == "hook":
         try:
@@ -267,12 +297,8 @@ def main(argv):
             )
             allow()
             return  # unreachable; allow() calls sys.exit / _emit_hook
-        reason = str(exc)
-        if mode == "hook":
-            _emit_hook("deny", reason)
-        else:
-            _warn(reason)
-            sys.exit(1)
+        _fail_closed(mode, str(exc))
+        return  # unreachable
 
     if not ran:
         allow()  # fail-open: only reaches here when claude is not installed
@@ -286,11 +312,8 @@ def main(argv):
             reasons or "  (see review output)"
         ) + "\n\nFix the issues above, then commit again.\n" \
           "Downgrade to advisory (warn-only): OCR_ADVISORY=1 git commit ..."
-        if mode == "hook":
-            _emit_hook("deny", reason)
-        else:
-            _warn(reason)
-            sys.exit(1)
+        _fail_closed(mode, reason)
+        return  # unreachable
 
     # Passed (or advisory): record marker so the paired adapter can skip, print
     # any advisory findings, and allow.
