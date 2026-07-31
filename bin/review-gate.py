@@ -32,7 +32,9 @@ PROMPT = "/review-gate:review --staged --json"
 DEFAULT_CLAUDE_ARGS = ["--allowedTools", "Bash Read Grep Glob Task"]
 try:
     TIMEOUT = int(os.environ.get("OCR_TIMEOUT", "300"))
-except (ValueError, TypeError):
+    if TIMEOUT <= 0:
+        TIMEOUT = 300
+except ValueError:
     TIMEOUT = 300
 MARKER_TTL = 3600  # seconds
 
@@ -244,9 +246,10 @@ def _fail_closed(mode, msg):
 
 
 def main(argv):
-    mode = "git"
-    if "--mode" in argv:
-        mode = argv[argv.index("--mode") + 1]
+    # Mode is parsed INSIDE the safety net so an IndexError from a malformed
+    # '--mode' flag (e.g. '--mode' with no value) is also caught and fails
+    # closed rather than crashing without emitting a deny payload.
+    mode = "git"  # safe default for the except clause below
 
     # Top-level safety net: any unhandled exception in main() fails closed.
     # Without this, a crash in compute_verdict(), _format_reasons(), or any
@@ -254,6 +257,8 @@ def main(argv):
     # deny payload — in hook mode Claude Code would treat that as a non-blocking
     # error and let the commit through, defeating the fail-closed policy.
     try:
+        if "--mode" in argv:
+            mode = argv[argv.index("--mode") + 1]
         _main_inner(argv, mode)
     except SystemExit:
         raise  # propagate intentional exits (allow/deny both use sys.exit)
