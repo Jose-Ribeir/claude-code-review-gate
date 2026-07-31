@@ -8,9 +8,11 @@
 #   --mode hook : a Claude Code PreToolUse permissionDecision (deny/allow) on stdout
 #   --mode git  : a process exit code (1 = block, 0 = allow)
 #
-# Design rule: FAIL OPEN. If the reviewer can't run (claude missing, timeout,
-# unparseable output), allow the commit with a warning. A review tool must never
-# become a hard outage on `git commit`.
+# Failure policy: FAIL CLOSED on timeout, subprocess error, or unparseable
+# output.  Only "claude not found" still fails open — there is no sensible gate
+# when the tool is not installed.  Use OCR_FAIL_OPEN=1 for an emergency
+# one-shot bypass; use OCR_ADVISORY=1 to downgrade permanently to warn-only.
+# Raise OCR_TIMEOUT (default 300 s) if legitimate reviews routinely time out.
 #
 # The orchestrated review methodology this drives is adapted from open-code-review
 # (ocr): https://github.com/alibaba/open-code-review (Apache-2.0). See NOTICE.
@@ -28,8 +30,15 @@ from ocr_verdict import compute_verdict  # noqa: E402
 
 PROMPT = "/review-gate:review --staged --json"
 DEFAULT_CLAUDE_ARGS = ["--allowedTools", "Bash Read Grep Glob Task"]
-TIMEOUT = int(os.environ.get("OCR_TIMEOUT", "240"))
+TIMEOUT = int(os.environ.get("OCR_TIMEOUT", "300"))
 MARKER_TTL = 3600  # seconds
+
+
+class ReviewGateError(Exception):
+    """Raised to fail the gate closed (timeout, subprocess crash, parse error).
+
+    Only 'claude not found' is allowed to remain fail-open.
+    """
 
 
 def _warn(msg):
@@ -152,7 +161,13 @@ def _find_claude():
 
 
 def _run_review(repo_root):
-    """Return (result_dict_or_None, ran_ok_bool)."""
+    """Return (result_dict, True) on success.
+
+    Raises ReviewGateError on timeout, subprocess error, or unparseable output
+    so that main() can fail the gate closed.  Only 'claude not found' still
+    returns (None, False) to allow the commit — there is no gate without the
+    tool.
+    """
     claude = _find_claude()
     if not claude:
         _warn("`claude` CLI not found on PATH or CLAUDE_CODE_EXECPATH — skipping review (fail-open).")
@@ -168,15 +183,24 @@ def _run_review(repo_root):
             timeout=TIMEOUT,
         )
     except subprocess.TimeoutExpired:
-        _warn(f"review timed out after {TIMEOUT}s — allowing commit (fail-open).")
-        return None, False
+        raise ReviewGateError(
+            f"review timed out after {TIMEOUT}s — blocking commit to preserve gate integrity.\n"
+            f"  Give Claude more time : OCR_TIMEOUT=600 git commit ...\n"
+            f"  Emergency one-shot bypass : OCR_FAIL_OPEN=1 git commit ..."
+        )
     except Exception as exc:
-        _warn(f"could not run review ({exc}) — allowing commit (fail-open).")
-        return None, False
+        raise ReviewGateError(
+            f"review process error ({exc}) — blocking commit to preserve gate integrity.\n"
+            f"  Emergency one-shot bypass : OCR_FAIL_OPEN=1 git commit ..."
+        )
     result = _extract_json(proc.stdout)
     if result is None:
-        _warn("could not parse review output — allowing commit (fail-open).")
-    return result, result is not None
+        raise ReviewGateError(
+            "could not parse review output — blocking commit to preserve gate integrity.\n"
+            f"  Claude stdout (first 400 chars): {proc.stdout[:400]!r}\n"
+            f"  Emergency one-shot bypass : OCR_FAIL_OPEN=1 git commit ..."
+        )
+    return result, True
 
 
 def _format_reasons(result, limit=20):
@@ -232,9 +256,26 @@ def main(argv):
     if marker and _marker_fresh(marker):
         allow()
 
-    result, ran = _run_review(repo_root)
+    try:
+        result, ran = _run_review(repo_root)
+    except ReviewGateError as exc:
+        # Fail closed: block the commit unless OCR_FAIL_OPEN=1 is set.
+        if os.environ.get("OCR_FAIL_OPEN", "").strip().lower() in ("1", "true", "yes"):
+            _warn(
+                f"OCR_FAIL_OPEN=1 set — bypassing fail-closed gate. Reason:\n  {exc}\n"
+                "[!] This bypass should be used sparingly and intentionally."
+            )
+            allow()
+            return  # unreachable; allow() calls sys.exit / _emit_hook
+        reason = str(exc)
+        if mode == "hook":
+            _emit_hook("deny", reason)
+        else:
+            _warn(reason)
+            sys.exit(1)
+
     if not ran:
-        allow()  # fail-open
+        allow()  # fail-open: only reaches here when claude is not installed
 
     verdict = compute_verdict(result)
     advisory = _is_advisory(repo_root)
@@ -243,7 +284,8 @@ def main(argv):
     if verdict == "block" and not advisory:
         reason = "review-gate blocked this commit (high-severity issues):\n" + (
             reasons or "  (see review output)"
-        ) + "\n\nFix the issues, or bypass with: git commit --no-verify"
+        ) + "\n\nFix the issues above, then commit again.\n" \
+          "Downgrade to advisory (warn-only): OCR_ADVISORY=1 git commit ..."
         if mode == "hook":
             _emit_hook("deny", reason)
         else:

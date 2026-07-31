@@ -9,7 +9,7 @@
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/bin/gate-hook.sh\"",
             "if": "Bash(git commit:*)",
-            "timeout": 300,
+            "timeout": 390,
             "statusMessage": "Reviewing staged changes (review-gate)..."
           }
         ]
