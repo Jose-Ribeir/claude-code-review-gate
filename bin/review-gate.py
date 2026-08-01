@@ -197,6 +197,35 @@ def _bypass_hint(mode):
     return "  Emergency one-shot bypass : OCR_FAIL_OPEN=1 git commit ..."
 
 
+def _downgrade_hint(mode):
+    """Permanent block->advisory downgrade instruction text, mode-aware.
+
+    OCR_ADVISORY has the identical env-inheritance limitation as OCR_FAIL_OPEN
+    (see _bypass_hint) -- an inline prefix on `git commit` never reaches this
+    process in hook mode. But this message is `permissionDecisionReason`, which
+    Claude Code surfaces back to the SAME agent whose commit just got blocked
+    -- unlike a human at a terminal reading a git CLI error, that agent has a
+    Write tool. A file-based alternative (.ocr/config.json {"blocking": false})
+    is therefore not a neutral workaround here: it reads as a self-service,
+    persistent, repo-wide kill switch the blocked agent could just write and
+    commit. Keep the session-scoped env-var route as the primary hint (it
+    still requires a human to re-launch Claude Code with the var set -- not
+    something the agent can do to itself mid-session) and only mention the
+    file route with an explicit human-only/persistent/repo-wide label.
+    """
+    if mode == "hook":
+        return (
+            '  Downgrade to advisory (warn-only) : export OCR_ADVISORY=1 in the environment\n'
+            "    Claude Code itself is launched from (a shell prefix on `git commit` will NOT\n"
+            "    work in hook mode -- this process inherits Claude Code's env, not the Bash\n"
+            '    tool call\'s). A human can also add (or create) {"blocking": false} in\n'
+            "    .ocr/config.json, but that is a PERSISTENT, REPO-WIDE change committed into\n"
+            "    the repo -- a human decision, not something to self-apply from inside a\n"
+            "    blocked session."
+        )
+    return "Downgrade to advisory (warn-only): OCR_ADVISORY=1 git commit ..."
+
+
 def _run_review(repo_root, mode):
     """Return (result_dict, True) on success.
 
@@ -365,20 +394,9 @@ def _main_inner(argv, mode):
     reasons = _format_reasons(result)
 
     if verdict == "block" and not advisory:
-        if mode == "hook":
-            # OCR_ADVISORY is read from this process's own os.environ (_is_advisory,
-            # line 86), which in hook mode is Claude Code's launch environment, not
-            # the `git commit` Bash tool call's shell env -- an inline
-            # `OCR_ADVISORY=1 git commit ...` prefix is a no-op here (same class of
-            # bug fixed for OCR_TIMEOUT/OCR_FAIL_OPEN in b0b2c14/cc8f709). Point at
-            # the file-based override instead, which _is_advisory also checks
-            # (line 88) and works identically in both modes.
-            downgrade = 'Downgrade to advisory (warn-only): add {"blocking": false} to .ocr/config.json'
-        else:
-            downgrade = "Downgrade to advisory (warn-only): OCR_ADVISORY=1 git commit ..."
         reason = "review-gate blocked this commit (high-severity issues):\n" + (
             reasons or "  (see review output)"
-        ) + f"\n\nFix the issues above, then commit again.\n{downgrade}"
+        ) + f"\n\nFix the issues above, then commit again.\n{_downgrade_hint(mode)}"
         _fail_closed(mode, reason)
         return  # unreachable
 
