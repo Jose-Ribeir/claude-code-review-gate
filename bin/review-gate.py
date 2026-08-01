@@ -165,7 +165,7 @@ def _find_claude():
     return None
 
 
-def _run_review(repo_root):
+def _run_review(repo_root, mode):
     """Return (result_dict, True) on success.
 
     Raises ReviewGateError on timeout, subprocess error, or unparseable output
@@ -188,13 +188,26 @@ def _run_review(repo_root):
             timeout=TIMEOUT,
         )
     except subprocess.TimeoutExpired:
+        if mode == "hook":
+            # gate-hook.sh execs this script with no argv/stdin parsing of OCR_TIMEOUT
+            # (see gate-hook.sh) -- it only ever sees whatever environment Claude Code's
+            # own PreToolUse hook launcher was started with, NOT the shell env of the
+            # `git commit` Bash tool call. An inline `OCR_TIMEOUT=<n> git commit ...`
+            # prefix therefore never reaches this process in hook mode.
+            escalation = (
+                f"  Give Claude more time : export OCR_TIMEOUT={TIMEOUT * 2} in the environment\n"
+                f"    Claude Code itself is launched from (a shell prefix on `git commit` will\n"
+                f"    NOT work in hook mode -- this process inherits Claude Code's env, not the\n"
+                f"    Bash tool call's). Also raise hooks/hooks.json's PreToolUse 'timeout'\n"
+                f"    (currently 690s) to stay above the new OCR_TIMEOUT -- Claude Code kills\n"
+                f"    this hook at that fixed harness deadline regardless of OCR_TIMEOUT, which\n"
+                f"    silently reopens the fail-open path this gate exists to close."
+            )
+        else:
+            escalation = f"  Give Claude more time : OCR_TIMEOUT={TIMEOUT * 2} git commit ..."
         raise ReviewGateError(
             f"review timed out after {TIMEOUT}s — blocking commit to preserve gate integrity.\n"
-            f"  Give Claude more time : OCR_TIMEOUT={TIMEOUT * 2} git commit ...\n"
-            f"    (in --mode hook, this also requires raising hooks/hooks.json's PreToolUse\n"
-            f"    'timeout' to stay above OCR_TIMEOUT — Claude Code kills the hook at that\n"
-            f"    fixed harness deadline regardless of OCR_TIMEOUT, which silently reopens\n"
-            f"    the fail-open path this gate exists to close)\n"
+            f"{escalation}\n"
             f"  Emergency one-shot bypass : OCR_FAIL_OPEN=1 git commit ..."
         )
     except Exception as exc:
@@ -296,7 +309,7 @@ def _main_inner(argv, mode):
         allow()
 
     try:
-        result, ran = _run_review(repo_root)
+        result, ran = _run_review(repo_root, mode)
     except ReviewGateError as exc:
         # Fail closed: block the commit unless OCR_FAIL_OPEN=1 is set.
         if os.environ.get("OCR_FAIL_OPEN", "").strip().lower() in ("1", "true", "yes"):
