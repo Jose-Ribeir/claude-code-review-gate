@@ -12,7 +12,7 @@
 # output.  Only "claude not found" still fails open — there is no sensible gate
 # when the tool is not installed.  Use OCR_FAIL_OPEN=1 for an emergency
 # one-shot bypass; use OCR_ADVISORY=1 to downgrade permanently to warn-only.
-# Raise OCR_TIMEOUT (default 300 s) if legitimate reviews routinely time out.
+# Raise OCR_TIMEOUT (default 600 s) if legitimate reviews routinely time out.
 #
 # The orchestrated review methodology this drives is adapted from open-code-review
 # (ocr): https://github.com/alibaba/open-code-review (Apache-2.0). See NOTICE.
@@ -31,11 +31,11 @@ from ocr_verdict import compute_verdict  # noqa: E402
 PROMPT = "/review-gate:review --staged --json"
 DEFAULT_CLAUDE_ARGS = ["--allowedTools", "Bash Read Grep Glob Task"]
 try:
-    TIMEOUT = int(os.environ.get("OCR_TIMEOUT", "300"))
+    TIMEOUT = int(os.environ.get("OCR_TIMEOUT", "600"))
     if TIMEOUT <= 0:
-        TIMEOUT = 300
+        TIMEOUT = 600
 except ValueError:
-    TIMEOUT = 300
+    TIMEOUT = 600
 MARKER_TTL = 3600  # seconds
 
 
@@ -190,7 +190,7 @@ def _run_review(repo_root):
     except subprocess.TimeoutExpired:
         raise ReviewGateError(
             f"review timed out after {TIMEOUT}s — blocking commit to preserve gate integrity.\n"
-            f"  Give Claude more time : OCR_TIMEOUT=600 git commit ...\n"
+            f"  Give Claude more time : OCR_TIMEOUT={TIMEOUT * 2} git commit ...\n"
             f"  Emergency one-shot bypass : OCR_FAIL_OPEN=1 git commit ..."
         )
     except Exception as exc:
