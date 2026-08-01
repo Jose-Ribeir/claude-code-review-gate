@@ -110,7 +110,7 @@ git commit --no-verify
 | Gate scope | Claude Code commits | run `bin/install-git-hook.sh` (→ everywhere) / `uninstall-git-hook.sh` | which commits are reviewed |
 | Mode | **block** | `OCR_ADVISORY=1`, or `.ocr/config.json` `{"blocking": false}` | block vs warn-only |
 | Block threshold | `high` & `confidence ≥ 0.7` | `OCR_BLOCK_SEVERITY`, `OCR_BLOCK_CONFIDENCE` | what is severe/sure enough to block |
-| Reviewer timeout | `240`s | `OCR_TIMEOUT` | fail-open deadline for `claude -p` |
+| Reviewer timeout | `600`s | `OCR_TIMEOUT` | fail-**closed** deadline for `claude -p` (blocks the commit; see `hooks/hooks.json` if raising this past ~600s in hook mode) |
 | Per-file rules | built-in rubric | `.ocr/rule.json` (project), `~/.ocr/rule.json` (global), `--rule <path>` | the review checklist per file |
 | `claude` flags | `--allowedTools "Bash Read Grep Glob Task"` | `OCR_CLAUDE_ARGS` | headless invocation tuning |
 | Bypass once | — | `git commit --no-verify` | skip the gate for one commit |

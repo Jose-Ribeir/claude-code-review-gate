@@ -191,6 +191,10 @@ def _run_review(repo_root):
         raise ReviewGateError(
             f"review timed out after {TIMEOUT}s — blocking commit to preserve gate integrity.\n"
             f"  Give Claude more time : OCR_TIMEOUT={TIMEOUT * 2} git commit ...\n"
+            f"    (in --mode hook, this also requires raising hooks/hooks.json's PreToolUse\n"
+            f"    'timeout' to stay above OCR_TIMEOUT — Claude Code kills the hook at that\n"
+            f"    fixed harness deadline regardless of OCR_TIMEOUT, which silently reopens\n"
+            f"    the fail-open path this gate exists to close)\n"
             f"  Emergency one-shot bypass : OCR_FAIL_OPEN=1 git commit ..."
         )
     except Exception as exc:
