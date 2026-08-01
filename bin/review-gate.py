@@ -165,6 +165,38 @@ def _find_claude():
     return None
 
 
+def _hook_timeout_budget():
+    """Return hooks/hooks.json's PreToolUse 'timeout' (int seconds), or None if
+    it can't be read/parsed. Never raises -- this is advisory message text, not
+    gate logic, so a missing/malformed file must not crash the review."""
+    try:
+        path = Path(os.path.dirname(os.path.abspath(__file__))) / ".." / "hooks" / "hooks.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return int(data["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"])
+    except Exception:
+        return None
+
+
+def _bypass_hint(mode):
+    """Emergency-bypass instruction text, mode-aware.
+
+    OCR_FAIL_OPEN is read from this process's own os.environ (line ~330). In
+    --mode hook this process inherits Claude Code's own launch environment, NOT
+    the shell environment of the `git commit` Bash tool call that triggered the
+    PreToolUse hook -- so an inline `OCR_FAIL_OPEN=1 git commit ...` prefix is a
+    no-op in hook mode: the gate denies again and the printed bypass appears to
+    not work, with no indication why.
+    """
+    if mode == "hook":
+        return (
+            "  Emergency one-shot bypass : export OCR_FAIL_OPEN=1 in the environment\n"
+            "    Claude Code itself is launched from (a shell prefix on `git commit` will\n"
+            "    NOT work in hook mode -- this process inherits Claude Code's env, not the\n"
+            "    Bash tool call's)."
+        )
+    return "  Emergency one-shot bypass : OCR_FAIL_OPEN=1 git commit ..."
+
+
 def _run_review(repo_root, mode):
     """Return (result_dict, True) on success.
 
@@ -179,6 +211,7 @@ def _run_review(repo_root, mode):
         return None, False
     extra = os.environ.get("OCR_CLAUDE_ARGS")
     args = shlex.split(extra) if extra else DEFAULT_CLAUDE_ARGS
+    bypass = _bypass_hint(mode)
     try:
         proc = subprocess.run(
             [claude, "-p", PROMPT] + args,
@@ -194,12 +227,14 @@ def _run_review(repo_root, mode):
             # own PreToolUse hook launcher was started with, NOT the shell env of the
             # `git commit` Bash tool call. An inline `OCR_TIMEOUT=<n> git commit ...`
             # prefix therefore never reaches this process in hook mode.
+            budget = _hook_timeout_budget()
+            budget_str = f"currently {budget}s" if budget is not None else "see hooks/hooks.json"
             escalation = (
                 f"  Give Claude more time : export OCR_TIMEOUT={TIMEOUT * 2} in the environment\n"
                 f"    Claude Code itself is launched from (a shell prefix on `git commit` will\n"
                 f"    NOT work in hook mode -- this process inherits Claude Code's env, not the\n"
                 f"    Bash tool call's). Also raise hooks/hooks.json's PreToolUse 'timeout'\n"
-                f"    (currently 690s) to stay above the new OCR_TIMEOUT -- Claude Code kills\n"
+                f"    ({budget_str}) to stay above the new OCR_TIMEOUT -- Claude Code kills\n"
                 f"    this hook at that fixed harness deadline regardless of OCR_TIMEOUT, which\n"
                 f"    silently reopens the fail-open path this gate exists to close."
             )
@@ -208,19 +243,19 @@ def _run_review(repo_root, mode):
         raise ReviewGateError(
             f"review timed out after {TIMEOUT}s — blocking commit to preserve gate integrity.\n"
             f"{escalation}\n"
-            f"  Emergency one-shot bypass : OCR_FAIL_OPEN=1 git commit ..."
+            f"{bypass}"
         )
     except Exception as exc:
         raise ReviewGateError(
             f"review process error ({exc}) — blocking commit to preserve gate integrity.\n"
-            f"  Emergency one-shot bypass : OCR_FAIL_OPEN=1 git commit ..."
+            f"{bypass}"
         )
     result = _extract_json(proc.stdout)
     if result is None:
         raise ReviewGateError(
             "could not parse review output — blocking commit to preserve gate integrity.\n"
             f"  Claude stdout (first 400 chars): {proc.stdout[:400]!r}\n"
-            f"  Emergency one-shot bypass : OCR_FAIL_OPEN=1 git commit ..."
+            f"{bypass}"
         )
     return result, True
 
