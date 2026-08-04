@@ -1,4 +1,19 @@
 {
-  "description": "Manual-only: auto-commit gate removed (cost — 1 reviewer subagent per file was spawned on every commit). Run /review-gate:review manually before pushing. For every-commit-everywhere coverage via the git hook instead, run bin/install-git-hook.sh.",
-  "hooks": {}
+  "description": "Pre-push gate: reviews all unpushed commits once when you push through Claude Code. Fires once per push (not per commit), covering the cumulative diff of all commits being pushed. Blocks confident high-severity findings. Fails open. For every-push-everywhere coverage outside Claude Code, run bin/install-git-hook.sh.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/bin/gate-hook.sh\"",
+            "if": "Bash(git push:*)",
+            "timeout": 690,
+            "statusMessage": "Reviewing unpushed commits (review-gate)..."
+          }
+        ]
+      }
+    ]
+  }
 }
