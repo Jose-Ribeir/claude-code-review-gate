@@ -1,19 +1,4 @@
 {
-  "description": "Default commit gate: reviews staged changes when you commit through Claude Code and blocks confident high-severity findings. Fails open. For every-commit-everywhere coverage, also run bin/install-git-hook.sh.",
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/bin/gate-hook.sh\"",
-            "if": "Bash(git commit:*)",
-            "timeout": 690,
-            "statusMessage": "Reviewing staged changes (review-gate)..."
-          }
-        ]
-      }
-    ]
-  }
+  "description": "Manual-only: auto-commit gate removed (cost — 1 reviewer subagent per file was spawned on every commit). Run /review-gate:review manually before pushing. For every-commit-everywhere coverage via the git hook instead, run bin/install-git-hook.sh.",
+  "hooks": {}
 }
