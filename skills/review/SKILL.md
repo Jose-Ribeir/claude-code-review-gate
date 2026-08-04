@@ -4,19 +4,20 @@ description: AI code review of your changes (open-code-review methodology, run n
 ---
 
 <!--
-  The multi-phase review methodology orchestrated here (per-file isolated review,
-  plan-for-large-diffs, "falsify, don't verify" filtering, cross-file dedup, and
-  project summary) is adapted from open-code-review (ocr):
+  The multi-phase review methodology orchestrated here (single-reviewer with
+  cross-file visibility, plan-for-large-diffs, "falsify, don't verify" filtering,
+  cross-file dedup, and project summary) is adapted from open-code-review (ocr):
   https://github.com/alibaba/open-code-review — Apache License, Version 2.0.
   Modified for this project: re-expressed as a native Claude Code orchestrator
-  that fans out per-file subagents and emits a severity/confidence verdict.
+  that spawns one independent reviewer subagent for the full change set and emits
+  a severity/confidence verdict. Cross-file fan-out is reserved for large diffs
+  (>15 files) where a single context would be diluted.
   See the repository NOTICE file for full attribution.
 -->
 
 # review-gate — orchestrator
 
-You are orchestrating an AI code review by fanning out one isolated
-`code-reviewer` subagent per file. Follow these steps exactly.
+You are orchestrating an AI code review. Follow these steps exactly.
 
 ## 0. Parse arguments (`$ARGUMENTS`)
 
@@ -38,8 +39,7 @@ You are orchestrating an AI code review by fanning out one isolated
   (tests, vendored/generated, lockfiles, VCS/tooling). Skip binary files and
   pure deletions.
 - **Safety ceiling:** if more than **40** files remain, review the 40 with the
-  largest diffs and record a warning that the rest were skipped (keeps cost and
-  latency bounded — this runs on every commit).
+  largest diffs and record a warning that the rest were skipped.
 
 If no files survive selection: emit a `skipped` result (see §6) and stop.
 
@@ -54,24 +54,36 @@ Precedence, highest first:
 A rule file may map glob patterns to checklist text and may set `merge: true` to
 prepend the system rubric. If no override matches a file, use the system rubric.
 
-## 3. Fan out one subagent per file (in parallel)
+## 3. Spawn the reviewer subagent
 
-For each selected file, spawn the **`code-reviewer`** subagent via the Task tool.
-**Launch them in parallel, at most ~6–8 in flight at once** (start the next as
-each returns). Pass each subagent a prompt containing:
+**Default path (≤ 15 files):** spawn **one** `code-reviewer` subagent via the
+Agent tool. Pass it a prompt containing:
 
 - `mode`: `review` or `scan`
-- `path`: the file path
-- `diff`: that file's unified diff — `git diff [--staged] -- <path>` (review
-  mode). For an untracked file, synthesize an all-added diff. Omit in scan mode.
-- `other_changed_files`: the other selected paths
-- `rubric`: the resolved checklist for this file (§2)
-- `requirement_background`: optional, if the user supplied one
-- `repo_root`: the absolute repository root
+- `files`: a JSON-style list of `{path, diff}` objects — one per selected file,
+  where `diff` is the output of `git diff [--staged] -- <path>` (for untracked
+  files synthesize an all-added diff; omit `diff` in scan mode). Collect all
+  per-file diffs yourself before spawning.
+- `rubric`: the resolved checklist from §2. If per-file overrides exist, note
+  them inline next to the relevant file entries.
+- `requirement_background`: optional, if the user supplied one.
+- `repo_root`: the absolute repository root.
 
-Each subagent returns a JSON array of findings. Parse each; if a subagent returns
-non-JSON or errors, record a warning for that file and continue (never abort the
-whole run for one file).
+The single reviewer sees the full change set and must catch both per-file bugs
+and cross-file inconsistencies (renamed symbols, removed mechanisms that still
+exist in other files, caller/callee drift). This is intentional.
+
+**Large-diff escalation (> 15 files):** group the selected files by top-level
+directory (first path segment). Spawn one `code-reviewer` subagent per group,
+running at most **4 groups in parallel**. Pass each group subagent the same
+fields as above but with only its group's `files` list; add an
+`other_changed_dirs` field listing the other groups' directories so the reviewer
+has cross-group awareness.
+
+The subagent (or each group subagent) returns a JSON array of findings, each
+with a `path` field. Parse the result; if the subagent returns non-JSON or
+errors, record a warning for all its files and continue (never abort for one
+error).
 
 ## 4. Global dedup (only if ≥ 4 total findings)
 
