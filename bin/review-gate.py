@@ -31,11 +31,11 @@ from ocr_verdict import compute_verdict  # noqa: E402
 PROMPT = "/review-gate:review --unpushed --json"
 DEFAULT_CLAUDE_ARGS = ["--allowedTools", "Bash Read Grep Glob Task"]
 try:
-    TIMEOUT = int(os.environ.get("OCR_TIMEOUT", "600"))
+    TIMEOUT = int(os.environ.get("OCR_TIMEOUT", "1800"))
     if TIMEOUT <= 0:
-        TIMEOUT = 600
+        TIMEOUT = 1800
 except ValueError:
-    TIMEOUT = 600
+    TIMEOUT = 1800
 MARKER_TTL = 3600  # seconds
 
 
