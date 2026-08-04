@@ -21,10 +21,14 @@ You are orchestrating an AI code review. Follow these steps exactly.
 
 ## 0. Parse arguments (`$ARGUMENTS`)
 
-- `--staged` — review staged changes only (`git diff --staged`). Used by the commit gate.
+- `--staged` — review staged changes only (`git diff --staged`).
+- `--unpushed` — review all commits not yet pushed to the upstream branch. Used
+  by the pre-push gate. File list: `git diff @{u}..HEAD --name-only`; falls back
+  to `git diff origin/main..HEAD --name-only` if no upstream tracking branch is
+  set. Per-file diff: `git diff @{u}..HEAD -- <path>` (or the fallback ref).
 - `--scan` — full-file scan of the repo (or of `paths` if given) instead of a diff review.
 - `--json` — print ONLY the machine-readable JSON output object (no prose). The
-  commit gate relies on this. Without it, print a human-readable report.
+  push gate relies on this. Without it, print a human-readable report.
 - `--rule <path>` — explicit rule file (highest precedence).
 - `--summary` — also produce a project summary (implied by `--scan`).
 - Any non-flag arguments are treated as path filters (files or directories).
@@ -34,6 +38,9 @@ You are orchestrating an AI code review. Follow these steps exactly.
 - Default (working review): `git diff --name-only` plus untracked files
   (`git ls-files --others --exclude-standard`).
 - `--staged`: `git diff --staged --name-only`.
+- `--unpushed`: `git diff @{u}..HEAD --name-only`. If that fails (no upstream
+  tracking branch), fall back to `git diff origin/main..HEAD --name-only`, then
+  `git diff origin/master..HEAD --name-only`. Use the same ref for per-file diffs.
 - `--scan`: `git ls-files` (optionally filtered by the given `paths`).
 - Apply `allowlist.md`: keep only allowed extensions; drop default exclusions
   (tests, vendored/generated, lockfiles, VCS/tooling). Skip binary files and
