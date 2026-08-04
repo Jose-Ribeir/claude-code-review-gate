@@ -61,16 +61,36 @@ Precedence, highest first:
 A rule file may map glob patterns to checklist text and may set `merge: true` to
 prepend the system rubric. If no override matches a file, use the system rubric.
 
+After resolving the base rubric for each file, also apply:
+
+5. **Language rule:** load `${CLAUDE_PLUGIN_ROOT}/skills/review/rules/<lang>.md`
+   matched by file extension and append it to the resolved rubric:
+   - `.py`, `.pyi` → `python.md`
+   - `.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`, `.cjs` → `typescript.md`
+   - `.go` → `go.md`
+   - `.rs` → `rust.md`
+   If no mapping matches, skip.
+
+6. **LLM-authored rule:** always append
+   `${CLAUDE_PLUGIN_ROOT}/skills/review/rules/llm-authored-code.md` to the rubric
+   for every file (this repo is primarily LLM-authored; remove this step for
+   non-LLM projects by adding `"llm_authored": false` to `.ocr/config.json`).
+
+For the single-reviewer case (≤15 files), include per-file language and LLM rules
+as a `language_rules` note alongside each entry in the `files` list passed to the
+subagent.
+
 ## 3. Spawn the reviewer subagent
 
 **Default path (≤ 15 files):** spawn **one** `code-reviewer` subagent via the
 Agent tool. Pass it a prompt containing:
 
 - `mode`: `review` or `scan`
-- `files`: a JSON-style list of `{path, diff}` objects — one per selected file,
-  where `diff` is the output of `git diff [--staged] -- <path>` (for untracked
-  files synthesize an all-added diff; omit `diff` in scan mode). Collect all
-  per-file diffs yourself before spawning.
+- `files`: a JSON-style list of `{path, diff, language_rules}` objects — one per
+  selected file, where `diff` is the output of `git diff [--staged] -- <path>`
+  (for untracked files synthesize an all-added diff; omit `diff` in scan mode),
+  and `language_rules` is the combined language-specific + LLM-authored rule text
+  resolved in §2. Collect all per-file diffs and rules yourself before spawning.
 - `rubric`: the resolved checklist from §2. If per-file overrides exist, note
   them inline next to the relevant file entries.
 - `requirement_background`: optional, if the user supplied one.
@@ -91,6 +111,36 @@ The subagent (or each group subagent) returns a JSON array of findings, each
 with a `path` field. Parse the result; if the subagent returns non-JSON or
 errors, record a warning for all its files and continue (never abort for one
 error).
+
+## 3a. Hallucination check
+
+For each finding that has a non-empty `existing_code`:
+- Search the corresponding file's diff text for that string (normalise whitespace
+  before comparing).
+- If `existing_code` does not appear anywhere in that file's diff **and** does not
+  appear in the current file content (use `Read` on the file to check): downgrade
+  the finding's `confidence` by `0.3` and record a warning
+  `{file, message: "existing_code not found in diff or file — confidence downgraded"}`.
+- A finding whose confidence drops below `0.7` no longer triggers `block`.
+
+This is a cheap string-match hallucination detector — a finding quoting code that
+doesn't exist in the change set is evidence of a hallucinated anchor.
+
+## 3b. Filter pass (independent falsify)
+
+Assign each surviving finding a temporary id (`"f-0"`, `"f-1"`, …).
+
+Spawn a `code-filter` subagent via the Agent tool. Pass it a prompt containing:
+- `diffs`: the combined raw diff text for all reviewed files (concatenated).
+- `findings`: the findings JSON array with the temporary ids attached.
+
+The filter agent runs in its own fresh context — it never sees the reviewer's
+reasoning, so its falsify pass is genuinely independent. It returns
+`{"drop_ids": [...]}`. Remove all findings whose id is in `drop_ids` before
+proceeding to dedup and verdict.
+
+If the filter call fails or returns non-JSON, log a warning and continue with all
+findings (never abort for a filter error).
 
 ## 4. Global dedup (only if ≥ 4 total findings)
 

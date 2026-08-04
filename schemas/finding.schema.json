@@ -58,6 +58,10 @@
         "content": { "type": "string" },
         "suggestion_code": { "type": "string" },
         "existing_code": { "type": "string" },
+        "evidence": {
+          "type": "string",
+          "description": "What Grep/Read was called and what it showed. Required for cross-file claims."
+        },
         "thinking": { "type": "string" }
       }
     }

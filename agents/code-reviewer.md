@@ -29,9 +29,11 @@ responsibility, not out of scope.
 The orchestrator gives you, in your prompt:
 
 - `mode`: `review` (diff-based) or `scan` (whole-file).
-- `files`: a list of `{path, diff}` objects covering every file in this change
-  set. `diff` is the unified diff for that file. Omitted in scan mode.
-- `rubric`: the resolved review checklist (may include per-file notes).
+- `files`: a list of `{path, diff, language_rules}` objects covering every file
+  in this change set. `diff` is the unified diff for that file (omitted in scan
+  mode). `language_rules` contains the language-specific and LLM-authored-code
+  rules for that file — append them to the rubric when reviewing that file.
+- `rubric`: the base review checklist.
 - `requirement_background` (optional): business context for the change.
 - `repo_root`: absolute path of the repository.
 - `other_changed_dirs` (optional): present in large-diff escalation mode;
@@ -72,17 +74,26 @@ The orchestrator gives you, in your prompt:
 
 ## Process
 
-1. **Triage:** Privately sketch a severity-ordered risk map across the whole
-   change set (do not output this). Always triage when the total diff is ≥ 50
-   lines or spans ≥ 3 files.
-2. **Review file by file**, gathering cross-file context with `Read`/`Grep` as
-   needed. Prefer fewer, high-signal findings over many shallow ones.
-3. **Falsify pass — falsify, do NOT verify.** Before emitting, re-examine each
-   candidate finding against the actual code you read:
-   - Keep a finding unless the code **directly contradicts** it.
-   - Do **not** drop a finding merely because you "cannot fully verify" it.
-   - Drop findings that misread clearly-correct code as a defect.
-   Assign `severity` and `confidence` (per the rubric) to the survivors only.
+1. **Risk scan** (private — do not output):
+   For each file, list suspected risk areas: `[file:approx_line] severity_estimate — reason`.
+   Always do this when total diff ≥ 50 lines or spans ≥ 3 files.
+
+2. **Evidence gathering** — investigate each risk area with your tools:
+   - Claims about code **visible in the diff**: `Read` the file at that range and
+     confirm the issue is real in context.
+   - Claims about **callers, cross-file impact, removed/renamed mechanisms, or
+     symbol usages elsewhere**: you **MUST call `Grep`** before emitting. If Grep
+     finds no evidence supporting the claim, **drop the finding** — do not emit
+     unverified cross-file claims. A cross-file claim with no cited Grep result
+     will be dropped by the orchestrator anyway.
+
+3. **Emit** — for each surviving finding:
+   - Set `evidence` to what you searched/found. Examples:
+     - `"Grepped 'send_email', found 3 callers in notifications.py:45, billing.py:120 — none updated"`
+     - `"Read auth.py:83-90, confirmed guard is absent from the new branch"`
+   - `evidence` is **required** for any finding making a cross-file claim.
+   - Prefer fewer, high-signal findings over many shallow ones.
+   - Return the JSON array. No prose, no fences.
 
 ## Output contract (critical)
 
@@ -99,7 +110,8 @@ no markdown fences, no preamble. Each element:
   "category": "correctness | security | performance | maintainability | test_coverage",
   "content": "what is wrong and why, concise and actionable",
   "suggestion_code": "optional: a corrected snippet",
-  "existing_code": "optional: the exact current snippet this refers to (display only)"
+  "existing_code": "optional: the exact current snippet this refers to (display only)",
+  "evidence": "optional but required for cross-file claims: what Grep/Read was called and what it showed"
 }
 ```
 
