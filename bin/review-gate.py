@@ -28,7 +28,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ocr_verdict import compute_verdict  # noqa: E402
 
-PROMPT = "/review-gate:review --staged --json"
+PROMPT = "/review-gate:review --unpushed --json"
 DEFAULT_CLAUDE_ARGS = ["--allowedTools", "Bash Read Grep Glob Task"]
 try:
     TIMEOUT = int(os.environ.get("OCR_TIMEOUT", "600"))
@@ -70,16 +70,17 @@ def _git_dir():
     return out if rc == 0 and out else ".git"
 
 
-def _staged_tree_hash():
-    out, rc = _git(["write-tree"])
+def _head_sha():
+    out, rc = _git(["rev-parse", "HEAD"])
     return out if rc == 0 and out else ""
 
 
-def _has_staged_source():
-    out, rc = _git(["diff", "--staged", "--name-only"])
-    if rc != 0:
-        return True  # unknown -> let the reviewer decide
-    return bool(out.strip())
+def _has_unpushed_commits():
+    for ref in ("@{u}", "origin/main", "origin/master", "origin/HEAD"):
+        out, rc = _git(["log", f"{ref}..HEAD", "--oneline"])
+        if rc == 0:
+            return bool(out.strip())
+    return True  # unknown -> let the reviewer decide
 
 
 def _is_advisory(repo_root):
@@ -101,8 +102,8 @@ def _is_advisory(repo_root):
     return False
 
 
-def _marker_path(git_dir, tree_hash):
-    return Path(git_dir) / f"scr-reviewed-{tree_hash}"
+def _marker_path(git_dir, head_sha):
+    return Path(git_dir) / f"scr-push-reviewed-{head_sha}"
 
 
 def _marker_fresh(path):
@@ -348,12 +349,12 @@ def main(argv):
 
 
 def _main_inner(argv, mode):
-    # Hook mode: consume the PreToolUse payload on stdin (and only gate commits).
+    # Hook mode: consume the PreToolUse payload on stdin (and only gate pushes).
     if mode == "hook":
         try:
             payload = json.load(sys.stdin)
             cmd = (payload.get("tool_input") or {}).get("command", "")
-            if "git commit" not in cmd:
+            if "git push" not in cmd:
                 _emit_hook("allow")
         except Exception:
             pass  # if we can't read it, fall through and review anyway
@@ -361,12 +362,12 @@ def _main_inner(argv, mode):
     repo_root = _repo_root()
     allow = (lambda: _emit_hook("allow")) if mode == "hook" else (lambda: sys.exit(0))
 
-    if not _has_staged_source():
+    if not _has_unpushed_commits():
         allow()
 
     git_dir = _git_dir()
-    tree_hash = _staged_tree_hash()
-    marker = _marker_path(git_dir, tree_hash) if tree_hash else None
+    head_sha = _head_sha()
+    marker = _marker_path(git_dir, head_sha) if head_sha else None
 
     # The other adapter already reviewed this exact staged tree and passed it.
     if marker and _marker_fresh(marker):
