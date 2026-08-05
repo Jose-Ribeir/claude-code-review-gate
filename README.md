@@ -4,26 +4,26 @@
 [![Claude Code Plugin](https://img.shields.io/badge/Claude%20Code-plugin-8A2BE2.svg)](https://code.claude.com/docs/en/plugins)
 ![Status: beta](https://img.shields.io/badge/status-beta-orange.svg)
 
-> **AI code review + a blocking pre-commit gate, native to Claude Code.**
+> **AI code review + a blocking pre-push gate, native to Claude Code.**
 > Runs on your Claude subscription the compliant way — no token borrowing, no external binary.
 
-**claude-code-review-gate** is a Claude Code plugin that adds AI code review and a **blocking pre-commit gate** to your workflow. Claude Code does the inference itself, so review runs **on your Claude subscription** with no token borrowing and no third-party binary. The review methodology is adapted from [open-code-review](https://github.com/alibaba/open-code-review). Install the plugin and review with `/review-gate:review`.
+**claude-code-review-gate** is a Claude Code plugin that adds AI code review and a **blocking pre-push gate** to your workflow. Claude Code does the inference itself, so review runs **on your Claude subscription** with no token borrowing and no third-party binary. The review methodology is adapted from [open-code-review](https://github.com/alibaba/open-code-review). Install the plugin and review with `/review-gate:review`.
 
 ## Demo
 
-Commit a change containing a confident high-severity bug, and the gate blocks it:
+Push a branch containing a confident high-severity bug, and the gate blocks it:
 
 ```console
-$ git commit -m "add user lookup"
-[review-gate] review-gate blocked this commit (high-severity issues):
+$ git push
+[review-gate] review-gate blocked this push (high-severity issues):
   [high] db.py:6 - SQL injection: `user_input` is concatenated directly into the
          query string; an attacker can pass `' OR '1'='1` or `'; DROP TABLE users; --`.
   [medium] db.py:10-11 - the sqlite3 connection is never closed; callers leak the handle.
 
-Fix the issues, or bypass with: git commit --no-verify
+Fix the issues, or bypass with: git push --no-verify
 ```
 
-Switch the bug to a parameterized query and the commit sails through (`verdict: pass`).
+Switch the bug to a parameterized query and the push sails through (`verdict: pass`).
 Want advisory-only? Set `OCR_ADVISORY=1` and findings are printed but never block.
 
 <!-- A short GIF of the above (block → fix → pass) can replace this console block. -->
@@ -31,9 +31,11 @@ Want advisory-only? Set `OCR_ADVISORY=1` and findings are printed but never bloc
 ## What it is
 
 - **On-demand review** of your working diff or staged changes, and a **full-file scan** of a repo — run as a skill: `/review-gate:review`.
-- A **blocking commit gate**: reviews staged changes and **blocks confident high-severity findings**. Default gates commits made through Claude Code; an optional installer extends it to **every** commit (terminal, IDE, or Claude Code).
-- A **per-file reviewer subagent** with its own isolated context, fanned out in parallel, that reads the real files and returns a structured **severity + confidence** finding schema.
-- A **deterministic verdict** (`block` / `warn` / `pass`) decided by auditable code, not the model's discretion. **Fails open** — a review hiccup never traps your commit.
+- A **blocking push gate**: reviews every unpushed commit **once per push** (not once per commit) and **blocks confident high-severity findings**. Default gates pushes made through Claude Code; an optional installer extends it to **every** push (terminal, IDE, or Claude Code).
+- **One reviewer subagent** for the whole change set, so cross-file defects — a symbol renamed in one file and stale in another, a guard removed in A but still assumed by B — are visible. Large diffs (>15 files) fan out by directory.
+- An **independent falsify pass** before anything blocks: a second subagent that never saw the reviewer's reasoning gets only the diff and the findings, and drops a finding **only** with direct counter-evidence.
+- A **deterministic verdict** (`block` / `warn` / `pass`) decided by auditable code, not the model's discretion.
+- **Fails closed** on timeout, crash, or unparseable output — a broken reviewer blocks rather than waving changes through. Only "`claude` not installed" fails open. `OCR_FAIL_OPEN=1` is the emergency bypass.
 
 ## Why this exists (and how it relates to open-code-review)
 
@@ -45,20 +47,27 @@ This plugin gives you the **same review methodology the compliant way**: Claude 
 
 ```
 /review-gate:review  (orchestrator skill, runs on the main agent)
-        │  select changed/staged files → apply allowlist + rule hierarchy
+        │  select unpushed/changed files → allowlist → rule hierarchy
+        │  (+ per-language rules and LLM-authored-code rules per file)
         ▼
-   fan out, in parallel, one isolated subagent per file
-        │
-   ┌────┴─────────────── code-reviewer (per file) ───────────────┐
-   │  Read the real file → triage (if large) → review only new   │
-   │  lines → "falsify, don't verify" pass → emit Finding[] JSON  │
+   ONE code-reviewer subagent for the whole change set
+        │   (>15 files: fan out by top-level directory, max 4 parallel)
+   ┌────┴──────────────────── code-reviewer ─────────────────────┐
+   │  risk scan → gather evidence (Grep REQUIRED for any         │
+   │  cross-file claim) → emit Finding[] JSON with `evidence`    │
    └─────────────────────────────────────────────────────────────┘
-        │  collect findings → global dedup → (scan) project summary
+        │  hallucination check: existing_code not in the diff → downgrade
         ▼
-   verdict: block | warn | pass   →   render text, or JSON for the gate
+   code-filter subagent (only if something would block)
+        │  fresh context, never saw the reviewer's reasoning;
+        │  drops a finding ONLY on direct counter-evidence
+        ▼
+   dedup → verdict: block | warn | pass → text, or JSON for the gate
 ```
 
-The commit gate runs `claude -p "/review-gate:review --staged --json"` headlessly and maps the verdict to a decision: a Claude Code **PreToolUse** hook returns allow/deny (default wiring), or a **git pre-commit** hook returns an exit code (the optional "everywhere" wiring).
+The push gate runs `claude -p "/review-gate:review --unpushed --json"` headlessly and maps the verdict to a decision: a Claude Code **PreToolUse** hook returns allow/deny (default wiring), or a **git pre-push** hook returns an exit code (the optional "everywhere" wiring).
+
+That headless session is deliberately isolated from your interactive one — pinned model, no user-level settings or hooks, no MCP servers. See [Cost](#cost) for why that matters.
 
 ## Install
 
@@ -73,12 +82,14 @@ The commit gate runs `claude -p "/review-gate:review --staged --json"` headlessl
 claude --plugin-dir /path/to/claude-code-review-gate
 ```
 
-**3. (Optional) gate EVERY commit, everywhere.** By default the gate only fires for commits made through Claude Code. To gate terminal/IDE commits in every repo too:
+**3. (Optional) gate EVERY push, everywhere.** By default the gate only fires for pushes made through Claude Code. To gate terminal/IDE pushes in every repo too:
 ```
 bash bin/install-git-hook.sh     # sets a global core.hooksPath
 bash bin/uninstall-git-hook.sh   # reverts it
 ```
-> ⚠️ This sets a **global** `core.hooksPath`, which applies to all your repos and overrides each repo's `.git/hooks/pre-commit` (this hook still runs a repo-local pre-commit if one exists, so existing hooks keep working). Requires the `claude` CLI on your `PATH`.
+> ⚠️ This sets a **global** `core.hooksPath`, which applies to all your repos and overrides each repo's `.git/hooks/pre-push` (this hook still runs a repo-local pre-push if one exists, so existing hooks keep working). Requires the `claude` CLI on your `PATH`.
+
+> **Upgrading from a pre-0.2 install?** Earlier versions installed a **`pre-commit`** hook. It fires on every commit, and since the gate now reviews `@{u}..HEAD` it would review the wrong state at commit time (during a pre-commit hook the new commit does not exist yet, so `HEAD` is still its parent). Re-run `bash bin/install-git-hook.sh` — it removes the stale `pre-commit` and installs `pre-push` in its place.
 
 **Requirements:** Claude Code with an authenticated Claude subscription; Python 3 and Git (Git Bash on Windows). No API key.
 
@@ -88,19 +99,22 @@ bash bin/uninstall-git-hook.sh   # reverts it
 # Review your current working changes
 /review-gate:review
 
-# Review only staged changes (what the commit gate uses)
+# Review every unpushed commit (what the push gate uses)
+/review-gate:review --unpushed
+
+# Review only staged changes
 /review-gate:review --staged
 
 # Full-repo scan with a project summary
 /review-gate:review --scan --summary
 
 # Use a specific rule file, output machine-readable JSON
-/review-gate:review --staged --rule ./.ocr/rule.json --json
+/review-gate:review --unpushed --rule ./.ocr/rule.json --json
 ```
 
-**The commit gate in action:** commit a change containing a confident high-severity bug and the commit is blocked with the findings listed. Fix it, or bypass once:
+**The push gate in action:** push a branch containing a confident high-severity bug and the push is blocked with the findings listed. Fix it, or bypass once:
 ```bash
-git commit --no-verify
+git push --no-verify
 ```
 
 ## Configuration
@@ -117,7 +131,28 @@ git commit --no-verify
 | All `claude` flags | see `DEFAULT_CLAUDE_ARGS` | `OCR_CLAUDE_ARGS` | replaces the defaults **wholesale** — discards the cost controls too |
 | Bypass once | — | `git push --no-verify` | skip the gate for one push |
 
-Rule precedence (highest first): `--rule` → project `.ocr/rule.json` → global `~/.ocr/rule.json` → built-in `skills/review/rubric.md`. See `examples/.ocr/rule.json`.
+Rule precedence (highest first): `--rule` → project `.ocr/rule.json` → global `~/.ocr/rule.json` → built-in `skills/review/rubric.md`, then the matching `skills/review/rules/<lang>.md` and `rules/llm-authored-code.md` appended. See `examples/.ocr/rule.json`.
+
+## Cost
+
+The gate runs the review in a **separate headless `claude -p` session**. That session re-reads its whole context on every tool call, and it makes many of them, so anything loaded into it is paid for repeatedly. The gate therefore isolates it from your interactive environment:
+
+| Isolation | Flag | Why |
+|---|---|---|
+| **Pinned model** | `--model` (`OCR_MODEL`, default `sonnet`) | Without a pin the review inherits the **parent session's** model. On Opus that is `$0.50/M` cache reads vs Sonnet `$0.30/M` vs Haiku `$0.10/M` — on a read-dominated workload, a straight multiple of your bill. |
+| **No user settings** | `--setting-sources project` | Global hooks live in `~/.claude/settings.json` and would fire on **every tool call** of the review. Auth is unaffected — OAuth/keychain is not a settings source. |
+| **Plugin loaded from disk** | `--plugin-dir` | Required, because skipping user settings also skips the plugin registry. |
+| **No MCP servers** | `--mcp-config` (empty) + `--strict-mcp-config` | Each connected server's tool schemas cost context in a session that only needs Bash/Read/Grep/Glob. |
+| **Stable cache prefix** | `--exclude-dynamic-system-prompt-sections` | Keeps per-machine sections out of the cached prefix. |
+
+**Turning the cost down further:**
+- `OCR_MODEL=haiku` — ~5× cheaper cache reads than Opus. Trades some review precision; a gate that emits false positives gets bypassed, and a bypassed gate has zero recall, so weigh it.
+- Reviews run **once per push**, not once per commit. A 10-commit push is one review.
+- The falsify pass only runs when a finding would actually block, so a clean push never pays for it.
+
+> `OCR_CLAUDE_ARGS` **replaces** these defaults wholesale — using it discards every control above. Prefer `OCR_CLAUDE_EXTRA_ARGS`, which appends.
+
+> **Not** used: `claude --bare`. It would skip hooks, CLAUDE.md, and MCP in a single flag, but it also forces auth to `ANTHROPIC_API_KEY`/`apiKeyHelper` and never reads OAuth — which would break subscription auth and bill the API directly, defeating the point of this plugin.
 
 ## How it compares to open-code-review
 
@@ -125,10 +160,12 @@ Rule precedence (highest first): `--rule` → project `.ocr/rule.json` → globa
 |---|---|---|
 | Runs as | external Go binary | native Claude Code skill + subagents |
 | Auth on a subscription | borrows the token (ToS-blocked) | Claude Code's own auth (compliant) |
-| Per-file isolation | per-file API session | per-file subagent (isolated context) |
+| Review unit | one isolated session per file | one reviewer for the change set (fan out >15 files) |
+| Cross-file defects | only if the model calls a lookup tool | in scope by default; cross-file claims require cited `Grep` evidence |
+| Falsify pass | separate LLM call per file | separate subagent, gated on would-block |
 | Severity / confidence | not in the schema | first-class, drives the gate |
-| Commit blocking | left to the caller | deterministic verdict + gate |
-| Line anchoring | fuzzy diff matching | true line numbers from real file reads |
+| Push blocking | left to the caller | deterministic verdict + gate |
+| Line anchoring | fuzzy diff matching + LLM re-anchor | true line numbers from real file reads, plus a string-match hallucination check |
 
 ## FAQ
 
@@ -136,17 +173,22 @@ Rule precedence (highest first): `--rule` → project `.ocr/rule.json` → globa
 
 **Does this use my Claude subscription? Is that allowed?** Yes and yes — the reviewing is done by Claude Code itself (the official client) via headless `claude -p`, which is the supported way to script it. Nothing is sent to ocr or any third party.
 
-**Will it block my commits? How do I bypass?** By default it blocks confident high-severity findings. Use `git commit --no-verify` for a one-off, `OCR_ADVISORY=1` (or `.ocr/config.json` `{"blocking": false}`) for warn-only, or uninstall the global hook.
+**Will it block my pushes? How do I bypass?** By default it blocks confident high-severity findings. Use `git push --no-verify` for a one-off, `OCR_ADVISORY=1` (or `.ocr/config.json` `{"blocking": false}`) for warn-only, or uninstall the global hook.
+
+**What happens if the review times out or crashes?** It **blocks** — the gate fails closed, so a broken reviewer can't silently wave changes through. The one exception is `claude` not being installed, which fails open (there is no gate without the tool). `OCR_FAIL_OPEN=1` is the emergency bypass; in hook mode it must be exported in the environment Claude Code itself was launched from, since a shell prefix on `git push` never reaches the hook process.
+
+**Why is it expensive / how do I make it cheaper?** See [Cost](#cost). The short version: set `OCR_MODEL=haiku`, and make sure you're on a current install — pre-0.2 installed a per-**commit** hook that also bypassed the cost controls.
 
 **Is it affiliated with Alibaba or Anthropic?** No.
 
 ## Safety & limitations
 
-- **Fails open** by design — if the reviewer can't run (no `claude`, timeout, bad output) the commit proceeds with a warning.
+- **Fails closed** by design — a timeout, crash, or unparseable review **blocks** the push, so a broken reviewer can't wave changes through. Only a missing `claude` binary fails open. Bypass with `OCR_FAIL_OPEN=1`, or downgrade permanently with `OCR_ADVISORY=1`.
 - AI review is **advisory assistance, not a guarantee** — it complements, not replaces, tests and human review.
-- **Full-file scans can be token-heavy** on large repos; a file ceiling keeps per-commit cost bounded.
-- The **global git hook affects all commit paths** — read the install warning.
+- **Full-file scans can be token-heavy** on large repos; a 40-file ceiling keeps per-push cost bounded. See [Cost](#cost) for the per-session controls.
+- The **global git hook affects all push paths** — read the install warning.
 - `severity`/`confidence` are model-estimated, not calibrated; tune the thresholds if blocking is too eager or too lax.
+- **Cross-file findings are only as good as the reviewer's `Grep` evidence.** The orchestrator drops unverified cross-file claims, which trades some recall for precision.
 
 ## Contributing
 
