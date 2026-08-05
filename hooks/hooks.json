@@ -1,5 +1,5 @@
 {
-  "description": "Pre-push gate: reviews all unpushed commits once when you push through Claude Code. Fires once per push (not per commit), covering the cumulative diff of all commits being pushed. Blocks confident high-severity findings. Fails open. For every-push-everywhere coverage outside Claude Code, run bin/install-git-hook.sh.",
+  "description": "Pre-push gate: reviews all unpushed commits once when you push through Claude Code. Fires once per push (not per commit), covering the cumulative diff of all commits being pushed. Blocks confident high-severity findings. Fails CLOSED on timeout, crash, or unparseable output (only a missing claude binary fails open); OCR_FAIL_OPEN=1 bypasses. The review runs in an isolated headless session (pinned model via OCR_MODEL, no user settings/hooks, no MCP). For every-push-everywhere coverage outside Claude Code, run bin/install-git-hook.sh.",
   "hooks": {
     "PreToolUse": [
       {
