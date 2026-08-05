@@ -13,8 +13,15 @@ HOOKS_DIR="${SCR_HOOKS_DIR:-$HOME/.config/review-gate/hooks}"
 
 mkdir -p "$HOOKS_DIR"
 
+# Canonicalize before comparing: git stores whatever string was set (e.g.
+# "C:/Users/me/..." on Windows) while $HOME expands to "/c/Users/me/..." under
+# Git Bash. A plain string compare sees those as different directories, so
+# re-running the installer would "back up" our own hooks dir over itself and
+# uninstall would then restore core.hooksPath to us instead of unsetting it.
+_canon() { [ -d "$1" ] && (cd "$1" 2>/dev/null && pwd) || printf '%s' "$1"; }
+
 PREV="$(git config --global --get core.hooksPath || true)"
-if [ -n "$PREV" ] && [ "$PREV" != "$HOOKS_DIR" ]; then
+if [ -n "$PREV" ] && [ "$(_canon "$PREV")" != "$(_canon "$HOOKS_DIR")" ]; then
   git config --global reviewGate.prevHooksPath "$PREV"
   echo "Backed up existing global core.hooksPath: $PREV"
 fi
