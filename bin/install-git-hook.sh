@@ -1,17 +1,14 @@
 #!/usr/bin/env bash
 #
-# Installs the "everywhere" commit gate: sets a global core.hooksPath whose
-# pre-commit runs review-gate on EVERY commit (terminal, IDE, or
-# Claude Code), in every repo. This is OPTIONAL — the plugin already gates
-# commits made through Claude Code without it.
+# Installs the "everywhere" push gate: sets a global core.hooksPath whose
+# pre-push hook runs review-gate on EVERY push (terminal, IDE, or Claude Code),
+# in every repo. This is OPTIONAL — the plugin already gates pushes made
+# through Claude Code without it.
 #
 # Revert with uninstall-git-hook.sh.
 set -euo pipefail
 
 BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PLUGIN_ROOT="$(cd "$BIN_DIR/.." && pwd)"
-# A path the `claude` binary accepts on this OS (mixed-mode on Windows/Git Bash).
-PLUGIN_ROOT_ARG="$(cygpath -m "$PLUGIN_ROOT" 2>/dev/null || echo "$PLUGIN_ROOT")"
 HOOKS_DIR="${SCR_HOOKS_DIR:-$HOME/.config/review-gate/hooks}"
 
 mkdir -p "$HOOKS_DIR"
@@ -22,26 +19,43 @@ if [ -n "$PREV" ] && [ "$PREV" != "$HOOKS_DIR" ]; then
   echo "Backed up existing global core.hooksPath: $PREV"
 fi
 
-# Materialize the pre-commit with the plugin bin path + plugin root baked in.
-sed -e "s|__SCR_BIN__|$BIN_DIR|g" -e "s|__PLUGIN_ROOT__|$PLUGIN_ROOT_ARG|g" \
-  "$BIN_DIR/pre-commit" > "$HOOKS_DIR/pre-commit"
-chmod +x "$HOOKS_DIR/pre-commit"
+# Versions of this plugin before the commit->push migration installed a
+# pre-commit hook here. Left in place it still fires on every commit, and
+# because the gate now reviews `@{u}..HEAD` it would review the WRONG state at
+# commit time (HEAD is the parent; the staged changes are invisible). Remove
+# ours if we recognize it; leave anything unrecognized alone and warn.
+STALE="$HOOKS_DIR/pre-commit"
+if [ -f "$STALE" ]; then
+  if grep -q "review-gate" "$STALE" 2>/dev/null; then
+    rm -f "$STALE"
+    echo "Removed stale review-gate pre-commit hook (superseded by pre-push)."
+  else
+    echo "WARNING: $STALE exists and is not ours — leaving it in place."
+  fi
+fi
+
+# Materialize the pre-push with the plugin bin path baked in. The plugin root
+# no longer needs substituting: review-gate.py derives it from its own location
+# and passes --plugin-dir itself (see DEFAULT_CLAUDE_ARGS).
+sed -e "s|__SCR_BIN__|$BIN_DIR|g" "$BIN_DIR/pre-push" > "$HOOKS_DIR/pre-push"
+chmod +x "$HOOKS_DIR/pre-push"
 
 git config --global core.hooksPath "$HOOKS_DIR"
 
 cat <<EOF
-Installed the global pre-commit gate.
+Installed the global pre-push gate.
   hooks dir : $HOOKS_DIR
   reviewer  : $BIN_DIR/review-gate.py
 
 WARNING: global core.hooksPath now applies to ALL your repositories and
-overrides each repo's .git/hooks/pre-commit (this hook still RUNS a repo-local
-pre-commit if one exists, so existing hooks keep working).
+overrides each repo's .git/hooks/pre-push (this hook still RUNS a repo-local
+pre-push if one exists, so existing hooks keep working).
 
 Modes:
-  default            block confident high-severity findings
-  OCR_ADVISORY=1     warn only, never block
-  git commit --no-verify   bypass entirely
+  default              block confident high-severity findings
+  OCR_ADVISORY=1       warn only, never block
+  OCR_MODEL=haiku      cheaper review model (default: sonnet)
+  git push --no-verify bypass entirely
 
 Uninstall: $BIN_DIR/uninstall-git-hook.sh
 EOF
