@@ -128,6 +128,12 @@ doesn't exist in the change set is evidence of a hallucinated anchor.
 
 ## 3b. Filter pass (independent falsify)
 
+**Skip this step entirely** unless at least one finding has
+`severity == "high"` AND `confidence >= 0.7` — i.e. unless the verdict would
+otherwise be `block`. The filter exists to protect against a false-positive
+block; when nothing would block, it costs a subagent context load and cannot
+change the outcome.
+
 Assign each surviving finding a temporary id (`"f-0"`, `"f-1"`, …).
 
 Spawn a `code-filter` subagent via the Agent tool. Pass it a prompt containing:

@@ -9,11 +9,15 @@ set -euo pipefail
 
 SCR_BIN="${SCR_BIN:-__SCR_BIN__}"
 
-# Default headless args: load the plugin from disk so /review-gate:review resolves
-# even when the plugin isn't formally installed, and allow the review's read-only
-# tools to run non-interactively. Override by exporting OCR_CLAUDE_ARGS yourself.
-if [ -z "${OCR_CLAUDE_ARGS:-}" ]; then
-  export OCR_CLAUDE_ARGS="--plugin-dir __PLUGIN_ROOT__ --dangerously-skip-permissions"
+# Extra headless args for this path only: allow the review's read-only tools to
+# run non-interactively. review-gate.py's DEFAULT_CLAUDE_ARGS already supplies
+# --plugin-dir and the cost controls (pinned model, no user settings, no MCP),
+# and OCR_CLAUDE_EXTRA_ARGS is APPENDED to them rather than replacing them.
+#
+# Use OCR_CLAUDE_ARGS instead if you want to replace the defaults wholesale --
+# but note that discards the cost controls along with everything else.
+if [ -z "${OCR_CLAUDE_ARGS:-}" ] && [ -z "${OCR_CLAUDE_EXTRA_ARGS:-}" ]; then
+  export OCR_CLAUDE_EXTRA_ARGS="--dangerously-skip-permissions"
 fi
 
 # Pick a WORKING Python interpreter; skip Windows Store alias stubs (which can't

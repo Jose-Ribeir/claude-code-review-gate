@@ -29,7 +29,45 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ocr_verdict import compute_verdict  # noqa: E402
 
 PROMPT = "/review-gate:review --unpushed --json"
-DEFAULT_CLAUDE_ARGS = ["--allowedTools", "Bash Read Grep Glob Task"]
+
+# The plugin's own root (bin/.. == the plugin dir). Passed explicitly so the
+# review skill still resolves when we skip user settings below.
+_PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# Model for the headless review session. Pinned deliberately: without --model
+# the spawned session inherits whatever model the PARENT Claude Code session is
+# on, so a user on Opus pays Opus cache-read rates ($0.50/M) for every gate run
+# -- ~5x Haiku and ~1.7x Sonnet, on a workload that re-reads its whole context
+# on every tool call. Sonnet is the default because review quality matters (a
+# gate that emits false positives gets bypassed, and a bypassed gate has zero
+# recall); set OCR_MODEL=haiku to trade some precision for cost, or =opus if you
+# want maximum depth and accept the bill.
+_MODEL = os.environ.get("OCR_MODEL", "sonnet").strip() or "sonnet"
+
+DEFAULT_CLAUDE_ARGS = [
+    "--allowedTools", "Bash Read Grep Glob Task",
+    # Pin the model rather than inheriting the parent session's (see above).
+    "--model", _MODEL,
+    # Load ONLY project settings. The user's ~/.claude/settings.json is where
+    # global hooks live; in a headless review session those fire on every tool
+    # call (each one a subprocess, and any that inject context add tokens to a
+    # context that is already re-read on every call). Skipping user settings
+    # also skips the plugin registry, hence --plugin-dir below. Auth is
+    # unaffected -- OAuth/keychain is not a settings source.
+    "--setting-sources", "project",
+    # Load the review plugin from disk. Required because --setting-sources
+    # above drops the user-level enabledPlugins registry.
+    "--plugin-dir", _PLUGIN_ROOT,
+    # No MCP servers. --mcp-config is given an empty object so there is nothing
+    # to load; --strict-mcp-config makes that authoritative and ignores every
+    # other MCP configuration. A code review needs Bash/Read/Grep/Glob and
+    # nothing else, and each connected server's tool schemas cost context.
+    "--mcp-config", '{"mcpServers":{}}',
+    "--strict-mcp-config",
+    # Move per-machine sections (cwd, env, git status) out of the system prompt
+    # so the cached prefix stays stable across runs.
+    "--exclude-dynamic-system-prompt-sections",
+]
 try:
     TIMEOUT = int(os.environ.get("OCR_TIMEOUT", "1800"))
     if TIMEOUT <= 0:
@@ -239,8 +277,16 @@ def _run_review(repo_root, mode):
     if not claude:
         _warn("`claude` CLI not found on PATH or CLAUDE_CODE_EXECPATH — skipping review (fail-open).")
         return None, False
-    extra = os.environ.get("OCR_CLAUDE_ARGS")
-    args = shlex.split(extra) if extra else DEFAULT_CLAUDE_ARGS
+    # OCR_CLAUDE_ARGS replaces the defaults wholesale (full escape hatch, also
+    # discards the cost controls); OCR_CLAUDE_EXTRA_ARGS appends to them, which
+    # is what callers usually want -- the git-hook adapter uses it to add
+    # --dangerously-skip-permissions without losing the pinned model.
+    override = os.environ.get("OCR_CLAUDE_ARGS")
+    if override:
+        args = shlex.split(override)
+    else:
+        args = list(DEFAULT_CLAUDE_ARGS)
+        args += shlex.split(os.environ.get("OCR_CLAUDE_EXTRA_ARGS", ""))
     bypass = _bypass_hint(mode)
     try:
         proc = subprocess.run(
