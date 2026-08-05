@@ -110,10 +110,12 @@ git commit --no-verify
 | Gate scope | Claude Code commits | run `bin/install-git-hook.sh` (→ everywhere) / `uninstall-git-hook.sh` | which commits are reviewed |
 | Mode | **block** | `OCR_ADVISORY=1`, or `.ocr/config.json` `{"blocking": false}` | block vs warn-only |
 | Block threshold | `high` & `confidence ≥ 0.7` | `OCR_BLOCK_SEVERITY`, `OCR_BLOCK_CONFIDENCE` | what is severe/sure enough to block |
-| Reviewer timeout | `600`s | `OCR_TIMEOUT` | fail-**closed** deadline for `claude -p` (blocks the commit; see `hooks/hooks.json` if raising this past ~600s in hook mode) |
-| Per-file rules | built-in rubric | `.ocr/rule.json` (project), `~/.ocr/rule.json` (global), `--rule <path>` | the review checklist per file |
-| `claude` flags | `--allowedTools "Bash Read Grep Glob Task"` | `OCR_CLAUDE_ARGS` | headless invocation tuning |
-| Bypass once | — | `git commit --no-verify` | skip the gate for one commit |
+| Reviewer timeout | `1800`s | `OCR_TIMEOUT` | fail-**closed** deadline for `claude -p` (blocks the push; keep `hooks/hooks.json`'s `timeout` above it) |
+| Per-file rules | built-in rubric + per-language rules | `.ocr/rule.json` (project), `~/.ocr/rule.json` (global), `--rule <path>` | the review checklist per file |
+| Review model | `sonnet` | `OCR_MODEL` (`haiku` / `sonnet` / `opus`) | **cost lever.** The review runs in its own headless session; without a pin it would inherit the parent session's model and pay its cache-read rate on a workload that re-reads context every tool call |
+| Extra `claude` flags | — | `OCR_CLAUDE_EXTRA_ARGS` | appended to the defaults |
+| All `claude` flags | see `DEFAULT_CLAUDE_ARGS` | `OCR_CLAUDE_ARGS` | replaces the defaults **wholesale** — discards the cost controls too |
+| Bypass once | — | `git push --no-verify` | skip the gate for one push |
 
 Rule precedence (highest first): `--rule` → project `.ocr/rule.json` → global `~/.ocr/rule.json` → built-in `skills/review/rubric.md`. See `examples/.ocr/rule.json`.
 
