@@ -6,6 +6,19 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **A failed `claude` invocation is no longer reported as a bad review.**
+  `_run_review` never checked the subprocess exit code, so every failure mode
+  collapsed into "could not parse review output" — which points at the review
+  skill when the actual fault is the CLI. An expired login is the common case:
+  `claude` prints `Failed to authenticate: OAuth session expired` to **stdout**,
+  where the gate expects JSON. The gate now reports the exit code, which binary
+  ran, and its output, and recognizes credential failures specifically. Note a
+  Claude Code Desktop session refreshes its auth in-process, so the app keeps
+  working while the on-disk credentials the CLI reads go stale — the gate breaks
+  with no visible sign anything logged out. Still fails CLOSED: an unusable
+  login must not become a silent bypass.
+
 ## [0.2.0] - 2026-08-10
 
 ### Changed — BREAKING
