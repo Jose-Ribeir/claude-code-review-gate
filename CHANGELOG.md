@@ -6,6 +6,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-10
+
 ### Changed — BREAKING
 - **The gate is now pre-push, not pre-commit.** It reviews every unpushed commit
   once per push (`git diff @{u}..HEAD`) instead of reviewing staged changes on
@@ -72,5 +74,6 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Rule hierarchy, allowlist/exclusions, finding JSON Schema, sample `.ocr/rule.json`.
 - Apache-2.0 license with NOTICE attributing open-code-review.
 
-[Unreleased]: https://github.com/Jose-Ribeir/claude-code-review-gate/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Jose-Ribeir/claude-code-review-gate/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Jose-Ribeir/claude-code-review-gate/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Jose-Ribeir/claude-code-review-gate/releases/tag/v0.1.0

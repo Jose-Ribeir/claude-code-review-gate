@@ -64,5 +64,11 @@ Modes:
   OCR_MODEL=haiku      cheaper review model (default: sonnet)
   git push --no-verify bypass entirely
 
+The gate FAILS CLOSED: a review that times out (OCR_TIMEOUT, default 1800s),
+crashes, or returns unparseable output BLOCKS the push rather than letting it
+through. Only a missing 'claude' binary fails open. If a broken reviewer ever
+traps you, OCR_FAIL_OPEN=1 is the one-shot bypass and OCR_ADVISORY=1 downgrades
+to warn-only permanently.
+
 Uninstall: $BIN_DIR/uninstall-git-hook.sh
 EOF
