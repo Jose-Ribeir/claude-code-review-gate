@@ -12,7 +12,7 @@
     {
       "name": "review-gate",
       "source": ".",
-      "description": "Native Claude Code AI code review + blocking pre-commit gate, on your Claude subscription. open-code-review methodology, run compliantly.",
+      "description": "Native Claude Code AI code review + blocking pre-push gate, on your Claude subscription. open-code-review methodology, run compliantly.",
       "license": "Apache-2.0",
       "keywords": [
         "claude-code",

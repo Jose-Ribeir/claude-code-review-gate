@@ -1,7 +1,7 @@
 {
   "name": "review-gate",
-  "description": "Native Claude Code AI code review + blocking pre-commit gate on your Claude subscription. Per-file reviewer subagents, severity/confidence verdicts. open-code-review, done compliantly.",
-  "version": "0.1.0",
+  "description": "Native Claude Code AI code review + blocking pre-push gate on your Claude subscription. Isolated headless reviewer, severity/confidence verdicts, fails closed. open-code-review, done compliantly.",
+  "version": "0.2.0",
   "author": {
     "name": "José Ribeiro"
   },
