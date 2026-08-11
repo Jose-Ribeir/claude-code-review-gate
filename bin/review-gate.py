@@ -216,6 +216,51 @@ def _hook_timeout_budget():
         return None
 
 
+# Substrings that identify a credentials problem rather than a review problem.
+# Matched case-insensitively against whatever claude printed.
+_AUTH_MARKERS = (
+    "oauth session expired",
+    "failed to authenticate",
+    "authentication_error",
+    "invalid api key",
+    "please run /login",
+    # Keep these as full phrases. A bare "credentials" substring also matches
+    # unrelated crash text that merely mentions the word, and a wrong auth hint
+    # is worse than none -- it sends people to re-login over a real bug.
+    "invalid credentials",
+    "credentials expired",
+    "expired credentials",
+)
+
+
+def _auth_hint(output):
+    """Extra guidance when claude's output looks like a login/credentials failure.
+
+    Returns "" for anything else, so the caller can always interpolate it.
+
+    This stays FAIL CLOSED on purpose. Only a missing binary fails open; an
+    expired login is the tool being present but unusable, and treating that as
+    "no gate needed" would make expiring credentials a silent bypass. So block,
+    but say what to actually fix -- the generic parse error sends people into
+    the review skill when nothing there is wrong.
+
+    Re-login is interactive and cannot be done from inside a hook: the headless
+    subprocess this gate spawns has no terminal to complete the OAuth flow.
+    """
+    low = (output or "").lower()
+    if not any(m in low for m in _AUTH_MARKERS):
+        return ""
+    return (
+        "  This is a CREDENTIALS failure, not a review failure -- the review never ran.\n"
+        "  Fix it : run `claude` in an interactive terminal and log in via /login,\n"
+        "    then retry. The headless session the gate spawns cannot complete an\n"
+        "    OAuth flow itself (no terminal to hand the browser callback to).\n"
+        "  Note   : a Claude Code Desktop session refreshes its own auth in-process,\n"
+        "    so the app keeps working while the on-disk credentials the CLI reads go\n"
+        "    stale -- the gate breaks with no visible sign anything logged out.\n"
+    )
+
+
 def _bypass_hint(mode):
     """Emergency-bypass instruction text, mode-aware.
 
@@ -268,10 +313,11 @@ def _downgrade_hint(mode):
 def _run_review(repo_root, mode):
     """Return (result_dict, True) on success.
 
-    Raises ReviewGateError on timeout, subprocess error, or unparseable output
-    so that main() can fail the gate closed.  Only 'claude not found' still
-    returns (None, False) to allow the commit — there is no gate without the
-    tool.
+    Raises ReviewGateError on timeout, subprocess error, a non-zero claude exit
+    (the review never ran, so the output is an error string rather than
+    malformed JSON), or unparseable output, so that main() can fail the gate
+    closed.  Only 'claude not found' still returns (None, False) to allow the
+    commit — there is no gate without the tool.
     """
     claude = _find_claude()
     if not claude:
@@ -326,11 +372,32 @@ def _run_review(repo_root, mode):
             f"review process error ({exc}) — blocking commit to preserve gate integrity.\n"
             f"{bypass}"
         )
+    # A non-zero exit means claude never got as far as producing a review, so the
+    # output is an error string, not malformed JSON. Diagnose that separately:
+    # reporting "could not parse review output" for a login failure sends people
+    # looking at the review skill when the real fault is the CLI's credentials.
+    # Note claude writes these errors to STDOUT, so stderr is often empty.
+    if proc.returncode != 0:
+        # Strip BEFORE falling through: a whitespace-only stdout is truthy, so
+        # `stdout or stderr` would select it and discard a real stderr message,
+        # leaving detail empty and hiding why the review failed.
+        detail = (proc.stdout or "").strip() or (proc.stderr or "").strip()
+        raise ReviewGateError(
+            f"`claude` exited {proc.returncode} without running the review -- blocking commit "
+            "to preserve gate integrity.\n"
+            f"  {claude}\n"
+            f"  Output (first 400 chars): {detail[:400]!r}\n"
+            f"{_auth_hint(detail)}"
+            f"{bypass}"
+        )
     result = _extract_json(proc.stdout)
     if result is None:
+        # Exit 0 but no JSON. Auth failures have been seen to exit 0 too
+        # (the Desktop-bundled claude.exe does exactly this), so still check.
         raise ReviewGateError(
             "could not parse review output — blocking commit to preserve gate integrity.\n"
             f"  Claude stdout (first 400 chars): {proc.stdout[:400]!r}\n"
+            f"{_auth_hint(proc.stdout or '')}"
             f"{bypass}"
         )
     return result, True
