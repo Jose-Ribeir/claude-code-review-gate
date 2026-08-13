@@ -11,6 +11,7 @@ review_gate = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(review_gate)
 
 _extract_json = review_gate._extract_json
+_format_reasons = review_gate._format_reasons
 
 
 def test_whole_string_json():
@@ -53,3 +54,24 @@ def test_empty_string_returns_none():
 
 def test_malformed_braces_return_none():
     assert _extract_json("{not: valid json at all") is None
+
+
+def test_format_reasons_full_finding():
+    result = {
+        "findings": [
+            {"severity": "high", "path": "a.py", "start_line": 3, "end_line": 3, "content": "bug"}
+        ]
+    }
+    assert _format_reasons(result) == "  [high] a.py:3 - bug"
+
+
+def test_format_reasons_missing_fields_flagged_not_blank():
+    # A finding can be syntactically valid JSON yet still miss the fields it
+    # needs to be actionable (the reviewer skipped them under output-length
+    # pressure). The line must say so, not silently print "path:? - " with
+    # nothing after the dash, which reads as display truncation rather than a
+    # defect in the review itself.
+    result = {"findings": [{"severity": "high", "path": "a.py"}]}
+    line = _format_reasons(result)
+    assert line.startswith("  [high] a.py:? - ")
+    assert "reviewer omitted" in line
