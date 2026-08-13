@@ -12,6 +12,9 @@ Thumbs.db
 # Local Claude Code state (never ship personal settings)
 .claude/settings.local.json
 
+# Serena (code-navigation MCP) local project state
+.serena/
+
 # Editor
 .idea/
 .vscode/
