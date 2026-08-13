@@ -140,6 +140,29 @@ def _is_advisory(repo_root):
     return False
 
 
+def _raw_output_path(git_dir):
+    return Path(git_dir) / "review-gate-last-output.json"
+
+
+def _save_raw_output(git_dir, text):
+    """Best-effort dump of claude's raw stdout, overwritten on every run.
+
+    A finding can be syntactically valid JSON yet still be missing fields the
+    reviewer was told to always include (e.g. start_line/content) --
+    _format_reasons then has nothing to show but "?" placeholders for that
+    entry. Keeping the untouched raw output around lets a blocked user inspect
+    what the reviewer actually said instead of re-running the whole review
+    from scratch just to see full detail.
+    """
+    if not git_dir:
+        return
+    try:
+        Path(git_dir).mkdir(parents=True, exist_ok=True)
+        _raw_output_path(git_dir).write_text(text or "", encoding="utf-8")
+    except Exception:
+        pass
+
+
 def _marker_path(git_dir, head_sha):
     return Path(git_dir) / f"scr-push-reviewed-{head_sha}"
 
@@ -326,7 +349,7 @@ def _downgrade_hint(mode):
     return "Downgrade to advisory (warn-only): OCR_ADVISORY=1 git commit ..."
 
 
-def _run_review(repo_root, mode):
+def _run_review(repo_root, mode, git_dir=None):
     """Return (result_dict, True) on success.
 
     Raises ReviewGateError on timeout, subprocess error, a non-zero claude exit
@@ -388,6 +411,7 @@ def _run_review(repo_root, mode):
             f"review process error ({exc}) — blocking commit to preserve gate integrity.\n"
             f"{bypass}"
         )
+    _save_raw_output(git_dir, proc.stdout)
     # A non-zero exit means claude never got as far as producing a review, so the
     # output is an error string, not malformed JSON. Diagnose that separately:
     # reporting "could not parse review output" for a login failure sends people
@@ -426,7 +450,15 @@ def _format_reasons(result, limit=20):
         path = f.get("path", "?")
         s, e = f.get("start_line", "?"), f.get("end_line", "?")
         loc = f"{path}:{s}" if s == e else f"{path}:{s}-{e}"
-        lines.append(f"  [{sev}] {loc} - {f.get('content','').strip()}")
+        # A finding can be syntactically valid JSON yet still miss the fields
+        # it needs to be actionable (the reviewer skipped them, usually under
+        # output-length pressure). Say so explicitly instead of printing a
+        # bare "- " that looks like display truncation rather than a defect
+        # in the review itself.
+        content = (f.get("content") or "").strip() or (
+            "(reviewer omitted a description for this finding — see raw output log)"
+        )
+        lines.append(f"  [{sev}] {loc} - {content}")
     return "\n".join(lines[:limit])
 
 
@@ -503,7 +535,7 @@ def _main_inner(argv, mode):
         allow()
 
     try:
-        result, ran = _run_review(repo_root, mode)
+        result, ran = _run_review(repo_root, mode, git_dir)
     except ReviewGateError as exc:
         # Fail closed: block the commit unless OCR_FAIL_OPEN=1 is set.
         if os.environ.get("OCR_FAIL_OPEN", "").strip().lower() in ("1", "true", "yes"):
@@ -524,9 +556,10 @@ def _main_inner(argv, mode):
     reasons = _format_reasons(result)
 
     if verdict == "block" and not advisory:
+        log_hint = f"\n  Full reviewer output: {_raw_output_path(git_dir)}" if git_dir else ""
         reason = "review-gate blocked this commit (high-severity issues):\n" + (
             reasons or "  (see review output)"
-        ) + f"\n\nFix the issues above, then commit again.\n{_downgrade_hint(mode)}"
+        ) + f"{log_hint}\n\nFix the issues above, then commit again.\n{_downgrade_hint(mode)}"
         _fail_closed(mode, reason)
         return  # unreachable
 
@@ -539,7 +572,8 @@ def _main_inner(argv, mode):
             pass
     if reasons:
         label = "advisory (blocking disabled)" if advisory else f"verdict: {verdict}"
-        _warn(f"{label} — findings:\n{reasons}")
+        log_hint = f"\n  Full reviewer output: {_raw_output_path(git_dir)}" if git_dir else ""
+        _warn(f"{label} — findings:\n{reasons}{log_hint}")
     allow()
 
 
