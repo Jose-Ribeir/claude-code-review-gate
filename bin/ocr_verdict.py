@@ -42,6 +42,31 @@ def _findings(data):
     return []
 
 
+def _is_actionable(f):
+    """A finding with no description or no valid location is not something a
+    human can act on -- most likely the reviewer dropped required fields
+    while generating the final JSON (seen in practice: severity/path present,
+    content/start_line/end_line missing), not a deliberate signal. Treat it
+    the same way the hallucination check (see the review skill's step 3a)
+    treats an unverifiable existing_code snippet: too low-credibility to
+    block on by itself, but still worth a warning -- it still counts toward
+    `has_warn` below, and _format_reasons/the raw-output log still surface it
+    for a human to look at.
+    """
+    # f.get("content", "") only falls back to "" when the key is absent -- an
+    # explicit JSON null ("content": null) makes it return None, and str(None)
+    # is the non-empty string "None", which would pass a bare truthy check.
+    if not str(f.get("content") or "").strip():
+        return False
+    for key in ("start_line", "end_line"):
+        try:
+            if int(f.get(key)) <= 0:
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
 def compute_verdict(data):
     """Return 'block' | 'warn' | 'pass' for a parsed review result."""
     min_rank, min_conf = _block_threshold()
@@ -55,7 +80,7 @@ def compute_verdict(data):
             conf = float(f.get("confidence", 0.0))
         except (TypeError, ValueError):
             conf = 0.0
-        if rank >= min_rank and conf >= min_conf:
+        if rank >= min_rank and conf >= min_conf and _is_actionable(f):
             return "block"
         if rank >= _SEVERITY_RANK["medium"]:
             has_warn = True

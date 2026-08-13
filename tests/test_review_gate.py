@@ -12,6 +12,7 @@ _spec.loader.exec_module(review_gate)
 
 _extract_json = review_gate._extract_json
 _format_reasons = review_gate._format_reasons
+compute_verdict = review_gate.compute_verdict
 
 
 def test_whole_string_json():
@@ -75,3 +76,79 @@ def test_format_reasons_missing_fields_flagged_not_blank():
     line = _format_reasons(result)
     assert line.startswith("  [high] a.py:? - ")
     assert "reviewer omitted" in line
+
+
+def test_complete_high_confidence_finding_blocks():
+    result = {
+        "findings": [
+            {
+                "severity": "high",
+                "confidence": 0.9,
+                "path": "a.py",
+                "start_line": 3,
+                "end_line": 3,
+                "content": "real bug",
+            }
+        ]
+    }
+    assert compute_verdict(result) == "block"
+
+
+def test_incomplete_finding_cannot_block_even_at_high_confidence():
+    # The exact shape observed in production: severity/confidence/path present
+    # (enough to pass the old block check) but content/lines missing -- nothing
+    # a human could act on. compute_verdict is the auditable, model-independent
+    # decision point (see its own module docstring), so this must be enforced
+    # here rather than trusted to the reviewing LLM to self-police.
+    result = {
+        "findings": [
+            {"severity": "high", "confidence": 0.9, "path": "a.py"}
+        ]
+    }
+    assert compute_verdict(result) != "block"
+
+
+def test_incomplete_finding_still_counts_as_warn():
+    # Not actionable enough to block, but still a real signal -- must not be
+    # thrown away entirely, only downgraded below the blocking threshold.
+    result = {
+        "findings": [
+            {"severity": "high", "confidence": 0.9, "path": "a.py"}
+        ]
+    }
+    assert compute_verdict(result) == "warn"
+
+
+def test_finding_with_explicit_null_content_cannot_block():
+    # f.get("content", "") only uses the "" default when the key is absent;
+    # a JSON null makes it return None, and str(None) is the non-empty string
+    # "None" -- a bare truthy check on that would wrongly call it actionable.
+    result = {
+        "findings": [
+            {
+                "severity": "high",
+                "confidence": 0.9,
+                "path": "a.py",
+                "start_line": 5,
+                "end_line": 6,
+                "content": None,
+            }
+        ]
+    }
+    assert compute_verdict(result) != "block"
+
+
+def test_incomplete_finding_with_zero_line_numbers_cannot_block():
+    result = {
+        "findings": [
+            {
+                "severity": "high",
+                "confidence": 0.9,
+                "path": "a.py",
+                "start_line": 0,
+                "end_line": 0,
+                "content": "bug",
+            }
+        ]
+    }
+    assert compute_verdict(result) != "block"
