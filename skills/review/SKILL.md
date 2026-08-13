@@ -112,6 +112,17 @@ with a `path` field. Parse the result; if the subagent returns non-JSON or
 errors, record a warning for all its files and continue (never abort for one
 error).
 
+**Carry every field forward unchanged.** Steps 3a-6 below have you filter,
+downgrade, and re-render findings, which means retyping each finding object
+by hand rather than passing the subagent's JSON straight through. When you do,
+copy every field of a finding verbatim (`path`, `start_line`, `end_line`,
+`content`, etc.) — do not paraphrase, shorten, or silently drop a field for
+any finding, no matter how far down the array it sits or how large the change
+set is. A finding missing `content` or its line numbers is unusable to the
+person reading the verdict, and `compute_verdict` will refuse to let an
+incomplete finding block a push on its own — so a dropped field doesn't just
+degrade the report, it silently weakens the gate.
+
 ## 3a. Hallucination check
 
 For each finding that has a non-empty `existing_code`:
