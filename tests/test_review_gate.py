@@ -1,0 +1,55 @@
+"""Unit tests for review-gate.py's _extract_json balanced-brace parser."""
+import importlib.util
+import os
+import sys
+
+_BIN = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin")
+sys.path.insert(0, _BIN)  # so review-gate.py's own `from ocr_verdict import ...` resolves
+
+_spec = importlib.util.spec_from_file_location("review_gate", os.path.join(_BIN, "review-gate.py"))
+review_gate = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(review_gate)
+
+_extract_json = review_gate._extract_json
+
+
+def test_whole_string_json():
+    assert _extract_json('{"findings": []}') == {"findings": []}
+
+
+def test_fenced_json_block():
+    text = 'Here is the verdict:\n```json\n{"findings": [{"severity": "low"}]}\n```\n'
+    assert _extract_json(text) == {"findings": [{"severity": "low"}]}
+
+
+def test_trailing_prose_with_stray_brace_after_json():
+    # The bug this parser fixes: a naive find("{")..rfind("}") span would grab
+    # the LAST '}' in the whole text -- including the one in the parenthetical
+    # below -- and fail to parse. A balanced scan must stop at the object's own
+    # matching brace and ignore everything after it.
+    text = 'Review complete - verdict pass {"findings": []} (no blocking issues found}'
+    assert _extract_json(text) == {"findings": []}
+
+
+def test_skips_unrelated_json_object_without_findings_key():
+    # An earlier JSON-looking value quoted from the reviewed diff (e.g. a config
+    # fixture) must not win over the real verdict that follows it.
+    text = 'Example fixture: {"severity": "high"}\nActual verdict: {"findings": [{"severity": "high"}]}'
+    assert _extract_json(text) == {"findings": [{"severity": "high"}]}
+
+
+def test_last_findings_object_wins_when_multiple_present():
+    text = '{"findings": [{"id": 1}]}\nWait, corrected: {"findings": [{"id": 2}]}'
+    assert _extract_json(text) == {"findings": [{"id": 2}]}
+
+
+def test_no_json_present_returns_none():
+    assert _extract_json("Review complete, verdict pass, nothing to report.") is None
+
+
+def test_empty_string_returns_none():
+    assert _extract_json("") is None
+
+
+def test_malformed_braces_return_none():
+    assert _extract_json("{not: valid json at all") is None
