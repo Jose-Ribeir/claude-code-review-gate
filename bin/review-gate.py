@@ -170,14 +170,30 @@ def _extract_json(text):
             return json.loads(b)
         except Exception:
             continue
-    # 3) widest brace span
-    start, end = text.find("{"), text.rfind("}")
-    if start != -1 and end > start:
+    # 3) balanced scan from each '{' in turn (json.JSONDecoder.raw_decode stops
+    # at the object's own matching brace and ignores everything after it, unlike
+    # a naive find("{")..rfind("}") span, which grabs the LAST '}' anywhere in
+    # the text -- including one inside trailing prose the model appended after
+    # the JSON despite being told to print only the object -- and turns a valid
+    # verdict into an unparseable-output failure.
+    #
+    # Only a dict carrying "findings" (mandatory per the skill's --json contract)
+    # is accepted as a candidate. Without that check the first '{' that happens
+    # to decode would win even if it's an unrelated JSON value the model quoted
+    # from the reviewed diff itself (e.g. a config fixture) before the real
+    # verdict -- and take the LAST candidate, not the first, since that quoted
+    # case necessarily precedes the model's actual answer.
+    decoder = json.JSONDecoder()
+    idx, match = text.find("{"), None
+    while idx != -1:
         try:
-            return json.loads(text[start : end + 1])
-        except Exception:
-            pass
-    return None
+            obj, end = decoder.raw_decode(text, idx)
+            if isinstance(obj, dict) and "findings" in obj:
+                match = obj
+            idx = text.find("{", end)
+        except json.JSONDecodeError:
+            idx = text.find("{", idx + 1)
+    return match
 
 
 def _find_claude():
