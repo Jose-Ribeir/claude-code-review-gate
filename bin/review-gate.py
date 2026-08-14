@@ -45,16 +45,53 @@ _PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _MODEL = os.environ.get("OCR_MODEL", "sonnet").strip() or "sonnet"
 
 DEFAULT_CLAUDE_ARGS = [
-    "--allowedTools", "Bash Read Grep Glob Task",
+    # The reviewer's input is an UNTRUSTED diff. Anything it is pre-approved to
+    # run is therefore reachable by prompt injection from a hostile branch, so
+    # the allowlist is read-only: the review reads code and asks git what
+    # changed, and needs nothing else. Each rule is its own argv element -- the
+    # documented form is `--allowedTools "Bash(git log *)" "Bash(git diff *)"`,
+    # and note the SPACE before `*`, not a colon: a `param:value` rule against
+    # Bash's primary `command` field is ignored (with a startup warning) because
+    # it would be bypassable by a compound command.
+    #
+    # Everything outside this list still *exists*, it just is not pre-approved,
+    # and a headless session has nobody to prompt -- so it is refused. That is
+    # only true while --dangerously-skip-permissions is absent; see pre-push,
+    # which used to set it by default and no longer does.
+    "--allowedTools",
+    "Bash(git diff *)",
+    "Bash(git ls-files *)",
+    "Bash(git log *)",
+    "Bash(git show *)",
+    "Bash(git rev-parse *)",
+    "Bash(git status *)",
+    "Read",
+    "Grep",
+    "Glob",
+    "Task",
+    # Belt and braces: a bare tool name removes the tool from the model's
+    # context entirely rather than merely denying calls to it. The review skill
+    # promises "Never modify files" (skills/review/SKILL.md); this enforces it.
+    "--disallowedTools",
+    "Write",
+    "Edit",
+    "NotebookEdit",
+    "WebFetch",
+    "WebSearch",
     # Pin the model rather than inheriting the parent session's (see above).
     "--model", _MODEL,
-    # Load ONLY project settings. The user's ~/.claude/settings.json is where
+    # Load NO settings sources. The user's ~/.claude/settings.json is where
     # global hooks live; in a headless review session those fire on every tool
     # call (each one a subprocess, and any that inject context add tokens to a
-    # context that is already re-read on every call). Skipping user settings
-    # also skips the plugin registry, hence --plugin-dir below. Auth is
-    # unaffected -- OAuth/keychain is not a settings source.
-    "--setting-sources", "project",
+    # context that is already re-read on every call).
+    #
+    # `project` used to be loaded here for that cost reason, but project
+    # settings live in the repo BEING REVIEWED -- on a hostile branch they are
+    # attacker-controlled, and settings can define hooks, which execute. An
+    # empty value loads none of the three (`none` is not a valid source name;
+    # the CLI accepts user/project/local only). Auth is unaffected --
+    # OAuth/keychain is not a settings source.
+    "--setting-sources", "",
     # Load the review plugin from disk. Required because --setting-sources
     # above drops the user-level enabledPlugins registry.
     "--plugin-dir", _PLUGIN_ROOT,
@@ -139,6 +176,38 @@ def _is_advisory(repo_root):
         except Exception:
             continue
     return False
+
+
+def _in_review():
+    """True when this process is running inside the headless review session.
+
+    _run_review sets OCR_IN_REVIEW=1 in the child environment; the child is
+    given --plugin-dir, so this plugin's push gate is registered there too.
+    """
+    return os.environ.get("OCR_IN_REVIEW", "").strip().lower() in ("1", "true", "yes")
+
+
+# Longest finding description we will echo back. Long enough for a real finding,
+# short enough that a hostile diff cannot flood the parent session's context.
+_MAX_CONTENT = 500
+
+
+def _sanitize(text, limit=_MAX_CONTENT):
+    """Make reviewer-supplied text safe to echo into the parent session.
+
+    Everything in a finding originates in the diff under review, which on a
+    hostile branch is attacker-controlled -- and in hook mode this text is
+    placed in permissionDecisionReason, i.e. injected straight into the
+    CALLING session's context. Strip control characters (ANSI escapes, CR, and
+    embedded newlines that would let one finding forge extra report lines) and
+    cap the length.
+    """
+    s = str(text)
+    s = "".join(ch if ch.isprintable() else " " for ch in s)
+    s = " ".join(s.split())
+    if len(s) > limit:
+        s = s[: limit - 1].rstrip() + "…"
+    return s
 
 
 def _raw_output_path(git_dir):
@@ -391,9 +460,8 @@ def _run_review(repo_root, mode, git_dir=None):
         _warn("`claude` CLI not found on PATH or CLAUDE_CODE_EXECPATH — skipping review (fail-open).")
         return None, False
     # OCR_CLAUDE_ARGS replaces the defaults wholesale (full escape hatch, also
-    # discards the cost controls); OCR_CLAUDE_EXTRA_ARGS appends to them, which
-    # is what callers usually want -- the git-hook adapter uses it to add
-    # --dangerously-skip-permissions without losing the pinned model.
+    # discards the cost controls AND the read-only tool allowlist);
+    # OCR_CLAUDE_EXTRA_ARGS appends to them, which is what callers usually want.
     override = os.environ.get("OCR_CLAUDE_ARGS")
     if override:
         args = shlex.split(override)
@@ -401,6 +469,13 @@ def _run_review(repo_root, mode, git_dir=None):
         args = list(DEFAULT_CLAUDE_ARGS)
         args += shlex.split(os.environ.get("OCR_CLAUDE_EXTRA_ARGS", ""))
     bypass = _bypass_hint(mode)
+    # The child is given --plugin-dir, so THIS plugin -- including its
+    # PreToolUse push gate -- is registered inside the review session too.
+    # Without a marker in the environment, every Bash call the reviewer makes
+    # pays a Python spawn, and a push from inside a review would nest a whole
+    # second review. Both adapters short-circuit on this (see _in_review).
+    child_env = dict(os.environ)
+    child_env["OCR_IN_REVIEW"] = "1"
     try:
         proc = subprocess.run(
             [claude, "-p", PROMPT] + args,
@@ -408,6 +483,7 @@ def _run_review(repo_root, mode, git_dir=None):
             capture_output=True,
             text=True,
             timeout=TIMEOUT,
+            env=child_env,
         )
     except subprocess.TimeoutExpired:
         if mode == "hook":
@@ -474,16 +550,18 @@ def _run_review(repo_root, mode, git_dir=None):
 def _format_reasons(result, limit=20):
     lines = []
     for f in result.get("findings", []) if isinstance(result, dict) else []:
-        sev = str(f.get("severity", "?"))
-        path = f.get("path", "?")
-        s, e = f.get("start_line", "?"), f.get("end_line", "?")
+        # Every field here came out of the diff under review, so all of it is
+        # sanitized before it reaches the caller's context (see _sanitize).
+        sev = _sanitize(f.get("severity", "?"), 20)
+        path = _sanitize(f.get("path", "?"), 200)
+        s, e = _sanitize(f.get("start_line", "?"), 12), _sanitize(f.get("end_line", "?"), 12)
         loc = f"{path}:{s}" if s == e else f"{path}:{s}-{e}"
         # A finding can be syntactically valid JSON yet still miss the fields
         # it needs to be actionable (the reviewer skipped them, usually under
         # output-length pressure). Say so explicitly instead of printing a
         # bare "- " that looks like display truncation rather than a defect
         # in the review itself.
-        content = (f.get("content") or "").strip() or (
+        content = _sanitize(f.get("content") or "").strip() or (
             "(reviewer omitted a description for this finding — see raw output log)"
         )
         lines.append(f"  [{sev}] {loc} - {content}")
@@ -538,6 +616,17 @@ def main(argv):
 
 
 def _main_inner(argv, mode):
+    # Re-entry guard. _run_review passes --plugin-dir to the child, so this
+    # plugin's own push gate is registered inside the review session. Without
+    # this, every Bash call the reviewer makes spawns a Python process, and a
+    # push from inside a review would recurse into a second full review.
+    # Checked before anything else, including stdin, so the cost is one env
+    # lookup on the hot path.
+    if _in_review():
+        if mode == "hook":
+            _emit_hook("allow")
+        sys.exit(0)
+
     # Hook mode: consume the PreToolUse payload on stdin (and only gate pushes).
     if mode == "hook":
         try:
