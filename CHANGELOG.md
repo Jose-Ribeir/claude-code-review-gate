@@ -6,6 +6,35 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-14
+
+A hardening release, ahead of publishing the plugin. Three of these were silent
+fail-opens in a tool whose headline claim is that it fails closed.
+
+### Security
+- **The reviewer could be turned into a shell by the code it was reviewing.**
+  Its input is an untrusted diff, and it was handed tools to match:
+  `--allowedTools "Bash Read Grep Glob Task"` pre-approved *unrestricted* Bash,
+  `--setting-sources project` loaded the reviewed repo's own
+  `.claude/settings.json` (settings can define hooks, and hooks execute), and
+  the global git-hook adapter defaulted to `--dangerously-skip-permissions` on
+  top. Composed, a hostile branch could run arbitrary code on `git push`. The
+  allowlist is now read-only (`git diff`/`ls-files`/`log`/`show`/`rev-parse`/
+  `status`, plus `Read`/`Grep`/`Glob`/`Task`), Write/Edit/NotebookEdit/WebFetch/
+  WebSearch are removed from the model's context outright, settings sources are
+  empty, and skip-permissions is no longer defaulted — which is what makes the
+  allowlist binding, since a headless session has nobody to prompt and refuses
+  anything outside it.
+- **Findings are sanitized before being echoed back.** In hook mode they land in
+  `permissionDecisionReason`, i.e. straight into the calling session's context,
+  and they originate in the diff. Control characters are stripped and length is
+  capped, so one finding cannot forge extra report lines.
+- **Added a re-entry guard.** The review session is launched with
+  `--plugin-dir`, so this plugin's own push gate was registered inside it: every
+  Bash call the reviewer made spawned a Python process, and a push from within a
+  review would have recursed into a second full review. `OCR_IN_REVIEW=1` now
+  short-circuits both adapters.
+
 ### Fixed
 - **Review markers no longer accumulate in the git dir.** A marker is written per
   reviewed HEAD sha so the paired adapter (the Claude Code hook and the global
@@ -16,6 +45,68 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a fresh marker for another sha is still load-bearing, since the paired adapter
   may be mid-push against a different HEAD. Failures during the sweep are
   swallowed — housekeeping must never break the gate.
+- **No-Python failed OPEN.** Both adapters skipped the review and allowed the
+  push when no working interpreter was found, while the docs insisted a missing
+  `claude` binary was the only fail-open path. They now block, and say how to
+  recover.
+- **Windows without Git Bash had no gate at all.** Claude Code runs a shell-form
+  hook under Git Bash on Windows, or PowerShell when Git Bash is absent — so
+  `bash "..."` never started there, and a hook that fails to launch is treated
+  as non-blocking. `scripts/gate-hook.ps1` now covers that case. Hooks have no
+  platform condition, so both entries fire and the PowerShell one defers only
+  when Git Bash is *positively* confirmed (by installation, not `PATH`; a WSL
+  bash in `System32` does not count). When unsure it runs — a duplicate review
+  is cheaper than an unreviewed push.
+- **The push matcher missed wrapped commands.** `Bash(git push:*)` fires for
+  plain, compound (`cd x && git push`), env-prefixed and `;`-separated commands,
+  but not for `command git push` or `bash -c "git push"`. Now `Bash(*git push*)`,
+  which catches those and stays selective.
+- **The gate could create a stray `.git/` directory.** `_git_dir()` asked for
+  `--git-dir`, which answers the bare relative string `".git"` when cwd is the
+  repo root; callers resolved that against the process cwd (in hook mode,
+  wherever Claude Code was launched from) and then `mkdir -p`'d it. It now uses
+  `--absolute-git-dir`, anchors on the repo root, and returns empty outside a
+  repo.
+- **Every push wrote `.pyc` files into the installed plugin snapshot**, a
+  directory the plugin manager treats as immutable and `sync-local-install.py`
+  diffs for drift. `sys.dont_write_bytecode` is set before the sibling import.
+- **CI had been red on `main` since `69a4452`** — the verdict smoke test still
+  asserted the pre-`_is_actionable` answer. The fixture was stale, not the code.
+  CI now also runs the test suite (which it never did) across a 3.9/3.12 matrix,
+  and validates both manifests.
+- `.gitattributes` pinned `bin/pre-commit`, renamed to `pre-push` back in
+  `6aaf562`. The catch-all still normalized it, so the explicit CRLF protection
+  on the repo's most CRLF-fragile file had been quietly absent.
+- Corrected the fail-open documentation in five places, and the module
+  docstring's `OCR_TIMEOUT` default (600s → the actual 1800s).
+
+### Changed
+- **BREAKING: executables moved from `bin/` to `scripts/`.** A plugin's `bin/`
+  is added to the Bash tool's `PATH`, so every file in it became a bare command
+  in every Bash call for every user with the plugin enabled — including
+  `pre-push` (a template that resolves an unsubstituted placeholder, reviews
+  nothing, and exits 0) and `sync-local-install.py` (a dev tool that writes into
+  `~/.claude/plugins`). None were meant to be typed.
+  - **If you installed the global git hook, re-run
+    `bash scripts/install-git-hook.sh`.** You do not have to: the materialized
+    hook no longer trusts a baked path, and a compatibility shim remains at
+    `bin/review-gate.py` (removal target: **0.5.0**). Re-running just gives you
+    a clean install. `/review-gate:doctor` reports whether yours is stale.
+- **The global git hook resolves the reviewer at runtime.** It previously baked
+  an absolute path into a file outside the repo that no upgrade rewrites, so a
+  plugin upgrade — including this one — orphaned it, and an orphaned path meant
+  the push went through unreviewed. It now checks `$SCR_GATE_DIR`, then a
+  pointer written under `${CLAUDE_PLUGIN_DATA}` (which survives updates, unlike
+  the versioned cache dir), then the install-time hint, and **blocks with repair
+  instructions** if it finds nothing. This also retires the version-skew hazard
+  `CONTRIBUTING.md` has warned about.
+
+### Added
+- **`/review-gate:doctor`** — reports whether the gate is actually wired up and
+  able to run. Needed because a hook that fails to launch, times out, or dies
+  abnormally is non-blocking and cannot detect its own absence.
+- `displayName` in the plugin manifest, and a `pyproject.toml` pinning the lint
+  and test configuration CI already enforces.
 
 ## [0.2.1] - 2026-08-14
 

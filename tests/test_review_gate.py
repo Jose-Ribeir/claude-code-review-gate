@@ -327,3 +327,41 @@ def test_bytecode_writing_is_disabled():
     # Otherwise every push drops .pyc files into the versioned plugin snapshot,
     # which the plugin manager treats as immutable and sync-local-install diffs.
     assert review_gate.sys.dont_write_bytecode is True
+
+
+# --- the shipped payload ------------------------------------------------------
+# PAYLOAD in sync-local-install.py is an ALLOWLIST, so a newly added component
+# directory ships only if someone remembers to list it. commands/ was added in
+# 0.3.0 and initially was not, which would have quietly shipped a plugin whose
+# /review-gate:doctor did not exist.
+
+import importlib.util as _ilu  # noqa: E402
+
+_sync_spec = _ilu.spec_from_file_location(
+    "sync_local_install", os.path.join(_SCRIPTS, "sync-local-install.py")
+)
+_sync = _ilu.module_from_spec(_sync_spec)
+_sync_spec.loader.exec_module(_sync)
+
+_REPO = os.path.dirname(_SCRIPTS)
+# Directories Claude Code discovers by convention. If one exists in the repo it
+# must be in the payload, or the installed plugin silently lacks that feature.
+_COMPONENT_DIRS = ["agents", "commands", "skills", "hooks", ".claude-plugin"]
+
+
+def test_payload_ships_every_component_directory_that_exists():
+    missing = [
+        d for d in _COMPONENT_DIRS
+        if os.path.isdir(os.path.join(_REPO, d)) and d not in _sync.PAYLOAD
+    ]
+    assert not missing, f"component dirs missing from PAYLOAD: {missing}"
+
+
+def test_payload_entries_all_exist():
+    absent = [n for n in _sync.PAYLOAD if not os.path.exists(os.path.join(_REPO, n))]
+    assert not absent, f"PAYLOAD lists paths that do not exist: {absent}"
+
+
+def test_payload_ships_the_runtime_scripts_and_the_compat_shim():
+    assert "scripts" in _sync.PAYLOAD
+    assert "bin" in _sync.PAYLOAD, "the pre-0.3.0 compat shim must still ship"

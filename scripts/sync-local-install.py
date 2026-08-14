@@ -43,6 +43,7 @@ PLUGIN_KEY = f"{PLUGIN}@{MARKETPLACE}"
 PAYLOAD = [
     ".claude-plugin",
     "agents",
+    "commands",
     # bin/ holds one compatibility shim, kept so pre-0.3.0 git-hook installs
     # (which baked an absolute path to it) keep resolving. Removal target:
     # 0.5.0. Everything else moved to scripts/ -- a plugin's bin/ is added to

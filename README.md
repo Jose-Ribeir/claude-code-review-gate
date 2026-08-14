@@ -89,6 +89,14 @@ bash scripts/uninstall-git-hook.sh   # reverts it
 ```
 > ⚠️ This sets a **global** `core.hooksPath`, which applies to all your repos and overrides each repo's `.git/hooks/pre-push` (this hook still runs a repo-local pre-push if one exists, so existing hooks keep working). Requires the `claude` CLI on your `PATH`.
 
+**4. Confirm it's actually wired up.**
+```
+/review-gate:doctor
+```
+Worth doing once after install or upgrade. A hook that fails to *launch* is treated by Claude Code as non-blocking, so a gate that cannot start does not announce itself — it just stops reviewing. The doctor is how you check.
+
+> **Upgrading from a pre-0.3 install?** Re-run `bash scripts/install-git-hook.sh` if you use the global git hook. The executables moved from `bin/` to `scripts/`; existing hooks self-heal (they now resolve the reviewer at runtime, and a compatibility shim is kept at the old path until 0.5.0), but re-running gives you a clean install. `/review-gate:doctor` reports whether yours is stale.
+
 > **Upgrading from a pre-0.2 install?** Earlier versions installed a **`pre-commit`** hook. It fires on every commit, and since the gate now reviews `@{u}..HEAD` it would review the wrong state at commit time (during a pre-commit hook the new commit does not exist yet, so `HEAD` is still its parent). Re-run `bash scripts/install-git-hook.sh` — it removes the stale `pre-commit` and installs `pre-push` in its place.
 
 **Requirements:** Claude Code with an authenticated Claude subscription; Python 3 and Git. No API key.
