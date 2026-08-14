@@ -293,3 +293,37 @@ def test_allowlist_grants_no_write_capable_tool():
 def test_settings_sources_are_empty_so_a_hostile_repo_cannot_inject_hooks():
     args = review_gate.DEFAULT_CLAUDE_ARGS
     assert args[args.index("--setting-sources") + 1] == ""
+
+
+# --- git dir resolution -------------------------------------------------------
+# _git_dir used to fall back to the RELATIVE string ".git", which _save_raw_output
+# would then mkdir -p. Running the gate anywhere outside a repo therefore created
+# a bogus .git directory in that cwd -- from a tool that promises to only read.
+
+_git_dir = review_gate._git_dir
+_save_raw_output = review_gate._save_raw_output
+
+
+def test_git_dir_is_empty_outside_a_repo(tmp_path):
+    assert _git_dir(str(tmp_path)) == ""
+
+
+def test_git_dir_is_absolute_inside_a_repo():
+    # --absolute-git-dir, not --git-dir: the latter answers a bare ".git" when
+    # cwd is the repo root, which callers would resolve against the WRONG cwd
+    # (in hook mode the process inherits Claude Code's cwd, not the repo's).
+    repo = os.path.dirname(_SCRIPTS)
+    got = _git_dir(repo)
+    assert got and os.path.isabs(got)
+
+
+def test_save_raw_output_creates_no_stray_git_dir(tmp_path):
+    _save_raw_output("", "some reviewer output")
+    assert not (tmp_path / ".git").exists()
+    assert not os.path.exists(os.path.join(os.getcwd(), ".git")) or os.path.isdir(".git")
+
+
+def test_bytecode_writing_is_disabled():
+    # Otherwise every push drops .pyc files into the versioned plugin snapshot,
+    # which the plugin manager treats as immutable and sync-local-install diffs.
+    assert review_gate.sys.dont_write_bytecode is True
