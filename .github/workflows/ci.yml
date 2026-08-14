@@ -46,10 +46,58 @@ jobs:
           print(f"OK: {len(files)} JSON files valid")
           PY
 
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The README promises "Python 3" with no floor. The matrix is what makes
+        # that claim true -- the code is stdlib-only with no syntax above 3.8.
+        python-version: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install pytest
+        run: pip install pytest
+
+      - name: Run test suite
+        run: python -m pytest tests -q
+
+      # These four assertions are the verdict contract in its most compressed
+      # form. They duplicate tests/test_review_gate.py on purpose: the parser is
+      # also a standalone CLI, and this is the only thing that exercises it that
+      # way. Keep them in sync -- a stale fixture here once claimed a regression
+      # that did not exist (see CHANGELOG 0.3.0).
       - name: Verdict parser smoke test
         run: |
-          echo '{"findings":[{"severity":"high","confidence":0.9}]}' | python bin/ocr_verdict.py | grep -qx block
+          # A complete, confident, high-severity finding blocks.
+          echo '{"findings":[{"severity":"high","confidence":0.9,"path":"a.py","start_line":3,"end_line":3,"content":"bug"}]}' \
+            | python bin/ocr_verdict.py | grep -qx block
+          # The same finding minus content/line numbers is not actionable, so it
+          # warns instead of blocking (_is_actionable, added in 69a4452).
+          echo '{"findings":[{"severity":"high","confidence":0.9,"path":"a.py"}]}' \
+            | python bin/ocr_verdict.py | grep -qx warn
           echo '{"findings":[{"severity":"high","confidence":0.5}]}' | python bin/ocr_verdict.py | grep -qx warn
           echo '{"findings":[{"severity":"low","confidence":0.9}]}'  | python bin/ocr_verdict.py | grep -qx pass
           echo 'not json' | python bin/ocr_verdict.py | grep -qx pass
           echo "verdict parser OK"
+
+  plugin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # `claude plugin validate` is a local file check and needs no auth. Do NOT
+      # add `claude -p` here -- that needs interactive auth (see CONTRIBUTING.md).
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Validate plugin manifest
+        run: claude plugin validate .claude-plugin/plugin.json --strict
+
+      - name: Validate marketplace manifest
+        run: claude plugin validate . --strict
