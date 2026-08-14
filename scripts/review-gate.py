@@ -9,10 +9,19 @@
 #   --mode git  : a process exit code (1 = block, 0 = allow)
 #
 # Failure policy: FAIL CLOSED on timeout, subprocess error, or unparseable
-# output.  Only "claude not found" still fails open — there is no sensible gate
-# when the tool is not installed.  Use OCR_FAIL_OPEN=1 for an emergency
-# one-shot bypass; use OCR_ADVISORY=1 to downgrade permanently to warn-only.
-# Raise OCR_TIMEOUT (default 600 s) if legitimate reviews routinely time out.
+# output — and, as of 0.3.0, on a missing Python 3 or a reviewer the git hook
+# cannot locate (both used to fail open, contradicting this very paragraph).
+#
+# What still fails OPEN, in full:
+#   1. "claude not found" — deliberate; there is no sensible gate without it.
+#   2. The hook failing to LAUNCH, timing out, or dying abnormally. Claude Code
+#      treats a hook it could not start or had to kill as non-blocking, and no
+#      code in here can override that. It is why hooks/hooks.json's timeout must
+#      stay above OCR_TIMEOUT, and why /review-gate:doctor exists.
+#   3. OCR_FAIL_OPEN=1 (one-shot bypass) / OCR_ADVISORY=1 (permanent warn-only).
+#
+# Raise OCR_TIMEOUT (default 1800 s) if legitimate reviews routinely time out,
+# and raise hooks/hooks.json's timeout to stay above it.
 #
 # The orchestrated review methodology this drives is adapted from open-code-review
 # (ocr): https://github.com/alibaba/open-code-review (Apache-2.0). See NOTICE.
@@ -25,6 +34,12 @@ import shlex
 import time
 from pathlib import Path
 
+# Import the verdict logic from its sibling WITHOUT leaving a __pycache__ behind.
+# The plugin runs from ~/.claude/plugins/cache/<...>/<version>/, which the plugin
+# manager treats as an immutable snapshot and which sync-local-install.py diffs
+# for drift; writing .pyc files into it on every push dirties both. The process
+# is short-lived, so losing bytecode caching costs nothing measurable.
+sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ocr_verdict import compute_verdict  # noqa: E402
 
@@ -118,7 +133,10 @@ MARKER_PREFIX = "scr-push-reviewed-"
 class ReviewGateError(Exception):
     """Raised to fail the gate closed (timeout, subprocess crash, parse error).
 
-    Only 'claude not found' is allowed to remain fail-open.
+    Within this module, 'claude not found' is the only condition allowed to
+    remain fail-open. The adapters add their own (see the module header) and
+    Claude Code adds one more that no code here can reach: a hook that fails to
+    launch or gets killed is treated as non-blocking.
     """
 
 
@@ -141,13 +159,25 @@ def _repo_root():
     return out if rc == 0 and out else os.getcwd()
 
 
-def _git_dir():
-    out, rc = _git(["rev-parse", "--git-dir"])
-    return out if rc == 0 and out else ".git"
+def _git_dir(repo_root=None):
+    """Absolute path to the git dir, or "" when we are not in a repo.
+
+    Two things matter here. It asks for --absolute-git-dir rather than
+    --git-dir, because the latter answers the bare relative string ".git" when
+    cwd happens to be the repo root -- and every caller then resolves that
+    against the PROCESS cwd, which in hook mode is wherever Claude Code was
+    launched from, not the repo. And it returns "" on failure rather than
+    falling back to ".git": _save_raw_output mkdir -p's whatever it is given,
+    so the old fallback would CREATE a bogus .git directory in the cwd of any
+    non-repo the gate ran in. A gate that promises to only read must not
+    scatter directories around.
+    """
+    out, rc = _git(["rev-parse", "--absolute-git-dir"], cwd=repo_root)
+    return out if rc == 0 and out else ""
 
 
-def _head_sha():
-    out, rc = _git(["rev-parse", "HEAD"])
+def _head_sha(repo_root=None):
+    out, rc = _git(["rev-parse", "HEAD"], cwd=repo_root)
     return out if rc == 0 and out else ""
 
 
@@ -267,6 +297,15 @@ def _save_raw_output(git_dir, text):
 
 
 def _marker_path(git_dir, head_sha):
+    """Path of the "this push was already reviewed" marker.
+
+    Keyed on HEAD sha alone, which is narrower than it looks: it identifies the
+    COMMITS, not the push. Reviewing HEAD and then pushing a different ref that
+    resolves to the same HEAD within MARKER_TTL skips the second review. That is
+    the intended behaviour -- the same commits do not need reviewing twice, and
+    it is what lets the two adapters avoid double-reviewing one push -- but it
+    does mean the marker is not a per-remote or per-ref record.
+    """
     return Path(git_dir) / f"{MARKER_PREFIX}{head_sha}"
 
 
@@ -681,9 +720,13 @@ def _main_inner(argv, mode):
     if not _has_unpushed_commits():
         allow()
 
-    git_dir = _git_dir()
-    head_sha = _head_sha()
-    marker = _marker_path(git_dir, head_sha) if head_sha else None
+    # Anchored on repo_root, not the process cwd: in hook mode this process
+    # inherits the cwd Claude Code was launched from, which need not be the
+    # repo being pushed. Either may be "" outside a repo -- every consumer
+    # below guards for that rather than inventing a path.
+    git_dir = _git_dir(repo_root)
+    head_sha = _head_sha(repo_root)
+    marker = _marker_path(git_dir, head_sha) if (git_dir and head_sha) else None
 
     # The other adapter already reviewed this exact staged tree and passed it.
     if marker and _marker_fresh(marker):
