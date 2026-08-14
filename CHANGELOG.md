@@ -6,6 +6,17 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **Review markers no longer accumulate in the git dir.** A marker is written per
+  reviewed HEAD sha so the paired adapter (the Claude Code hook and the global
+  git hook) can skip re-reviewing the same push, and is only ever honored within
+  `MARKER_TTL`. Nothing removed the expired ones, so `.git/` gained one
+  `scr-push-reviewed-*` file per passing push, forever. `_reap_markers()` now
+  sweeps expired markers whenever a new one is written. Only expired markers go:
+  a fresh marker for another sha is still load-bearing, since the paired adapter
+  may be mid-push against a different HEAD. Failures during the sweep are
+  swallowed — housekeeping must never break the gate.
+
 ## [0.2.1] - 2026-08-14
 
 ### Fixed

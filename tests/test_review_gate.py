@@ -152,3 +152,62 @@ def test_incomplete_finding_with_zero_line_numbers_cannot_block():
         ]
     }
     assert compute_verdict(result) != "block"
+
+
+# --- marker reaping -----------------------------------------------------------
+# Markers are written per reviewed HEAD sha so the paired adapter (Claude Code
+# hook vs global git hook) can skip re-reviewing the same push. They were never
+# removed, so one file accumulated in the git dir per passing push, forever.
+
+import time  # noqa: E402
+
+_reap_markers = review_gate._reap_markers
+_marker_path = review_gate._marker_path
+MARKER_PREFIX = review_gate.MARKER_PREFIX
+MARKER_TTL = review_gate.MARKER_TTL
+
+
+def _write_marker(git_dir, sha, age_seconds):
+    path = _marker_path(str(git_dir), sha)
+    path.write_text("x", encoding="utf-8")
+    stamp = time.time() - age_seconds
+    os.utime(path, (stamp, stamp))
+    return path
+
+
+def test_reap_removes_expired_markers(tmp_path):
+    old = _write_marker(tmp_path, "a" * 40, MARKER_TTL + 60)
+    _reap_markers(str(tmp_path))
+    assert not old.exists()
+
+
+def test_reap_keeps_unexpired_markers_for_other_shas(tmp_path):
+    # A fresh marker for another sha is still load-bearing: the paired adapter
+    # may be mid-push against a different HEAD.
+    fresh = _write_marker(tmp_path, "b" * 40, 10)
+    _reap_markers(str(tmp_path))
+    assert fresh.exists()
+
+
+def test_reap_never_removes_the_marker_just_written(tmp_path):
+    # Guards the keep= contract even if the new marker's mtime looks expired
+    # (clock skew, or a filesystem with coarse timestamps).
+    current = _write_marker(tmp_path, "c" * 40, MARKER_TTL + 60)
+    _reap_markers(str(tmp_path), keep=current)
+    assert current.exists()
+
+
+def test_reap_ignores_unrelated_files_in_the_git_dir(tmp_path):
+    # The sweep globs inside the real .git directory -- it must not touch HEAD,
+    # config, or anything else that happens to be old.
+    bystander = tmp_path / "config"
+    bystander.write_text("[core]", encoding="utf-8")
+    os.utime(bystander, (time.time() - 999999,) * 2)
+    _write_marker(tmp_path, "d" * 40, MARKER_TTL + 60)
+    _reap_markers(str(tmp_path))
+    assert bystander.exists()
+
+
+def test_reap_survives_a_missing_git_dir(tmp_path):
+    # Housekeeping must never raise into the gate's pass path.
+    _reap_markers(str(tmp_path / "does-not-exist"))

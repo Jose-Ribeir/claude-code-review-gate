@@ -75,6 +75,7 @@ try:
 except ValueError:
     TIMEOUT = 1800
 MARKER_TTL = 3600  # seconds
+MARKER_PREFIX = "scr-push-reviewed-"
 
 
 class ReviewGateError(Exception):
@@ -164,7 +165,7 @@ def _save_raw_output(git_dir, text):
 
 
 def _marker_path(git_dir, head_sha):
-    return Path(git_dir) / f"scr-push-reviewed-{head_sha}"
+    return Path(git_dir) / f"{MARKER_PREFIX}{head_sha}"
 
 
 def _marker_fresh(path):
@@ -172,6 +173,33 @@ def _marker_fresh(path):
         return path.exists() and (time.time() - path.stat().st_mtime) < MARKER_TTL
     except Exception:
         return False
+
+
+def _reap_markers(git_dir, keep=None):
+    """Delete markers too old to short-circuit anything.
+
+    A marker is named for the HEAD sha it reviewed and is only ever honored
+    within MARKER_TTL, but nothing removed the expired ones -- so the git dir
+    accumulated one file per passing push, forever. Sweep them whenever a new
+    marker is written: self-limiting, and no separate cleanup entry point to
+    remember to run.
+
+    Only EXPIRED markers go. A fresh one for some other sha is still load-bearing
+    -- the paired adapter may be mid-push against a different HEAD, and deleting
+    it would cost a duplicate review rather than save anything.
+    """
+    try:
+        cutoff = time.time() - MARKER_TTL
+        for path in Path(git_dir).glob(f"{MARKER_PREFIX}*"):
+            if keep is not None and path == keep:
+                continue
+            try:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink()
+            except OSError:
+                continue  # already gone, or held by a concurrent gate run
+    except Exception:
+        pass  # housekeeping must never break the gate
 
 
 def _extract_json(text):
@@ -570,6 +598,7 @@ def _main_inner(argv, mode):
             marker.write_text(str(time.time()), encoding="utf-8")
         except Exception:
             pass
+        _reap_markers(git_dir, keep=marker)
     if reasons:
         label = "advisory (blocking disabled)" if advisory else f"verdict: {verdict}"
         log_hint = f"\n  Full reviewer output: {_raw_output_path(git_dir)}" if git_dir else ""
