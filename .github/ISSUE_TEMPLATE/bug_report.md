@@ -21,5 +21,5 @@ A clear description of the bug.
 **Expected vs actual**
 
 **Relevant output**
-<!-- Output from `python bin/review-gate.py --mode git`, or the gate's stderr.
+<!-- Output from `python scripts/review-gate.py --mode git`, or the gate's stderr.
      Do NOT paste secrets. -->

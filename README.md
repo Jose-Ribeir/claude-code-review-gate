@@ -35,7 +35,7 @@ Want advisory-only? Set `OCR_ADVISORY=1` and findings are printed but never bloc
 - **One reviewer subagent** for the whole change set, so cross-file defects — a symbol renamed in one file and stale in another, a guard removed in A but still assumed by B — are visible. Large diffs (>15 files) fan out by directory.
 - An **independent falsify pass** before anything blocks: a second subagent that never saw the reviewer's reasoning gets only the diff and the findings, and drops a finding **only** with direct counter-evidence.
 - A **deterministic verdict** (`block` / `warn` / `pass`) decided by auditable code, not the model's discretion.
-- **Fails closed** on timeout, crash, or unparseable output — a broken reviewer blocks rather than waving changes through. Only "`claude` not installed" fails open. `OCR_FAIL_OPEN=1` is the emergency bypass.
+- **Fails closed** on timeout, crash, unparseable output, a missing Python 3, or a reviewer it cannot locate — a broken gate blocks rather than waving changes through. `OCR_FAIL_OPEN=1` is the emergency bypass. See [Safety & limitations](#safety--limitations) for the cases that still fail open.
 
 ## Why this exists (and how it relates to open-code-review)
 
@@ -84,14 +84,16 @@ claude --plugin-dir /path/to/claude-code-review-gate
 
 **3. (Optional) gate EVERY push, everywhere.** By default the gate only fires for pushes made through Claude Code. To gate terminal/IDE pushes in every repo too:
 ```
-bash bin/install-git-hook.sh     # sets a global core.hooksPath
-bash bin/uninstall-git-hook.sh   # reverts it
+bash scripts/install-git-hook.sh     # sets a global core.hooksPath
+bash scripts/uninstall-git-hook.sh   # reverts it
 ```
 > ⚠️ This sets a **global** `core.hooksPath`, which applies to all your repos and overrides each repo's `.git/hooks/pre-push` (this hook still runs a repo-local pre-push if one exists, so existing hooks keep working). Requires the `claude` CLI on your `PATH`.
 
-> **Upgrading from a pre-0.2 install?** Earlier versions installed a **`pre-commit`** hook. It fires on every commit, and since the gate now reviews `@{u}..HEAD` it would review the wrong state at commit time (during a pre-commit hook the new commit does not exist yet, so `HEAD` is still its parent). Re-run `bash bin/install-git-hook.sh` — it removes the stale `pre-commit` and installs `pre-push` in its place.
+> **Upgrading from a pre-0.2 install?** Earlier versions installed a **`pre-commit`** hook. It fires on every commit, and since the gate now reviews `@{u}..HEAD` it would review the wrong state at commit time (during a pre-commit hook the new commit does not exist yet, so `HEAD` is still its parent). Re-run `bash scripts/install-git-hook.sh` — it removes the stale `pre-commit` and installs `pre-push` in its place.
 
-**Requirements:** Claude Code with an authenticated Claude subscription; Python 3 and Git (Git Bash on Windows). No API key.
+**Requirements:** Claude Code with an authenticated Claude subscription; Python 3 and Git. No API key.
+
+> **Windows:** the gate ships both a Git Bash and a PowerShell adapter, so Git for Windows' "Git from the command line only" setup (which keeps `bash.exe` off `PATH`) is fine. The global git hook installed in step 3 does need a bash, which Git for Windows always bundles. Run `/review-gate:doctor` if you want to confirm what is wired up.
 
 ## Usage
 
@@ -121,7 +123,7 @@ git push --no-verify
 
 | Setting | Default | How to change | Effect |
 |---|---|---|---|
-| Gate scope | Claude Code commits | run `bin/install-git-hook.sh` (→ everywhere) / `uninstall-git-hook.sh` | which commits are reviewed |
+| Gate scope | Claude Code commits | run `scripts/install-git-hook.sh` (→ everywhere) / `uninstall-git-hook.sh` | which commits are reviewed |
 | Mode | **block** | `OCR_ADVISORY=1`, or `.ocr/config.json` `{"blocking": false}` | block vs warn-only |
 | Block threshold | `high` & `confidence ≥ 0.7` | `OCR_BLOCK_SEVERITY`, `OCR_BLOCK_CONFIDENCE` | what is severe/sure enough to block |
 | Reviewer timeout | `1800`s | `OCR_TIMEOUT` | fail-**closed** deadline for `claude -p` (blocks the push; keep `hooks/hooks.json`'s `timeout` above it) |
@@ -175,7 +177,7 @@ The gate runs the review in a **separate headless `claude -p` session**. That se
 
 **Will it block my pushes? How do I bypass?** By default it blocks confident high-severity findings. Use `git push --no-verify` for a one-off, `OCR_ADVISORY=1` (or `.ocr/config.json` `{"blocking": false}`) for warn-only, or uninstall the global hook.
 
-**What happens if the review times out or crashes?** It **blocks** — the gate fails closed, so a broken reviewer can't silently wave changes through. The one exception is `claude` not being installed, which fails open (there is no gate without the tool). `OCR_FAIL_OPEN=1` is the emergency bypass; in hook mode it must be exported in the environment Claude Code itself was launched from, since a shell prefix on `git push` never reaches the hook process.
+**What happens if the review times out or crashes?** It **blocks** — the gate fails closed, so a broken reviewer can't silently wave changes through. The same applies to a missing Python 3 or a reviewer the git hook can't locate after an upgrade. `OCR_FAIL_OPEN=1` is the emergency bypass; in hook mode it must be exported in the environment Claude Code itself was launched from, since a shell prefix on `git push` never reaches the hook process. The full list of what still fails open is in [Safety & limitations](#safety--limitations).
 
 **Why is it expensive / how do I make it cheaper?** See [Cost](#cost). The short version: set `OCR_MODEL=haiku`, and make sure you're on a current install — pre-0.2 installed a per-**commit** hook that also bypassed the cost controls.
 
@@ -183,7 +185,12 @@ The gate runs the review in a **separate headless `claude -p` session**. That se
 
 ## Safety & limitations
 
-- **Fails closed** by design — a timeout, crash, or unparseable review **blocks** the push, so a broken reviewer can't wave changes through. Only a missing `claude` binary fails open. Bypass with `OCR_FAIL_OPEN=1`, or downgrade permanently with `OCR_ADVISORY=1`.
+- **Fails closed** by design — a timeout, crash, unparseable review, missing Python 3, or an unlocatable reviewer **blocks** the push. Bypass with `OCR_FAIL_OPEN=1`, or downgrade permanently with `OCR_ADVISORY=1`.
+- **It still fails open in these cases**, and it is worth knowing which:
+  - **`claude` is not installed** — deliberate; there is no gate without the tool.
+  - **The hook fails to launch, times out, or dies abnormally.** Claude Code treats a hook it could not start or had to kill as *non-blocking*, and no code inside the hook can change that. On Windows this is why both a Git Bash and a PowerShell adapter are registered — if neither can start, the gate is silently absent. Run `/review-gate:doctor` to check.
+  - **`OCR_FAIL_OPEN=1` or `OCR_ADVISORY=1`** — the intended escape hatches.
+- **Two structural limits**: `git push --no-verify` skips the git-hook wiring entirely, and pushing from a terminal skips the plugin wiring unless you installed the global hook.
 - AI review is **advisory assistance, not a guarantee** — it complements, not replaces, tests and human review.
 - **Full-file scans can be token-heavy** on large repos; a 40-file ceiling keeps per-push cost bounded. See [Cost](#cost) for the per-session controls.
 - The **global git hook affects all push paths** — read the install warning.

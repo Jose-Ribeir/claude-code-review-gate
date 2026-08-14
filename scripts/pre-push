@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+#
+# review-gate — global git pre-push gate (the optional "everywhere" wiring,
+# installed by install-git-hook.sh). Reviews all unpushed commits via the
+# official `claude` CLI and blocks confident high-severity findings.
+#
+# This is a PRE-PUSH hook, not pre-commit, and that is load-bearing: the gate
+# reviews `@{u}..HEAD` (all unpushed commits). During a pre-commit hook the new
+# commit does not exist yet, so HEAD still points at its parent — the staged
+# changes being committed would never be reviewed, and the already-reviewed
+# commits behind HEAD would be re-reviewed on every single commit.
+#
+# This file is COPIED to $HOME/.config/review-gate/hooks/pre-push at install
+# time and then never updated again. That is why it resolves the reviewer at
+# runtime instead of having a path baked in: the copy outlives every upgrade of
+# the plugin it points at. See _resolve_gate_dir below.
+set -euo pipefail
+
+# Stamped by install-git-hook.sh so /review-gate:doctor can spot a copy that
+# predates the installed plugin. Left as literal placeholders when this file is
+# run straight out of the repo, which is harmless -- both are advisory.
+SCR_INSTALLED_VERSION="__SCR_VERSION__"
+SCR_BIN="${SCR_BIN:-__SCR_DIR__}"
+
+# ---------------------------------------------------------------------------
+# Locate the reviewer.
+#
+# Earlier versions substituted an absolute path into a __SCR_BIN__ placeholder
+# here at install time. That path went stale two ways: the plugin cache is
+# versioned (`.../review-gate/<version>/`), so every upgrade orphaned it, and
+# the 0.3.0 bin/ -> scripts/ rename invalidated every existing install at once.
+# A stale path meant the `-f` test below failed, RC stayed 0, and the push went
+# through UNREVIEWED — a silent fail-open produced by upgrading.
+#
+# So: resolve fresh on every push, most-specific source first.
+# ---------------------------------------------------------------------------
+_resolve_gate_dir() {
+  # 1. Explicit override. Always wins.
+  if [ -n "${SCR_GATE_DIR:-}" ] && [ -f "$SCR_GATE_DIR/review-gate.py" ]; then
+    printf '%s' "$SCR_GATE_DIR"; return 0
+  fi
+
+  # 2. The pointer the plugin hook drops on every run. This is the reliable
+  #    one: ${CLAUDE_PLUGIN_DATA} survives plugin updates (the versioned cache
+  #    dir does not), it does not care which marketplace the plugin came from,
+  #    and it is equally correct for a `--plugin-dir` dev install that has no
+  #    cache entry at all.
+  local cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+  local ptr
+  for ptr in "$cfg"/plugins/data/*/gate-dir; do
+    [ -f "$ptr" ] || continue
+    local dir
+    dir="$(cat "$ptr" 2>/dev/null || true)"
+    if [ -n "$dir" ] && [ -f "$dir/review-gate.py" ]; then
+      printf '%s' "$dir"; return 0
+    fi
+  done
+
+  # 3. The hint baked in at install time. Kept only as a fallback, and it
+  #    accepts a pre-0.3.0 `.../bin` value so an old install still resolves:
+  #    if bin/ is gone, try its scripts/ sibling.
+  local hint="${SCR_BIN:-}"
+  if [ -n "$hint" ]; then
+    if [ -f "$hint/review-gate.py" ]; then printf '%s' "$hint"; return 0; fi
+    local moved="${hint%/bin}/scripts"
+    if [ "$moved" != "$hint" ] && [ -f "$moved/review-gate.py" ]; then
+      printf '%s' "$moved"; return 0
+    fi
+  fi
+
+  return 1
+}
+
+# git feeds pre-push the ref updates on stdin. review-gate.py --mode git does
+# not read stdin (only --mode hook does), so capture the lines here and pass
+# them on to any chained repo-local hook, which may well expect them.
+REFS="$(cat || true)"
+
+_fail_open_requested() {
+  case "${OCR_FAIL_OPEN:-}" in 1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]) return 0 ;; esac
+  return 1
+}
+
+# Pick a WORKING Python interpreter; skip Windows Store alias stubs (which can't
+# execute).
+PY=""
+for _c in python3 python py; do
+  _p="$(command -v "$_c" 2>/dev/null)" || continue
+  case "$_p" in *[Ww]indows[Aa]pps*) continue ;; esac
+  if "$_p" -c "import sys" >/dev/null 2>&1; then PY="$_p"; break; fi
+done
+
+RC=0
+# OCR_IN_REVIEW=1 means we are inside the headless review session, which loads
+# this plugin via --plugin-dir. Skip our own review, but still fall through to
+# the chained repo-local hook below.
+if [ "${OCR_IN_REVIEW:-}" = "1" ]; then
+  :
+elif GATE_DIR="$(_resolve_gate_dir)"; then
+  if [ -n "$PY" ]; then
+    "$PY" "$GATE_DIR/review-gate.py" --mode git </dev/null || RC=$?
+  elif _fail_open_requested; then
+    echo "review-gate: no working Python 3 found; OCR_FAIL_OPEN set, skipping review." >&2
+  else
+    # FAIL CLOSED. Previously this silently skipped the review and let the push
+    # through, which contradicted the documented policy.
+    cat >&2 <<'MSG'
+[review-gate] BLOCKED: no working Python 3 interpreter found, so your unpushed
+commits could not be reviewed. A gate that cannot run must not wave a push
+through.
+
+Fix it:
+  - Install Python 3, then push again.
+  - Run /review-gate:doctor in Claude Code to see what is missing.
+  - Emergency bypass: OCR_FAIL_OPEN=1 git push
+  - Or skip hooks entirely for one push: git push --no-verify
+MSG
+    RC=1
+  fi
+elif _fail_open_requested; then
+  echo "review-gate: reviewer not found; OCR_FAIL_OPEN set, skipping review." >&2
+else
+  # Same reasoning: an install we cannot locate is a broken gate, not an absent
+  # one. Say exactly how to repair it rather than failing open in silence.
+  cat >&2 <<'MSG'
+[review-gate] BLOCKED: could not locate review-gate.py, so your unpushed commits
+were not reviewed.
+
+This usually means the plugin was updated or removed after this git hook was
+installed. Repair it with either:
+  - Re-run the installer:  bash <plugin>/scripts/install-git-hook.sh
+  - Remove the gate:       bash <plugin>/scripts/uninstall-git-hook.sh
+  - Point at it directly:  SCR_GATE_DIR=/path/to/plugin/scripts git push
+
+Emergency bypass: OCR_FAIL_OPEN=1 git push   (or: git push --no-verify)
+MSG
+  RC=1
+fi
+
+# core.hooksPath overrides a repo's own .git/hooks/pre-push; don't silently
+# disable it — run it too (only if we didn't already block), replaying the ref
+# lines we consumed above on its stdin.
+GITDIR="$(git rev-parse --git-dir 2>/dev/null || echo .git)"
+LOCAL="$GITDIR/hooks/pre-push"
+if [ "$RC" -eq 0 ] && [ -x "$LOCAL" ] && [ "$LOCAL" -ef "$0" ] 2>/dev/null; then
+  : # guard: never recurse into ourselves
+elif [ "$RC" -eq 0 ] && [ -x "$LOCAL" ]; then
+  printf '%s\n' "$REFS" | "$LOCAL" "$@" || RC=$?
+fi
+
+exit "$RC"
