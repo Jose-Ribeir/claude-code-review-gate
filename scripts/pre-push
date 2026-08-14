@@ -59,13 +59,22 @@ _resolve_gate_dir() {
   # 3. The hint baked in at install time. Kept only as a fallback, and it
   #    accepts a pre-0.3.0 `.../bin` value so an old install still resolves:
   #    if bin/ is gone, try its scripts/ sibling.
+  #
+  #    Both separators are handled. install-git-hook.sh bakes a `pwd` result, so
+  #    a real install is forward-slashed even on Windows -- but a hand-set
+  #    SCR_BIN there is typically `C:\...\bin`, and stripping only `/bin` would
+  #    silently skip the fallback and block the push on a gate that is actually
+  #    fine.
   local hint="${SCR_BIN:-}"
   if [ -n "$hint" ]; then
     if [ -f "$hint/review-gate.py" ]; then printf '%s' "$hint"; return 0; fi
-    local moved="${hint%/bin}/scripts"
-    if [ "$moved" != "$hint" ] && [ -f "$moved/review-gate.py" ]; then
-      printf '%s' "$moved"; return 0
-    fi
+    local base moved
+    for base in "${hint%/bin}" "${hint%\\bin}"; do
+      [ "$base" = "$hint" ] && continue   # this separator did not match
+      for moved in "$base/scripts" "$base\\scripts"; do
+        if [ -f "$moved/review-gate.py" ]; then printf '%s' "$moved"; return 0; fi
+      done
+    done
   fi
 
   return 1
