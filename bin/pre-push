@@ -15,16 +15,18 @@ set -euo pipefail
 
 SCR_BIN="${SCR_BIN:-__SCR_BIN__}"
 
-# Extra headless args for this path only: allow the review's read-only tools to
-# run non-interactively. review-gate.py's DEFAULT_CLAUDE_ARGS already supplies
-# --plugin-dir and the cost controls (pinned model, no user settings, no MCP),
-# and OCR_CLAUDE_EXTRA_ARGS is APPENDED to them rather than replacing them.
+# This hook used to default OCR_CLAUDE_EXTRA_ARGS=--dangerously-skip-permissions
+# so the review's tools would run non-interactively. It no longer does, and that
+# is deliberate: review-gate.py's DEFAULT_CLAUDE_ARGS now pre-approves a
+# READ-ONLY allowlist (git diff/ls-files/log/show/rev-parse/status, Read, Grep,
+# Glob, Task), which is everything the review actually needs. Skipping
+# permissions on top of that would re-open the whole tool surface to a session
+# whose input is an untrusted diff -- i.e. prompt injection from a hostile
+# branch becomes arbitrary code execution on `git push`.
 #
-# Use OCR_CLAUDE_ARGS instead if you want to replace the defaults wholesale --
-# but note that discards the cost controls along with everything else.
-if [ -z "${OCR_CLAUDE_ARGS:-}" ] && [ -z "${OCR_CLAUDE_EXTRA_ARGS:-}" ]; then
-  export OCR_CLAUDE_EXTRA_ARGS="--dangerously-skip-permissions"
-fi
+# If you genuinely need it back, set OCR_CLAUDE_EXTRA_ARGS yourself; it is
+# APPENDED to the defaults. OCR_CLAUDE_ARGS replaces them wholesale, which
+# discards the allowlist and the cost controls together.
 
 # git feeds pre-push the ref updates on stdin. review-gate.py --mode git does
 # not read stdin (only --mode hook does), so capture the lines here and pass
@@ -40,8 +42,12 @@ for _c in python3 python py; do
   if "$_p" -c "import sys" >/dev/null 2>&1; then PY="$_p"; break; fi
 done
 
+# OCR_IN_REVIEW=1 means we are running inside the headless review session, which
+# loads this plugin via --plugin-dir. Skip our own review (review-gate.py guards
+# this too; catching it here avoids spawning Python at all) but still fall
+# through to the chained repo-local hook below.
 RC=0
-if [ -n "$PY" ] && [ -f "$SCR_BIN/review-gate.py" ]; then
+if [ "${OCR_IN_REVIEW:-}" != "1" ] && [ -n "$PY" ] && [ -f "$SCR_BIN/review-gate.py" ]; then
   "$PY" "$SCR_BIN/review-gate.py" --mode git </dev/null || RC=$?
 fi
 
