@@ -10,6 +10,25 @@ claude --plugin-dir ./claude-code-review-gate
 ```
 Then try `/review-gate:review --staged` in a repo with staged changes.
 
+### If you installed the plugin from a local directory marketplace
+
+Claude Code does **not** run your working tree. It copies a snapshot into
+`~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/`, and
+`${CLAUDE_PLUGIN_ROOT}` in [hooks/hooks.json](hooks/hooks.json) resolves to that
+snapshot. The install record is version-pinned, so committing changes nothing the
+gate actually runs — it keeps enforcing the old code, bugs included, with no
+warning. Refresh it after changing plugin code:
+
+```bash
+python bin/sync-local-install.py            # copy working tree -> snapshot
+python bin/sync-local-install.py --check    # report drift, exit 1 if stale
+python bin/sync-local-install.py --prune    # also drop superseded snapshots
+```
+
+Restart Claude Code afterwards. The global git hook from `bin/install-git-hook.sh`
+needs none of this — it bakes in an absolute path to `bin/` and always runs live
+code, so the two can silently disagree about which version is in force.
+
 ## Test the commit gate
 
 - **Verdict parser:** pipe a sample review JSON into `python bin/ocr_verdict.py` and
@@ -19,6 +38,9 @@ Then try `/review-gate:review --staged` in a repo with staged changes.
   high-severity block. Use `OCR_ADVISORY=1` to confirm warn-only behavior.
 - **Everywhere hook:** `bin/install-git-hook.sh`, commit from a terminal, then
   `bin/uninstall-git-hook.sh` to restore your previous `core.hooksPath`.
+- **Plugin hook:** after `bin/sync-local-install.py`, restart Claude Code and push
+  through it. If behavior does not match your edits, run `--check` — a stale
+  snapshot is the usual cause.
 
 Do not call `claude -p` in CI — it needs interactive auth.
 
