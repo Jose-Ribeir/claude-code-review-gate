@@ -3,7 +3,7 @@
 * text=auto eol=lf
 
 *.sh        text eol=lf
-bin/pre-commit text eol=lf
+scripts/pre-push text eol=lf
 *.py        text eol=lf
 *.json      text eol=lf
 *.md        text eol=lf
