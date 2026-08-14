@@ -19,10 +19,10 @@ jobs:
         run: pip install ruff
 
       - name: Lint Python (ruff)
-        run: ruff check bin
+        run: ruff check scripts bin tests
 
       - name: Byte-compile Python
-        run: python -m compileall bin
+        run: python -m compileall scripts bin
 
       - name: Validate JSON files
         run: |
@@ -76,14 +76,14 @@ jobs:
         run: |
           # A complete, confident, high-severity finding blocks.
           echo '{"findings":[{"severity":"high","confidence":0.9,"path":"a.py","start_line":3,"end_line":3,"content":"bug"}]}' \
-            | python bin/ocr_verdict.py | grep -qx block
+            | python scripts/ocr_verdict.py | grep -qx block
           # The same finding minus content/line numbers is not actionable, so it
           # warns instead of blocking (_is_actionable, added in 69a4452).
           echo '{"findings":[{"severity":"high","confidence":0.9,"path":"a.py"}]}' \
-            | python bin/ocr_verdict.py | grep -qx warn
-          echo '{"findings":[{"severity":"high","confidence":0.5}]}' | python bin/ocr_verdict.py | grep -qx warn
-          echo '{"findings":[{"severity":"low","confidence":0.9}]}'  | python bin/ocr_verdict.py | grep -qx pass
-          echo 'not json' | python bin/ocr_verdict.py | grep -qx pass
+            | python scripts/ocr_verdict.py | grep -qx warn
+          echo '{"findings":[{"severity":"high","confidence":0.5}]}' | python scripts/ocr_verdict.py | grep -qx warn
+          echo '{"findings":[{"severity":"low","confidence":0.9}]}'  | python scripts/ocr_verdict.py | grep -qx pass
+          echo 'not json' | python scripts/ocr_verdict.py | grep -qx pass
           echo "verdict parser OK"
 
   plugin:

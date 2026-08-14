@@ -13,12 +13,16 @@
 # the gate keeps enforcing old code, including bugs you already fixed.
 #
 # Run this after changing plugin code (and bump plugin.json when releasing):
-#   python3 bin/sync-local-install.py            # sync
-#   python3 bin/sync-local-install.py --check    # report drift, change nothing
-#   python3 bin/sync-local-install.py --prune    # also drop superseded snapshots
+#   python3 scripts/sync-local-install.py            # sync
+#   python3 scripts/sync-local-install.py --check    # report drift, change nothing
+#   python3 scripts/sync-local-install.py --prune    # also drop superseded snapshots
 #
-# The global git hook installed by install-git-hook.sh needs none of this -- it
-# bakes in an absolute path to this bin/ directory and always runs live code.
+# The global git hook installed by install-git-hook.sh used to sidestep all of
+# this by baking in an absolute path to this directory, so it always ran live
+# code. As of 0.3.0 it resolves the reviewer at runtime and prefers the pointer
+# that review-gate.py writes under ${CLAUDE_PLUGIN_DATA} -- which points at
+# whichever install last ran the plugin hook, i.e. the SNAPSHOT. So the two
+# wirings now agree on the version in force, and syncing matters for both.
 import argparse
 import filecmp
 import json
@@ -39,7 +43,13 @@ PLUGIN_KEY = f"{PLUGIN}@{MARKETPLACE}"
 PAYLOAD = [
     ".claude-plugin",
     "agents",
+    # bin/ holds one compatibility shim, kept so pre-0.3.0 git-hook installs
+    # (which baked an absolute path to it) keep resolving. Removal target:
+    # 0.5.0. Everything else moved to scripts/ -- a plugin's bin/ is added to
+    # the Bash tool's PATH, so anything left here becomes a bare command in
+    # every user's shell.
     "bin",
+    "scripts",
     "examples",
     "hooks",
     "schemas",

@@ -8,8 +8,14 @@
 # Revert with uninstall-git-hook.sh.
 set -euo pipefail
 
-BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOOKS_DIR="${SCR_HOOKS_DIR:-$HOME/.config/review-gate/hooks}"
+
+# Stamped into the installed hook purely so /review-gate:doctor can report
+# version skew between this copy and the running plugin.
+SCR_VERSION="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+  "$SCR_DIR/../.claude-plugin/plugin.json" 2>/dev/null | head -1)"
+SCR_VERSION="${SCR_VERSION:-unknown}"
 
 mkdir -p "$HOOKS_DIR"
 
@@ -41,10 +47,14 @@ if [ -f "$STALE" ]; then
   fi
 fi
 
-# Materialize the pre-push with the plugin bin path baked in. The plugin root
-# no longer needs substituting: review-gate.py derives it from its own location
-# and passes --plugin-dir itself (see DEFAULT_CLAUDE_ARGS).
-sed -e "s|__SCR_BIN__|$BIN_DIR|g" "$BIN_DIR/pre-push" > "$HOOKS_DIR/pre-push"
+# Materialize the pre-push. Both substitutions are ADVISORY ONLY -- the copy
+# resolves the reviewer at runtime (see _resolve_gate_dir there). That matters
+# because this file is written once and never updated: baking the path in as a
+# contract is what made every pre-0.3.0 install silently fail open when the
+# plugin moved. The directory is kept as a last-resort hint, and the version is
+# only ever read back by /review-gate:doctor.
+sed -e "s|__SCR_DIR__|$SCR_DIR|g" -e "s|__SCR_VERSION__|$SCR_VERSION|g" \
+  "$SCR_DIR/pre-push" > "$HOOKS_DIR/pre-push"
 chmod +x "$HOOKS_DIR/pre-push"
 
 git config --global core.hooksPath "$HOOKS_DIR"
@@ -52,7 +62,8 @@ git config --global core.hooksPath "$HOOKS_DIR"
 cat <<EOF
 Installed the global pre-push gate.
   hooks dir : $HOOKS_DIR
-  reviewer  : $BIN_DIR/review-gate.py
+  reviewer  : $SCR_DIR/review-gate.py
+  version   : $SCR_VERSION
 
 WARNING: global core.hooksPath now applies to ALL your repositories and
 overrides each repo's .git/hooks/pre-push (this hook still RUNS a repo-local
@@ -66,9 +77,15 @@ Modes:
 
 The gate FAILS CLOSED: a review that times out (OCR_TIMEOUT, default 1800s),
 crashes, or returns unparseable output BLOCKS the push rather than letting it
-through. Only a missing 'claude' binary fails open. If a broken reviewer ever
-traps you, OCR_FAIL_OPEN=1 is the one-shot bypass and OCR_ADVISORY=1 downgrades
-to warn-only permanently.
+through. So does a missing Python 3 or a reviewer this hook cannot locate.
 
-Uninstall: $BIN_DIR/uninstall-git-hook.sh
+It still fails OPEN in these cases:
+  - 'claude' is not installed        (deliberate: there is no gate without it)
+  - OCR_FAIL_OPEN=1 / OCR_ADVISORY=1 (the escape hatches)
+and it is BYPASSED entirely by 'git push --no-verify'.
+
+If a broken reviewer ever traps you, OCR_FAIL_OPEN=1 is the one-shot bypass and
+OCR_ADVISORY=1 downgrades to warn-only permanently.
+
+Uninstall: $SCR_DIR/uninstall-git-hook.sh
 EOF

@@ -3,10 +3,10 @@ import importlib.util
 import os
 import sys
 
-_BIN = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin")
-sys.path.insert(0, _BIN)  # so review-gate.py's own `from ocr_verdict import ...` resolves
+_SCRIPTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts")
+sys.path.insert(0, _SCRIPTS)  # so review-gate.py's own `from ocr_verdict import ...` resolves
 
-_spec = importlib.util.spec_from_file_location("review_gate", os.path.join(_BIN, "review-gate.py"))
+_spec = importlib.util.spec_from_file_location("review_gate", os.path.join(_SCRIPTS, "review-gate.py"))
 review_gate = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(review_gate)
 
