@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 #
-# PreToolUse adapter for the Claude Code commit gate (the default wiring).
+# PreToolUse adapter for the Claude Code push gate (the default wiring).
 # Referenced from hooks/hooks.json. Reads the PreToolUse payload on stdin and
-# lets review-gate.py emit the permissionDecision JSON. Fails open.
+# lets review-gate.py emit the permissionDecision JSON.
+#
+# Failure policy: FAIL CLOSED. If there is no working Python, or review-gate.py
+# is missing, this denies the push rather than allowing it -- a gate that cannot
+# run must not wave a push through. OCR_FAIL_OPEN=1 is the escape hatch.
+# (Said "Fails open" until 0.3.0, which was true of the old body and is exactly
+# the drift this release set out to remove.) Matches gate-hook.ps1.
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
