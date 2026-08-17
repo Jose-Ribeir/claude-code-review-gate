@@ -82,6 +82,23 @@ subagent.
 
 ## 3. Spawn the reviewer subagent
 
+Every Agent tool call in this skill — the reviewer(s) here, and the filter
+agent in §3b — **must use `run_in_background: false`**. The step right after
+each spawn (parse its JSON, then 3a/3b/4/6) depends on that agent's result as
+its very next action, which is exactly the case the Agent tool itself says
+warrants foreground execution. Backgrounding it is worse than inefficient
+here: a backgrounded agent's result arrives later as an async task
+notification, in a turn of its own. The pre-push gate runs this skill
+headlessly via `claude -p`, which reports only your last completed turn as
+its result. If any such notification — including a stray duplicate — lands
+*after* you've already printed the `--json` verdict in step 6, you will
+produce one more (harmless-looking) turn acknowledging it, and that turn's
+prose becomes the entire captured output, silently replacing the JSON and
+false-blocking the push with an unparseable-output error. Running every
+subagent in the foreground removes this race structurally: there is no later
+turn for a stray notification to land in, because you cannot proceed past
+the spawn until the real result is already in hand.
+
 **Default path (≤ 15 files):** spawn **one** `code-reviewer` subagent via the
 Agent tool. Pass it a prompt containing:
 
@@ -102,8 +119,13 @@ exist in other files, caller/callee drift). This is intentional.
 
 **Large-diff escalation (> 15 files):** group the selected files by top-level
 directory (first path segment). Spawn one `code-reviewer` subagent per group,
-running at most **4 groups in parallel**. Pass each group subagent the same
-fields as above but with only its group's `files` list; add an
+running at most **4 groups in parallel** — issue all of them as parallel
+Agent tool-use blocks within a single message (per the "run agents in
+parallel" pattern), each with `run_in_background: false`. Do not let any
+group run in the background: per the note above §3, a single backgrounded
+group is enough to trigger the race, and with up to 4 groups in flight the
+odds of a stray/duplicate notification only go up. Pass each group subagent
+the same fields as above but with only its group's `files` list; add an
 `other_changed_dirs` field listing the other groups' directories so the reviewer
 has cross-group awareness.
 
@@ -147,7 +169,8 @@ change the outcome.
 
 Assign each surviving finding a temporary id (`"f-0"`, `"f-1"`, …).
 
-Spawn a `code-filter` subagent via the Agent tool. Pass it a prompt containing:
+Spawn a `code-filter` subagent via the Agent tool, with `run_in_background: false`
+(see the note above §3 — step 4/6 depend on its result next). Pass it a prompt containing:
 - `diffs`: the combined raw diff text for all reviewed files (concatenated).
 - `findings`: the findings JSON array with the temporary ids attached.
 
