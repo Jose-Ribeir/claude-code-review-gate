@@ -143,6 +143,21 @@ git push --no-verify
 
 Rule precedence (highest first): `--rule` → project `.ocr/rule.json` → global `~/.ocr/rule.json` → built-in `skills/review/rubric.md`, then the matching `skills/review/rules/<lang>.md` and `rules/llm-authored-code.md` appended. See `examples/.ocr/rule.json`.
 
+### Optional: Serena MCP (enhanced cross-file analysis for interactive sessions)
+
+Before spawning the reviewer, the orchestrator pre-computes where your changed symbols are
+referenced elsewhere in the repo. In headless pre-push runs the gate always uses `git grep`
+on committed state (`HEAD`) — MCP servers are intentionally excluded from the gate's isolated
+session (see [Cost](#cost)). In interactive `/review-gate:review` sessions, if the
+[Serena MCP server](https://github.com/oraios/serena) is connected in Claude Code, the
+orchestrator additionally uses language-server-precise symbol resolution for signature-changed
+symbols. Removed and renamed names always use `git grep` regardless of Serena availability,
+since a language server cannot find references to a symbol that no longer exists — and `git grep`
+additionally catches references in configs, templates, and string literals.
+
+No configuration is required. Serena is detected automatically. Without it the plugin is
+fully functional.
+
 ## Cost
 
 The gate runs the review in a **separate headless `claude -p` session**. That session re-reads its whole context on every tool call, and it makes many of them, so anything loaded into it is paid for repeatedly. The gate therefore isolates it from your interactive environment:
