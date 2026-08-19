@@ -19,7 +19,7 @@ symbols in `cross_file_context`. Use it as follows:
   budget rules.
 - `cross_file_context` field is **absent** (extraction was skipped — scan mode or
   internal error): for each removed/renamed symbol you can identify from the diff,
-  run one `Grep(pattern: \b<name>\b, output_mode: "files_with_matches")`, then one
+  run one `Grep(pattern: r'\b<name>\b', output_mode: "files_with_matches")`, then one
   content Grep per hit file (max 5 files). Count all calls against your global Grep
   budget (max 5 total). If the budget is exhausted, note which symbols were not checked.
 

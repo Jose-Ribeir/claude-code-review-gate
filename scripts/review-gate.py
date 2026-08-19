@@ -78,7 +78,6 @@ DEFAULT_CLAUDE_ARGS = [
     "Bash(git ls-files *)",
     "Bash(git log *)",
     "Bash(git show *)",
-    "Bash(git grep *)",
     "Bash(git rev-parse *)",
     "Bash(git status *)",
     "Read",
