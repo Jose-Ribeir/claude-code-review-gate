@@ -164,18 +164,18 @@ different meaning in the rules file).
 **Step 2 — Detect Serena availability (interactive sessions only):**
 
 Check own tool list. If `mcp__serena__find_referencing_symbols` is visible → Serena
-is available for `signature_changed` symbols. If not visible, use the git-grep path
+is available for `signature_changed` symbols. If not visible, use the Grep-tool path
 for all symbols. MCP servers are intentionally absent in headless gate runs
 (`--strict-mcp-config`), so Serena is never available there.
 
-`removed` and `renamed` symbols (old names) **always use the git-grep path**,
+`removed` and `renamed` symbols (old names) **always use the Grep-tool path**,
 regardless of Serena availability. A language server cannot find references to a
-symbol that no longer exists; `git grep` also catches string/config/template
+symbol that no longer exists; additionally, the Grep tool catches string/config/template
 references.
 
 If any Serena call errors or returns empty results for a symbol whose definition is
-visible in the diff → abandon Serena for this review; use git-grep for all remaining
-symbols.
+visible in the diff → abandon Serena for this review; use the Grep tool for all
+remaining symbols.
 
 ---
 
@@ -193,11 +193,11 @@ Read any files.
 
 ---
 
-**Step 4 — Git-grep path (removed/renamed always; all symbols when Serena unavailable):**
+**Step 4 — Grep-tool path (removed/renamed always; all symbols when Serena unavailable):**
 
-For each symbol, search its **old name** via Bash:
+For each symbol, search its **old name** using the `Grep` tool:
 ```
-git grep -n "\b<name>\b" HEAD
+Grep(pattern: r'\b<name>\b', output_mode: "files_with_matches")
 ```
 
 Skip the search and record `note: "name too generic"` if the name is fewer than 4
@@ -212,12 +212,13 @@ Discard hits in files that are in the current change set.
 Result handling:
 - 0 external hits → `external_refs: []`. (Positive evidence: no incomplete refactor.)
 - > 10 external files → record `ref_count_note: "<N> files reference this name"` and
-  the first 3 paths as `sample_files`. No further git-grep calls for this symbol.
+  the first 3 paths as `sample_files`. No further Grep calls for this symbol.
 - 1–10 files → for each non-test file up to 5 (max 2 test files, tagged
-  `in_tests: true`): `git grep -n -C 3 "\b<name>\b" HEAD -- <file>` (keep at most
-  the first 20 matching lines). Never Read these files.
+  `in_tests: true`): one content Grep per file:
+  `Grep(pattern: r'\b<name>\b', path: "<file>", output_mode: "content", context: 3, head_limit: 20)`
+  Never Read these files.
 
-**Global call ceiling:** max 20 git-grep Bash calls total across all symbols in §2b.
+**Global call ceiling:** max 20 Grep calls total across all symbols in §2b.
 When the ceiling is hit, remaining symbols get `note: "search budget exhausted"` and
 their count is added to `symbols_dropped`.
 
