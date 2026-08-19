@@ -5,23 +5,27 @@ GPT, etc.). These rules target the specific, recurring failure modes of LLM
 code generation — they are distinct from the generic correctness rubric.
 
 ## Incomplete refactors — Correctness / high
-LLMs rename, remove, or replace a symbol in the file they are editing but miss
-other files that reference the old symbol. This is the #1 failure mode.
+The orchestrator pre-computes repo-wide references for removed/renamed/signature-changed
+symbols in `cross_file_context`. Use it as follows:
 
-**What to check:**
-- If a function, class, variable, or constant is renamed or removed, Grep the
-  full repo for the old name. Any hit in another file that was NOT also changed
-  is an incomplete refactor.
-- If a mechanism is removed from one file (an early-return guard, a rate limit,
-  a deduplication check), Grep for equivalent logic in other files — the
-  mechanism may need updating there too.
-- Pay special attention to import statements: a removed symbol must be removed
-  from every importer.
+- `external_refs` non-empty → each listed external file is a candidate incomplete
+  refactor. Emit one finding per external file (or group all import-site findings into
+  one). Cite the provided `path`/`line`/`snippet` as `evidence`.
+- `ref_count_note` present → emit **one** finding citing the count and `sample_files`.
+  Do not produce per-file findings.
+- `external_refs` empty **and no `note` or `ref_count_note`** → the orchestrator
+  searched and found nothing. Emit nothing for that symbol.
+- `note: "name too generic"` → see the agent's cross_file_context guidance for Grep
+  budget rules.
+- `cross_file_context` field is **absent** (extraction was skipped — scan mode or
+  internal error): for each removed/renamed symbol you can identify from the diff,
+  run one `Grep(pattern: \b<name>\b, output_mode: "files_with_matches")`, then one
+  content Grep per hit file (max 5 files). Count all calls against your global Grep
+  budget (max 5 total). If the budget is exhausted, note which symbols were not checked.
 
-```
-Commit rule (CLAUDE.md): "Any commit that reverts, exempts, or removes a
-mechanism must state the grep count before and after the change."
-```
+Do **not** search old names when `cross_file_context` is present — even if
+`symbols: []` (empty means the orchestrator searched and found nothing or no symbols
+changed).
 
 ## Mock-patching wrong namespace — Test Coverage / high
 LLMs patch the module where a class or function is **defined**, not where it is
@@ -72,7 +76,9 @@ than the one actually defined.
 
 **What to check:** For any function call in the diff where the function was
 also changed in the same diff (or recently), verify the call site matches the
-current definition signature exactly — parameter count, names, and types.
+current definition signature exactly — parameter count, names, and types. For
+external call sites, use the `external_refs` snippets from the matching
+`signature_changed` entry in `cross_file_context`; do not grep for them separately.
 
 ## Silent error swallowing — Correctness / medium
 LLMs frequently add `except Exception: pass` or `except Exception: return None`
