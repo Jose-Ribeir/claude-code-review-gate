@@ -6,6 +6,42 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-08-20
+
+### Changed
+- **Review token spend cut ~70-85% per run.** `git diff` now passes `-M` for
+  rename detection, so a moved file no longer renders as a full delete+add. A
+  new symbol-context step resolves cross-file references via Serena or
+  `git grep HEAD` instead of giving the reviewer unrestricted Bash and telling
+  it to go read files itself. Hard caps added throughout: per-file and total
+  diff size, symbols per file, git-grep calls, snippets, and reference counts.
+
+### Fixed
+- **The gate's own README/header lied about failing open.** `gate-hook.sh`
+  still opened with "Fails open" while its body (rewritten in 0.3.0) denies
+  the push when there's no working Python. Corrected to match actual
+  behavior.
+- **The shell resolver had no test coverage.** `_resolve_gate_dir` is the
+  mechanism the whole plugin depends on to find its own reviewer; a
+  regression there could silently reintroduce the exact bug 0.3.0 closed.
+  Added `tests/test_pre_push_resolver.py`, which caught a real Windows bug:
+  `${hint%/bin}` only strips a forward-slash suffix, so a `C:\...\bin` hint
+  skipped the legacy fallback and blocked pushes even with a working gate.
+  Both path separators are now handled.
+- **Backgrounded review subagents could race the JSON verdict.** The
+  orchestrator never specified `run_in_background: false`, so a stray async
+  notification landing after the final `--json` verdict was printed could
+  silently replace it, false-blocking headless pushes with an
+  unparseable-output error.
+
+### Security
+- **Dropped `Bash(git grep *)` from the headless allowlist.**
+  `git grep -O/--open-files-in-pager=<cmd>` executes an arbitrary
+  caller-supplied command, and a prefix-wildcard allowlist pattern can't
+  exclude just that flag. All textual searches now go through the `Grep`
+  tool instead, which has no equivalent flag and isn't exploitable via
+  prompt injection.
+
 ## [0.3.0] - 2026-08-14
 
 A hardening release, ahead of publishing the plugin. Three of these were silent
