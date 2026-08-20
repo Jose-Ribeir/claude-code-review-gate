@@ -101,6 +101,8 @@ Worth doing once after install or upgrade. A hook that fails to *launch* is trea
 
 **Requirements:** Claude Code with an authenticated Claude subscription; Python 3 and Git. No API key.
 
+> **No Python 3 found?** The plugin checks for a working interpreter at the start of every Claude Code session and warns you right away if it can't find one — you don't have to wait for a blocked `git push` to discover it. Install Python 3, then restart Claude Code so it picks up the new `PATH`.
+
 > **Windows:** the gate ships both a Git Bash and a PowerShell adapter, so Git for Windows' "Git from the command line only" setup (which keeps `bash.exe` off `PATH`) is fine. The global git hook installed in step 3 does need a bash, which Git for Windows always bundles. Run `/review-gate:doctor` if you want to confirm what is wired up.
 
 ## Usage

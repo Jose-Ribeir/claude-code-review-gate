@@ -23,6 +23,22 @@ if [ "${OCR_IN_REVIEW:-}" = "1" ]; then
   exit 0
 fi
 
+# Read the payload once, up front, and short-circuit non-pushes before ever
+# touching Python. hooks.json's `if: "Bash(*git push*)"` is best-effort --
+# Claude Code's own docs say an if-pattern it can't parse "fails open" (the
+# hook runs anyway) -- and `*text*` isn't documented syntax, so in practice
+# this hook fires on every Bash call, not just git push. Without this check,
+# that means ANY Bash call with no working Python gets denied, not just a
+# real push. Same substring rule review-gate.py itself applies once running.
+payload="$(cat)"
+case "$payload" in
+  *'git push'*) ;;
+  *)
+    printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}'
+    exit 0
+    ;;
+esac
+
 # Pick a WORKING Python interpreter; skip Windows Store alias stubs.
 PY=""
 for _c in python3 python py; do
@@ -55,4 +71,4 @@ if [ -z "$PY" ] || [ ! -f "$DIR/review-gate.py" ]; then
   exit 0
 fi
 
-exec "$PY" "$DIR/review-gate.py" --mode hook
+printf '%s' "$payload" | "$PY" "$DIR/review-gate.py" --mode hook

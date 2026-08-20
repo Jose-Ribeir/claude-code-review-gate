@@ -72,13 +72,24 @@ accurate (Apache-2.0 §4 requires retaining notices and stating changes).
 ## Hook wiring
 
 `hooks/hooks.json` registers **two** `PreToolUse` entries, both matching
-`Bash` with `if: "Bash(*git push*)"`. Notes worth keeping straight:
+`Bash` with `if: "Bash(git *)"`. Notes worth keeping straight:
 
-- **The `*…*` glob is deliberate.** A rule like `Bash(git push:*)` or
-  `Bash(git push *)` does fire for plain, compound (`cd x && git push`),
-  env-prefixed and `;`-separated commands — but *not* for `command git push` or
-  `bash -c "git push"`. The surrounding wildcards catch those too, and stay
-  selective enough that unrelated Bash calls never spawn the hook.
+- **`if` is best-effort, not a hard filter — do not trust it alone.** Claude
+  Code's own docs: an `if` pattern it can't parse "fails open," i.e. the hook
+  runs regardless. We used to run `if: "Bash(*git push*)"`, believing the
+  surrounding wildcards made this selective; `*text*` isn't documented syntax,
+  so that pattern silently failed open and the hook fired on **every** Bash
+  call — confirmed in the field when it blocked an unrelated `git config`
+  command for lack of a Python interpreter. `Bash(git *)` is at least valid,
+  documented syntax, but it still isn't a hard `git push` filter (it matches
+  any git subcommand) and still won't catch `bash -c "git push"`.
+- **The real filter lives in the scripts, not the JSON.** Both `gate-hook.sh`
+  and `gate-hook.ps1` read the PreToolUse payload first thing and check for
+  `git push` themselves — the same substring rule `review-gate.py` applies
+  once it's running — before touching Python at all. That's what actually
+  keeps a non-push Bash call from ever depending on Python being on PATH.
+  `if` in the JSON is only there to skip the process spawn entirely on the
+  common case where it happens to parse.
 - **Two entries, because hooks have no platform condition.** `if` is permission
   rule syntax, not a platform test. Claude Code runs a shell-form command under
   Git Bash on Windows, or PowerShell when Git Bash isn't installed — so the
