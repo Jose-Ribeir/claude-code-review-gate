@@ -31,6 +31,24 @@ function Test-Truthy { param([string]$v) return @('1', 'true', 'yes') -contains 
 # including this hook -- is registered inside the review session too.
 if ($env:OCR_IN_REVIEW -eq '1') { Write-Decision 'allow'; exit 0 }
 
+# --- Read the payload once, up front -------------------------------------------
+# Stdin carries the PreToolUse payload. Read raw BYTES: piping to a native
+# child in Windows PowerShell 5.1 re-encodes via $OutputEncoding (ASCII/OEM by
+# default), which would mangle non-ASCII paths in the JSON.
+$stdinBytes = New-Object System.IO.MemoryStream
+[Console]::OpenStandardInput().CopyTo($stdinBytes)
+$bytes = $stdinBytes.ToArray()
+
+# Short-circuit non-pushes before ever touching Python. hooks.json's
+# `if: "Bash(*git push*)"` is best-effort -- Claude Code's own docs say an
+# if-pattern it can't parse "fails open" (the hook runs anyway), and
+# `*text*` isn't documented syntax -- so in practice this hook fires on every
+# Bash call, not just git push. Without this check, that means ANY Bash call
+# with no working Python gets denied, not just a real push. Same substring
+# rule review-gate.py itself applies once it's running.
+$payloadText = [System.Text.Encoding]::UTF8.GetString($bytes)
+if ($payloadText -notlike '*git push*') { Write-Decision 'allow'; exit 0 }
+
 # --- Should this adapter run at all? ------------------------------------------
 # Deliberately biased toward RUNNING. Deferring when gate-hook.sh cannot
 # actually run means both adapters go inert and the gate silently disappears --
@@ -112,13 +130,7 @@ if (-not $py -or -not (Test-Path $core)) {
 }
 
 # --- Run the gate -------------------------------------------------------------
-# Stdin carries the PreToolUse payload. Pipe it through as raw BYTES: piping to
-# a native child in Windows PowerShell 5.1 re-encodes via $OutputEncoding
-# (ASCII/OEM by default), which would mangle non-ASCII paths in the JSON.
-$stdinBytes = New-Object System.IO.MemoryStream
-[Console]::OpenStandardInput().CopyTo($stdinBytes)
-$bytes = $stdinBytes.ToArray()
-
+# $bytes was already read above, before the git-push check.
 $psi = New-Object System.Diagnostics.ProcessStartInfo
 $psi.FileName               = $py
 $psi.Arguments              = '"' + $core + '" --mode hook'

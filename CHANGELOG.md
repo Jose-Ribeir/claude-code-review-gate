@@ -6,6 +6,29 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-08-20
+
+### Added
+- **A `SessionStart` check warns immediately if no working Python 3 is
+  found**, instead of the user only finding out when a real `git push` gets
+  denied. Claude Code has no plugin "on install" hook, so this fires on every
+  session start/resume — silent when Python is fine, and a short warning
+  (with the fix steps and `/review-gate:doctor` pointer) when it isn't.
+  `scripts/session-start-check.sh` / `.ps1`, same two-adapter pattern as the
+  push gate itself.
+
+### Fixed
+- **The push matcher's `if: "Bash(*git push*)"` was invalid syntax and
+  silently failed open.** Per Claude Code's own hooks docs, an unparseable
+  `if` pattern makes the hook run regardless of the command — `*text*`
+  substring wildcards aren't documented syntax. So the gate hook fired on
+  *every* Bash call, not just `git push`, confirmed when it denied an
+  unrelated `git config --global --get core.hooksPath` for lack of a working
+  Python interpreter. `if` is now `Bash(git *)` (valid, still best-effort),
+  and `gate-hook.sh`/`gate-hook.ps1` now read the PreToolUse payload and check
+  for `git push` themselves — before ever resolving Python — so a non-push
+  Bash call can no longer be blocked by a missing/unreachable interpreter.
+
 ## [0.3.1] - 2026-08-20
 
 ### Changed

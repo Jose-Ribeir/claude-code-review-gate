@@ -8,7 +8,7 @@
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/gate-hook.sh\"",
             "shell": "bash",
-            "if": "Bash(*git push*)",
+            "if": "Bash(git *)",
             "timeout": 1920,
             "statusMessage": "Reviewing unpushed commits (review-gate)..."
           },
@@ -22,9 +22,35 @@
               "-File",
               "${CLAUDE_PLUGIN_ROOT}/scripts/gate-hook.ps1"
             ],
-            "if": "Bash(*git push*)",
+            "if": "Bash(git *)",
             "timeout": 1920,
             "statusMessage": "Reviewing unpushed commits (review-gate)..."
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/session-start-check.sh\"",
+            "shell": "bash",
+            "timeout": 15,
+            "statusMessage": "review-gate: checking for Python 3..."
+          },
+          {
+            "type": "command",
+            "command": "powershell",
+            "args": [
+              "-NoProfile",
+              "-ExecutionPolicy",
+              "Bypass",
+              "-File",
+              "${CLAUDE_PLUGIN_ROOT}/scripts/session-start-check.ps1"
+            ],
+            "timeout": 15,
+            "statusMessage": "review-gate: checking for Python 3..."
           }
         ]
       }
