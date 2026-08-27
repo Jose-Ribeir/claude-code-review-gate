@@ -6,6 +6,33 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Non-blocking findings are now persisted instead of destroyed.** A `warn`
+  or `pass` verdict lets the push through, printed its findings once to stderr,
+  and left the detail only in `review-gate-last-output.json` — which
+  `_save_raw_output` overwrites on every run (`scripts/review-gate.py:280`
+  before this change). Medium/low findings on a passing push were therefore
+  unrecoverable as soon as the next review started.
+  - `_record_review` appends one JSON line per completed review — findings
+    verbatim, verdict, branch, HEAD sha, mode, timestamp — to
+    `.git/review-gate-findings.jsonl`. Written for **every** verdict, blocking
+    or not, and never pruned by this tool.
+  - `_archive_raw_output` also snapshots the reviewer's raw stdout to
+    `.git/review-gate-history/<UTC>-<sha7>.json`. Only these snapshots rotate
+    (`OCR_HISTORY_LIMIT`, default 50, `0` = keep all); the findings log does not.
+  - `review-gate.py --history [N]` replays recorded reviews. Without it there
+    was no command that could show a passing review's findings again.
+- **Push markers carry the findings of the review that wrote them.** They held
+  a bare epoch float, so when the paired adapter short-circuited on a fresh
+  marker it allowed silently and the first run's findings were shown exactly
+  once. `_write_marker`/`_read_marker`/`_prior_findings_note` now replay them;
+  markers written by older versions still parse (treated as "no findings").
+- **Hook mode reports non-blocking findings to the calling session.** `allow()`
+  takes an optional reason, so a `warn` verdict rides back in
+  `permissionDecisionReason` instead of going to a stderr stream Claude Code
+  does not surface on an allow decision.
+
+
 ## [0.3.2] - 2026-08-20
 
 ### Added

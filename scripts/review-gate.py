@@ -129,6 +129,36 @@ except ValueError:
 MARKER_TTL = 3600  # seconds
 MARKER_PREFIX = "scr-push-reviewed-"
 
+# Where non-blocking findings survive. review-gate-last-output.json is
+# overwritten on every run and the push markers held nothing but an epoch
+# float, so a warn/pass verdict's findings -- precisely the ones that do NOT
+# stop the push, and are therefore the easiest to lose -- became unrecoverable
+# the moment the next review started. FINDINGS_LOG is append-only and is never
+# pruned by this tool: one JSON line per completed review, kept forever.
+FINDINGS_LOG = "review-gate-findings.jsonl"
+# Per-run snapshots of claude's raw stdout. Large, and the findings themselves
+# already live in FINDINGS_LOG, so this directory IS rotated.
+HISTORY_DIR = "review-gate-history"
+# Cap on a single FINDINGS_LOG line, so one pathological review cannot turn the
+# log into an unreadable multi-megabyte record. The full text stays in
+# HISTORY_DIR, and the entry says so via "truncated": true.
+_MAX_LOG_LINE = 256 * 1024
+DEFAULT_HISTORY_LIMIT = 50
+
+
+def _history_limit():
+    """How many raw-stdout snapshots to keep. OCR_HISTORY_LIMIT=0 keeps all.
+
+    Read per call rather than at import so a caller can change it without
+    re-importing, and so the value is testable. Only the verbose snapshots are
+    ever rotated -- see _prune_history.
+    """
+    try:
+        n = int(os.getenv("OCR_HISTORY_LIMIT", str(DEFAULT_HISTORY_LIMIT)))
+    except ValueError:
+        return DEFAULT_HISTORY_LIMIT
+    return DEFAULT_HISTORY_LIMIT if n < 0 else n  # negative would delete everything
+
 
 class ReviewGateError(Exception):
     """Raised to fail the gate closed (timeout, subprocess crash, parse error).
@@ -179,6 +209,16 @@ def _git_dir(repo_root=None):
 def _head_sha(repo_root=None):
     out, rc = _git(["rev-parse", "HEAD"], cwd=repo_root)
     return out if rc == 0 and out else ""
+
+
+def _branch(repo_root=None):
+    """Current branch name, or "" (detached HEAD, or not a repo).
+
+    Recorded with each review so the findings log can be read months later
+    without having to work out which branch a bare sha belonged to.
+    """
+    out, rc = _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_root)
+    return out if rc == 0 and out and out != "HEAD" else ""
 
 
 def _has_unpushed_commits():
@@ -277,8 +317,16 @@ def _raw_output_path(git_dir):
     return Path(git_dir) / "review-gate-last-output.json"
 
 
-def _save_raw_output(git_dir, text):
-    """Best-effort dump of claude's raw stdout, overwritten on every run.
+def _findings_log_path(git_dir):
+    return Path(git_dir) / FINDINGS_LOG
+
+
+def _history_dir(git_dir):
+    return Path(git_dir) / HISTORY_DIR
+
+
+def _save_raw_output(git_dir, text, head_sha=""):
+    """Best-effort dump of claude's raw stdout. Returns the archived filename.
 
     A finding can be syntactically valid JSON yet still be missing fields the
     reviewer was told to always include (e.g. start_line/content) --
@@ -286,14 +334,154 @@ def _save_raw_output(git_dir, text):
     entry. Keeping the untouched raw output around lets a blocked user inspect
     what the reviewer actually said instead of re-running the whole review
     from scratch just to see full detail.
+
+    Two copies are written: the stable review-gate-last-output.json path (still
+    overwritten every run, still what the block message points at) and a
+    timestamped snapshot under HISTORY_DIR, because the stable path alone meant
+    one push destroyed the previous push's evidence.
     """
     if not git_dir:
-        return
+        return ""
     try:
         Path(git_dir).mkdir(parents=True, exist_ok=True)
         _raw_output_path(git_dir).write_text(text or "", encoding="utf-8")
     except Exception:
         pass
+    return _archive_raw_output(git_dir, text, head_sha)
+
+
+def _archive_raw_output(git_dir, text, head_sha=""):
+    """Write one timestamped snapshot of the raw output. Returns its filename.
+
+    Named <UTC stamp>-<sha7>.json so the file sorts chronologically and can be
+    matched back to the FINDINGS_LOG entry that references it. Best-effort:
+    archiving is bookkeeping and must never break the gate.
+    """
+    if not git_dir:
+        return ""
+    try:
+        d = _history_dir(git_dir)
+        d.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        sha = (head_sha or "nohead")[:7]
+        name = f"{stamp}-{sha}.json"
+        n = 2
+        # Two adapters reviewing the same HEAD within one second must not
+        # overwrite each other's snapshot.
+        while (d / name).exists():
+            name = f"{stamp}-{sha}-{n}.json"
+            n += 1
+        (d / name).write_text(text or "", encoding="utf-8")
+        _prune_history(d)
+        return name
+    except Exception:
+        return ""
+
+
+def _prune_history(dirpath):
+    """Keep only the newest _history_limit() raw snapshots (0 == keep all).
+
+    Rotation applies to the verbose stdout dumps ONLY. The findings extracted
+    from them live in FINDINGS_LOG, which is never pruned -- silently dropping
+    findings is the exact failure this whole mechanism exists to prevent.
+    """
+    limit = _history_limit()
+    if not limit:
+        return
+    try:
+        files = []
+        for path in Path(dirpath).glob("*.json"):
+            try:
+                files.append((path.stat().st_mtime, path))
+            except OSError:
+                continue  # vanished under a concurrent gate run
+        files.sort(reverse=True)
+        for _, stale in files[limit:]:
+            try:
+                stale.unlink()
+            except OSError:
+                continue
+    except Exception:
+        pass  # housekeeping must never break the gate
+
+
+def _record_review(git_dir, head_sha, branch, mode, verdict, advisory, blocked, result, raw_name=""):
+    """Append this review to FINDINGS_LOG. Returns the log path, or None.
+
+    Written for EVERY completed review, blocking or not, because the
+    non-blocking ones are the ones nothing else keeps: a warn/pass verdict lets
+    the push through, prints its findings once to a stderr stream nobody
+    re-reads, and is then overwritten in review-gate-last-output.json by the
+    next run. Findings are stored verbatim (JSON-encoded, so control characters
+    cannot escape the line); readers sanitize at print time.
+
+    One line, one buffered append per process, so concurrent adapters interleave
+    records rather than corrupting each other's.
+    """
+    if not git_dir:
+        return None
+    try:
+        findings = result.get("findings", []) if isinstance(result, dict) else []
+        if not isinstance(findings, list):
+            findings = []
+        entry = {
+            "ts": time.time(),
+            "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "head": head_sha,
+            "branch": branch,
+            "mode": mode,
+            "verdict": verdict,
+            "advisory": bool(advisory),
+            "blocked": bool(blocked),
+            "finding_count": len(findings),
+            "findings": findings,
+            "truncated": False,
+            "raw": f"{HISTORY_DIR}/{raw_name}" if raw_name else "",
+        }
+        # Shed findings until the line fits, rather than truncating the string
+        # and leaving unparseable JSON behind. The dropped detail is still in
+        # the raw snapshot this entry points at.
+        line = ""
+        for keep in (len(findings), 5, 0):
+            entry["findings"] = findings[:keep]
+            entry["truncated"] = keep < len(findings)
+            line = json.dumps(entry, ensure_ascii=False, default=str)
+            if len(line) <= _MAX_LOG_LINE:
+                break
+        path = _findings_log_path(git_dir)
+        Path(git_dir).mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+        return path
+    except Exception:
+        return None
+
+
+def _read_history(git_dir, limit=10):
+    """Return the last `limit` recorded reviews (0 == all), oldest first.
+
+    A malformed line is skipped, never fatal: the log is append-only and may
+    have been half-written by a killed process, and a broken tail must not
+    hide the intact records before it.
+    """
+    if not git_dir:
+        return []
+    entries = []
+    try:
+        with _findings_log_path(git_dir).open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(obj, dict):
+                    entries.append(obj)
+    except OSError:
+        return []
+    return entries[-limit:] if limit else entries
 
 
 def _marker_path(git_dir, head_sha):
@@ -314,6 +502,61 @@ def _marker_fresh(path):
         return path.exists() and (time.time() - path.stat().st_mtime) < MARKER_TTL
     except Exception:
         return False
+
+
+def _write_marker(marker, head_sha, verdict, advisory, reasons):
+    """Record the marker AND what the review that wrote it found.
+
+    The marker used to hold a bare epoch float. That was enough to skip the
+    duplicate review, but it meant the paired adapter's short-circuit dropped
+    the findings on the floor -- they were shown exactly once, by whichever
+    process happened to run first. Freshness still comes from the file's mtime,
+    so the payload costs nothing; markers written by older versions hold a bare
+    float and still parse (see _read_marker).
+    """
+    payload = {
+        "ts": time.time(),
+        "head": head_sha,
+        "verdict": verdict,
+        "advisory": bool(advisory),
+        "reasons": reasons or "",
+    }
+    marker.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+def _read_marker(marker):
+    """Payload of the run that wrote this marker; {} for legacy/unreadable ones.
+
+    Markers written by earlier versions hold a bare epoch float, and a marker
+    is not a trusted store either way -- anything that does not parse as an
+    object is treated as "no recorded findings" rather than as an error.
+    """
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _prior_findings_note(prior):
+    """Re-surface the findings recorded by an earlier review of this HEAD.
+
+    Every line is re-sanitized on the way out: the text was produced by
+    _format_reasons (already sanitized) but has since been through a file that
+    anything with write access to the git dir could have edited.
+    """
+    lines = [
+        "  " + _sanitize(line, 600)
+        for line in str(prior.get("reasons") or "").splitlines()
+        if line.strip()
+    ]
+    if not lines:
+        return ""
+    verdict = _sanitize(prior.get("verdict", "?"), 20)
+    return (
+        f"already reviewed at this HEAD (verdict: {verdict}) - findings from that run:\n"
+        + "\n".join(lines)
+    )
 
 
 def _reap_markers(git_dir, keep=None):
@@ -518,8 +761,8 @@ def _downgrade_hint(mode):
     return "Downgrade to advisory (warn-only): OCR_ADVISORY=1 git commit ..."
 
 
-def _run_review(repo_root, mode, git_dir=None):
-    """Return (result_dict, True) on success.
+def _run_review(repo_root, mode, git_dir=None, head_sha=""):
+    """Return (result_dict, True, raw_archive_name) on success.
 
     Raises ReviewGateError on timeout, subprocess error, a non-zero claude exit
     (the review never ran, so the output is an error string rather than
@@ -530,7 +773,7 @@ def _run_review(repo_root, mode, git_dir=None):
     claude = _find_claude()
     if not claude:
         _warn("`claude` CLI not found on PATH or CLAUDE_CODE_EXECPATH — skipping review (fail-open).")
-        return None, False
+        return None, False, ""
     # OCR_CLAUDE_ARGS replaces the defaults wholesale (full escape hatch, also
     # discards the cost controls AND the read-only tool allowlist);
     # OCR_CLAUDE_EXTRA_ARGS appends to them, which is what callers usually want.
@@ -587,7 +830,7 @@ def _run_review(repo_root, mode, git_dir=None):
             f"review process error ({exc}) — blocking commit to preserve gate integrity.\n"
             f"{bypass}"
         )
-    _save_raw_output(git_dir, proc.stdout)
+    raw_name = _save_raw_output(git_dir, proc.stdout, head_sha)
     # A non-zero exit means claude never got as far as producing a review, so the
     # output is an error string, not malformed JSON. Diagnose that separately:
     # reporting "could not parse review output" for a login failure sends people
@@ -616,7 +859,7 @@ def _run_review(repo_root, mode, git_dir=None):
             f"{_auth_hint(proc.stdout or '')}"
             f"{bypass}"
         )
-    return result, True
+    return result, True, raw_name
 
 
 def _format_reasons(result, limit=20):
@@ -637,7 +880,72 @@ def _format_reasons(result, limit=20):
             "(reviewer omitted a description for this finding — see raw output log)"
         )
         lines.append(f"  [{sev}] {loc} - {content}")
-    return "\n".join(lines[:limit])
+    # limit=0 means "all of them" -- used by --history, which is read on demand
+    # and has no context budget to protect, unlike the gate's own messages.
+    return "\n".join(lines if not limit else lines[:limit])
+
+
+def _output_hints(git_dir, record=None):
+    """Where to look afterwards: this run's raw output, and the kept log."""
+    if not git_dir:
+        return ""
+    hint = f"\n  Full reviewer output: {_raw_output_path(git_dir)}"
+    if record:
+        hint += (
+            f"\n  Findings log (kept, append-only): {record}"
+            f"\n  Replay past findings: python \"{os.path.abspath(__file__)}\" --history"
+        )
+    return hint
+
+
+def _print_history(argv):
+    """`review-gate.py --history [N]` - replay recorded reviews. Returns an exit code.
+
+    Without this there is no command that shows a passing review's findings
+    again: they are printed once, to a stderr stream that scrolls past with the
+    push output, and nothing else surfaces them.
+    """
+    limit = 10
+    i = argv.index("--history")
+    if i + 1 < len(argv):
+        try:
+            limit = max(0, int(argv[i + 1]))
+        except ValueError:
+            pass  # not a count -- keep the default
+    repo_root = _repo_root()
+    git_dir = _git_dir(repo_root)
+    if not git_dir:
+        _warn("not inside a git repository - no review history here.")
+        return 1
+    entries = _read_history(git_dir, limit)
+    if not entries:
+        _warn(f"no reviews recorded yet ({_findings_log_path(git_dir)}).")
+        return 0
+    out = sys.stdout
+    out.write(f"{_findings_log_path(git_dir)}\n\n")
+    for e in entries:
+        flags = [name for name, on in (
+            ("BLOCKED", e.get("blocked")),
+            ("advisory", e.get("advisory")),
+            ("truncated", e.get("truncated")),
+        ) if on]
+        out.write(
+            "{at}  {head}  {verdict}  {n} finding(s)  branch={branch}{flags}\n".format(
+                at=_sanitize(e.get("at", "?"), 32),
+                head=_sanitize(e.get("head", "?"), 40)[:12] or "?",
+                verdict=_sanitize(e.get("verdict", "?"), 16),
+                n=e.get("finding_count", 0),
+                branch=_sanitize(e.get("branch") or "-", 80),
+                flags=f"  [{', '.join(flags)}]" if flags else "",
+            )
+        )
+        body = _format_reasons(e, limit=0)
+        if body:
+            out.write(body + "\n")
+        if e.get("raw"):
+            out.write(f"  raw: {_sanitize(e['raw'], 200)}\n")
+        out.write("\n")
+    return 0
 
 
 def _emit_hook(decision, reason=""):
@@ -671,6 +979,11 @@ def main(argv):
     # '--mode' flag (e.g. '--mode' with no value) is also caught and fails
     # closed rather than crashing without emitting a deny payload.
     mode = "git"  # safe default for the except clause below
+
+    # Read-only query over the persisted log. Handled before anything else so
+    # it never spawns a review, touches a marker, or needs a hook payload.
+    if "--history" in argv:
+        sys.exit(_print_history(argv))
 
     # Top-level safety net: any unhandled exception in main() fails closed.
     # Without this, a crash in compute_verdict(), _format_reasons(), or any
@@ -715,7 +1028,16 @@ def _main_inner(argv, mode):
             pass  # if we can't read it, fall through and review anyway
 
     repo_root = _repo_root()
-    allow = (lambda: _emit_hook("allow")) if mode == "hook" else (lambda: sys.exit(0))
+    # allow() takes an optional reason: in hook mode a non-blocking review's
+    # findings ride back in permissionDecisionReason, so the calling session
+    # actually sees them. Previously "pass" and "warn" were equally silent
+    # there -- the findings went to a stderr stream Claude Code does not show
+    # on an allow decision.
+    allow = (
+        (lambda reason="": _emit_hook("allow", reason))
+        if mode == "hook"
+        else (lambda reason="": sys.exit(0))
+    )
 
     if not _has_unpushed_commits():
         allow()
@@ -729,11 +1051,16 @@ def _main_inner(argv, mode):
     marker = _marker_path(git_dir, head_sha) if (git_dir and head_sha) else None
 
     # The other adapter already reviewed this exact staged tree and passed it.
+    # Replay what it found instead of allowing silently: the duplicate review
+    # is what we are skipping, not the report.
     if marker and _marker_fresh(marker):
-        allow()
+        note = _prior_findings_note(_read_marker(marker))
+        if note:
+            _warn(note + _output_hints(git_dir, _findings_log_path(git_dir) if git_dir else None))
+        allow(note)
 
     try:
-        result, ran = _run_review(repo_root, mode, git_dir)
+        result, ran, raw_name = _run_review(repo_root, mode, git_dir, head_sha)
     except ReviewGateError as exc:
         # Fail closed: block the commit unless OCR_FAIL_OPEN=1 is set.
         if os.environ.get("OCR_FAIL_OPEN", "").strip().lower() in ("1", "true", "yes"):
@@ -752,28 +1079,37 @@ def _main_inner(argv, mode):
     verdict = compute_verdict(result)
     advisory = _is_advisory(repo_root)
     reasons = _format_reasons(result)
+    blocked = verdict == "block" and not advisory
 
-    if verdict == "block" and not advisory:
-        log_hint = f"\n  Full reviewer output: {_raw_output_path(git_dir)}" if git_dir else ""
+    # Persist BEFORE deciding, and for every verdict. A non-blocking review is
+    # the one that needs this: it lets the push through, so nothing forces
+    # anyone to read it, and its raw output is overwritten by the next run.
+    record = _record_review(
+        git_dir, head_sha, _branch(repo_root), mode, verdict, advisory, blocked, result, raw_name
+    )
+    hints = _output_hints(git_dir, record)
+
+    if blocked:
         reason = "review-gate blocked this commit (high-severity issues):\n" + (
             reasons or "  (see review output)"
-        ) + f"{log_hint}\n\nFix the issues above, then commit again.\n{_downgrade_hint(mode)}"
+        ) + f"{hints}\n\nFix the issues above, then commit again.\n{_downgrade_hint(mode)}"
         _fail_closed(mode, reason)
         return  # unreachable
 
-    # Passed (or advisory): record marker so the paired adapter can skip, print
-    # any advisory findings, and allow.
+    # Passed (or advisory): record the marker -- with the findings in it, so the
+    # paired adapter's short-circuit can replay them -- report, and allow.
     if marker:
         try:
-            marker.write_text(str(time.time()), encoding="utf-8")
+            _write_marker(marker, head_sha, verdict, advisory, reasons)
         except Exception:
             pass
         _reap_markers(git_dir, keep=marker)
+    note = ""
     if reasons:
         label = "advisory (blocking disabled)" if advisory else f"verdict: {verdict}"
-        log_hint = f"\n  Full reviewer output: {_raw_output_path(git_dir)}" if git_dir else ""
-        _warn(f"{label} — findings:\n{reasons}{log_hint}")
-    allow()
+        note = f"{label} — findings:\n{reasons}"
+        _warn(note + hints)
+    allow(note)
 
 
 if __name__ == "__main__":
