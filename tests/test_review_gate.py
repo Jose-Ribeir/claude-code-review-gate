@@ -481,6 +481,47 @@ def test_two_archives_in_the_same_second_do_not_collide(tmp_path):
     assert (_history_dir(str(tmp_path)) / a).read_text(encoding="utf-8") == "first"
 
 
+def test_archive_never_clobbers_an_existing_snapshot(tmp_path):
+    # The name is claimed with O_CREAT|O_EXCL, not exists()-then-write: a name
+    # already on disk must be skipped, never overwritten.
+    d = _history_dir(str(tmp_path))
+    d.mkdir()
+    taken = _archive_raw_output(str(tmp_path), "first", "abcdef1")
+    (d / taken.replace(".json", "-2.json")).write_text("squatter", encoding="utf-8")
+
+    third = _archive_raw_output(str(tmp_path), "third", "abcdef1")
+    assert third not in (taken, taken.replace(".json", "-2.json"))
+    assert (d / taken).read_text(encoding="utf-8") == "first"
+    assert (d / taken.replace(".json", "-2.json")).read_text(encoding="utf-8") == "squatter"
+    assert (d / third).read_text(encoding="utf-8") == "third"
+
+
+def test_archive_loses_the_race_without_losing_the_other_snapshot(tmp_path, monkeypatch):
+    # Simulate the interleaving directly: the first O_EXCL create loses to a
+    # concurrent adapter that just took the name. The retry must move on rather
+    # than overwrite, which is what the old exists()-then-write could not do.
+    d = _history_dir(str(tmp_path))
+    d.mkdir()
+    real_open = os.open
+    state = {"raced": False}
+
+    def _racing_open(path, flags, *a, **kw):
+        if not state["raced"] and (flags & os.O_EXCL):
+            state["raced"] = True
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("other adapter")  # the loser's target, now taken
+            raise FileExistsError(path)
+        return real_open(path, flags, *a, **kw)
+
+    monkeypatch.setattr(os, "open", _racing_open)
+    name = _archive_raw_output(str(tmp_path), "mine", "abcdef1")
+    monkeypatch.undo()
+
+    assert name.endswith("-2.json")
+    assert (d / name).read_text(encoding="utf-8") == "mine"
+    assert (d / name.replace("-2.json", ".json")).read_text(encoding="utf-8") == "other adapter"
+
+
 def test_prune_keeps_only_the_newest_snapshots(tmp_path, monkeypatch):
     monkeypatch.setenv("OCR_HISTORY_LIMIT", "2")
     d = _history_dir(str(tmp_path))

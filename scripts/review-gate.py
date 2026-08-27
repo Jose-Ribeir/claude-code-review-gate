@@ -364,14 +364,26 @@ def _archive_raw_output(git_dir, text, head_sha=""):
         d.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
         sha = (head_sha or "nohead")[:7]
+        data = (text or "").encode("utf-8")
+        # Claim the name and commit to it in ONE step. The obvious spelling --
+        # while (d / name).exists(): name = next_one -- is check-then-act: the
+        # two adapters can archive the same HEAD inside the same UTC second,
+        # both see the same name free, and one snapshot then overwrites the
+        # other, which is the exact collision this loop exists to prevent.
+        # O_CREAT|O_EXCL makes the filesystem arbitrate instead.
         name = f"{stamp}-{sha}.json"
         n = 2
-        # Two adapters reviewing the same HEAD within one second must not
-        # overwrite each other's snapshot.
-        while (d / name).exists():
-            name = f"{stamp}-{sha}-{n}.json"
-            n += 1
-        (d / name).write_text(text or "", encoding="utf-8")
+        while True:
+            try:
+                fd = os.open(str(d / name), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                break
+            except FileExistsError:
+                if n > 100:
+                    return ""  # something is very wrong; do not spin
+                name = f"{stamp}-{sha}-{n}.json"
+                n += 1
+        with os.fdopen(fd, "wb") as fh:  # fdopen owns the fd and closes it
+            fh.write(data)
         _prune_history(d)
         return name
     except Exception:
