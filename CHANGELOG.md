@@ -46,6 +46,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Findings were never at risk — they are written separately to the findings
   log — but a raw snapshot could be lost, leaving one review's log entry
   pointing at another run's stdout.
+- **Archived snapshots were created executable on POSIX.** `os.open` defaults
+  to mode `0o777` (`0o755` under the usual umask), while every sibling
+  artifact this tool writes goes through Python's io layer and lands at
+  `0o644`. The mode is now passed explicitly as `0o666`.
 
 ## [0.3.2] - 2026-08-20
 
