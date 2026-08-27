@@ -6,6 +6,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-08-28
+
 ### Added
 - **Non-blocking findings are now persisted instead of destroyed.** A `warn`
   or `pass` verdict lets the push through, printed its findings once to stderr,
@@ -32,6 +34,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `permissionDecisionReason` instead of going to a stderr stream Claude Code
   does not surface on an allow decision.
 
+
+### Fixed
+- **`_archive_raw_output` claimed a snapshot filename with
+  `while (d / name).exists()` and only then wrote it** — check-then-act, so
+  the two adapters archiving the same HEAD inside one UTC second could both
+  see the same name free and one would overwrite the other, which is the
+  collision that loop exists to prevent. Found by the gate reviewing its own
+  commit. The name is now taken with `os.open(..., O_CREAT|O_EXCL|O_WRONLY)`
+  and the retry moves on instead of overwriting (bounded at 100 attempts).
+  Findings were never at risk — they are written separately to the findings
+  log — but a raw snapshot could be lost, leaving one review's log entry
+  pointing at another run's stdout.
 
 ## [0.3.2] - 2026-08-20
 
