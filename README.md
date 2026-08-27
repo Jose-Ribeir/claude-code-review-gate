@@ -142,8 +142,41 @@ git push --no-verify
 | Extra `claude` flags | — | `OCR_CLAUDE_EXTRA_ARGS` | appended to the defaults |
 | All `claude` flags | see `DEFAULT_CLAUDE_ARGS` | `OCR_CLAUDE_ARGS` | replaces the defaults **wholesale** — discards the cost controls too |
 | Bypass once | — | `git push --no-verify` | skip the gate for one push |
+| Findings log | `.git/review-gate-findings.jsonl` | — | one JSON line per completed review, **append-only and never pruned** |
+| Raw-output snapshots | newest `50`, in `.git/review-gate-history/` | `OCR_HISTORY_LIMIT` (`0` = keep all) | full reviewer stdout per run |
 
 Rule precedence (highest first): `--rule` → project `.ocr/rule.json` → global `~/.ocr/rule.json` → built-in `skills/review/rubric.md`, then the matching `skills/review/rules/<lang>.md` and `rules/llm-authored-code.md` appended. See `examples/.ocr/rule.json`.
+
+### Where findings go
+
+A **blocking** finding is impossible to miss — it stops the push. A `warn` or `pass`
+finding used to be almost impossible to *keep*: it was printed once to stderr, and the
+only file holding the detail (`review-gate-last-output.json`) was overwritten by the
+next run. Medium and low findings on a passing push were effectively gone.
+
+Now every completed review is recorded, whatever the verdict:
+
+```bash
+# Replay the last 10 recorded reviews, with their findings
+python ~/.claude/plugins/.../review-gate/scripts/review-gate.py --history
+
+# ...or just read the log; it is one JSON object per line
+cat .git/review-gate-findings.jsonl | tail -1
+```
+
+| What | Where | Retention |
+|---|---|---|
+| Findings, verdict, branch, HEAD sha, timestamp | `.git/review-gate-findings.jsonl` | **kept forever** — nothing in the plugin deletes from it |
+| Full reviewer stdout for one run | `.git/review-gate-history/<UTC>-<sha7>.json` | newest `OCR_HISTORY_LIMIT` (default 50) |
+| Full reviewer stdout for the *latest* run | `.git/review-gate-last-output.json` | overwritten every run (unchanged) |
+
+Non-blocking findings are also **reported** rather than swallowed: in hook mode they come
+back in the push's `permissionDecisionReason`, so the calling Claude Code session sees them,
+and the "already reviewed this HEAD" short-circuit replays the other adapter's findings
+instead of allowing silently.
+
+All of this lives in `.git/`, so it is per-clone, never committed, and never pushed.
+
 
 ### Optional: Serena MCP (enhanced cross-file analysis for interactive sessions)
 
