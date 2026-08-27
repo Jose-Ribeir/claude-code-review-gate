@@ -522,6 +522,19 @@ def test_archive_loses_the_race_without_losing_the_other_snapshot(tmp_path, monk
     assert (d / name.replace("-2.json", ".json")).read_text(encoding="utf-8") == "other adapter"
 
 
+def test_archived_snapshot_is_not_executable(tmp_path):
+    # os.open defaults to 0o777; a data file must not come out executable, and
+    # must match the io-layer siblings (_save_raw_output, the findings log).
+    if os.name != "posix":
+        return  # mode bits are not meaningful on Windows
+    name = _archive_raw_output(str(tmp_path), "raw", "abcdef1")
+    _rec(tmp_path)
+    snapshot = (_history_dir(str(tmp_path)) / name).stat().st_mode & 0o777
+    sibling = _findings_log_path(str(tmp_path)).stat().st_mode & 0o777
+    assert snapshot & 0o111 == 0
+    assert snapshot == sibling
+
+
 def test_prune_keeps_only_the_newest_snapshots(tmp_path, monkeypatch):
     monkeypatch.setenv("OCR_HISTORY_LIMIT", "2")
     d = _history_dir(str(tmp_path))

@@ -375,7 +375,11 @@ def _archive_raw_output(git_dir, text, head_sha=""):
         n = 2
         while True:
             try:
-                fd = os.open(str(d / name), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                # 0o666 explicitly: os.open defaults to 0o777, which would
+                # leave these snapshots executable on POSIX (0o755 under the
+                # usual umask) while every sibling artifact this tool writes
+                # goes through Python's io layer and lands at 0o644.
+                fd = os.open(str(d / name), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
                 break
             except FileExistsError:
                 if n > 100:
