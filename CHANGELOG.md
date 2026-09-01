@@ -6,6 +6,29 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-09-01
+
+### Fixed
+- **`-exec` and friends matched the shell `-c` cluster.** The pattern was
+  `-[A-Za-z]*c$`, documented as matching short combined clusters but in fact
+  matching every single-dash long option merely *ending* in `c` — `-exec`,
+  `-sync`, `-static`, `-atomic`, `-public`, `-classic`. A quoted argument after
+  one of those was kept as executable shell, so `find . -exec "..."` in a
+  segment that also mentioned a shell had its argument parsed as code. Capped
+  at two letters before the `c`, which covers every cluster anyone writes
+  (`-c`, `-lc`, `-ec`, `-xc`, `-euc`). The trade is deliberate: a longer
+  cluster like `-euxc` is now missed, which is the unsafe direction — but
+  essentially nobody writes it, `find -exec` is common, and the git pre-push
+  adapter still covers what this adapter misses.
+
+### Added
+- **Direct tests for the tokenizer and the masking state machine.** They were
+  only exercised through the callers, and five prior spellings were each wrong
+  in a different way. Now pinned: punctuation split without surrounding spaces,
+  the newline token, the unbalanced-quote fallback, the segment reset at a
+  separator (so a `bash -c` does not make every later quote code), and both
+  directions of the cluster pattern.
+
 ## [0.4.5] - 2026-09-01
 
 ### Fixed
