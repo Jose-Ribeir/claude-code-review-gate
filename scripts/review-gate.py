@@ -276,6 +276,9 @@ def _branch(repo_root=None):
 
 
 _ZERO_SHA = "0" * 40
+# Sentinel: several branches gain commits in one push, which no single
+# revision range can express. Callers deny rather than review a subset.
+_MULTI_REF = "\x00multi-ref"
 
 
 def _read_push_refs():
@@ -304,9 +307,15 @@ def _read_push_refs():
         parts = line.split()
         if len(parts) != 4:
             continue
-        local_sha, remote_sha = parts[1], parts[3]
+        local_ref, local_sha, remote_ref, remote_sha = parts
         if local_sha == _ZERO_SHA:
-            continue  # branch deletion
+            continue  # branch deletion: no content to review
+        if remote_ref and not remote_ref.startswith("refs/heads/"):
+            # Tags and other non-branch refs. A `--follow-tags` push carries
+            # them alongside the branch, and their commits are already covered
+            # by it; counting them would turn ordinary pushes into multi-ref
+            # ones for no gain.
+            continue
         refs.append((local_sha, remote_sha))
     return refs
 
@@ -319,7 +328,7 @@ def _range_for_refs(refs, repo_root=None):
     such base, so it falls back to the same default-branch heuristic the skill
     uses; that is a guess, but a guess about a NEW branch, not a silent skip.
     """
-    best = ""
+    found = []
     for local_sha, remote_sha in refs:
         if remote_sha != _ZERO_SHA:
             rng = remote_sha + ".." + local_sha
@@ -335,8 +344,16 @@ def _range_for_refs(refs, repo_root=None):
             rng = base + ".." + local_sha
         out, rc = _git(["log", rng, "--oneline"], cwd=repo_root)
         if rc == 0 and out.strip():
-            return rng  # first ref update that actually carries commits
-    return best
+            found.append(rng)
+    if not found:
+        return ""
+    if len(found) > 1:
+        # More than one branch is gaining commits in a single push. There is no
+        # single `A..B` that expresses that, and reviewing just one of them
+        # would leave the rest unreviewed -- the very fail-open this function
+        # exists to close. Say so and let the caller refuse.
+        return _MULTI_REF
+    return found[0]
 
 
 def _has_unpushed_commits(repo_root=None, push_range=None):
@@ -351,7 +368,7 @@ def _has_unpushed_commits(repo_root=None, push_range=None):
     repo_root is not optional in spirit either: without it this asked the
     PROCESS cwd, which in hook mode is wherever Claude Code was launched from.
     """
-    if push_range:
+    if push_range and push_range != _MULTI_REF:
         out, rc = _git(["log", push_range, "--oneline"], cwd=repo_root)
         if rc == 0:
             return bool(out.strip())
@@ -1743,6 +1760,17 @@ def _main_inner(argv, mode):
         if mode == "hook"
         else (lambda reason="": sys.exit(0))
     )
+
+    if push_range == _MULTI_REF:
+        if _fail_open_requested():
+            allow()
+        _fail_closed(
+            mode,
+            "review-gate: this push updates more than one branch at once, and a review "
+            "covers a single revision range. Reviewing one of them would leave the rest "
+            "unreviewed, so it is refused instead.\n\nPush the branches separately, or "
+            "set OCR_FAIL_OPEN=1 for a one-shot bypass.",
+        )
 
     if not _has_unpushed_commits(repo_root, push_range):
         allow()

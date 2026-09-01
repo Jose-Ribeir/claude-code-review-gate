@@ -1486,3 +1486,47 @@ def test_without_a_range_the_prompt_is_unchanged(monkeypatch, tmp_path):
     review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40)
     assert "--unpushed" in seen["prompt"]
     assert "--range" not in seen["prompt"]
+
+
+def test_a_tag_ref_is_not_counted_as_a_branch_update(monkeypatch):
+    # `git push --follow-tags` carries tag refs alongside the branch. Their
+    # commits are already covered by it, so counting them would turn ordinary
+    # pushes into multi-ref ones for no gain.
+    _stdin(monkeypatch,
+           "refs/tags/v1 " + "a" * 40 + " refs/tags/v1 " + _ZERO + "\n"
+           "refs/heads/x " + "c" * 40 + " refs/heads/main " + "d" * 40 + "\n")
+    assert review_gate._read_push_refs() == [("c" * 40, "d" * 40)]
+
+
+def test_two_branches_gaining_commits_is_refused_not_half_reviewed(monkeypatch):
+    # No single `A..B` expresses two branches, and reviewing one would leave
+    # the other unreviewed -- the exact fail-open this code closes.
+    monkeypatch.setattr(
+        review_gate, "_git",
+        lambda args, cwd=None: ("commit1", 0) if args[:1] == ["log"] else ("", 1),
+    )
+    rng = review_gate._range_for_refs([("a" * 40, "b" * 40), ("c" * 40, "d" * 40)])
+    assert rng == review_gate._MULTI_REF
+
+
+def test_a_second_ref_carrying_nothing_does_not_trigger_the_refusal(monkeypatch):
+    def _fake_git(args, cwd=None):
+        if args[:1] != ["log"]:
+            return "", 1
+        return ("commit1", 0) if args[1].startswith("b" * 40) else ("", 0)
+
+    monkeypatch.setattr(review_gate, "_git", _fake_git)
+    rng = review_gate._range_for_refs([("a" * 40, "b" * 40), ("c" * 40, "d" * 40)])
+    assert rng == "b" * 40 + ".." + "a" * 40
+
+
+def test_the_multi_ref_sentinel_is_never_used_as_a_revision_range(monkeypatch):
+    seen = []
+
+    def _fake_git(args, cwd=None):
+        seen.append(args)
+        return "commit1", 0
+
+    monkeypatch.setattr(review_gate, "_git", _fake_git)
+    review_gate._has_unpushed_commits("/repo", push_range=review_gate._MULTI_REF)
+    assert all(review_gate._MULTI_REF not in a for args in seen for a in args)
