@@ -1391,7 +1391,7 @@ def test_the_range_is_what_the_remote_gains(monkeypatch):
     # Not @{u}..HEAD -- the remote sha of the ref actually being written.
     monkeypatch.setattr(
         review_gate, "_git",
-        lambda args, cwd=None: ("commit1", 0) if args[:1] == ["log"] else ("", 1),
+        lambda args, cwd=None: ("commit1", 0) if args[:1] in (["log"], ["cat-file"]) else ("", 1),
     )
     rng = review_gate._range_for_refs([("a" * 40, "b" * 40)])
     assert rng == "b" * 40 + ".." + "a" * 40
@@ -1400,7 +1400,7 @@ def test_the_range_is_what_the_remote_gains(monkeypatch):
 def test_a_range_with_no_commits_is_not_offered(monkeypatch):
     monkeypatch.setattr(
         review_gate, "_git",
-        lambda args, cwd=None: ("", 0) if args[:1] == ["log"] else ("", 1),
+        lambda args, cwd=None: ("", 0) if args[:1] in (["log"], ["cat-file"]) else ("", 1),
     )
     assert review_gate._range_for_refs([("a" * 40, "b" * 40)]) == ""
 
@@ -1503,7 +1503,7 @@ def test_two_branches_gaining_commits_is_refused_not_half_reviewed(monkeypatch):
     # the other unreviewed -- the exact fail-open this code closes.
     monkeypatch.setattr(
         review_gate, "_git",
-        lambda args, cwd=None: ("commit1", 0) if args[:1] == ["log"] else ("", 1),
+        lambda args, cwd=None: ("commit1", 0) if args[:1] in (["log"], ["cat-file"]) else ("", 1),
     )
     rng = review_gate._range_for_refs([("a" * 40, "b" * 40), ("c" * 40, "d" * 40)])
     assert rng == review_gate._MULTI_REF
@@ -1511,6 +1511,8 @@ def test_two_branches_gaining_commits_is_refused_not_half_reviewed(monkeypatch):
 
 def test_a_second_ref_carrying_nothing_does_not_trigger_the_refusal(monkeypatch):
     def _fake_git(args, cwd=None):
+        if args[:1] == ["cat-file"]:
+            return "", 0
         if args[:1] != ["log"]:
             return "", 1
         return ("commit1", 0) if args[1].startswith("b" * 40) else ("", 0)
@@ -1530,3 +1532,34 @@ def test_the_multi_ref_sentinel_is_never_used_as_a_revision_range(monkeypatch):
     monkeypatch.setattr(review_gate, "_git", _fake_git)
     review_gate._has_unpushed_commits("/repo", push_range=review_gate._MULTI_REF)
     assert all(review_gate._MULTI_REF not in a for args in seen for a in args)
+
+
+def test_a_remote_sha_the_client_does_not_have_falls_back_rather_than_skipping(monkeypatch):
+    # The remote sha comes from the REMOTE during negotiation; the client only
+    # needs the objects it must send, so that commit may be absent locally.
+    # `git log <missing>..<local>` then fails, and treating that as "no
+    # commits" would skip the review exactly when we are least sure.
+    def _fake_git(args, cwd=None):
+        if args[:1] == ["cat-file"]:
+            return "", 1                     # remote tip not present locally
+        if args[:2] == ["rev-parse", "--verify"]:
+            return ("origin/main", 0) if args[-1] == "origin/main" else ("", 1)
+        if args[:1] == ["log"]:
+            return "commit1", 0
+        return "", 1
+
+    monkeypatch.setattr(review_gate, "_git", _fake_git)
+    assert review_gate._range_for_refs([("a" * 40, "b" * 40)]) == "origin/main.." + "a" * 40
+
+
+def test_an_unevaluable_range_is_assumed_to_carry_commits(monkeypatch):
+    # Over-reviewing costs a review; under-reviewing costs the gate.
+    def _fake_git(args, cwd=None):
+        if args[:1] == ["cat-file"]:
+            return "", 0
+        if args[:1] == ["log"]:
+            return "", 128                   # unknown revision
+        return "", 1
+
+    monkeypatch.setattr(review_gate, "_git", _fake_git)
+    assert review_gate._range_for_refs([("a" * 40, "b" * 40)]) == "b" * 40 + ".." + "a" * 40

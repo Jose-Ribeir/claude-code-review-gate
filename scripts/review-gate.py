@@ -330,20 +330,32 @@ def _range_for_refs(refs, repo_root=None):
     """
     found = []
     for local_sha, remote_sha in refs:
+        # The remote sha is whatever the REMOTE reported during negotiation,
+        # and the client only needs the objects it must send -- so that commit
+        # may not exist locally at all. `git log <missing>..<local>` then fails
+        # with "unknown revision", and treating a failure as "no commits" would
+        # skip the review exactly when we are least sure. Confirm the base is
+        # present before using it, and fall back when it is not.
+        base = ""
         if remote_sha != _ZERO_SHA:
-            rng = remote_sha + ".." + local_sha
-        else:
-            base = ""
+            _o, _rc = _git(["cat-file", "-e", remote_sha + "^{commit}"], cwd=repo_root)
+            if _rc == 0:
+                base = remote_sha
+        if not base:
             for cand in ("origin/HEAD", "origin/main", "origin/master"):
                 out, rc = _git(["rev-parse", "--verify", "--quiet", cand], cwd=repo_root)
                 if rc == 0 and out:
                     base = cand
                     break
-            if not base:
-                continue
-            rng = base + ".." + local_sha
+        if not base:
+            continue
+        rng = base + ".." + local_sha
         out, rc = _git(["log", rng, "--oneline"], cwd=repo_root)
-        if rc == 0 and out.strip():
+        if rc != 0:
+            # Still unevaluable. Assume it carries commits: over-reviewing
+            # costs a review, under-reviewing costs the gate.
+            found.append(rng)
+        elif out.strip():
             found.append(rng)
     if not found:
         return ""
