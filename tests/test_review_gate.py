@@ -1435,3 +1435,91 @@ def test_a_marker_followed_by_a_bare_word_is_data_not_an_opener():
     cmd = f'echo "a <<EOF b"\ncd /repo\n{_PUSH}'
     assert _cd_targets(cmd) == ["/repo"]
     assert review_gate._strip_heredocs(cmd) == cmd
+
+
+# --- quoted spans are data, except a cd target and a shell's -c ---------------
+# The last known way to make the parser misread a command: a cd chain inside a
+# quoted ARGUMENT (a commit message, a grep pattern) was parsed as code, so a
+# chain that never ran resolved to nothing and the unknown-target rule could
+# deny something innocent.
+
+def test_a_cd_chain_in_a_commit_message_is_not_code():
+    cmd = f'git commit -m "cd repo1 && cd sub && {_PUSH}"'
+    assert _cd_targets(cmd) == []
+    assert review_gate._looks_like_real_push(cmd) is False
+
+
+def test_a_cd_chain_in_a_grep_pattern_is_not_code():
+    cmd = f'grep -r "cd /x && {_PUSH}" .'
+    assert _cd_targets(cmd) == []
+    assert review_gate._looks_like_real_push(cmd) is False
+
+
+def test_a_quoted_cd_target_survives_masking():
+    # The exception that makes blanket masking unsafe: this quoted span IS the
+    # hop we are trying to follow.
+    cmd = f'cd "/path with spaces" && {_PUSH}'
+    assert _cd_targets(cmd) == ["/path with spaces"]
+
+
+def test_a_shell_dash_c_argument_is_still_code(tmp_path):
+    for runner in ("bash", "/bin/bash", "sh"):
+        cmd = f'{runner} -c "cd /real && {_PUSH}"'
+        assert _cd_targets(cmd) == ["/real"], runner
+        assert review_gate._looks_like_real_push(cmd) is True, runner
+
+
+def test_a_non_shell_dash_c_argument_is_not_code():
+    # python -c takes PYTHON, not shell. Treating every `-c` as shell made this
+    # harmless one-liner read as a real push.
+    cmd = f"""python -c "print('{_PUSH}')" """
+    assert review_gate._looks_like_real_push(cmd) is False
+    assert _cd_targets("""python -c "import os; os.system('cd /x')" """) == []
+
+
+def test_a_real_push_alongside_a_quoted_message_still_parses():
+    cmd = f'cd /repo && git commit -m "msg" && {_PUSH}'
+    assert _cd_targets(cmd) == ["/repo"]
+    assert review_gate._looks_like_real_push(cmd) is True
+
+
+def test_an_unbalanced_quote_does_not_crash_or_swallow_the_command():
+    cmd = f'echo "unterminated && cd /repo && {_PUSH}'
+    review_gate._mask_quoted(cmd)  # must not raise
+
+
+# --- commit and push in one command -------------------------------------------
+# A PreToolUse hook runs BEFORE the command, so when the command creates the
+# commit it pushes, HEAD still points at the parent and there is nothing
+# unpushed to review. Structural -- no pre-tool hook can review a commit that
+# does not exist yet -- so the gate says so instead of passing in silence.
+
+_commits_in_same_command = review_gate._commits_in_same_command
+
+
+def test_commit_then_push_in_one_command_is_detected():
+    assert _commits_in_same_command(f'git add -A && git commit -q -m "x" && {_PUSH}') is True
+
+
+def test_commit_then_push_is_detected_across_lines():
+    assert _commits_in_same_command(f'git commit -m "x"\n{_PUSH}') is True
+
+
+def test_a_push_on_its_own_is_not_the_commit_then_push_shape():
+    assert _commits_in_same_command(f"cd /repo && {_PUSH}") is False
+
+
+def test_a_commit_message_mentioning_a_push_is_not_the_shape():
+    assert _commits_in_same_command(f'git commit -m "later {_PUSH}"') is False
+
+
+def test_a_commit_after_the_push_is_not_the_shape():
+    # Only a commit created BEFORE the push can be the one going unreviewed.
+    assert _commits_in_same_command(f'{_PUSH} && git commit -m "x"') is False
+
+
+def test_a_push_with_nothing_to_send_is_not_reported_as_unreviewed():
+    assert review_gate._push_was_a_noop(
+        {"tool_response": {"stdout": "Everything up-to-date", "stderr": ""}}
+    ) is True
+    assert review_gate._push_was_a_noop({"tool_response": {"stdout": "main -> main"}}) is False
