@@ -22,10 +22,18 @@ You are orchestrating an AI code review. Follow these steps exactly.
 ## 0. Parse arguments (`$ARGUMENTS`)
 
 - `--staged` — review staged changes only (`git diff --staged`).
-- `--unpushed` — review all commits not yet pushed to the upstream branch. Used
-  by the pre-push gate. File list: `git diff -M @{u}..HEAD --name-status`; falls back
-  to `git diff -M origin/main..HEAD --name-status` if no upstream tracking branch is
+- `--unpushed` — review all commits not yet pushed to the upstream branch. File
+  list: `git diff -M @{u}..HEAD --name-status`; falls back to
+  `git diff -M origin/main..HEAD --name-status` if no upstream tracking branch is
   set. Per-file diff: `git diff -M @{u}..HEAD -- <path>` (or the fallback ref).
+- `--range <A>..<B>` — review exactly that range. **Takes precedence over
+  `--unpushed`.** The pre-push gate passes it, because git tells a pre-push hook
+  precisely what is being sent and where (`<local ref> <local sha> <remote ref>
+  <remote sha>` on stdin), and that is a different question from "is HEAD ahead
+  of its own upstream". They diverge whenever you push to a ref that is not your
+  upstream — `git push origin mybranch:main` with `mybranch` already pushed has
+  nothing unpushed by the `@{u}` reading, so deriving the range here would review
+  nothing while five commits reached `main`.
 - `--scan` — full-file scan of the repo (or of `paths` if given) instead of a diff review.
 - `--json` — print ONLY the machine-readable JSON output object (no prose). The
   push gate relies on this. Without it, print a human-readable report.
@@ -36,11 +44,16 @@ You are orchestrating an AI code review. Follow these steps exactly.
 ## 1. Select files and collect diffs
 
 **Determine the revision range** for `--unpushed`:
+0. If `--range <A>..<B>` was given, use it verbatim as `<range>` and skip the
+   rest — the caller knows what is being pushed and this does not.
 1. Try `git rev-parse @{u}` — if it succeeds, use `@{u}..HEAD` as `<range>`.
 2. If it fails (no upstream tracking branch), run
    `git remote show origin | grep 'HEAD branch'` to get the default branch name,
    then use `origin/<defaultBranch>..HEAD` as `<range>`.
 3. If both fail, fall back to `origin/main..HEAD`.
+
+`--range` alone (without `--unpushed`) behaves the same way: it is a diff review
+over `<range>`, using the same file list and per-file diff commands.
 
 **File list — pass `-M` (rename detection) everywhere:**
 - Default (working review): `git diff -M --name-status` plus untracked files

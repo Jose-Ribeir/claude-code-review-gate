@@ -53,6 +53,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ocr_verdict import compute_verdict  # noqa: E402
 
 PROMPT = "/review-gate:review --unpushed --json"
+# With an explicit range the skill reviews exactly what the remote is about to
+# gain, instead of re-deriving `@{u}..HEAD` and reaching the same wrong answer
+# the gate used to.
+PROMPT_RANGE = "/review-gate:review --range {rng} --json"
 
 # The plugin's own root (scripts/.. == the plugin dir). Passed explicitly so the
 # review skill still resolves when we skip user settings below.
@@ -271,11 +275,86 @@ def _branch(repo_root=None):
     return out if rc == 0 and out and out != "HEAD" else ""
 
 
-def _has_unpushed_commits(repo_root=None):
-    # repo_root is not optional in spirit: without it this asked the PROCESS
-    # cwd, which in hook mode is wherever Claude Code was launched from. On a
-    # `cd other-repo && git push` it therefore answered about the session's
-    # repo, found nothing unpushed, and allowed a push it had never looked at.
+_ZERO_SHA = "0" * 40
+
+
+def _read_push_refs():
+    """The ref updates git feeds a pre-push hook on stdin, as (local, remote).
+
+    Format per line: `<local ref> <local sha> <remote ref> <remote sha>`.
+    This is the AUTHORITATIVE answer to "what is being sent, and where" -- and
+    the gate used to throw it away, asking `@{u}..HEAD` instead. Those diverge
+    the moment you push to a ref that is not your branch's upstream:
+    `git push origin mybranch:main` with mybranch already pushed reports zero
+    unpushed commits, so the gate allowed five commits onto main having
+    reviewed none of them. Observed in a real repo, not hypothesised.
+
+    Deletions (local sha all-zero) are skipped: there is no content to review.
+    Returns [] when stdin is empty or unreadable, which puts callers back on
+    the old heuristic rather than failing.
+    """
+    try:
+        if sys.stdin is None or sys.stdin.isatty():
+            return []
+        raw = sys.stdin.read()
+    except Exception:
+        return []
+    refs = []
+    for line in (raw or "").splitlines():
+        parts = line.split()
+        if len(parts) != 4:
+            continue
+        local_sha, remote_sha = parts[1], parts[3]
+        if local_sha == _ZERO_SHA:
+            continue  # branch deletion
+        refs.append((local_sha, remote_sha))
+    return refs
+
+
+def _range_for_refs(refs, repo_root=None):
+    """The revision range actually being pushed, or "" when nothing is.
+
+    `<remote sha>..<local sha>` per ref update -- exactly what the remote is
+    about to gain. A brand-new remote ref has an all-zero remote sha and no
+    such base, so it falls back to the same default-branch heuristic the skill
+    uses; that is a guess, but a guess about a NEW branch, not a silent skip.
+    """
+    best = ""
+    for local_sha, remote_sha in refs:
+        if remote_sha != _ZERO_SHA:
+            rng = remote_sha + ".." + local_sha
+        else:
+            base = ""
+            for cand in ("origin/HEAD", "origin/main", "origin/master"):
+                out, rc = _git(["rev-parse", "--verify", "--quiet", cand], cwd=repo_root)
+                if rc == 0 and out:
+                    base = cand
+                    break
+            if not base:
+                continue
+            rng = base + ".." + local_sha
+        out, rc = _git(["log", rng, "--oneline"], cwd=repo_root)
+        if rc == 0 and out.strip():
+            return rng  # first ref update that actually carries commits
+    return best
+
+
+def _has_unpushed_commits(repo_root=None, push_range=None):
+    """Is there anything to review for this push?
+
+    When the caller knows the range being pushed (git mode, from the pre-push
+    refs), that is the answer -- it describes what the REMOTE is about to gain.
+    Only without it does this fall back to asking whether HEAD is ahead of its
+    own upstream, which is a different question and answers "no" for a
+    `branch:main` push whose branch was already pushed.
+
+    repo_root is not optional in spirit either: without it this asked the
+    PROCESS cwd, which in hook mode is wherever Claude Code was launched from.
+    """
+    if push_range:
+        out, rc = _git(["log", push_range, "--oneline"], cwd=repo_root)
+        if rc == 0:
+            return bool(out.strip())
     for ref in ("@{u}", "origin/main", "origin/master", "origin/HEAD"):
         out, rc = _git(["log", f"{ref}..HEAD", "--oneline"], cwd=repo_root)
         if rc == 0:
@@ -1106,7 +1185,7 @@ def _downgrade_hint(mode):
     return "Downgrade to advisory (warn-only): OCR_ADVISORY=1 git commit ..."
 
 
-def _run_review(repo_root, mode, git_dir=None, head_sha=""):
+def _run_review(repo_root, mode, git_dir=None, head_sha="", push_range=""):
     """Return (result_dict, True, raw_archive_name) on success.
 
     Raises ReviewGateError on timeout, subprocess error, a non-zero claude exit
@@ -1138,7 +1217,7 @@ def _run_review(repo_root, mode, git_dir=None, head_sha=""):
     child_env["OCR_IN_REVIEW"] = "1"
     try:
         proc = subprocess.run(
-            [claude, "-p", PROMPT] + args,
+            [claude, "-p", PROMPT_RANGE.format(rng=push_range) if push_range else PROMPT] + args,
             cwd=repo_root,
             capture_output=True,
             text=True,
@@ -1634,6 +1713,15 @@ def _main_inner(argv, mode):
                          repo_root)
     else:
         repo_root = _repo_root()
+
+    # Git mode only: the pre-push refs on stdin say exactly what is being sent
+    # and where. Hook mode runs BEFORE git, so no refs exist yet and the older
+    # upstream heuristic is all there is -- which is why this adapter is the
+    # one that closes the branch:main bypass.
+    push_range = ""
+    if mode == "git":
+        push_range = _range_for_refs(_read_push_refs(), repo_root)
+
     # allow() takes an optional reason, and it is worth being precise about
     # where that reason ends up, because this comment used to claim the
     # opposite and a fix was built on the claim.
@@ -1656,7 +1744,7 @@ def _main_inner(argv, mode):
         else (lambda reason="": sys.exit(0))
     )
 
-    if not _has_unpushed_commits(repo_root):
+    if not _has_unpushed_commits(repo_root, push_range):
         allow()
 
     # Anchored on repo_root, which is now genuinely the repo being pushed
@@ -1678,7 +1766,7 @@ def _main_inner(argv, mode):
         allow(note)
 
     try:
-        result, ran, raw_name = _run_review(repo_root, mode, git_dir, head_sha)
+        result, ran, raw_name = _run_review(repo_root, mode, git_dir, head_sha, push_range)
     except ReviewGateError as exc:
         # Fail closed: block the commit unless OCR_FAIL_OPEN=1 is set.
         if os.environ.get("OCR_FAIL_OPEN", "").strip().lower() in ("1", "true", "yes"):
