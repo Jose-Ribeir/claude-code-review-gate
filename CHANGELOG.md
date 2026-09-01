@@ -6,6 +6,39 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-09-01
+
+### Fixed
+- **Only the last `cd` hop was anchored to the session directory.** A relative
+  hop is relative to the hop before it, so in a two-hop chain the second lives
+  under the first, not under the session dir. Joining it onto the base produced
+  a path that either did not exist — falling through to the fallback this code
+  exists to avoid — or existed and pointed somewhere unrelated. `_effective_cd`
+  now folds the chain in order: an **absolute** hop re-anchors and clears an
+  earlier unknown (it fully determines the destination regardless of what came
+  before), a relative hop after an unknown one stays unknown, and `cd -` is
+  unfollowable since it needs the shell's directory history.
+- **Heredoc bodies were parsed as commands.** A body the command *writes* is
+  data the shell never runs. This was not academic: the change adding these
+  tests was itself denied by the gate, because the heredoc it was writing
+  contained a relative `cd` chain as test data — the parser read it as real,
+  resolved it to nothing, and the unknown-target rule blocked an innocent
+  command. `_strip_heredocs` drops bodies before parsing, keeping the opener
+  line (a real `cd` can share it) and handling quoted and unquoted markers.
+  - Stripping is deliberately narrow, because a first cut of it was worse than
+    the problem: it matched `<<WORD` anywhere on a line and, with no matching
+    terminator, discarded everything to the end of the command — which could
+    swallow a genuine `cd` and a genuine push and leave the parser blind. An
+    opener must now **end its line** (bar trailing redirections), and a body is
+    dropped **only when a terminator is actually found**. Unterminated input
+    therefore errs toward reading the body as code — at worst resolving the
+    wrong directory and *denying* — rather than toward deleting real commands
+    and allowing. Wrong-and-blocking is recoverable; blind-and-allowing is the
+    fail-open this whole line of work exists to close.
+  - Known residual: a `cd` chain inside a **quoted argument** is still parsed
+    as code. Stripping quoted spans wholesale is not safe, since
+    `cd "path with spaces"` is exactly that shape.
+
 ## [0.4.1] - 2026-09-01
 
 ### Fixed
