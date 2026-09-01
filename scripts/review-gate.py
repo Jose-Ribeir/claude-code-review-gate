@@ -799,9 +799,6 @@ _QUOTED = re.compile(
 # -c flag: python's is Python, and reading it as shell turned a harmless
 # `python -c "print('git push')"` into a push.
 _SHELLS = ("bash", "sh", "zsh", "dash", "ksh", "bash.exe", "sh.exe")
-# How far back to look for the runner that owns a quoted span. A few tokens is
-# all the decision needs, and a bound is what keeps _mask_quoted linear.
-_RUNNER_WINDOW = 200
 # `-c`, or a combined short-flag cluster ending in it: `-lc`, `-ec`.
 _DASH_C = re.compile(r"-[A-Za-z]*c$")
 
@@ -847,20 +844,25 @@ def _mask_quoted(cmd):
     """
     if not cmd or ("'" not in cmd and '"' not in cmd):
         return cmd or ""
-    out, last = [], 0
+    # Tokens of everything seen so far, built INCREMENTALLY. Re-splitting the
+    # whole prefix per span was quadratic; truncating it to a fixed window was
+    # worse -- a runner just past the cutoff silently failed the shell test, so
+    # a real `bash -c "cd /x && git push"` got blanked as data and the push
+    # went invisible. Extending by only the new gap is linear AND complete.
+    out, last, toks = [], 0, []
     for m in _QUOTED.finditer(cmd):
-        # Only a bounded window back, not the whole prefix: re-splitting
-        # everything before each span made this O(n * spans), and a generated
-        # script with thousands of quoted strings is exactly the kind of input
-        # this function must not choke on. The decision needs a few tokens.
-        toks = cmd[max(0, m.start() - _RUNNER_WINDOW) : m.start()].split()
-        prev = toks[-1] if toks else ""
-        out.append(cmd[last : m.start()])
-        if prev == "cd" or _is_shell_dash_c(toks):
+        gap = cmd[last : m.start()]
+        toks.extend(gap.split())
+        out.append(gap)
+        if (toks and toks[-1] == "cd") or _is_shell_dash_c(toks):
             out.append(m.group(0))
         else:
             q = m.group(0)[0]  # the pattern no longer captures it
             out.append(q + " " * (len(m.group(0)) - 2) + q)
+        # A quoted span is ONE token to whatever follows it, kept or blanked.
+        # The placeholder is never "cd" and never matches -c, which is all the
+        # next span's decision cares about.
+        toks.append('""')
         last = m.end()
     out.append(cmd[last:])
     return "".join(out)
