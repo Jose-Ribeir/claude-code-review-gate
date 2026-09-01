@@ -801,27 +801,34 @@ _QUOTED = re.compile(
 _SHELLS = ("bash", "sh", "zsh", "dash", "ksh", "bash.exe", "sh.exe")
 # `-c`, or a combined short-flag cluster ending in it: `-lc`, `-ec`.
 _DASH_C = re.compile(r"-[A-Za-z]*c$")
-# Tokens that end one simple command and begin the next.
-_SEPARATORS = ("&&", "||", ";", "|", "&", ";;", "(", ")", "{", "}")
-# A leading `FOO=bar` assignment, which precedes the runner rather than being it.
-_ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-
-
+# Tokens that end one simple command and begin the next. A NEWLINE is one of
+# them, and it has to be tokenized explicitly: str.split() throws newlines away
+# as ordinary whitespace, so a multi-line `ls` followed by `bash -c "..."` on
+# the next line looked like ONE command whose first word was `ls`, and the
+# shell test failed on a genuine invocation.
+_SEPARATORS = ("&&", "||", ";", "|", "&", ";;", "(", ")", "{", "}", "\n")
+_TOKENS = re.compile(r"\n|\S+")
 def _is_shell_dash_c(toks):
     """True when these tokens end in `<shell> [flags] -c`, so a quote is CODE.
 
-    The runner is the FIRST word of the simple command that owns the `-c`, not
-    "whatever sits before the flags". Two earlier spellings got this wrong and
-    each was a fail-open, because a false negative blanks a real
-    `bash -c "cd /repo && git push"` into invisibility:
-      - checking only the token before `-c` missed `bash -lc` (a combined
-        cluster, never equal to "-c") and `bash -eu -c`;
-      - walking back over tokens starting with "-" missed any flag that takes
-        a separate value -- `--rcfile FILE`, `-o pipefail` -- because the value
-        does not start with a dash and stopped the walk early.
+    Asks whether the simple command owning the `-c` MENTIONS a shell anywhere,
+    rather than trying to pick out which token is the runner. Four attempts at
+    the latter each missed a real invocation, and every miss is a fail-open --
+    a false negative blanks a genuine `bash -c "cd /repo && git push"` into
+    data, hiding both the cd and the push:
+      - the token before `-c` alone missed `bash -lc` (a combined cluster,
+        never equal to "-c") and `bash -eu -c`;
+      - walking back over tokens starting with "-" missed flags taking a
+        separate value (`--rcfile FILE`, `-o pipefail`);
+      - taking the first word missed every wrapper (`sudo bash -c`), and
+        newlines vanished in str.split() so `ls` on the previous line looked
+        like the runner;
+      - skipping a wrapper list still missed wrappers with arguments of their
+        own (`timeout 30 bash -c`).
 
-    So: scan back to the nearest command separator, then skip leading env
-    assignments and `env` itself, and ask whether what remains is a shell.
+    Membership needs none of that. It errs toward calling a span CODE, and
+    that is the right direction here: treating data as code costs at worst a
+    conservative block, while treating code as data is the fail-open.
     """
     if not toks or not _DASH_C.match(toks[-1]):
         return False
@@ -830,11 +837,7 @@ def _is_shell_dash_c(toks):
         if toks[i] in _SEPARATORS:
             start = i + 1
             break
-    while start < len(toks) - 1 and (
-        _ENV_ASSIGN.match(toks[start]) or os.path.basename(toks[start]) in ("env", "env.exe")
-    ):
-        start += 1
-    return start < len(toks) - 1 and os.path.basename(toks[start]) in _SHELLS
+    return any(os.path.basename(t) in _SHELLS for t in toks[start:-1])
 
 
 def _mask_quoted(cmd):
@@ -869,7 +872,7 @@ def _mask_quoted(cmd):
     out, last, toks = [], 0, []
     for m in _QUOTED.finditer(cmd):
         gap = cmd[last : m.start()]
-        toks.extend(gap.split())
+        toks.extend(_TOKENS.findall(gap))  # newlines kept: they separate commands
         out.append(gap)
         if (toks and toks[-1] == "cd") or _is_shell_dash_c(toks):
             out.append(m.group(0))
