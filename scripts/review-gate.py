@@ -799,21 +799,39 @@ _QUOTED = re.compile(
 # -c flag: python's is Python, and reading it as shell turned a harmless
 # `python -c "print('git push')"` into a push.
 _SHELLS = ("bash", "sh", "zsh", "dash", "ksh", "bash.exe", "sh.exe")
-# `-c`, or a SHORT combined cluster ending in it: `-lc`, `-ec`, `-euc`.
-#
-# The length cap is the whole point. `-[A-Za-z]*c$` also matched every
-# single-dash long option that merely ends in the letter c -- `-exec`, `-sync`,
-# `-static`, `-atomic`, `-public`, `-classic` -- so a quoted argument after one
-# of those was treated as executable shell. Two letters before the `c` covers
-# every cluster anyone writes (`-c`, `-lc`, `-ec`, `-xc`, `-euc`) and excludes
-# all of those. `--foo` never matches at all: the second character must be a
-# letter.
-#
-# The trade is deliberate. A longer cluster like `-euxc` would now be missed,
-# and a miss is the unsafe direction here -- but it is a shape essentially
-# nobody writes, and the git pre-push adapter still covers what this one
-# misses. An over-match, by contrast, fires on `find -exec`, which is common.
-_DASH_C = re.compile(r"-[A-Za-z]{0,2}c$")
+# Bash's single-letter options. A combined short-flag cluster can only be built
+# out of these, which is what makes the test below lexical rather than a guess.
+_BASH_SHORT_OPTS = frozenset("abBcCDeEfhHiklmnoprstTuvx")
+
+
+def _is_dash_c(tok):
+    """True for `-c`, or a combined short-flag cluster ending in it.
+
+    Three conditions, and each exists because a simpler rule was wrong:
+
+      length <= 4   A plain `-[A-Za-z]*c$` matched every single-dash long
+                    option merely ENDING in c -- -exec, -sync, -static,
+                    -atomic, -public, -classic -- so a quoted argument after
+                    one was treated as executable shell.
+      no repeats    A combined cluster never repeats a flag. This is what
+                    rejects -exec (two e's) and -static (two t's), which a
+                    length cap alone cannot: -exec is exactly four letters.
+      known letters Every character must be a real bash short option, which
+                    rejects -sync (y) and -magic (g).
+
+    Together they accept every cluster anyone writes -- -c, -lc, -ec, -xc,
+    -euc, -euxc -- and reject all of the above. A previous cap of two letters
+    got the rejections right but lost `-euxc`, and a miss is the unsafe
+    direction: it blanks a real `bash -euxc "... git push"` into data.
+
+    `--foo` never qualifies; a long option is not a cluster.
+    """
+    if not tok.startswith("-") or tok.startswith("--") or not tok.endswith("c"):
+        return False
+    letters = tok[1:]
+    if len(letters) > 4 or len(set(letters)) != len(letters):
+        return False
+    return set(letters) <= _BASH_SHORT_OPTS
 # Tokens that end one simple command and begin the next. A NEWLINE is one of
 # them, and it has to be tokenized explicitly: str.split() throws newlines away
 # as ordinary whitespace, so a multi-line `ls` followed by `bash -c "..."` on
@@ -897,7 +915,7 @@ def _mask_quoted(cmd):
                 seg_has_shell = True
             prev = t
         out.append(gap)
-        if prev == "cd" or (_DASH_C.match(prev) and seg_has_shell):
+        if prev == "cd" or (_is_dash_c(prev) and seg_has_shell):
             out.append(m.group(0))
         else:
             q = m.group(0)[0]  # the pattern no longer captures it
