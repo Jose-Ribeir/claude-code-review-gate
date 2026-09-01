@@ -6,6 +6,42 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.7] - 2026-09-01
+
+### Fixed
+- **`-euxc` no longer misses.** 0.4.6 capped the shell `-c` cluster at two
+  letters to stop `-exec`, `-sync` and `-static` from matching, which worked but
+  lost `-euxc` — and a miss is the *unsafe* direction, blanking a real
+  `bash -euxc "cd /repo && git push"` into data. Length was the wrong
+  discriminator. Three lexical conditions replace it, each rejecting something
+  the others cannot: **length ≤ 4** (`-atomic`, `-public`, `-classic`,
+  `-topic`), **no repeated letters** (`-exec` has two `e`s and is *exactly*
+  four letters, so a cap alone never rejects it; `-static` has two `t`s), and
+  **every letter a real bash short option** (`-sync` has `y`, `-magic` has `g`).
+  Every cluster anyone writes passes: `-c`, `-lc`, `-ec`, `-xc`, `-euc`, `-euxc`.
+
+### Added
+- **`install-git-hook.sh --chain-into <repo>`**, for a repo that sets its own
+  `core.hooksPath`. Git resolves the local one first, so such a repo silently
+  drops the global gate — pushes from a plain terminal are not gated at all and
+  nothing announces it. `/review-gate:doctor` reports the condition; this prints
+  the cure.
+  - It **prints and does not edit**: that hook belongs to the repo and is under
+    its version control, and a generated edit landing in someone's commit
+    unannounced is not a trade an installer gets to make.
+  - The snippet calls `review-gate.py` **directly** rather than the global
+    pre-push wrapper, because that wrapper also chains `$GITDIR/hooks/pre-push`
+    — in a repo with its own checks, that runs them twice. It resolves the
+    reviewer through the `plugins/data/*/gate-dir` pointer the plugin refreshes
+    on every run, so it survives upgrades that move the versioned cache path.
+  - Place it immediately before the hook's success `exit 0`, not at the end of
+    the file: a hook that exits early never reaches an appended block.
+  - It **fails closed**, mirroring `scripts/pre-push`. A first cut no-opped when
+    the reviewer or a working Python could not be found, which is the least
+    visible place in the tool to fail open — the snippet exists precisely for
+    repos where nothing else reviews the push. `OCR_FAIL_OPEN=1` remains the
+    one-shot bypass.
+
 ## [0.4.6] - 2026-09-01
 
 ### Fixed
