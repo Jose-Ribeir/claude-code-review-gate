@@ -6,6 +6,44 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-09-01
+
+### Fixed
+- **Shell `-c` detection missed most real spellings**, and every miss was a
+  fail-open: blanking a genuine `bash -c "cd /repo && git push"` hides both the
+  `cd` and the push, so the gate resolves the session's repo instead of the one
+  being pushed. It took three passes to get right, because the framing was
+  wrong rather than the details:
+  - matching only the exact token `-c` missed `bash -lc` (a combined cluster,
+    never equal to `-c`) and `bash -eu -c`;
+  - walking back over tokens starting with `-` missed any flag taking a
+    *separate* value — `bash --rcfile FILE -c`, `bash -o pipefail -c` — since
+    the value stopped the walk before the shell name.
+
+  - taking the **first word** of the command missed every wrapper (`sudo bash
+    -c`, `timeout 30 bash -c`), and newlines vanish in `str.split()`, so `ls`
+    on the previous line looked like the runner.
+
+  Picking out *which* token is the runner was the wrong question. Detection now
+  asks whether the simple command owning the `-c` **mentions a shell anywhere**,
+  which needs no notion of flags, wrappers, or env assignments; newlines are
+  tokenized explicitly so a separator on a line boundary is visible. That errs
+  toward calling a span code, which is the right direction: treating data as
+  code costs at worst a conservative block, while treating code as data is the
+  fail-open. `python -c`, `node -e`, `ssh host -c` and `sudo python -c` still
+  do not qualify, as they must not.
+- **The runner lookup was quadratic.** It re-split the whole command prefix for
+  every quoted span, in a function that runs on every Bash call; a generated
+  script with thousands of quoted strings is exactly that input. Tokens are now
+  accumulated incrementally — each step extends the list by only the new gap,
+  and a quoted span counts as the single token it is. 6000 spans in ~19 ms.
+  - A first attempt bounded the lookup to a fixed 200-character window instead,
+    which traded the cost for a **correctness hole**: a runner past the cutoff
+    failed the shell test, so a real `bash <flags> -c "cd /repo && git push"`
+    was blanked as data and its push went invisible — reintroducing the very
+    fail-open the exception exists to prevent. The incremental form has no
+    cutoff, so the distance from a runner to its quote does not matter.
+
 ## [0.4.4] - 2026-09-01
 
 Closes the two issues 0.4.2 and 0.4.3 documented rather than fixed.
