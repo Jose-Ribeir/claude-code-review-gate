@@ -1406,3 +1406,32 @@ def test_an_unterminated_heredoc_strips_nothing():
 def test_an_opener_with_a_trailing_redirection_is_still_an_opener():
     cmd = f"cat <<'EOF' > out\ncd /elsewhere\nEOF\ncd /repo && {_PUSH}"
     assert _cd_targets(cmd) == ["/repo"]
+
+
+# The opener lookahead has been wrong twice, in both directions. Allowing only
+# redirections after the marker rejected the extremely ordinary
+# `python - <<'PY' | tee log`, so its body went unstripped and the misparse
+# came back. What actually separates an opener from the same characters as data
+# is that an opener is followed by end-of-line, a redirection, or a
+# pipe/separator -- never by a bare word.
+
+def test_an_opener_followed_by_a_pipe_is_still_an_opener():
+    cmd = f"cat <<'EOF' | grep x\ncd /elsewhere && {_PUSH}\nEOF\ncd /repo && {_PUSH}"
+    assert _cd_targets(cmd) == ["/repo"]
+
+
+def test_an_opener_followed_by_a_redirection_and_a_pipe_is_still_an_opener():
+    # The shape used throughout this project's own tooling.
+    cmd = f"python - <<'PY' 2>&1 | head -5\ncd /elsewhere && {_PUSH}\nPY\ncd /repo && {_PUSH}"
+    assert _cd_targets(cmd) == ["/repo"]
+
+
+def test_an_opener_followed_by_a_command_separator_is_still_an_opener():
+    cmd = f"cat <<EOF && echo hi\ncd /elsewhere\nEOF\ncd /repo && {_PUSH}"
+    assert _cd_targets(cmd) == ["/repo"]
+
+
+def test_a_marker_followed_by_a_bare_word_is_data_not_an_opener():
+    cmd = f'echo "a <<EOF b"\ncd /repo\n{_PUSH}'
+    assert _cd_targets(cmd) == ["/repo"]
+    assert review_gate._strip_heredocs(cmd) == cmd
