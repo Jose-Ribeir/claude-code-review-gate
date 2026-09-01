@@ -6,6 +6,40 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-09-01
+
+### Fixed
+- **A push to a ref that is not your upstream skipped the review entirely.**
+  `_has_unpushed_commits` asked *"is HEAD ahead of its own upstream?"* when the
+  question is *"what is the remote about to gain?"*. Those diverge the moment
+  the target ref differs from the upstream. Observed in a real repo: a branch
+  level with `origin/mybranch`, pushed as `mybranch:main`, reported nothing
+  unpushed — so the gate exited before even the marker replay, and five commits
+  reached `main` reviewed by nothing, with no hint in the output.
+  - Git hands a pre-push hook exactly this (`<local ref> <local sha> <remote
+    ref> <remote sha>` on stdin) and every adapter was discarding it with
+    `</dev/null`. All three now pass it through: `scripts/pre-push`, the
+    `--chain-into` snippet, and copies already installed in shadowed repos.
+  - The range is `<remote sha>..<local sha>` — what the remote gains. A
+    brand-new remote ref has no such base and falls back to the default-branch
+    heuristic: a guess about a new branch rather than a silent skip.
+  - Hook mode keeps the upstream heuristic, because it runs *before* git and
+    has no refs to consult. That asymmetry is why the git adapter is the one
+    that closes this.
+  - **Detection was only half.** The review is now invoked with
+    `--range <A>..<B>`; without it the skill re-derives `@{u}..HEAD` and would
+    have turned a silent skip into a confident empty pass. `--range` is
+    documented in `skills/review/SKILL.md` as taking precedence over
+    `--unpushed`.
+  - **A push updating several branches is refused, not half-reviewed.** No
+    single `A..B` expresses two branches, and reviewing one would leave the
+    rest unreviewed — the same fail-open one layer down. Tag refs are filtered
+    first, so a `--follow-tags` push is not mistaken for a multi-branch one.
+  - The `--chain-into` snippet no longer assumes a `$PUSH_REFS` variable it
+    never defined. It names the variable, says to point it at wherever the host
+    hook saved the ref lines, and degrades to the upstream heuristic when unset
+    rather than expanding to nothing unannounced.
+
 ## [0.5.0] - 2026-09-01
 
 ### Changed
