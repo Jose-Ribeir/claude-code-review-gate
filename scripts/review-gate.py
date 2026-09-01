@@ -754,379 +754,100 @@ _CD_TARGET = re.compile(
 # It first allowed only redirections, which rejected the extremely ordinary
 # `python - <<'PY' | tee log` and `cat <<'EOF' | grep x`, so their bodies went
 # unstripped and the misparse it exists to prevent came straight back.
-_HEREDOC = re.compile(
-    r"""<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1(?=\s*(?:[0-9]*[<>|&;]|$))"""
+# Which repository a push targets, and whether we can be sure.
+#
+# This replaces ~400 lines of shell parsing -- heredoc stripping, quote
+# masking, a shlex tokenizer, five spellings of `bash -c`. That machinery
+# existed to make every exotic command WORK; it produced eleven repair
+# commits, several of them fail-opens the gate itself caught. In a
+# fail-closed tool the right answer to an ambiguous command is not a better
+# parser, it is to refuse and say so.
+#
+# So: resolve the ordinary shapes, and treat everything else as unknown.
+# `_gate_repo` returns (repo_root, ambiguous); an ambiguous push is denied
+# with an actionable message rather than silently reviewed in the wrong repo.
+_CD = re.compile(
+    # A quote is a command boundary too: `bash -c "cd /repo && ..."` really does
+    # start a command there. The same rule makes a commit message that contains
+    # a cd chain read as ambiguous, which blocks. Erring toward doubt is the
+    # point -- see _gate_repo.
+    "(?:^|[;&|\\n\\r\"']|&&|\\|\\|)\\s*cd\\s+(?:\"([^\"]*)\"|'([^']*)'|([^\\s;&|]+))"
 )
-
-
-def _strip_heredocs(cmd):
-    """Drop heredoc BODIES before parsing a command for cds and pushes.
-
-    A heredoc body is data the command writes, not commands the shell runs.
-    Parsing it as code is not academic: writing a test file that happens to
-    contain the string `cd repo && cd sub && git push` made this very gate
-    block the Bash call adding those tests. The body determined a `cd` chain
-    that never executed, the chain resolved to nothing, and the
-    unknown-target rule denied an entirely innocent command.
-
-    Only the body goes; the opener line stays, since a real `cd` can share it.
-    """
-    if not cmd or "<<" not in cmd:
-        return cmd or ""
-    lines, out, i = cmd.splitlines(), [], 0
-    while i < len(lines):
-        line = lines[i]
-        out.append(line)
-        i += 1
-        m = _HEREDOC.search(line)
-        if not m:
-            continue
-        marker = m.group(2)
-        j = i
-        while j < len(lines) and lines[j].strip() != marker:
-            j += 1
-        if j >= len(lines):
-            # No terminator anywhere. Then this was not a heredoc we can trust
-            # -- and stripping to the end of the command would delete real
-            # commands, including the cd and the push this parse exists to
-            # find. Strip nothing and keep reading.
-            continue
-        i = j + 1  # past the body AND the terminator line
-    return "\n".join(out)
-
-
-# Each branch is written so a backslash can be consumed exactly ONE way. The
-# first version used a backreference with `(?:\\.|(?!\1).)*`, whose two
-# alternatives both match a backslash -- on an unterminated quote the engine
-# tries every pairing of a backslash run and the match goes exponential. That
-# is a denial of service in a hook that runs on every Bash call, so the classes
-# below exclude the backslash and leave `\\.` as the only way to consume it.
-# Single quotes take no escapes in POSIX sh, hence the simpler branch.
-_QUOTED = re.compile(
-    r"'[^']*'"  # single-quoted: literal through to the next quote
-    r'|"(?:[^"\\]|\\.)*"',  # double-quoted: backslash escapes apply
-    re.S,
-)
-# Runners whose `-c` argument is SHELL. Deliberately not every program with a
-# -c flag: python's is Python, and reading it as shell turned a harmless
-# `python -c "print('git push')"` into a push.
-_SHELLS = ("bash", "sh", "zsh", "dash", "ksh", "bash.exe", "sh.exe")
-# Bash's single-letter options. A combined short-flag cluster can only be built
-# out of these, which is what makes the test below lexical rather than a guess.
-_BASH_SHORT_OPTS = frozenset("abBcCDeEfhHiklmnoprstTuvx")
-
-
-def _is_dash_c(tok):
-    """True for `-c`, or a combined short-flag cluster ending in it.
-
-    Three conditions, and each exists because a simpler rule was wrong:
-
-      length <= 4   A plain `-[A-Za-z]*c$` matched every single-dash long
-                    option merely ENDING in c -- -exec, -sync, -static,
-                    -atomic, -public, -classic -- so a quoted argument after
-                    one was treated as executable shell.
-      no repeats    A combined cluster never repeats a flag. This is what
-                    rejects -exec (two e's) and -static (two t's), which a
-                    length cap alone cannot: -exec is exactly four letters.
-      known letters Every character must be a real bash short option, which
-                    rejects -sync (y) and -magic (g).
-
-    Together they accept every cluster anyone writes -- -c, -lc, -ec, -xc,
-    -euc, -euxc -- and reject all of the above. A previous cap of two letters
-    got the rejections right but lost `-euxc`, and a miss is the unsafe
-    direction: it blanks a real `bash -euxc "... git push"` into data.
-
-    `--foo` never qualifies; a long option is not a cluster.
-    """
-    if not tok.startswith("-") or tok.startswith("--") or not tok.endswith("c"):
-        return False
-    letters = tok[1:]
-    if len(letters) > 4 or len(set(letters)) != len(letters):
-        return False
-    return set(letters) <= _BASH_SHORT_OPTS
-# Tokens that end one simple command and begin the next. A NEWLINE is one of
-# them, and it has to be tokenized explicitly: str.split() throws newlines away
-# as ordinary whitespace, so a multi-line `ls` followed by `bash -c "..."` on
-# the next line looked like ONE command whose first word was `ls`, and the
-# shell test failed on a genuine invocation.
-_SEPARATORS = ("&&", "||", ";", "|", "&", ";;", "(", ")", "{", "}", "\n")
-
-
-def _tokenize(text):
-    """Shell tokens, with separators isolated even without spaces around them.
-
-    A `\\n|\\S+` split cannot do this: `\\S+` swallows punctuation, so
-    `echo done;bash -c ...` produced the single token `done;bash` and the
-    separator was invisible. shlex's punctuation_chars mode splits `;`, `&&`,
-    `||`, `|` and friends properly, which is what this needs and what hand
-    rolling kept getting wrong.
-
-    Lines are fed separately so a newline survives as its own separator token;
-    shlex treats it as plain whitespace. An unbalanced quote makes shlex raise,
-    and that falls back to a plain split rather than losing the line.
-    """
-    toks = []
-    for i, line in enumerate(text.splitlines()):
-        if i:
-            toks.append("\n")
-        try:
-            lex = shlex.shlex(line, punctuation_chars=True, posix=False)
-            lex.whitespace_split = True
-            lex.commenters = ""  # `#` is not a comment to us; it is just text
-            toks.extend(lex)
-        except ValueError:
-            toks.extend(line.split())
-    return toks
-# Deciding whether a quoted span is CODE asks whether the simple command that
-# owns the `-c` MENTIONS a shell -- not which token is the runner. Five
-# spellings of the latter each missed a real invocation, and every miss is a
-# fail-open, because a false negative blanks a genuine
-# `bash -c "cd /repo && git push"` into data and hides both the cd and the push:
-#   - the token before `-c` missed `bash -lc` and `bash -eu -c`;
-#   - walking back over "-" tokens missed flags with separate values
-#     (`--rcfile FILE`, `-o pipefail`);
-#   - the command's first word missed every wrapper (`sudo bash -c`), and
-#     newlines vanished in str.split();
-#   - a wrapper skip-list still missed wrappers with their own arguments
-#     (`timeout 30 bash -c`).
-# Membership needs none of that, and it errs toward calling a span CODE, which
-# is the right direction: data read as code costs at worst a conservative
-# block, while code read as data is the fail-open.
-
-
-def _mask_quoted(cmd):
-    """Blank the inside of quoted spans that are DATA rather than code.
-
-    `git commit -m "cd repo && git push"` contains neither a cd chain nor a
-    push -- it contains a message. Parsing it as code was a way to make this
-    gate misread a command: a chain that never ran resolved to nothing, and
-    the unknown-target rule denied something innocent.
-
-    Two spans are kept verbatim:
-      cd         -- `cd "path with spaces"` really is the target, and blanking
-                    it would lose the very hop being followed.
-      <shell> -c -- really does execute its argument as shell (see above).
-
-    Quotes themselves are preserved so token boundaries do not shift, and an
-    unbalanced quote simply fails to match and is left alone.
-    """
-    if not cmd or ("'" not in cmd and '"' not in cmd):
-        return cmd or ""
-    out, last, prev = [], 0, ""
-    # Whether the simple command being scanned mentions a shell. Tracked as a
-    # running flag rather than re-scanned per span: a backward walk over the
-    # accumulated tokens was O(current length) each time, which is the same
-    # quadratic shape this function has already had to remove once.
-    seg_has_shell = False
-    for m in _QUOTED.finditer(cmd):
-        gap = cmd[last : m.start()]
-        for t in _tokenize(gap):
-            if t in _SEPARATORS:
-                seg_has_shell = False  # a new simple command starts here
-            elif os.path.basename(t) in _SHELLS:
-                seg_has_shell = True
-            prev = t
-        out.append(gap)
-        if prev == "cd" or (_is_dash_c(prev) and seg_has_shell):
-            out.append(m.group(0))
-        else:
-            q = m.group(0)[0]  # the pattern no longer captures it
-            out.append(q + " " * (len(m.group(0)) - 2) + q)
-        # A quoted span is ONE token to whatever follows it, kept or blanked,
-        # and it is neither "cd" nor a -c.
-        prev = '""'
-        last = m.end()
-    out.append(cmd[last:])
-    return "".join(out)
-
-
-def _shell_code(cmd):
-    """The part of a command the shell will actually RUN, for parsing.
-
-    Heredoc bodies go first (they are written, not run), then quoted data is
-    blanked. Everything that reads a command for cds or pushes goes through
-    here, so the two rules stay in one place.
-    """
-    return _mask_quoted(_strip_heredocs(cmd or ""))
-
-
-def _cd_targets(cmd):
-    """Every directory a shell command cds into before it reaches `git push`.
-
-    In command order. `~` and `-` are kept rather than filtered: _effective_cd
-    gives them meaning (expandable, and unfollowable, respectively), and
-    dropping a hop silently would misplace every hop after it.
-    """
-    if not cmd:
-        return []
-    code = _shell_code(cmd)
-    # Bound the scan at the push COMMAND, not the first literal occurrence of
-    # the text: `echo remember to git push` is a mention, and truncating there
-    # would hide a real cd that comes after it.
-    stop = _REAL_PUSH.search(code)
-    head = code[: stop.start()] if stop else code
-    targets = []
-    for m in _CD_TARGET.finditer(head):
-        target = next((g for g in m.groups() if g), "")
-        if target:
-            targets.append(target)
-    return targets
-
-
-# A target we cannot resolve lexically: `$VAR`, `${VAR}`, `$(cmd)`, backticks.
-# Deliberately not expanded from OUR environment -- those were set by the shell
-# running the command, so substituting our values would answer confidently wrong.
+# Anything we cannot expand ourselves: `$VAR`, `${VAR}`, `$(cmd)`, backticks.
+# `$` was set by the shell running the command, not by ours.
 _UNEXPANDABLE = re.compile(r"[$`]")
 
 
-def _effective_cd(cmd, base):
-    """The directory a command has reached by the time it runs `git push`.
-
-    Folds the WHOLE chain instead of looking only at the last hop, because a
-    relative hop is relative to the PREVIOUS one: in `cd repo && cd sub &&
-    git push`, `sub` lives under `repo`, not under the session directory.
-    Joining it against the session base produced a path that either did not
-    exist (falling through to a fallback) or, worse, existed and pointed
-    somewhere unrelated.
-
-    Returns "" when the chain cannot be followed. An absolute hop re-anchors
-    and clears an earlier unknown -- `cd $T && cd /srv/repo` ends at
-    /srv/repo no matter what `$T` was -- while a relative hop after an
-    unknown one stays unknown, since there is nothing to join it onto.
-    """
-    targets = _cd_targets(cmd)
-    if not targets:
-        return base or ""
-    cur, unknown = base or "", False
-    for raw in targets:
-        if raw == "-" or _UNEXPANDABLE.search(raw):
-            unknown = True  # `cd -` needs shell history; `$VAR` needs its shell
-            continue
-        try:
-            t = os.path.expanduser(raw)
-            if os.path.isabs(t):
-                cur, unknown = t, False
-            elif unknown or not cur:
-                continue
-            else:
-                cur = os.path.normpath(os.path.join(cur, t))
-        except Exception:
-            unknown = True
-    return "" if unknown else cur
+def _cd_targets(cmd):
+    """Directories a command cds into before it reaches `git push`, in order."""
+    if not cmd:
+        return []
+    head = cmd.split("git push", 1)[0]
+    return [next(g for g in m.groups() if g is not None and g != "") or ""
+            for m in _CD.finditer(head)
+            if any(g for g in m.groups())]
 
 
-def _resolve_pushed_repo(payload):
-    """The repository the push actually happened in.
+def _gate_repo(payload):
+    """(repo_root, ambiguous) for the push described by a PreToolUse payload.
 
-    Neither the process cwd nor the payload's `cwd` is reliable: both are the
-    SESSION's directory, and Claude Code routinely runs pushes as
-    `cd <repo> && git push`. Reading the session dir instead cost us a real
-    failure in testing -- the hook reported a different repository's month-old
-    findings as though they described the push that had just completed, which
-    is worse than saying nothing at all.
+    The hook's own cwd is the SESSION's directory, not the pushed repo, and
+    Claude Code routinely pushes as `cd <repo> && git push`. Reading the
+    session dir instead let a push be reviewed in the wrong repo -- and where
+    that repo had nothing unpushed, allowed with no review at all.
 
-    So: the folded `cd` chain wins (see _effective_cd), then the payload's
-    cwd, then the process cwd. Each candidate is confirmed by asking git to
-    resolve it.
-
-    The chain is FOLDED, not sampled. An earlier version took only the last
-    hop and joined it onto the session dir, which is wrong whenever that hop
-    is relative -- it belongs under the hop before it, not under the base.
-    _effective_cd also decides what "unresolvable" means: shell parsing cannot
-    expand variables, so `cd "$T"` yields a literal `$T` and the chain goes
-    unknown from there unless a later ABSOLUTE hop re-anchors it. An
-    unresolvable chain means we do not know, and the freshness check in
-    _mode_post is what keeps "we do not know" from turning into a confident
-    report about the wrong repo.
+    Ambiguity is anything this does not resolve literally: an unexpanded
+    variable, a command substitution, a `cd -`, a target that is not a
+    directory, or a chain that ends somewhere unresolvable. Callers deny on
+    it. That is deliberately blunter than the parser it replaced: a heredoc
+    or a quoted argument that merely CONTAINS `cd ... && git push` now reads
+    as ambiguous and blocks, where before it was silently misrouted. Blocking
+    is visible, bypassable, and correct-by-default; misrouting is neither.
     """
     cmd, cwd = "", ""
     if isinstance(payload, dict):
         cmd = (payload.get("tool_input") or {}).get("command", "") or ""
         cwd = str(payload.get("cwd") or "")
-    # _effective_cd folds the whole cd chain onto the session dir, so a
-    # relative hop is joined onto the hop before it rather than onto the base.
-    candidates = [_effective_cd(cmd, cwd or os.getcwd())]
-    if cwd:
-        candidates.append(cwd)
-    candidates.append(os.getcwd())
-    for cand in candidates:
+    base = cwd or os.getcwd()
+    cur = base
+    for raw in _cd_targets(cmd):
+        if raw == "-" or _UNEXPANDABLE.search(raw):
+            return "", True
         try:
-            if not cand or not os.path.isdir(cand):
-                continue
+            t = os.path.expanduser(raw)
+            cur = t if os.path.isabs(t) else os.path.normpath(os.path.join(cur, t))
+            if not os.path.isdir(cur):
+                return "", True
         except Exception:
-            continue
-        out, rc = _git(["rev-parse", "--show-toplevel"], cwd=cand)
-        if rc == 0 and out:
-            return out
-    return ""
+            return "", True
+    out, rc = _git(["rev-parse", "--show-toplevel"], cwd=cur)
+    if rc == 0 and out:
+        return out, False
+    return "", True
 
 
 def _fail_open_requested():
     return os.environ.get("OCR_FAIL_OPEN", "").strip().lower() in ("1", "true", "yes")
 
 
-def _push_target_unknown(payload):
-    """True when the command cds somewhere we cannot resolve to a repository.
-
-    This is the distinction the GATE needs and the reporter does not. Both use
-    _resolve_pushed_repo, but its fallback chain always yields something -- and
-    for the gate, silently falling back to the session's repo is precisely the
-    fail-open being fixed: it reviews a repo nobody is pushing, finds nothing
-    unpushed, and allows.
-
-    So the gate asks this separately: was there a `cd` we could not follow?
-    "No cd at all" means the session's cwd IS the target and everything is
-    fine. "There was a cd and it resolved to nothing" -- an unexpanded `$VAR`,
-    a command substitution, a directory that is not a repo -- means we do not
-    know where these commits are going, and a gate that does not know what it
-    is looking at must not wave the push through.
-    """
-    cmd, cwd = "", ""
-    if isinstance(payload, dict):
-        cmd = (payload.get("tool_input") or {}).get("command", "") or ""
-        cwd = str(payload.get("cwd") or "")
-    if not _cd_targets(cmd):
-        return False  # no cd at all: the session's cwd IS the target
-    # The whole chain, folded. "" means a hop we could not follow -- `cd $VAR`,
-    # `cd -`, or a relative hop after one of those.
-    target = _effective_cd(cmd, cwd or os.getcwd())
-    try:
-        if not target or not os.path.isdir(target):
-            return True
-    except Exception:
-        return True
-    out, rc = _git(["rev-parse", "--show-toplevel"], cwd=target)
-    return not (rc == 0 and out)
-
-
-# `git push` at a COMMAND position -- optionally behind env-var prefixes and
-# git's own flags -- rather than anywhere in the string.
+# `git push` at a COMMAND position rather than anywhere in the string. Kept
+# because the adapters trigger on a bare "git push" SUBSTRING -- deliberately
+# loose, since over-reviewing is cheap -- while a DENY is held to this stricter
+# test. Without it, a grep pattern or commit message that merely mentions a
+# push could be blocked for a reason about pushing.
 _REAL_PUSH = re.compile(
-    r"(?:^|[;&|\n\r\"']|&&|\|\|)\s*"    # start, separator, new LINE, or a quote
-    # \n matters: a multi-line Bash call putting `git push` on its own line
-    # matched none of the alternatives, so this returned False for a genuine
-    # push and the unknown-target block it gates silently never fired.
-    r"(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*"  # env-var prefixes: FOO=bar git push
-    r"git\s+"
-    r"(?:(?:-\S+|\S+=\S+)\s+)*"         # git's own flags AND their values: git -c a=b push
-    r"push\b"
+    # start of string, a command separator, a newline, or a quote
+    "(?:^|[;&|\\n\\r\"']|&&|\\|\\|)\\s*"
+    "(?:[A-Za-z_][A-Za-z0-9_]*=\\S*\\s+)*"   # env prefixes: FOO=bar git push
+    "git\\s+"
+    "(?:(?:-\\S+|\\S+=\\S+)\\s+)*"           # git flags and their values
+    "push\\b"
 )
 
 
 def _looks_like_real_push(cmd):
-    """True when the command actually invokes `git push`, not merely mentions it.
-
-    The adapters gate on a bare "git push" SUBSTRING, which is deliberately
-    loose -- over-reviewing is cheap. Blocking is not. A command that merely
-    contains the words (a grep pattern, a heredoc, a commit message, a Python
-    string) must never be denied for a reason about pushing, so the block below
-    is held to this stricter test while the review trigger keeps the loose one.
-
-    Heredoc bodies go first, for the same reason: a script or test file being
-    written by the command is data, and a `git push` inside it is not one the
-    shell will run.
-    """
-    return bool(_REAL_PUSH.search(_shell_code(cmd)))
+    """True when the command actually invokes `git push`, not merely mentions it."""
+    return bool(_REAL_PUSH.search(cmd or ""))
 
 
 def _hookspath_shadowed(repo_root):
@@ -1585,44 +1306,47 @@ def _post_context(entry, git_dir, shadow=False):
     return "\n".join(lines)[:POST_MAX_CONTEXT]
 
 
-_COMMIT = re.compile(
-    r"(?:^|[;&|\n\r\"']|&&|\|\|)\s*"
-    r"(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*git\s+(?:(?:-\S+|\S+=\S+)\s+)*commit\b"
-)
+def _breadcrumb_path(session_id):
+    """Where the gate records which repo it just reviewed, for --mode post.
 
+    Delivery used to re-derive the pushed repo by parsing the command all over
+    again -- the same fragile work, duplicated, with its own failure modes. The
+    gate has already resolved it (it had to, in order to review the right
+    thing), so it simply writes it down and the reporter reads it.
 
-def _commits_in_same_command(cmd):
-    """True when the command creates the commit it then pushes.
-
-    A PreToolUse hook runs BEFORE the command, so at gate time the new commit
-    does not exist yet and HEAD still points at its parent: there is nothing
-    unpushed to review, and the plugin adapter allows without looking at
-    anything. The git pre-push adapter does see it, because it runs after the
-    commit -- so this is a gap only where that adapter is absent or shadowed
-    by a repo-local core.hooksPath.
-
-    Structural: no pre-tool hook can review a commit that does not exist. The
-    least it can do is not let the push pass in silence.
+    Keyed by session so two concurrent sessions cannot read each other's, and
+    kept beside the gate-dir pointer, which is the one location that survives
+    plugin upgrades.
     """
-    code = _shell_code(cmd)
-    m = _COMMIT.search(code)
-    if not m:
-        return False
-    # _REAL_PUSH, not a substring search: `git commit -m "wip" && echo remember
-    # to git push later` only commits, and calling that "pushed unreviewed"
-    # would be a false alarm about work that was never sent anywhere.
-    at = _REAL_PUSH.search(code)
-    return bool(at) and m.start() < at.start()
+    data = os.environ.get("CLAUDE_PLUGIN_DATA", "").strip()
+    if not data:
+        cfg = os.environ.get("CLAUDE_CONFIG_DIR", "").strip() or os.path.join(
+            os.path.expanduser("~"), ".claude"
+        )
+        data = os.path.join(cfg, "plugins", "data", "review-gate-local")
+    name = "pushed-repo-" + _marker_digest(session_id or "nosession")
+    return Path(data) / name
 
 
-def _push_was_a_noop(payload):
-    """True when git had nothing to push, so "unreviewed" would be noise."""
+def _drop_breadcrumb(session_id, repo_root):
+    """Best-effort: a missing breadcrumb only costs a fallback, never a crash."""
     try:
-        resp = payload.get("tool_response") or {}
-        blob = f"{resp.get('stdout', '')}\n{resp.get('stderr', '')}"
+        p = _breadcrumb_path(session_id)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(repo_root or "", encoding="utf-8")
     except Exception:
-        return False
-    return "Everything up-to-date" in blob
+        pass
+
+
+def _read_breadcrumb(session_id):
+    try:
+        p = _breadcrumb_path(session_id)
+        if time.time() - p.stat().st_mtime > MARKER_TTL:
+            return ""  # stale: from some earlier push, not this one
+        val = p.read_text(encoding="utf-8").strip()
+        return val if val and os.path.isdir(val) else ""
+    except Exception:
+        return ""
 
 
 def _emit_post_context(text):
@@ -1677,8 +1401,10 @@ def _mode_post(argv):
         if cmd and "git push" not in cmd:
             return 0
 
-    # Resolved from the COMMAND, not the process cwd -- see _resolve_pushed_repo.
-    repo_root = _resolve_pushed_repo(payload)
+    # The repo the GATE resolved, not one re-derived here. Delivery does no
+    # command parsing at all: the breadcrumb is written by the adapter that
+    # already had to work this out in order to review the right thing.
+    repo_root = _read_breadcrumb(session_id) or _repo_root()
     if not repo_root:
         return 0
     git_dir = _git_dir(repo_root)
@@ -1688,28 +1414,10 @@ def _mode_post(argv):
 
     entry = _latest_record_for_head(git_dir, head)
     if not entry:
-        # Usually uninteresting: nothing was pushed, or this repo is not gated.
-        # One shape is worth saying out loud rather than passing in silence --
-        # see _commits_in_same_command.
-        if not _commits_in_same_command(cmd) or _push_was_a_noop(payload):
-            return 0
-        marker = Path(git_dir) / f"{POST_DELIVERED_PREFIX}{_marker_digest('unreviewed', head, session_id)}"
-        if not _claim_marker(marker):
-            return 0
-        _emit_post_context(
-            "review-gate: these commits were NOT reviewed.\n"
-            "  The command created the commit and pushed it in one step, so the gate ran\n"
-            "  before that commit existed and had nothing to look at. The global git hook\n"
-            "  covers this shape, but it did not run here (not installed, or shadowed by a\n"
-            "  repo-local core.hooksPath -- /review-gate:doctor will say which).\n"
-            "  To review them now: commit and push as two separate commands next time, or\n"
-            "  run /review-gate:review over the pushed range."
-        )
-        _reap_markers(git_dir, keep=marker)
-        return 0
+        return 0  # no review recorded for these commits
 
     # The record must describe THIS push, not merely this HEAD. Resolving the
-    # repo from a shell command is best-effort (see _resolve_pushed_repo), so
+    # repo from a shell command is best-effort (see _gate_repo), so
     # when it guesses wrong it tends to land on whatever repository the session
     # happens to sit in -- whose HEAD has a record too, often months old. That
     # is exactly how a live test reported a different repo's stale findings as
@@ -1861,9 +1569,9 @@ def _main_inner(argv, mode):
         # merely CONTAINING those words behind an unresolvable cd would be
         # denied -- a grep pattern, a heredoc, a Python string. Over-reviewing
         # is cheap; over-blocking is not.
-        if _push_target_unknown(payload) and _looks_like_real_push(
-            (payload.get("tool_input") or {}).get("command", "") if isinstance(payload, dict) else ""
-        ):
+        _cmd = (payload.get("tool_input") or {}).get("command", "") if isinstance(payload, dict) else ""
+        _resolved, _ambiguous = _gate_repo(payload)
+        if _ambiguous and _looks_like_real_push(_cmd):
             # There is a `cd` we cannot follow, so we do not know what these
             # commits are. Blocking is the same rule the rest of this file
             # applies to every other "cannot run" case: a gate that does not
@@ -1883,7 +1591,9 @@ def _main_inner(argv, mode):
                 "itself was launched from.\n"
                 "  - Or push from a plain terminal, which this adapter does not gate.",
             )
-        repo_root = _resolve_pushed_repo(payload) or _repo_root()
+        repo_root = _resolved or _repo_root()
+        _drop_breadcrumb(str(payload.get("session_id") or "") if isinstance(payload, dict) else "",
+                         repo_root)
     else:
         repo_root = _repo_root()
     # allow() takes an optional reason, and it is worth being precise about
