@@ -807,82 +807,91 @@ _DASH_C = re.compile(r"-[A-Za-z]*c$")
 # the next line looked like ONE command whose first word was `ls`, and the
 # shell test failed on a genuine invocation.
 _SEPARATORS = ("&&", "||", ";", "|", "&", ";;", "(", ")", "{", "}", "\n")
-_TOKENS = re.compile(r"\n|\S+")
-def _is_shell_dash_c(toks):
-    """True when these tokens end in `<shell> [flags] -c`, so a quote is CODE.
 
-    Asks whether the simple command owning the `-c` MENTIONS a shell anywhere,
-    rather than trying to pick out which token is the runner. Four attempts at
-    the latter each missed a real invocation, and every miss is a fail-open --
-    a false negative blanks a genuine `bash -c "cd /repo && git push"` into
-    data, hiding both the cd and the push:
-      - the token before `-c` alone missed `bash -lc` (a combined cluster,
-        never equal to "-c") and `bash -eu -c`;
-      - walking back over tokens starting with "-" missed flags taking a
-        separate value (`--rcfile FILE`, `-o pipefail`);
-      - taking the first word missed every wrapper (`sudo bash -c`), and
-        newlines vanished in str.split() so `ls` on the previous line looked
-        like the runner;
-      - skipping a wrapper list still missed wrappers with arguments of their
-        own (`timeout 30 bash -c`).
 
-    Membership needs none of that. It errs toward calling a span CODE, and
-    that is the right direction here: treating data as code costs at worst a
-    conservative block, while treating code as data is the fail-open.
+def _tokenize(text):
+    """Shell tokens, with separators isolated even without spaces around them.
+
+    A `\\n|\\S+` split cannot do this: `\\S+` swallows punctuation, so
+    `echo done;bash -c ...` produced the single token `done;bash` and the
+    separator was invisible. shlex's punctuation_chars mode splits `;`, `&&`,
+    `||`, `|` and friends properly, which is what this needs and what hand
+    rolling kept getting wrong.
+
+    Lines are fed separately so a newline survives as its own separator token;
+    shlex treats it as plain whitespace. An unbalanced quote makes shlex raise,
+    and that falls back to a plain split rather than losing the line.
     """
-    if not toks or not _DASH_C.match(toks[-1]):
-        return False
-    start = 0
-    for i in range(len(toks) - 2, -1, -1):
-        if toks[i] in _SEPARATORS:
-            start = i + 1
-            break
-    return any(os.path.basename(t) in _SHELLS for t in toks[start:-1])
+    toks = []
+    for i, line in enumerate(text.splitlines()):
+        if i:
+            toks.append("\n")
+        try:
+            lex = shlex.shlex(line, punctuation_chars=True, posix=False)
+            lex.whitespace_split = True
+            lex.commenters = ""  # `#` is not a comment to us; it is just text
+            toks.extend(lex)
+        except ValueError:
+            toks.extend(line.split())
+    return toks
+# Deciding whether a quoted span is CODE asks whether the simple command that
+# owns the `-c` MENTIONS a shell -- not which token is the runner. Five
+# spellings of the latter each missed a real invocation, and every miss is a
+# fail-open, because a false negative blanks a genuine
+# `bash -c "cd /repo && git push"` into data and hides both the cd and the push:
+#   - the token before `-c` missed `bash -lc` and `bash -eu -c`;
+#   - walking back over "-" tokens missed flags with separate values
+#     (`--rcfile FILE`, `-o pipefail`);
+#   - the command's first word missed every wrapper (`sudo bash -c`), and
+#     newlines vanished in str.split();
+#   - a wrapper skip-list still missed wrappers with their own arguments
+#     (`timeout 30 bash -c`).
+# Membership needs none of that, and it errs toward calling a span CODE, which
+# is the right direction: data read as code costs at worst a conservative
+# block, while code read as data is the fail-open.
 
 
 def _mask_quoted(cmd):
     """Blank the inside of quoted spans that are DATA rather than code.
 
     `git commit -m "cd repo && git push"` contains neither a cd chain nor a
-    push -- it contains a message. Parsing it as code was the last known way
-    to make this gate misread a command: a chain that never ran resolved to
-    nothing, and the unknown-target rule denied something innocent.
+    push -- it contains a message. Parsing it as code was a way to make this
+    gate misread a command: a chain that never ran resolved to nothing, and
+    the unknown-target rule denied something innocent.
 
-    Two spans are kept verbatim, decided by the tokens before the opening
-    quote:
-      cd        -- `cd "path with spaces"` really is the target, and blanking
-                   it would lose the very hop we are trying to follow.
-      <shell> -c -- `bash -c "cd /repo && git push"` really does execute its
-                   argument as shell, so it must stay parseable.
-
-    The shell name is checked, not just `-c`: `python -c "print('git push')"`
-    also has a `-c`, but its argument is Python, and treating it as shell made
-    an innocent one-liner read as a push.
+    Two spans are kept verbatim:
+      cd         -- `cd "path with spaces"` really is the target, and blanking
+                    it would lose the very hop being followed.
+      <shell> -c -- really does execute its argument as shell (see above).
 
     Quotes themselves are preserved so token boundaries do not shift, and an
     unbalanced quote simply fails to match and is left alone.
     """
     if not cmd or ("'" not in cmd and '"' not in cmd):
         return cmd or ""
-    # Tokens of everything seen so far, built INCREMENTALLY. Re-splitting the
-    # whole prefix per span was quadratic; truncating it to a fixed window was
-    # worse -- a runner just past the cutoff silently failed the shell test, so
-    # a real `bash -c "cd /x && git push"` got blanked as data and the push
-    # went invisible. Extending by only the new gap is linear AND complete.
-    out, last, toks = [], 0, []
+    out, last, prev = [], 0, ""
+    # Whether the simple command being scanned mentions a shell. Tracked as a
+    # running flag rather than re-scanned per span: a backward walk over the
+    # accumulated tokens was O(current length) each time, which is the same
+    # quadratic shape this function has already had to remove once.
+    seg_has_shell = False
     for m in _QUOTED.finditer(cmd):
         gap = cmd[last : m.start()]
-        toks.extend(_TOKENS.findall(gap))  # newlines kept: they separate commands
+        for t in _tokenize(gap):
+            if t in _SEPARATORS:
+                seg_has_shell = False  # a new simple command starts here
+            elif os.path.basename(t) in _SHELLS:
+                seg_has_shell = True
+            prev = t
         out.append(gap)
-        if (toks and toks[-1] == "cd") or _is_shell_dash_c(toks):
+        if prev == "cd" or (_DASH_C.match(prev) and seg_has_shell):
             out.append(m.group(0))
         else:
             q = m.group(0)[0]  # the pattern no longer captures it
             out.append(q + " " * (len(m.group(0)) - 2) + q)
-        # A quoted span is ONE token to whatever follows it, kept or blanked.
-        # The placeholder is never "cd" and never matches -c, which is all the
-        # next span's decision cares about.
-        toks.append('""')
+        # A quoted span is ONE token to whatever follows it, kept or blanked,
+        # and it is neither "cd" nor a -c.
+        prev = '""'
         last = m.end()
     out.append(cmd[last:])
     return "".join(out)

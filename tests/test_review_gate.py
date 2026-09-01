@@ -1490,6 +1490,10 @@ def test_every_ordinary_shell_dash_c_form_is_still_code():
         # A newline is a command separator, but str.split() discarded it, so
         # the previous line's first word looked like the runner.
         "ls\nbash -c",
+        # A separator with no spaces around it: `\S+` swallowed the `;` into
+        # its neighbour, so the token was "done;bash" and the separator was
+        # invisible. shlex splits punctuation properly.
+        "echo done;bash -c",
     ):
         cmd = f'{runner} "cd /real && {_PUSH}"'
         assert _cd_targets(cmd) == ["/real"], runner
