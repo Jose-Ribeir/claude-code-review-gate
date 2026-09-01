@@ -6,6 +6,26 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-09-01
+
+### Fixed
+Three high-severity findings the gate raised against its own 0.4.0 release,
+all in the `cd`-resolution code that release introduced.
+- **A multi-line command matched nothing.** `_cd_targets`' separator
+  alternation had no newline case and `re.finditer` is not `re.MULTILINE`, so
+  `^` only ever meant the start of the whole string — `cd repo\ngit push`
+  yielded zero targets, and a Bash tool call is routinely multi-line.
+- **`_looks_like_real_push` had the same gap, and there it was worse.** A
+  `git push` on its own line returned `False`, so the unknown-target block that
+  function gates silently never fired — dead for exactly the command shape it
+  was meant to catch.
+- **Relative `cd` targets were not anchored.** Both resolvers called
+  `os.path.isdir` on the raw capture, which Python resolves against the *hook
+  process's* cwd — the very confusion this code path exists to correct. A new
+  `_cd_candidate` expands `~` and joins a relative target onto the session's
+  cwd. It still does not `expandvars`: `$T` was set by the shell running the
+  command, not in ours.
+
 ## [0.4.0] - 2026-09-01
 
 ### Added
