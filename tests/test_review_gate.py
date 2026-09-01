@@ -627,13 +627,19 @@ _WARN_RESULT = {"findings": [dict(_FINDING, content="unchecked index")]}
 
 
 def _stub_gate(monkeypatch, tmp_path, result=_WARN_RESULT, calls=None):
+    """A gate whose review always returns `result`, anchored on tmp_path.
+
+    The two seams are _gate_repo (which repo is being pushed, and whether that
+    is even knowable) and _drop_breadcrumb (how delivery later finds out).
+    Everything else about the gate is exercised for real.
+    """
     monkeypatch.setattr(review_gate, "_write_gate_pointer", lambda: None)
     monkeypatch.setattr(review_gate, "_repo_root", lambda: str(tmp_path))
+    monkeypatch.setattr(review_gate, "_gate_repo", lambda payload: (str(tmp_path), False))
+    monkeypatch.setattr(review_gate, "_drop_breadcrumb", lambda session_id, repo: None)
     monkeypatch.setattr(review_gate, "_git_dir", lambda repo_root=None: str(tmp_path))
     monkeypatch.setattr(review_gate, "_head_sha", lambda repo_root=None: "a" * 40)
     monkeypatch.setattr(review_gate, "_branch", lambda repo_root=None: "feat/x")
-    monkeypatch.setattr(review_gate, "_resolve_pushed_repo", lambda payload: str(tmp_path))
-    monkeypatch.setattr(review_gate, "_push_target_unknown", lambda payload: False)
     monkeypatch.setattr(review_gate, "_has_unpushed_commits", lambda repo_root=None: True)
     monkeypatch.delenv("OCR_IN_REVIEW", raising=False)
 
@@ -644,6 +650,25 @@ def _stub_gate(monkeypatch, tmp_path, result=_WARN_RESULT, calls=None):
         return result, True, raw_name
 
     monkeypatch.setattr(review_gate, "_run_review", _fake_review)
+
+
+def _run_post(monkeypatch, tmp_path, command="git push", session_id="s1", shadowed=False,
+              head="a" * 40, omit_session=False):
+    """Drive --mode post. Note what is NOT stubbed: any command parsing.
+
+    Delivery reads the breadcrumb the gate left; it never looks at the command
+    to work out which repo was pushed. That is the point of the breadcrumb.
+    """
+    body = {"tool_input": {"command": command}}
+    if not omit_session:
+        body["session_id"] = session_id
+    monkeypatch.setattr(sys, "stdin", _io.StringIO(json.dumps(body)))
+    monkeypatch.setattr(review_gate, "_read_breadcrumb", lambda sid: str(tmp_path))
+    monkeypatch.setattr(review_gate, "_git_dir", lambda repo_root=None: str(tmp_path))
+    monkeypatch.setattr(review_gate, "_head_sha", lambda repo_root=None: head)
+    monkeypatch.setattr(review_gate, "_hookspath_shadowed", lambda repo_root: shadowed)
+    monkeypatch.delenv("OCR_IN_REVIEW", raising=False)
+    assert review_gate._mode_post(["review-gate.py", "--mode", "post"]) == 0
 
 
 def _run_hook(monkeypatch):
@@ -731,20 +756,6 @@ def _seed_record(tmp_path, verdict="warn", advisory=False, blocked=False, findin
         entry["truncated"] = True
         lines[-1] = json.dumps(entry)
         log.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
-def _run_post(monkeypatch, tmp_path, command="git push", session_id="s1", shadowed=False,
-              head="a" * 40, omit_session=False):
-    body = {"tool_input": {"command": command}}
-    if not omit_session:
-        body["session_id"] = session_id
-    monkeypatch.setattr(sys, "stdin", _io.StringIO(json.dumps(body)))
-    monkeypatch.setattr(review_gate, "_resolve_pushed_repo", lambda payload: str(tmp_path))
-    monkeypatch.setattr(review_gate, "_git_dir", lambda repo_root=None: str(tmp_path))
-    monkeypatch.setattr(review_gate, "_head_sha", lambda repo_root=None: head)
-    monkeypatch.setattr(review_gate, "_hookspath_shadowed", lambda repo_root: shadowed)
-    monkeypatch.delenv("OCR_IN_REVIEW", raising=False)
-    assert review_gate._mode_post(["review-gate.py", "--mode", "post"]) == 0
 
 
 def _post_context(capsys):
@@ -966,48 +977,6 @@ def test_env_prefixed_push_still_resolves(tmp_path):
     assert _cd_targets(cmd) == ["J:/x"]
 
 
-def test_resolve_prefers_the_commands_cd_over_the_session_cwd(tmp_path, monkeypatch):
-    pushed = tmp_path / "pushed"
-    pushed.mkdir()
-    monkeypatch.setattr(
-        review_gate, "_git",
-        lambda args, cwd=None: (str(cwd), 0) if args[:2] == ["rev-parse", "--show-toplevel"] else ("", 1),
-    )
-    got = review_gate._resolve_pushed_repo(
-        {"tool_input": {"command": f'cd "{pushed}" && git push'}, "cwd": str(tmp_path)}
-    )
-    assert got == str(pushed)
-
-
-def test_resolve_falls_back_to_the_payload_cwd_when_there_is_no_cd(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        review_gate, "_git",
-        lambda args, cwd=None: (str(cwd), 0) if args[:2] == ["rev-parse", "--show-toplevel"] else ("", 1),
-    )
-    got = review_gate._resolve_pushed_repo(
-        {"tool_input": {"command": "git push"}, "cwd": str(tmp_path)}
-    )
-    assert got == str(tmp_path)
-
-
-def test_a_cd_into_something_that_is_not_a_repo_falls_through(tmp_path, monkeypatch):
-    notrepo = tmp_path / "notrepo"
-    notrepo.mkdir()
-    session = tmp_path / "session"
-    session.mkdir()
-
-    def _fake_git(args, cwd=None):
-        if args[:2] == ["rev-parse", "--show-toplevel"] and str(cwd) == str(session):
-            return str(session), 0
-        return "", 1  # everything else, including notrepo, is not a repo
-
-    monkeypatch.setattr(review_gate, "_git", _fake_git)
-    got = review_gate._resolve_pushed_repo(
-        {"tool_input": {"command": f'cd "{notrepo}" && git push'}, "cwd": str(session)}
-    )
-    assert got == str(session)
-
-
 # --- capture encoding ---------------------------------------------------------
 # Regression: both subprocess calls used text=True with no encoding=, so output
 # was decoded with locale.getpreferredencoding() -- cp1252 on a default Windows
@@ -1050,33 +1019,6 @@ def test_git_subprocess_decodes_as_utf8(monkeypatch):
     review_gate._git(["rev-parse", "HEAD"])
     assert seen.get("encoding") == "utf-8"
     assert seen.get("errors") == "replace"
-
-
-# --- resolving the repo is best-effort, so staleness is the real guard --------
-# Two live failures drove this. First, --mode post resolved the session's repo
-# and delivered its month-old findings as though they described the push that
-# had just happened. Then, after the first fix, a command with two cds --
-# `cd J:/plugin && ...; cd "$T" && git push` -- had its real target hidden
-# behind an unexpandable shell variable, and falling back to the EARLIER cd
-# picked the wrong repo again. Shell parsing cannot be made reliable, so the
-# freshness bound is what makes a wrong guess silent instead of misleading.
-
-def test_only_the_last_cd_is_used_never_a_superseded_one(tmp_path, monkeypatch):
-    real = tmp_path / "real"
-    real.mkdir()
-
-    def _fake_git(args, cwd=None):
-        if args[:2] == ["rev-parse", "--show-toplevel"] and str(cwd) == str(real):
-            return str(real), 0
-        return "", 1
-
-    monkeypatch.setattr(review_gate, "_git", _fake_git)
-    # The last cd is an unexpanded variable; the earlier one is a real repo the
-    # shell has already left. Answering with it would be wrong.
-    got = review_gate._resolve_pushed_repo(
-        {"tool_input": {"command": f'cd {real} && x; cd "$T" && git push'}, "cwd": ""}
-    )
-    assert got != str(real)
 
 
 def test_post_ignores_a_record_too_old_to_describe_this_push(tmp_path, monkeypatch, capsys):
@@ -1143,108 +1085,11 @@ def _gate_hook(monkeypatch, command, **patches):
     return seen
 
 
-def test_the_gate_reviews_the_repo_the_command_cds_into(tmp_path, monkeypatch, capsys):
-    session, pushed = tmp_path / "session", tmp_path / "pushed"
-    session.mkdir()
-    pushed.mkdir()
-    seen = _gate_hook(
-        monkeypatch,
-        f"cd {pushed} && git push origin main",
-        _repo_root=lambda: str(session),
-        _push_target_unknown=lambda payload: False,
-        _resolve_pushed_repo=lambda payload: str(pushed),
-        _git_dir=lambda repo_root=None: str(repo_root),
-        _head_sha=lambda repo_root=None: "a" * 40,
-        _branch=lambda repo_root=None: "main",
-    )
-    # Both the "is there anything to review" question and the review itself
-    # must be asked of the pushed repo, not the session's.
-    assert seen["unpushed_root"] == str(pushed)
-    assert seen["review_root"] == str(pushed)
-
-
-def test_the_gate_blocks_when_it_cannot_tell_which_repo_is_being_pushed(monkeypatch, capsys):
-    monkeypatch.delenv("OCR_FAIL_OPEN", raising=False)
-    _gate_hook(monkeypatch, 'cd "$TARGET" && git push', _push_target_unknown=lambda payload: True)
-    payload = json.loads(capsys.readouterr().out)["hookSpecificOutput"]
-    assert payload["permissionDecision"] == "deny"
-    assert "could not determine which repository" in payload["permissionDecisionReason"]
-
-
-def test_fail_open_still_bypasses_the_unknown_target_block(monkeypatch, capsys):
-    monkeypatch.setenv("OCR_FAIL_OPEN", "1")
-    _gate_hook(monkeypatch, 'cd "$TARGET" && git push', _push_target_unknown=lambda payload: True)
-    payload = json.loads(capsys.readouterr().out)["hookSpecificOutput"]
-    assert payload["permissionDecision"] == "allow"
-
-
-def test_a_push_with_no_cd_is_not_treated_as_unknown():
-    assert review_gate._push_target_unknown({"tool_input": {"command": "git push origin main"}}) is False
-
-
-def test_an_unexpanded_variable_in_the_cd_is_unknown():
-    assert review_gate._push_target_unknown({"tool_input": {"command": 'cd "$T" && git push'}}) is True
-
-
-def test_a_cd_into_a_real_repo_is_not_unknown(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        review_gate, "_git",
-        lambda args, cwd=None: (str(cwd), 0) if args[:2] == ["rev-parse", "--show-toplevel"] else ("", 1),
-    )
-    assert review_gate._push_target_unknown(
-        {"tool_input": {"command": f"cd {tmp_path} && git push"}}
-    ) is False
-
-
-def test_a_cd_into_a_directory_that_is_not_a_repo_is_unknown(tmp_path, monkeypatch):
-    monkeypatch.setattr(review_gate, "_git", lambda args, cwd=None: ("", 1))
-    assert review_gate._push_target_unknown(
-        {"tool_input": {"command": f"cd {tmp_path} && git push"}}
-    ) is True
-
-
-# --- the block must not catch commands that merely SAY "git push" -------------
-# The adapters trigger a review on a loose "git push" substring, which is fine
-# because over-reviewing is cheap. Blocking is not: a first cut of the
-# unknown-target block would have denied `cd ~/x && grep "git push" .`, since
-# os.path.isdir does not expand ~ and the substring matched. Tilde paths and
-# incidental mentions are both ordinary, so both must stay allowed.
-
-def test_a_tilde_path_is_resolvable_not_unknown(monkeypatch):
-    monkeypatch.setattr(
-        review_gate, "_git",
-        lambda args, cwd=None: (str(cwd), 0) if args[:2] == ["rev-parse", "--show-toplevel"] else ("", 1),
-    )
-    assert review_gate._push_target_unknown({"tool_input": {"command": "cd ~ && git push"}}) is False
-
-
-def test_a_push_mentioned_only_as_text_is_not_a_real_push():
-    assert review_gate._looks_like_real_push('grep -r "git push" .') is False
-    assert review_gate._looks_like_real_push('python -c "print(\'git push\')"') is False
-
-
 def test_a_real_push_is_recognised_behind_env_prefixes_and_flags():
     assert review_gate._looks_like_real_push("git push origin main") is True
     assert review_gate._looks_like_real_push("cd /x && git push") is True
     assert review_gate._looks_like_real_push("PYTEST_WORKERS=4 git push origin main") is True
     assert review_gate._looks_like_real_push("git -c foo=bar push") is True
-
-
-def test_an_unknown_target_does_not_block_when_the_push_is_only_text(monkeypatch, capsys):
-    monkeypatch.delenv("OCR_FAIL_OPEN", raising=False)
-    seen = _gate_hook(
-        monkeypatch,
-        'cd "$T" && grep -r "git push" .',
-        _push_target_unknown=lambda payload: True,
-        _repo_root=lambda: "/session",
-        _resolve_pushed_repo=lambda payload: "/session",
-        _git_dir=lambda repo_root=None: "",
-        _head_sha=lambda repo_root=None: "",
-        _branch=lambda repo_root=None: "main",
-    )
-    payload = json.loads(capsys.readouterr().out)["hookSpecificOutput"]
-    assert payload["permissionDecision"] != "deny"
-    assert seen  # it went down the normal path rather than short-circuiting to a block
 
 
 # --- multi-line commands and relative cd targets ------------------------------
@@ -1265,125 +1110,7 @@ def test_cd_is_found_when_it_sits_on_its_own_line():
 def test_a_push_on_its_own_line_is_still_a_real_push():
     assert review_gate._looks_like_real_push("cd /repo\ngit push") is True
     assert review_gate._looks_like_real_push("set -e\nPYTEST_WORKERS=4 git push origin main") is True
-
-
-def test_a_relative_cd_is_anchored_to_the_session_directory(tmp_path, monkeypatch):
-    repo = tmp_path / "myrepo"
-    repo.mkdir()
-    seen = {}
-
-    def _fake_git(args, cwd=None):
-        seen["cwd"] = cwd
-        return (str(cwd), 0) if args[:2] == ["rev-parse", "--show-toplevel"] else ("", 1)
-
-    monkeypatch.setattr(review_gate, "_git", _fake_git)
-    got = review_gate._resolve_pushed_repo(
-        {"tool_input": {"command": "cd myrepo && git push"}, "cwd": str(tmp_path)}
-    )
-    assert got == str(repo)
-
-
-def test_a_relative_cd_that_does_not_exist_under_the_session_dir_is_unknown(tmp_path, monkeypatch):
-    monkeypatch.setattr(review_gate, "_git", lambda args, cwd=None: ("", 1))
-    assert review_gate._push_target_unknown(
-        {"tool_input": {"command": "cd nope && git push"}, "cwd": str(tmp_path)}
-    ) is True
-
-
-def test_a_relative_cd_is_not_tested_against_the_hook_process_cwd(tmp_path, monkeypatch):
-    # The regression itself: "scripts" exists under the plugin repo, which is
-    # where the hook process runs. Anchored to an unrelated session dir it must
-    # NOT resolve, no matter what the process cwd happens to contain.
-    monkeypatch.setattr(
-        review_gate, "_git",
-        lambda args, cwd=None: (str(cwd), 0) if args[:2] == ["rev-parse", "--show-toplevel"] else ("", 1),
-    )
-    assert review_gate._push_target_unknown(
-        {"tool_input": {"command": "cd scripts && git push"}, "cwd": str(tmp_path)}
-    ) is True
-
-
-# --- the whole cd chain, not just the last hop --------------------------------
-# The gate's review of 9af1886 (medium): only the LAST target was anchored to
-# the session base, but in `cd repo1 && cd sub && <push>`, `sub` is relative to
-# `repo1`. Joining it onto the base produced a path that either did not exist --
-# falling through to the fallback this code exists to avoid -- or existed and
-# pointed somewhere unrelated.
-
-_effective_cd = review_gate._effective_cd
 _PUSH = "git" + " push"  # not spelled literally: this file is read by the gate
-
-
-def test_a_relative_hop_is_joined_onto_the_previous_hop():
-    got = _effective_cd(f"cd repo1 && cd sub && {_PUSH}", os.path.join(os.sep, "session"))
-    assert got == os.path.normpath(os.path.join(os.sep, "session", "repo1", "sub"))
-
-
-def test_the_chain_folds_across_newlines_too():
-    got = _effective_cd(f"cd repo1\ncd sub\n{_PUSH}", os.path.join(os.sep, "session"))
-    assert got == os.path.normpath(os.path.join(os.sep, "session", "repo1", "sub"))
-
-
-def test_an_absolute_hop_re_anchors_and_clears_an_earlier_unknown():
-    # `$T` cannot be followed, but the absolute cd after it fully determines
-    # where the push happens, so the chain is knowable again.
-    abs_repo = os.path.join(os.sep, "srv", "repo")
-    assert _effective_cd(f'cd "$T" && cd {abs_repo} && {_PUSH}', os.sep) == abs_repo
-
-
-def test_a_relative_hop_after_an_unknown_one_stays_unknown():
-    # Nothing to join it onto, and guessing is what produced a confident answer
-    # about the wrong repository in the first place.
-    assert _effective_cd(f'cd "$T" && cd sub && {_PUSH}', os.sep) == ""
-
-
-def test_cd_dash_is_unfollowable():
-    assert _effective_cd(f"cd - && {_PUSH}", os.sep) == ""
-
-
-def test_no_cd_yields_the_base_unchanged():
-    base = os.path.join(os.sep, "session")
-    assert _effective_cd(f"{_PUSH} origin main", base) == base
-
-
-def test_a_chained_relative_push_resolves_to_the_real_repo(tmp_path, monkeypatch):
-    (tmp_path / "repo1" / "sub").mkdir(parents=True)
-    monkeypatch.setattr(
-        review_gate, "_git",
-        lambda args, cwd=None: (str(cwd), 0) if args[:2] == ["rev-parse", "--show-toplevel"] else ("", 1),
-    )
-    got = review_gate._resolve_pushed_repo(
-        {"tool_input": {"command": f"cd repo1 && cd sub && {_PUSH}"}, "cwd": str(tmp_path)}
-    )
-    assert got == os.path.normpath(str(tmp_path / "repo1" / "sub"))
-
-
-def test_a_chain_ending_somewhere_unfollowable_is_unknown(tmp_path, monkeypatch):
-    monkeypatch.setattr(review_gate, "_git", lambda args, cwd=None: ("", 1))
-    assert review_gate._push_target_unknown(
-        {"tool_input": {"command": f'cd repo1 && cd "$T" && {_PUSH}'}, "cwd": str(tmp_path)}
-    ) is True
-
-
-# --- heredoc bodies are data, not commands ------------------------------------
-# Found the hard way: the Bash call adding the tests above was DENIED by the
-# installed gate. Its heredoc contained `cd repo1 && cd sub && <push>` as test
-# data, which the parser read as a real cd chain -- it resolved to nothing, and
-# the unknown-target rule blocked an entirely innocent command.
-
-def test_a_heredoc_body_does_not_contribute_cd_targets():
-    cmd = (
-        "cd /real/repo && cat >> t.py <<'EOF'\n"
-        f"    x = 'cd repo1 && cd sub && {_PUSH}'\n"
-        "EOF\n"
-        "pytest -q"
-    )
-    assert _cd_targets(cmd) == ["/real/repo"]
-
-
-def test_a_push_inside_a_heredoc_is_not_a_real_push():
-    cmd = f"cat > deploy.sh <<'EOF'\ncd /srv/app && {_PUSH} origin main\nEOF"
-    assert review_gate._looks_like_real_push(cmd) is False
 
 
 def test_a_real_push_after_a_heredoc_still_counts():
@@ -1391,11 +1118,6 @@ def test_a_real_push_after_a_heredoc_still_counts():
     cmd = f"cat > x <<'EOF'\nhello\nEOF\ncd /srv/app && {_PUSH}"
     assert review_gate._looks_like_real_push(cmd) is True
     assert _cd_targets(cmd) == ["/srv/app"]
-
-
-def test_an_unquoted_heredoc_marker_is_handled_too():
-    cmd = f"cat > x <<EOF\ncd /elsewhere && {_PUSH}\nEOF\ncd /real && {_PUSH}"
-    assert _cd_targets(cmd) == ["/real"]
 
 
 # --- ...but stripping must never eat real commands ----------------------------
@@ -1412,236 +1134,11 @@ def test_two_angle_brackets_as_data_do_not_open_a_heredoc():
     assert review_gate._looks_like_real_push(cmd) is True
 
 
-def test_an_unterminated_heredoc_strips_nothing():
-    # No terminator anywhere means this cannot be trusted as a heredoc, and
-    # stripping to end-of-command would delete the real commands after it.
-    cmd = f"cat > x <<EOF\nbody\ncd /repo\n{_PUSH}"
-    assert review_gate._strip_heredocs(cmd) == cmd
-
-
-def test_an_opener_with_a_trailing_redirection_is_still_an_opener():
-    cmd = f"cat <<'EOF' > out\ncd /elsewhere\nEOF\ncd /repo && {_PUSH}"
-    assert _cd_targets(cmd) == ["/repo"]
-
-
-# The opener lookahead has been wrong twice, in both directions. Allowing only
-# redirections after the marker rejected the extremely ordinary
-# `python - <<'PY' | tee log`, so its body went unstripped and the misparse
-# came back. What actually separates an opener from the same characters as data
-# is that an opener is followed by end-of-line, a redirection, or a
-# pipe/separator -- never by a bare word.
-
-def test_an_opener_followed_by_a_pipe_is_still_an_opener():
-    cmd = f"cat <<'EOF' | grep x\ncd /elsewhere && {_PUSH}\nEOF\ncd /repo && {_PUSH}"
-    assert _cd_targets(cmd) == ["/repo"]
-
-
-def test_an_opener_followed_by_a_redirection_and_a_pipe_is_still_an_opener():
-    # The shape used throughout this project's own tooling.
-    cmd = f"python - <<'PY' 2>&1 | head -5\ncd /elsewhere && {_PUSH}\nPY\ncd /repo && {_PUSH}"
-    assert _cd_targets(cmd) == ["/repo"]
-
-
-def test_an_opener_followed_by_a_command_separator_is_still_an_opener():
-    cmd = f"cat <<EOF && echo hi\ncd /elsewhere\nEOF\ncd /repo && {_PUSH}"
-    assert _cd_targets(cmd) == ["/repo"]
-
-
-def test_a_marker_followed_by_a_bare_word_is_data_not_an_opener():
-    cmd = f'echo "a <<EOF b"\ncd /repo\n{_PUSH}'
-    assert _cd_targets(cmd) == ["/repo"]
-    assert review_gate._strip_heredocs(cmd) == cmd
-
-
-# --- quoted spans are data, except a cd target and a shell's -c ---------------
-# The last known way to make the parser misread a command: a cd chain inside a
-# quoted ARGUMENT (a commit message, a grep pattern) was parsed as code, so a
-# chain that never ran resolved to nothing and the unknown-target rule could
-# deny something innocent.
-
-def test_a_cd_chain_in_a_commit_message_is_not_code():
-    cmd = f'git commit -m "cd repo1 && cd sub && {_PUSH}"'
-    assert _cd_targets(cmd) == []
-    assert review_gate._looks_like_real_push(cmd) is False
-
-
-def test_a_cd_chain_in_a_grep_pattern_is_not_code():
-    cmd = f'grep -r "cd /x && {_PUSH}" .'
-    assert _cd_targets(cmd) == []
-    assert review_gate._looks_like_real_push(cmd) is False
-
-
 def test_a_quoted_cd_target_survives_masking():
     # The exception that makes blanket masking unsafe: this quoted span IS the
     # hop we are trying to follow.
     cmd = f'cd "/path with spaces" && {_PUSH}'
     assert _cd_targets(cmd) == ["/path with spaces"]
-
-
-def test_a_shell_dash_c_argument_is_still_code(tmp_path):
-    for runner in ("bash", "/bin/bash", "sh"):
-        cmd = f'{runner} -c "cd /real && {_PUSH}"'
-        assert _cd_targets(cmd) == ["/real"], runner
-        assert review_gate._looks_like_real_push(cmd) is True, runner
-
-
-def test_every_ordinary_shell_dash_c_form_is_still_code():
-    # Checking only the token before `-c` missed all of these. `-lc` never
-    # equals "-c" at all, and `-eu -c` / `--norc -c` put flags in between --
-    # yet each really does execute its argument, so blanking it hid a genuine
-    # cd and push from the parser.
-    for runner in (
-        "bash -c", "bash -lc", "bash -eu -c", "sh -e -c",
-        "bash --noprofile --norc -c", "/bin/bash -lc",
-        # Flags that take a SEPARATE value: walking back over tokens starting
-        # with "-" stopped at the value and never reached the shell name.
-        "bash --rcfile /etc/bashrc -c", "bash -o pipefail -c",
-        # Things that precede the shell rather than being it. Taking the first
-        # word of the command missed every one of these.
-        "FOO=1 bash -c", "env FOO=1 bash -c", "sudo bash -c",
-        "nohup /bin/bash -lc",
-        # A wrapper with an argument of its own, which a fixed skip-list of
-        # wrapper NAMES still got wrong.
-        "timeout 30 bash -c",
-        # A newline is a command separator, but str.split() discarded it, so
-        # the previous line's first word looked like the runner.
-        "ls\nbash -c",
-        # A separator with no spaces around it: `\S+` swallowed the `;` into
-        # its neighbour, so the token was "done;bash" and the separator was
-        # invisible. shlex splits punctuation properly.
-        "echo done;bash -c",
-    ):
-        cmd = f'{runner} "cd /real && {_PUSH}"'
-        assert _cd_targets(cmd) == ["/real"], runner
-        assert review_gate._looks_like_real_push(cmd) is True, runner
-
-
-def test_a_shell_dash_c_after_a_separator_still_resolves(tmp_path):
-    # The -c belongs to the command after `&&`, and both hops are real, so the
-    # chain folds onto the inner one.
-    cmd = f'cd /x && bash -c "cd /real && {_PUSH}"'
-    assert _cd_targets(cmd) == ["/x", "/real"]
-    # An absolute hop is returned as written -- it re-anchors the chain, and
-    # it is handed straight to `git -C`.
-    assert _effective_cd(cmd, os.sep) == "/real"
-
-
-def test_a_remote_runners_dash_c_is_not_local_shell():
-    # `ssh host -c ...` does not run its argument as a local shell.
-    cmd = f"""ssh host -c "cd /real && {_PUSH}" """
-    assert review_gate._looks_like_real_push(cmd) is False
-
-
-def test_a_wrapped_non_shell_is_still_not_shell():
-    # The membership test must not be so loose that any wrapper qualifies.
-    cmd = f"""sudo python -c "print('{_PUSH}')" """
-    assert review_gate._looks_like_real_push(cmd) is False
-
-
-# --- the tokenizer and the masking state machine, directly -------------------
-# These have interacting edge cases (segment resets, the newline token, the
-# stray-quote fallback, the -c cluster pattern) and five prior spellings were
-# each wrong in a different way, so they are pinned here rather than only
-# exercised through _cd_targets / _looks_like_real_push.
-
-_tokenize = review_gate._tokenize
-
-
-def test_tokenize_separates_punctuation_written_without_spaces():
-    assert _tokenize("echo done;bash -c") == ["echo", "done", ";", "bash", "-c"]
-    assert "&&" in _tokenize("a&&b")
-
-
-def test_tokenize_keeps_a_newline_as_its_own_token():
-    # shlex treats a newline as plain whitespace, so lines are fed separately
-    # and the separator is re-inserted; without it the previous line's first
-    # word looked like the runner of the next line's command.
-    assert _tokenize("ls\nbash -c") == ["ls", "\n", "bash", "-c"]
-
-
-def test_tokenize_falls_back_when_a_quote_is_unbalanced():
-    # shlex raises on an unterminated quote; losing the line entirely would
-    # hide whatever came before it.
-    assert _tokenize("echo don't stop") == ["echo", "don't", "stop"]
-
-
-def test_a_shell_in_an_earlier_segment_does_not_leak_into_a_later_one():
-    # The running seg_has_shell flag must reset at a separator, or every
-    # command after a `bash -c` would have its quotes treated as code.
-    cmd = f"""bash -c "echo hi" ; python -c "print('{_PUSH}')" """
-    assert review_gate._looks_like_real_push(cmd) is False
-
-
-def test_a_long_option_merely_ending_in_c_is_not_a_shell_dash_c():
-    # `-[A-Za-z]*c$` matched -exec, -sync, -static, -public and friends, so a
-    # quoted argument after one of them was parsed as executable shell.
-    for flag in (
-        "-exec",      # four letters, so a length cap alone cannot reject it;
-                      # the repeated `e` is what does
-        "-static",    # repeated `t`
-        "-mimic",     # repeated `m` and `i`
-        "-sync", "-async",   # `y` is not a bash short option
-        "-magic",            # `g` is not either
-        "-atomic", "-public", "-classic", "-generic", "-periodic", "-topic",
-        "--sync",     # a long option is never a cluster
-    ):
-        assert not review_gate._is_dash_c(flag), flag
-    cmd = f"""bash script.sh && find . -exec "cd /x && {_PUSH}" ;"""
-    assert _cd_targets(cmd) == []
-
-
-def test_the_short_clusters_that_do_mean_dash_c_still_match():
-    # -euxc is the regression this list guards: a two-letter cap rejected it,
-    # and a miss blanks a real `bash -euxc "... push"` into data.
-    for flag in ("-c", "-lc", "-ec", "-xc", "-euc", "-euxc"):
-        assert review_gate._is_dash_c(flag), flag
-
-
-def test_a_long_cluster_shell_invocation_is_still_code():
-    cmd = f'bash -euxc "cd /real && {_PUSH}"'
-    assert _cd_targets(cmd) == ["/real"]
-    assert review_gate._looks_like_real_push(cmd) is True
-
-
-def test_masking_stays_linear_across_many_quoted_spans():
-    # Re-splitting the whole prefix for each span made this O(n * spans); a
-    # generated script with thousands of quoted strings is exactly the input
-    # a hook on every Bash call must not choke on.
-    big = " ".join(f'echo "span {i}"' for i in range(6000))
-    started = time.time()
-    review_gate._mask_quoted(big)
-    assert time.time() - started < 2.0
-
-
-def test_a_runner_far_before_its_quote_is_still_found():
-    # The first attempt at making the lookup linear truncated it to a fixed
-    # 200-character window, which traded the quadratic cost for a correctness
-    # hole: a runner past the cutoff failed the shell test, so a real
-    # `bash -c "cd /x && <push>"` was blanked as data and the push went
-    # invisible to the gate. Tokens are accumulated incrementally now, so
-    # distance does not matter.
-    long_flags = " ".join(f"--flag-number-{i}" for i in range(30))
-    cmd = f'bash {long_flags} -c "cd /real && {_PUSH}"'
-    assert cmd.index('"') > 400  # well past any fixed window
-    assert _cd_targets(cmd) == ["/real"]
-    assert review_gate._looks_like_real_push(cmd) is True
-
-
-def test_data_is_still_masked_after_many_preceding_spans():
-    # The incremental tokenizer must not drift: a quoted span counts as one
-    # token, so a later commit message is still recognised as data.
-    prefix = " ".join(f'echo "x{i}"' for i in range(500))
-    cmd = f'{prefix} && git commit -m "cd /a && {_PUSH}"'
-    assert _cd_targets(cmd) == []
-    assert review_gate._looks_like_real_push(cmd) is False
-
-
-def test_a_non_shell_dash_c_argument_is_not_code():
-    # python -c takes PYTHON, not shell. Treating every `-c` as shell made this
-    # harmless one-liner read as a real push.
-    cmd = f"""python -c "print('{_PUSH}')" """
-    assert review_gate._looks_like_real_push(cmd) is False
-    assert _cd_targets("""python -c "import os; os.system('cd /x')" """) == []
 
 
 def test_a_real_push_alongside_a_quoted_message_still_parses():
@@ -1650,68 +1147,138 @@ def test_a_real_push_alongside_a_quoted_message_still_parses():
     assert review_gate._looks_like_real_push(cmd) is True
 
 
-def test_an_unbalanced_quote_does_not_crash_or_swallow_the_command():
-    cmd = f'echo "unterminated && cd /repo && {_PUSH}'
-    review_gate._mask_quoted(cmd)  # must not raise
+# --- which repo is being pushed, and whether that is knowable ----------------
+# This replaced ~300 lines of shell parsing. The parser tried to make every
+# exotic command WORK and produced eleven repair commits, several of them
+# fail-opens the gate itself caught. In a fail-closed tool the answer to an
+# ambiguous command is not a better parser: it is to refuse and say so.
+
+_gate_repo = review_gate._gate_repo
 
 
-# --- commit and push in one command -------------------------------------------
-# A PreToolUse hook runs BEFORE the command, so when the command creates the
-# commit it pushes, HEAD still points at the parent and there is nothing
-# unpushed to review. Structural -- no pre-tool hook can review a commit that
-# does not exist yet -- so the gate says so instead of passing in silence.
-
-_commits_in_same_command = review_gate._commits_in_same_command
+def _payload(cmd, cwd):
+    return {"tool_input": {"command": cmd}, "cwd": str(cwd)}
 
 
-def test_commit_then_push_in_one_command_is_detected():
-    assert _commits_in_same_command(f'git add -A && git commit -q -m "x" && {_PUSH}') is True
+def _repo_at(monkeypatch, *real_dirs):
+    """git resolves only the given directories; everything else is not a repo."""
+    real = {os.path.normcase(os.path.abspath(str(d))) for d in real_dirs}
+
+    def _fake_git(args, cwd=None):
+        if args[:2] == ["rev-parse", "--show-toplevel"]:
+            if cwd and os.path.normcase(os.path.abspath(str(cwd))) in real:
+                return str(cwd), 0
+        return "", 1
+
+    monkeypatch.setattr(review_gate, "_git", _fake_git)
 
 
-def test_commit_then_push_is_detected_across_lines():
-    assert _commits_in_same_command(f'git commit -m "x"\n{_PUSH}') is True
+def test_no_cd_uses_the_session_directory(tmp_path, monkeypatch):
+    _repo_at(monkeypatch, tmp_path)
+    assert _gate_repo(_payload("git push origin main", tmp_path)) == (str(tmp_path), False)
 
 
-def test_a_push_on_its_own_is_not_the_commit_then_push_shape():
-    assert _commits_in_same_command(f"cd /repo && {_PUSH}") is False
+def test_a_literal_cd_wins_over_the_session_directory(tmp_path, monkeypatch):
+    pushed = tmp_path / "pushed"
+    pushed.mkdir()
+    _repo_at(monkeypatch, pushed)
+    root, ambiguous = _gate_repo(_payload("cd " + str(pushed) + " && git push", tmp_path))
+    assert (root, ambiguous) == (str(pushed), False)
 
 
-def test_a_commit_message_mentioning_a_push_is_not_the_shape():
-    assert _commits_in_same_command(f'git commit -m "later {_PUSH}"') is False
+def test_a_relative_cd_is_anchored_to_the_session_directory(tmp_path, monkeypatch):
+    (tmp_path / "repo").mkdir()
+    _repo_at(monkeypatch, tmp_path / "repo")
+    root, ambiguous = _gate_repo(_payload("cd repo && git push", tmp_path))
+    assert ambiguous is False
+    assert os.path.normcase(root) == os.path.normcase(str(tmp_path / "repo"))
 
 
-def test_a_commit_after_the_push_is_not_the_shape():
-    # Only a commit created BEFORE the push can be the one going unreviewed.
-    assert _commits_in_same_command(f'{_PUSH} && git commit -m "x"') is False
+def test_a_chained_relative_cd_folds_onto_the_previous_hop(tmp_path, monkeypatch):
+    (tmp_path / "repo" / "sub").mkdir(parents=True)
+    _repo_at(monkeypatch, tmp_path / "repo" / "sub")
+    root, ambiguous = _gate_repo(_payload("cd repo && cd sub && git push", tmp_path))
+    assert ambiguous is False
+    assert os.path.normcase(root) == os.path.normcase(str(tmp_path / "repo" / "sub"))
 
 
-def test_an_unquoted_mention_of_a_push_is_not_the_commit_then_push_shape():
-    # _mask_quoted only blanks QUOTED spans, so an unquoted mention survives
-    # into the parse. Locating the push by substring called this shape a
-    # commit-pushed-unreviewed, a false alarm about work never sent anywhere.
-    cmd = f"git commit -m \"wip\" && echo remember to {_PUSH} later"
-    assert _commits_in_same_command(cmd) is False
+def test_an_unexpanded_variable_is_ambiguous(tmp_path, monkeypatch):
+    _repo_at(monkeypatch, tmp_path)
+    assert _gate_repo(_payload('cd "$T" && git push', tmp_path)) == ("", True)
 
 
-def test_a_cd_after_a_mere_mention_of_a_push_is_still_found():
-    # Bounding the cd scan at the first literal occurrence would truncate here
-    # and hide the real target.
-    assert _cd_targets(f"echo remember to {_PUSH} && cd /repo && {_PUSH}") == ["/repo"]
+def test_a_command_substitution_is_ambiguous(tmp_path, monkeypatch):
+    _repo_at(monkeypatch, tmp_path)
+    assert _gate_repo(_payload("cd $(git rev-parse --show-toplevel) && git push", tmp_path)) == ("", True)
 
 
-def test_quote_masking_is_linear_on_a_pathological_input():
-    # The first _QUOTED used a backreference with two alternatives that could
-    # each consume a backslash, so an unterminated quote followed by a run of
-    # backslashes forced the engine through every pairing -- exponential, in a
-    # hook that runs on every Bash call. Both branches are now unambiguous.
-    evil = 'echo "' + "\\" * 20000
-    started = time.time()
-    review_gate._mask_quoted(evil)
-    assert time.time() - started < 2.0
+def test_cd_dash_is_ambiguous(tmp_path, monkeypatch):
+    _repo_at(monkeypatch, tmp_path)
+    assert _gate_repo(_payload("cd - && git push", tmp_path)) == ("", True)
 
 
-def test_a_push_with_nothing_to_send_is_not_reported_as_unreviewed():
-    assert review_gate._push_was_a_noop(
-        {"tool_response": {"stdout": "Everything up-to-date", "stderr": ""}}
-    ) is True
-    assert review_gate._push_was_a_noop({"tool_response": {"stdout": "main -> main"}}) is False
+def test_a_cd_into_something_that_is_not_a_directory_is_ambiguous(tmp_path, monkeypatch):
+    _repo_at(monkeypatch, tmp_path)
+    assert _gate_repo(_payload("cd nope && git push", tmp_path)) == ("", True)
+
+
+def test_a_directory_that_is_not_a_repo_is_ambiguous(tmp_path, monkeypatch):
+    (tmp_path / "plain").mkdir()
+    _repo_at(monkeypatch, tmp_path)  # tmp_path resolves, tmp_path/plain does not
+    assert _gate_repo(_payload("cd plain && git push", tmp_path)) == ("", True)
+
+
+def test_ambiguity_is_deliberately_blunter_than_the_old_parser(tmp_path, monkeypatch):
+    # A heredoc or quoted argument that merely CONTAINS a cd chain now reads as
+    # ambiguous and blocks. The old parser tried to tell code from data and got
+    # it wrong repeatedly; blocking is visible and bypassable, misrouting is
+    # neither. This test exists so the trade is a decision, not an accident.
+    _repo_at(monkeypatch, tmp_path)
+    cmd = 'git commit -m "cd nowhere && git push" && git push'
+    assert _gate_repo(_payload(cmd, tmp_path)) == ("", True)
+
+
+# --- the breadcrumb: delivery does no command parsing at all -----------------
+# The gate already had to resolve the pushed repo in order to review it, so it
+# writes that down and --mode post reads it. Delivery re-deriving it by parsing
+# the command again was duplicated fragility with its own failure modes.
+
+def test_the_breadcrumb_round_trips(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(tmp_path / "data"))
+    review_gate._drop_breadcrumb("sess-1", str(tmp_path))
+    assert review_gate._read_breadcrumb("sess-1") == str(tmp_path)
+
+
+def test_breadcrumbs_are_per_session(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(tmp_path / "data"))
+    review_gate._drop_breadcrumb("sess-1", str(tmp_path))
+    assert review_gate._read_breadcrumb("sess-2") == ""
+
+
+def test_a_missing_breadcrumb_reads_empty(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(tmp_path / "data"))
+    assert review_gate._read_breadcrumb("never-written") == ""
+
+
+def test_a_stale_breadcrumb_is_ignored(tmp_path, monkeypatch):
+    # It describes some earlier push, not this one. Better to fall back to the
+    # process cwd than to report against a repo we have since left.
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(tmp_path / "data"))
+    review_gate._drop_breadcrumb("sess-1", str(tmp_path))
+    p = review_gate._breadcrumb_path("sess-1")
+    stamp = time.time() - (MARKER_TTL + 60)
+    os.utime(p, (stamp, stamp))
+    assert review_gate._read_breadcrumb("sess-1") == ""
+
+
+def test_a_breadcrumb_pointing_at_a_vanished_directory_reads_empty(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(tmp_path / "data"))
+    review_gate._drop_breadcrumb("sess-1", str(tmp_path / "gone"))
+    assert review_gate._read_breadcrumb("sess-1") == ""
+
+
+def test_dropping_a_breadcrumb_never_raises(tmp_path, monkeypatch):
+    # Bookkeeping must not be able to break a push.
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(tmp_path / "f" / "data"))
+    (tmp_path / "f").write_text("not a directory", encoding="utf-8")
+    review_gate._drop_breadcrumb("sess-1", str(tmp_path))  # must not raise
