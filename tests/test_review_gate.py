@@ -1282,3 +1282,17 @@ def test_dropping_a_breadcrumb_never_raises(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(tmp_path / "f" / "data"))
     (tmp_path / "f").write_text("not a directory", encoding="utf-8")
     review_gate._drop_breadcrumb("sess-1", str(tmp_path))  # must not raise
+
+
+def test_a_mention_of_a_push_does_not_truncate_the_cd_scan(tmp_path, monkeypatch):
+    # The scan is bounded at the push COMMAND, not the first occurrence of the
+    # words. Splitting on the substring loses a real cd that comes after a mere
+    # mention -- the command below would fall back to the session directory and
+    # review the wrong repo silently, which is the fail-open this resolution
+    # exists to close. Caught by the gate on its own release.
+    (tmp_path / "real").mkdir()
+    _repo_at(monkeypatch, tmp_path / "real")
+    cmd = 'echo "remember to git push later" && cd real && git push'
+    root, ambiguous = _gate_repo(_payload(cmd, tmp_path))
+    assert ambiguous is False
+    assert os.path.normcase(root) == os.path.normcase(str(tmp_path / "real"))
