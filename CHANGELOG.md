@@ -6,6 +6,23 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-09-01
+
+### Fixed
+- **A heredoc opener followed by a pipe was not recognised.** The lookahead
+  added in 0.4.2 allowed only *redirections* after the marker, so
+  `cat <<'EOF' | grep x` and `python - <<'PY' | tee log` — the shape this
+  project's own tooling uses constantly — were not treated as openers, their
+  bodies went unstripped, and body text resembling a `cd` chain was misparsed
+  exactly as before the stripping existed. What actually distinguishes an
+  opener from the same characters used as data is what *follows* the marker:
+  end-of-line, a redirection, or a pipe/separator — never a bare word. The
+  lookahead now says that, which is wider without being weaker.
+- **`_resolve_pushed_repo`'s docstring still described the removed single-hop
+  behaviour** after the implementation moved to the folded chain — the same
+  hazard this release line hit twice already: a comment asserting something the
+  code stopped doing.
+
 ## [0.4.2] - 2026-09-01
 
 ### Fixed
