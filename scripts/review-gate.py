@@ -799,8 +799,21 @@ _QUOTED = re.compile(
 # -c flag: python's is Python, and reading it as shell turned a harmless
 # `python -c "print('git push')"` into a push.
 _SHELLS = ("bash", "sh", "zsh", "dash", "ksh", "bash.exe", "sh.exe")
-# `-c`, or a combined short-flag cluster ending in it: `-lc`, `-ec`.
-_DASH_C = re.compile(r"-[A-Za-z]*c$")
+# `-c`, or a SHORT combined cluster ending in it: `-lc`, `-ec`, `-euc`.
+#
+# The length cap is the whole point. `-[A-Za-z]*c$` also matched every
+# single-dash long option that merely ends in the letter c -- `-exec`, `-sync`,
+# `-static`, `-atomic`, `-public`, `-classic` -- so a quoted argument after one
+# of those was treated as executable shell. Two letters before the `c` covers
+# every cluster anyone writes (`-c`, `-lc`, `-ec`, `-xc`, `-euc`) and excludes
+# all of those. `--foo` never matches at all: the second character must be a
+# letter.
+#
+# The trade is deliberate. A longer cluster like `-euxc` would now be missed,
+# and a miss is the unsafe direction here -- but it is a shape essentially
+# nobody writes, and the git pre-push adapter still covers what this one
+# misses. An over-match, by contrast, fires on `find -exec`, which is common.
+_DASH_C = re.compile(r"-[A-Za-z]{0,2}c$")
 # Tokens that end one simple command and begin the next. A NEWLINE is one of
 # them, and it has to be tokenized explicitly: str.split() throws newlines away
 # as ordinary whitespace, so a multi-line `ls` followed by `bash -c "..."` on
