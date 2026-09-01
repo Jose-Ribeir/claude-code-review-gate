@@ -783,7 +783,18 @@ def _strip_heredocs(cmd):
     return "\n".join(out)
 
 
-_QUOTED = re.compile(r"""(['"])(?:\\.|(?!\1).)*\1""", re.S)
+# Each branch is written so a backslash can be consumed exactly ONE way. The
+# first version used a backreference with `(?:\\.|(?!\1).)*`, whose two
+# alternatives both match a backslash -- on an unterminated quote the engine
+# tries every pairing of a backslash run and the match goes exponential. That
+# is a denial of service in a hook that runs on every Bash call, so the classes
+# below exclude the backslash and leave `\\.` as the only way to consume it.
+# Single quotes take no escapes in POSIX sh, hence the simpler branch.
+_QUOTED = re.compile(
+    r"'[^']*'"  # single-quoted: literal through to the next quote
+    r'|"(?:[^"\\]|\\.)*"',  # double-quoted: backslash escapes apply
+    re.S,
+)
 # Runners whose `-c` argument is SHELL. Deliberately not every program with a
 # -c flag: python's is Python, and reading it as shell turned a harmless
 # `python -c "print('git push')"` into a push.
@@ -823,7 +834,7 @@ def _mask_quoted(cmd):
         if prev == "cd" or (prev == "-c" and runner in _SHELLS):
             out.append(m.group(0))
         else:
-            q = m.group(1)
+            q = m.group(0)[0]  # the pattern no longer captures it
             out.append(q + " " * (len(m.group(0)) - 2) + q)
         last = m.end()
     out.append(cmd[last:])
@@ -849,7 +860,12 @@ def _cd_targets(cmd):
     """
     if not cmd:
         return []
-    head = _shell_code(cmd).split("git push", 1)[0]
+    code = _shell_code(cmd)
+    # Bound the scan at the push COMMAND, not the first literal occurrence of
+    # the text: `echo remember to git push` is a mention, and truncating there
+    # would hide a real cd that comes after it.
+    stop = _REAL_PUSH.search(code)
+    head = code[: stop.start()] if stop else code
     targets = []
     for m in _CD_TARGET.finditer(head):
         target = next((g for g in m.groups() if g), "")
@@ -1493,8 +1509,11 @@ def _commits_in_same_command(cmd):
     m = _COMMIT.search(code)
     if not m:
         return False
-    at = code.find("git push")
-    return at != -1 and m.start() < at
+    # _REAL_PUSH, not a substring search: `git commit -m "wip" && echo remember
+    # to git push later` only commits, and calling that "pushed unreviewed"
+    # would be a false alarm about work that was never sent anywhere.
+    at = _REAL_PUSH.search(code)
+    return bool(at) and m.start() < at.start()
 
 
 def _push_was_a_noop(payload):

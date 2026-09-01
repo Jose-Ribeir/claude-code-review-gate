@@ -1518,6 +1518,31 @@ def test_a_commit_after_the_push_is_not_the_shape():
     assert _commits_in_same_command(f'{_PUSH} && git commit -m "x"') is False
 
 
+def test_an_unquoted_mention_of_a_push_is_not_the_commit_then_push_shape():
+    # _mask_quoted only blanks QUOTED spans, so an unquoted mention survives
+    # into the parse. Locating the push by substring called this shape a
+    # commit-pushed-unreviewed, a false alarm about work never sent anywhere.
+    cmd = f"git commit -m \"wip\" && echo remember to {_PUSH} later"
+    assert _commits_in_same_command(cmd) is False
+
+
+def test_a_cd_after_a_mere_mention_of_a_push_is_still_found():
+    # Bounding the cd scan at the first literal occurrence would truncate here
+    # and hide the real target.
+    assert _cd_targets(f"echo remember to {_PUSH} && cd /repo && {_PUSH}") == ["/repo"]
+
+
+def test_quote_masking_is_linear_on_a_pathological_input():
+    # The first _QUOTED used a backreference with two alternatives that could
+    # each consume a backslash, so an unterminated quote followed by a run of
+    # backslashes forced the engine through every pairing -- exponential, in a
+    # hook that runs on every Bash call. Both branches are now unambiguous.
+    evil = 'echo "' + "\\" * 20000
+    started = time.time()
+    review_gate._mask_quoted(evil)
+    assert time.time() - started < 2.0
+
+
 def test_a_push_with_nothing_to_send_is_not_reported_as_unreviewed():
     assert review_gate._push_was_a_noop(
         {"tool_response": {"stdout": "Everything up-to-date", "stderr": ""}}
