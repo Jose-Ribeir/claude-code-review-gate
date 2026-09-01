@@ -616,7 +616,9 @@ def _stub_gate(monkeypatch, tmp_path, result=_WARN_RESULT, calls=None):
     monkeypatch.setattr(review_gate, "_git_dir", lambda repo_root=None: str(tmp_path))
     monkeypatch.setattr(review_gate, "_head_sha", lambda repo_root=None: "a" * 40)
     monkeypatch.setattr(review_gate, "_branch", lambda repo_root=None: "feat/x")
-    monkeypatch.setattr(review_gate, "_has_unpushed_commits", lambda: True)
+    monkeypatch.setattr(review_gate, "_resolve_pushed_repo", lambda payload: str(tmp_path))
+    monkeypatch.setattr(review_gate, "_push_target_unknown", lambda payload: False)
+    monkeypatch.setattr(review_gate, "_has_unpushed_commits", lambda repo_root=None: True)
     monkeypatch.delenv("OCR_IN_REVIEW", raising=False)
 
     def _fake_review(repo_root, mode, git_dir=None, head_sha=""):
@@ -644,8 +646,11 @@ def test_passing_review_persists_its_findings_and_reports_them(tmp_path, monkeyp
 
     payload = json.loads(capsys.readouterr().out)["hookSpecificOutput"]
     assert payload["permissionDecision"] == "allow"
-    # The findings ride back to the calling session instead of vanishing into
-    # a stderr stream Claude Code does not surface on an allow.
+    # The findings are attached to the allow decision. NOTE: this reaches the
+    # hook's own record (visible UI-side, useful when debugging) and NOT the
+    # model -- verified 2026-09, an allow produces no `hook_additional_context`
+    # companion. Model delivery is --mode post; see the tests at the end of
+    # this file. This assertion pins the debugging aid, not a delivery channel.
     assert "unchecked index" in payload["permissionDecisionReason"]
 
     entry = _read_history(str(tmp_path))[0]
@@ -686,3 +691,541 @@ def test_history_command_prints_the_recorded_findings(tmp_path, monkeypatch, cap
     assert review_gate._print_history(["review-gate.py", "--history"]) == 0
     out = capsys.readouterr().out
     assert "unchecked index" in out and "feat/x" in out and "warn" in out
+
+
+# --- --mode post: the only channel that reaches the model ---------------------
+# Verified 2026-09 against Claude Code transcripts: a PreToolUse
+# permissionDecisionReason on an ALLOW produces no `hook_additional_context`
+# record, so it never reaches the model; a PostToolUse additionalContext does.
+# These tests pin the behaviour that discovery forced.
+
+def _seed_record(tmp_path, verdict="warn", advisory=False, blocked=False, findings=None,
+                 head="a" * 40, count=None):
+    result = {"findings": findings if findings is not None else _WARN_RESULT["findings"]}
+    review_gate._record_review(
+        str(tmp_path), head, "feat/x", "hook", verdict, advisory, blocked, result, ""
+    )
+    if count is not None:
+        # Simulate _record_review shedding findings to fit _MAX_LOG_LINE: the
+        # entry keeps the true count but carries fewer (or zero) findings.
+        log = review_gate._findings_log_path(str(tmp_path))
+        lines = log.read_text(encoding="utf-8").splitlines()
+        entry = json.loads(lines[-1])
+        entry["finding_count"] = count
+        entry["truncated"] = True
+        lines[-1] = json.dumps(entry)
+        log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _run_post(monkeypatch, tmp_path, command="git push", session_id="s1", shadowed=False,
+              head="a" * 40, omit_session=False):
+    body = {"tool_input": {"command": command}}
+    if not omit_session:
+        body["session_id"] = session_id
+    monkeypatch.setattr(sys, "stdin", _io.StringIO(json.dumps(body)))
+    monkeypatch.setattr(review_gate, "_resolve_pushed_repo", lambda payload: str(tmp_path))
+    monkeypatch.setattr(review_gate, "_git_dir", lambda repo_root=None: str(tmp_path))
+    monkeypatch.setattr(review_gate, "_head_sha", lambda repo_root=None: head)
+    monkeypatch.setattr(review_gate, "_hookspath_shadowed", lambda repo_root: shadowed)
+    monkeypatch.delenv("OCR_IN_REVIEW", raising=False)
+    assert review_gate._mode_post(["review-gate.py", "--mode", "post"]) == 0
+
+
+def _post_context(capsys):
+    """The additionalContext this run emitted, or "" when it stayed silent."""
+    out = capsys.readouterr().out.strip()
+    if not out:
+        return ""
+    payload = json.loads(out)["hookSpecificOutput"]
+    assert payload["hookEventName"] == "PostToolUse"
+    return payload["additionalContext"]
+
+
+def test_post_delivers_a_warn_records_findings(tmp_path, monkeypatch, capsys):
+    _seed_record(tmp_path)
+    _run_post(monkeypatch, tmp_path)
+    ctx = _post_context(capsys)
+    assert "unchecked index" in ctx and "verdict: warn" in ctx
+
+
+def test_post_stays_silent_the_second_time_in_one_session(tmp_path, monkeypatch, capsys):
+    _seed_record(tmp_path)
+    _run_post(monkeypatch, tmp_path)
+    assert _post_context(capsys)
+    # Same session, same HEAD, same record: already in this context.
+    _run_post(monkeypatch, tmp_path)
+    assert _post_context(capsys) == ""
+
+
+def test_post_redelivers_to_a_new_session(tmp_path, monkeypatch, capsys):
+    _seed_record(tmp_path)
+    _run_post(monkeypatch, tmp_path, session_id="s1")
+    assert _post_context(capsys)
+    # A different session has a fresh context that genuinely lacks the findings.
+    _run_post(monkeypatch, tmp_path, session_id="s2")
+    assert "unchecked index" in _post_context(capsys)
+
+
+def test_post_redelivers_when_the_same_head_is_reviewed_again(tmp_path, monkeypatch, capsys):
+    _seed_record(tmp_path)
+    _run_post(monkeypatch, tmp_path)
+    capsys.readouterr()
+    time.sleep(0.01)
+    _seed_record(tmp_path)  # a second review of the same HEAD -> new record ts
+    _run_post(monkeypatch, tmp_path)
+    assert "unchecked index" in _post_context(capsys)
+
+
+def test_post_is_silent_on_a_clean_pass(tmp_path, monkeypatch, capsys):
+    _seed_record(tmp_path, verdict="pass", findings=[])
+    _run_post(monkeypatch, tmp_path)
+    assert _post_context(capsys) == ""
+
+
+def test_post_is_silent_when_no_review_was_recorded_for_this_head(tmp_path, monkeypatch, capsys):
+    _seed_record(tmp_path, head="b" * 40)
+    _run_post(monkeypatch, tmp_path, head="a" * 40)
+    assert _post_context(capsys) == ""
+
+
+def test_post_is_silent_for_a_command_that_is_not_a_push(tmp_path, monkeypatch, capsys):
+    _seed_record(tmp_path)
+    _run_post(monkeypatch, tmp_path, command="git status")
+    assert _post_context(capsys) == ""
+
+
+def test_post_shouts_about_an_advisory_downgraded_block(tmp_path, monkeypatch, capsys):
+    # The highest-stakes invisible case: a block-level finding that let the push
+    # through because blocking is off. Nothing else stops it.
+    _seed_record(tmp_path, verdict="block", advisory=True, blocked=False)
+    ctx = (_run_post(monkeypatch, tmp_path), _post_context(capsys))[1]
+    assert "BLOCK-level findings, NOT enforced (advisory mode)" in ctx
+
+
+def test_post_never_renders_an_empty_findings_block_when_the_log_shed_them(
+    tmp_path, monkeypatch, capsys
+):
+    _seed_record(tmp_path, findings=[], count=7)
+    _run_post(monkeypatch, tmp_path)
+    ctx = _post_context(capsys)
+    assert "7 finding(s)" in ctx and "7 more finding(s) not recorded" in ctx
+    assert "--history 1" in ctx
+
+
+def test_post_works_when_the_payload_carries_no_session_id(tmp_path, monkeypatch, capsys):
+    _seed_record(tmp_path)
+    _run_post(monkeypatch, tmp_path, omit_session=True)
+    assert "unchecked index" in _post_context(capsys)
+
+
+def test_post_warns_once_per_session_that_the_git_adapter_is_shadowed(
+    tmp_path, monkeypatch, capsys
+):
+    _seed_record(tmp_path)
+    _run_post(monkeypatch, tmp_path, shadowed=True)
+    assert "core.hooksPath" in _post_context(capsys)
+    # Static per-repo fact: repeating it every push trains the reader to skip it.
+    time.sleep(0.01)
+    _seed_record(tmp_path)
+    _run_post(monkeypatch, tmp_path, shadowed=True)
+    ctx = _post_context(capsys)
+    assert "unchecked index" in ctx and "core.hooksPath" not in ctx
+
+
+def test_post_output_is_pure_ascii(tmp_path, monkeypatch, capsys):
+    # This text reaches a Windows terminal via git's stderr in --mode git, where
+    # a stray em-dash renders as a replacement character.
+    _seed_record(tmp_path, verdict="block", advisory=True)
+    _run_post(monkeypatch, tmp_path, shadowed=True)
+    _post_context(capsys).encode("ascii")
+
+
+def test_post_is_inert_inside_the_headless_review_session(tmp_path, monkeypatch, capsys):
+    # The plugin is loaded into the review session via --plugin-dir, so this
+    # hook is registered there too and would fire on every Bash call it makes.
+    _seed_record(tmp_path)
+    monkeypatch.setenv("OCR_IN_REVIEW", "1")
+    monkeypatch.setattr(sys, "stdin", _io.StringIO('{"tool_input": {"command": "git push"}}'))
+    try:
+        review_gate.main(["review-gate.py", "--mode", "post"])
+    except SystemExit as exc:
+        assert exc.code == 0
+    assert capsys.readouterr().out.strip() == ""
+
+
+# --- core.hooksPath shadowing -------------------------------------------------
+# A repo-local core.hooksPath overrides the global one, silently taking the git
+# adapter out of the chain. install-git-hook.sh sets the GLOBAL value, so this
+# is a config-induced fail-open that nothing else announces.
+
+def _shadow_repo(tmp_path, monkeypatch, local, glob_="/g/review-gate/hooks"):
+    def _fake_git(args, cwd=None):
+        if args[:4] == ["config", "--local", "--get", "core.hooksPath"]:
+            return (local, 0) if local else ("", 1)
+        if args[:4] == ["config", "--global", "--get", "core.hooksPath"]:
+            return (glob_, 0) if glob_ else ("", 1)
+        return "", 1
+    monkeypatch.setattr(review_gate, "_git", _fake_git)
+    return review_gate._hookspath_shadowed(str(tmp_path))
+
+
+def test_no_local_hookspath_is_not_shadowed(tmp_path, monkeypatch):
+    assert _shadow_repo(tmp_path, monkeypatch, local="") is False
+
+
+def test_no_global_hook_means_there_is_nothing_to_shadow(tmp_path, monkeypatch):
+    assert _shadow_repo(tmp_path, monkeypatch, local="/repo/hooks", glob_="") is False
+
+
+def test_a_repo_local_hookspath_shadows_the_git_adapter(tmp_path, monkeypatch):
+    assert _shadow_repo(tmp_path, monkeypatch, local=str(tmp_path / "hooks")) is True
+
+
+def test_a_hook_that_actually_chains_into_us_is_not_shadowing(tmp_path, monkeypatch):
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    (hooks / "pre-push").write_text(
+        '#!/bin/sh\nexec python "$HOME/x/review-gate.py" --mode git\n', encoding="utf-8"
+    )
+    assert _shadow_repo(tmp_path, monkeypatch, local=str(hooks)) is False
+
+
+def test_merely_mentioning_review_gate_in_a_comment_does_not_count_as_chaining(
+    tmp_path, monkeypatch
+):
+    # Regression: the repo that prompted this check has a pre-push whose
+    # comments discuss review-gate at length precisely to explain that it does
+    # NOT invoke it. A bare substring match read that as "chained" and hid the
+    # exact fail-open this function exists to report.
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    (hooks / "pre-push").write_text(
+        "#!/bin/sh\n"
+        "# NOTE: this used to also run a second review pass on top of the\n"
+        "# review-gate plugin that already reviews every commit. Removed --\n"
+        "# do not re-add without checking whether review-gate is still enabled.\n"
+        "run_tests\n",
+        encoding="utf-8",
+    )
+    assert _shadow_repo(tmp_path, monkeypatch, local=str(hooks)) is True
+
+
+# --- which repository was actually pushed -------------------------------------
+# Regression: --mode post resolved the repo from the process cwd, which in a
+# hook is the SESSION's directory. Claude Code routinely pushes as
+# `cd <repo> && git push`, so a live smoke test delivered a different
+# repository's month-old findings as though they described the push that had
+# just completed -- worse than silence, because it reads as a real report.
+
+_cd_targets = review_gate._cd_targets
+
+
+def test_cd_target_is_taken_from_the_command():
+    assert _cd_targets("cd /a/b && git push origin main") == ["/a/b"]
+
+
+def test_cd_target_handles_quoted_paths_with_spaces():
+    assert _cd_targets('cd "/a b/c" && git push') == ["/a b/c"]
+    assert _cd_targets("cd '/a b/c' && git push") == ["/a b/c"]
+
+
+def test_the_last_cd_before_the_push_wins():
+    # Callers try these in reverse, so the one in effect at push time is last.
+    assert _cd_targets("cd /a && cd /b && git push")[-1] == "/b"
+
+
+def test_cd_after_the_push_is_not_a_target():
+    # Only what ran BEFORE the push can have determined where it happened.
+    assert _cd_targets("git push && cd /elsewhere") == []
+
+
+def test_a_command_with_no_cd_has_no_targets():
+    assert _cd_targets("git push origin main") == []
+    assert _cd_targets("") == []
+
+
+def test_env_prefixed_push_still_resolves(tmp_path):
+    # The shape the user actually reported this bug with.
+    cmd = 'cd J:/x && PYTEST_XDIST_AUTO_NUM_WORKERS=4 git push origin main 2>&1 | tail -14'
+    assert _cd_targets(cmd) == ["J:/x"]
+
+
+def test_resolve_prefers_the_commands_cd_over_the_session_cwd(tmp_path, monkeypatch):
+    pushed = tmp_path / "pushed"
+    pushed.mkdir()
+    monkeypatch.setattr(
+        review_gate, "_git",
+        lambda args, cwd=None: (str(cwd), 0) if args[:2] == ["rev-parse", "--show-toplevel"] else ("", 1),
+    )
+    got = review_gate._resolve_pushed_repo(
+        {"tool_input": {"command": f'cd "{pushed}" && git push'}, "cwd": str(tmp_path)}
+    )
+    assert got == str(pushed)
+
+
+def test_resolve_falls_back_to_the_payload_cwd_when_there_is_no_cd(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        review_gate, "_git",
+        lambda args, cwd=None: (str(cwd), 0) if args[:2] == ["rev-parse", "--show-toplevel"] else ("", 1),
+    )
+    got = review_gate._resolve_pushed_repo(
+        {"tool_input": {"command": "git push"}, "cwd": str(tmp_path)}
+    )
+    assert got == str(tmp_path)
+
+
+def test_a_cd_into_something_that_is_not_a_repo_falls_through(tmp_path, monkeypatch):
+    notrepo = tmp_path / "notrepo"
+    notrepo.mkdir()
+    session = tmp_path / "session"
+    session.mkdir()
+
+    def _fake_git(args, cwd=None):
+        if args[:2] == ["rev-parse", "--show-toplevel"] and str(cwd) == str(session):
+            return str(session), 0
+        return "", 1  # everything else, including notrepo, is not a repo
+
+    monkeypatch.setattr(review_gate, "_git", _fake_git)
+    got = review_gate._resolve_pushed_repo(
+        {"tool_input": {"command": f'cd "{notrepo}" && git push'}, "cwd": str(session)}
+    )
+    assert got == str(session)
+
+
+# --- capture encoding ---------------------------------------------------------
+# Regression: both subprocess calls used text=True with no encoding=, so output
+# was decoded with locale.getpreferredencoding() -- cp1252 on a default Windows
+# box. The reviewer emits UTF-8, so an em-dash in a finding arrived as "a€""
+# and was then stored that way in the findings log, the raw snapshot, and the
+# context injected into the session. Caught in a live smoke test, not by review.
+
+def test_the_reviewer_subprocess_decodes_as_utf8(monkeypatch, tmp_path):
+    seen = {}
+
+    class _Proc:
+        returncode = 0
+        stdout = '{"findings": []}'
+        stderr = ""
+
+    def _fake_run(cmd, **kw):
+        seen.update(kw)
+        return _Proc()
+
+    monkeypatch.setattr(review_gate.subprocess, "run", _fake_run)
+    monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
+    review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40)
+    assert seen.get("encoding") == "utf-8"
+    assert seen.get("errors") == "replace"
+
+
+def test_git_subprocess_decodes_as_utf8(monkeypatch):
+    seen = {}
+
+    class _Proc:
+        returncode = 0
+        stdout = "main"
+        stderr = ""
+
+    def _fake_run(cmd, **kw):
+        seen.update(kw)
+        return _Proc()
+
+    monkeypatch.setattr(review_gate.subprocess, "run", _fake_run)
+    review_gate._git(["rev-parse", "HEAD"])
+    assert seen.get("encoding") == "utf-8"
+    assert seen.get("errors") == "replace"
+
+
+# --- resolving the repo is best-effort, so staleness is the real guard --------
+# Two live failures drove this. First, --mode post resolved the session's repo
+# and delivered its month-old findings as though they described the push that
+# had just happened. Then, after the first fix, a command with two cds --
+# `cd J:/plugin && ...; cd "$T" && git push` -- had its real target hidden
+# behind an unexpandable shell variable, and falling back to the EARLIER cd
+# picked the wrong repo again. Shell parsing cannot be made reliable, so the
+# freshness bound is what makes a wrong guess silent instead of misleading.
+
+def test_only_the_last_cd_is_used_never_a_superseded_one(tmp_path, monkeypatch):
+    real = tmp_path / "real"
+    real.mkdir()
+
+    def _fake_git(args, cwd=None):
+        if args[:2] == ["rev-parse", "--show-toplevel"] and str(cwd) == str(real):
+            return str(real), 0
+        return "", 1
+
+    monkeypatch.setattr(review_gate, "_git", _fake_git)
+    # The last cd is an unexpanded variable; the earlier one is a real repo the
+    # shell has already left. Answering with it would be wrong.
+    got = review_gate._resolve_pushed_repo(
+        {"tool_input": {"command": f'cd {real} && x; cd "$T" && git push'}, "cwd": ""}
+    )
+    assert got != str(real)
+
+
+def test_post_ignores_a_record_too_old_to_describe_this_push(tmp_path, monkeypatch, capsys):
+    _seed_record(tmp_path)
+    log = review_gate._findings_log_path(str(tmp_path))
+    lines = log.read_text(encoding="utf-8").splitlines()
+    entry = json.loads(lines[-1])
+    entry["ts"] = time.time() - (MARKER_TTL + 60)
+    lines[-1] = json.dumps(entry)
+    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    _run_post(monkeypatch, tmp_path)
+    assert _post_context(capsys) == ""
+
+
+def test_post_still_delivers_a_record_written_moments_ago(tmp_path, monkeypatch, capsys):
+    _seed_record(tmp_path)
+    _run_post(monkeypatch, tmp_path)
+    assert "unchecked index" in _post_context(capsys)
+
+
+def test_post_ignores_a_record_with_an_unusable_timestamp(tmp_path, monkeypatch, capsys):
+    _seed_record(tmp_path)
+    log = review_gate._findings_log_path(str(tmp_path))
+    lines = log.read_text(encoding="utf-8").splitlines()
+    entry = json.loads(lines[-1])
+    entry["ts"] = "not-a-timestamp"
+    lines[-1] = json.dumps(entry)
+    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    _run_post(monkeypatch, tmp_path)
+    assert _post_context(capsys) == ""
+
+
+# --- the gate must look at the repo being PUSHED ------------------------------
+# Found by smoke test, not review: in hook mode repo_root came from the process
+# cwd -- the directory Claude Code was launched from. Claude routinely pushes as
+# `cd <repo> && git push`, so the gate inspected the SESSION's repo, found
+# nothing unpushed, and allowed a push it had never reviewed. Silent, and total
+# in any repo where the global git hook is absent or shadowed.
+
+def _gate_hook(monkeypatch, command, **patches):
+    seen = {}
+    monkeypatch.setattr(review_gate, "_write_gate_pointer", lambda: None)
+    monkeypatch.delenv("OCR_IN_REVIEW", raising=False)
+    for name, value in patches.items():
+        monkeypatch.setattr(review_gate, name, value)
+
+    def _unpushed(repo_root=None):
+        seen["unpushed_root"] = repo_root
+        return True
+
+    def _review(repo_root, mode, git_dir=None, head_sha=""):
+        seen["review_root"] = repo_root
+        return {"findings": []}, True, ""
+
+    monkeypatch.setattr(review_gate, "_has_unpushed_commits", _unpushed)
+    monkeypatch.setattr(review_gate, "_run_review", _review)
+    monkeypatch.setattr(sys, "stdin", _io.StringIO(json.dumps({"tool_input": {"command": command}})))
+    try:
+        review_gate._main_inner(["review-gate.py", "--mode", "hook"], "hook")
+    except SystemExit:
+        pass
+    return seen
+
+
+def test_the_gate_reviews_the_repo_the_command_cds_into(tmp_path, monkeypatch, capsys):
+    session, pushed = tmp_path / "session", tmp_path / "pushed"
+    session.mkdir()
+    pushed.mkdir()
+    seen = _gate_hook(
+        monkeypatch,
+        f"cd {pushed} && git push origin main",
+        _repo_root=lambda: str(session),
+        _push_target_unknown=lambda payload: False,
+        _resolve_pushed_repo=lambda payload: str(pushed),
+        _git_dir=lambda repo_root=None: str(repo_root),
+        _head_sha=lambda repo_root=None: "a" * 40,
+        _branch=lambda repo_root=None: "main",
+    )
+    # Both the "is there anything to review" question and the review itself
+    # must be asked of the pushed repo, not the session's.
+    assert seen["unpushed_root"] == str(pushed)
+    assert seen["review_root"] == str(pushed)
+
+
+def test_the_gate_blocks_when_it_cannot_tell_which_repo_is_being_pushed(monkeypatch, capsys):
+    monkeypatch.delenv("OCR_FAIL_OPEN", raising=False)
+    _gate_hook(monkeypatch, 'cd "$TARGET" && git push', _push_target_unknown=lambda payload: True)
+    payload = json.loads(capsys.readouterr().out)["hookSpecificOutput"]
+    assert payload["permissionDecision"] == "deny"
+    assert "could not determine which repository" in payload["permissionDecisionReason"]
+
+
+def test_fail_open_still_bypasses_the_unknown_target_block(monkeypatch, capsys):
+    monkeypatch.setenv("OCR_FAIL_OPEN", "1")
+    _gate_hook(monkeypatch, 'cd "$TARGET" && git push', _push_target_unknown=lambda payload: True)
+    payload = json.loads(capsys.readouterr().out)["hookSpecificOutput"]
+    assert payload["permissionDecision"] == "allow"
+
+
+def test_a_push_with_no_cd_is_not_treated_as_unknown():
+    assert review_gate._push_target_unknown({"tool_input": {"command": "git push origin main"}}) is False
+
+
+def test_an_unexpanded_variable_in_the_cd_is_unknown():
+    assert review_gate._push_target_unknown({"tool_input": {"command": 'cd "$T" && git push'}}) is True
+
+
+def test_a_cd_into_a_real_repo_is_not_unknown(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        review_gate, "_git",
+        lambda args, cwd=None: (str(cwd), 0) if args[:2] == ["rev-parse", "--show-toplevel"] else ("", 1),
+    )
+    assert review_gate._push_target_unknown(
+        {"tool_input": {"command": f"cd {tmp_path} && git push"}}
+    ) is False
+
+
+def test_a_cd_into_a_directory_that_is_not_a_repo_is_unknown(tmp_path, monkeypatch):
+    monkeypatch.setattr(review_gate, "_git", lambda args, cwd=None: ("", 1))
+    assert review_gate._push_target_unknown(
+        {"tool_input": {"command": f"cd {tmp_path} && git push"}}
+    ) is True
+
+
+# --- the block must not catch commands that merely SAY "git push" -------------
+# The adapters trigger a review on a loose "git push" substring, which is fine
+# because over-reviewing is cheap. Blocking is not: a first cut of the
+# unknown-target block would have denied `cd ~/x && grep "git push" .`, since
+# os.path.isdir does not expand ~ and the substring matched. Tilde paths and
+# incidental mentions are both ordinary, so both must stay allowed.
+
+def test_a_tilde_path_is_resolvable_not_unknown(monkeypatch):
+    monkeypatch.setattr(
+        review_gate, "_git",
+        lambda args, cwd=None: (str(cwd), 0) if args[:2] == ["rev-parse", "--show-toplevel"] else ("", 1),
+    )
+    assert review_gate._push_target_unknown({"tool_input": {"command": "cd ~ && git push"}}) is False
+
+
+def test_a_push_mentioned_only_as_text_is_not_a_real_push():
+    assert review_gate._looks_like_real_push('grep -r "git push" .') is False
+    assert review_gate._looks_like_real_push('python -c "print(\'git push\')"') is False
+
+
+def test_a_real_push_is_recognised_behind_env_prefixes_and_flags():
+    assert review_gate._looks_like_real_push("git push origin main") is True
+    assert review_gate._looks_like_real_push("cd /x && git push") is True
+    assert review_gate._looks_like_real_push("PYTEST_WORKERS=4 git push origin main") is True
+    assert review_gate._looks_like_real_push("git -c foo=bar push") is True
+
+
+def test_an_unknown_target_does_not_block_when_the_push_is_only_text(monkeypatch, capsys):
+    monkeypatch.delenv("OCR_FAIL_OPEN", raising=False)
+    seen = _gate_hook(
+        monkeypatch,
+        'cd "$T" && grep -r "git push" .',
+        _push_target_unknown=lambda payload: True,
+        _repo_root=lambda: "/session",
+        _resolve_pushed_repo=lambda payload: "/session",
+        _git_dir=lambda repo_root=None: "",
+        _head_sha=lambda repo_root=None: "",
+        _branch=lambda repo_root=None: "main",
+    )
+    payload = json.loads(capsys.readouterr().out)["hookSpecificOutput"]
+    assert payload["permissionDecision"] != "deny"
+    assert seen  # it went down the normal path rather than short-circuiting to a block

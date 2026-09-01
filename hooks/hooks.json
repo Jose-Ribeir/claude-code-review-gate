@@ -29,6 +29,33 @@
         ]
       }
     ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/post-hook.sh\"",
+            "shell": "bash",
+            "timeout": 30,
+            "statusMessage": "review-gate: checking for findings..."
+          },
+          {
+            "type": "command",
+            "command": "powershell",
+            "args": [
+              "-NoProfile",
+              "-ExecutionPolicy",
+              "Bypass",
+              "-File",
+              "${CLAUDE_PLUGIN_ROOT}/scripts/post-hook.ps1"
+            ],
+            "timeout": 30,
+            "statusMessage": "review-gate: checking for findings..."
+          }
+        ]
+      }
+    ],
     "SessionStart": [
       {
         "hooks": [

@@ -8,6 +8,12 @@
 #   --mode hook : a Claude Code PreToolUse permissionDecision (deny/allow) on stdout
 #   --mode git  : a process exit code (1 = block, 0 = allow)
 #
+# A third mode reports rather than decides:
+#   --mode post : a Claude Code PostToolUse additionalContext payload on stdout,
+#                 replaying the record an earlier review already wrote. This is
+#                 the ONLY channel that puts non-blocking findings in front of
+#                 the model -- see _mode_post for why the obvious ones do not.
+#
 # Failure policy: FAIL CLOSED on timeout, subprocess error, or unparseable
 # output — and, as of 0.3.0, on a missing Python 3 or a reviewer the git hook
 # cannot locate (both used to fail open, contradicting this very paragraph).
@@ -25,8 +31,11 @@
 #
 # The orchestrated review methodology this drives is adapted from open-code-review
 # (ocr): https://github.com/alibaba/open-code-review (Apache-2.0). See NOTICE.
+import hashlib
 import json
 import os
+from collections import deque
+import re
 import shutil
 import subprocess
 import sys
@@ -129,6 +138,26 @@ except ValueError:
 MARKER_TTL = 3600  # seconds
 MARKER_PREFIX = "scr-push-reviewed-"
 
+# Markers written by --mode post (see _mode_post). Both follow MARKER_PREFIX's
+# discipline -- claimed atomically, swept by _reap_markers on the same TTL --
+# and exist only to make a repeated report shut up:
+#   scr-post-delivered-*   this exact review was already injected into this
+#                          session's context; do not inject it again.
+#   scr-hookspath-warned-* this session was already told the git adapter is
+#                          shadowed here; it is a static per-repo fact and
+#                          repeating it every push trains the reader to skip it.
+POST_DELIVERED_PREFIX = "scr-post-delivered-"
+HOOKSPATH_WARNED_PREFIX = "scr-hookspath-warned-"
+_MARKER_PREFIXES = (MARKER_PREFIX, POST_DELIVERED_PREFIX, HOOKSPATH_WARNED_PREFIX)
+
+# --mode post limits. The findings log is append-only and never pruned, so the
+# scan is bounded from the newest end rather than reading the whole file; the
+# context cap keeps one pathological review from flooding the session it is
+# reporting into.
+POST_SCAN_CAP = 200
+POST_FINDING_LIMIT = 10
+POST_MAX_CONTEXT = 3000
+
 # Where non-blocking findings survive. review-gate-last-output.json is
 # overwritten on every run and the push markers held nothing but an epoch
 # float, so a warn/pass verdict's findings -- precisely the ones that do NOT
@@ -177,7 +206,16 @@ def _warn(msg):
 def _git(args, cwd=None):
     try:
         out = subprocess.run(
-            ["git"] + args, cwd=cwd, capture_output=True, text=True, timeout=30
+            # encoding is explicit for the same reason as in _run_review: git
+            # emits UTF-8 (branch names, paths), text=True alone would decode
+            # it with the locale's codepage.
+            ["git"] + args,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
         )
         return out.stdout.strip(), out.returncode
     except Exception:
@@ -221,9 +259,13 @@ def _branch(repo_root=None):
     return out if rc == 0 and out and out != "HEAD" else ""
 
 
-def _has_unpushed_commits():
+def _has_unpushed_commits(repo_root=None):
+    # repo_root is not optional in spirit: without it this asked the PROCESS
+    # cwd, which in hook mode is wherever Claude Code was launched from. On a
+    # `cd other-repo && git push` it therefore answered about the session's
+    # repo, found nothing unpushed, and allowed a push it had never looked at.
     for ref in ("@{u}", "origin/main", "origin/master", "origin/HEAD"):
-        out, rc = _git(["log", f"{ref}..HEAD", "--oneline"])
+        out, rc = _git(["log", f"{ref}..HEAD", "--oneline"], cwd=repo_root)
         if rc == 0:
             return bool(out.strip())
     return True  # unknown -> let the reviewer decide
@@ -309,7 +351,10 @@ def _sanitize(text, limit=_MAX_CONTENT):
     s = "".join(ch if ch.isprintable() else " " for ch in s)
     s = " ".join(s.split())
     if len(s) > limit:
-        s = s[: limit - 1].rstrip() + "…"
+        # -3, not -1: the marker is "..." since 0.3.4. A single "…" mojibakes
+        # to a replacement character on Windows, where this text reaches a
+        # terminal through git's stderr in --mode git.
+        s = s[: limit - 3].rstrip() + "..."
     return s
 
 
@@ -590,7 +635,10 @@ def _reap_markers(git_dir, keep=None):
     """
     try:
         cutoff = time.time() - MARKER_TTL
-        for path in Path(git_dir).glob(f"{MARKER_PREFIX}*"):
+        paths = []
+        for prefix in _MARKER_PREFIXES:
+            paths.extend(Path(git_dir).glob(f"{prefix}*"))
+        for path in paths:
             if keep is not None and path == keep:
                 continue
             try:
@@ -600,6 +648,241 @@ def _reap_markers(git_dir, keep=None):
                 continue  # already gone, or held by a concurrent gate run
     except Exception:
         pass  # housekeeping must never break the gate
+
+
+def _marker_digest(*parts):
+    """Stable short digest for a marker filename.
+
+    Hashed rather than concatenated because one of the parts is the hook
+    payload's session_id: it arrives from outside, and nothing guarantees it is
+    a safe path component. A digest is fixed-length, separator-free, and cannot
+    climb out of the git dir.
+    """
+    raw = "\x00".join(str(p) for p in parts)
+    return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def _claim_marker(path):
+    """Create `path` as an empty marker, atomically. True if WE created it.
+
+    check-then-act (`if not path.exists(): path.touch()`) is wrong here for the
+    same reason it was wrong in _archive_raw_output: both adapters can run
+    against one push, see the file missing, and both report.
+
+    0o666 explicitly -- os.open defaults to 0o777, which would leave these
+    executable on POSIX while every sibling artifact this tool writes lands at
+    0o644.
+
+    Note which way the error case falls: an existing marker means "already
+    said this" and returns False, but a marker we could not WRITE returns True.
+    Bookkeeping that fails must not suppress the report -- this whole mode
+    exists because findings were being missed, so a duplicate injection is the
+    cheap error and silence is the expensive one.
+    """
+    try:
+        os.close(os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666))
+        return True
+    except FileExistsError:
+        return False
+    except Exception:
+        return True
+
+
+def _latest_record_for_head(git_dir, head, cap=POST_SCAN_CAP):
+    """Newest FINDINGS_LOG entry recorded for `head`, or None.
+
+    Scans from the newest end, holding at most `cap` lines. FINDINGS_LOG is
+    append-only and deliberately never pruned, so reading it whole (as
+    _read_history does, for a command a human invokes on demand) would grow
+    without bound on a long-lived repo -- and the record this wants is by
+    construction one of the last few.
+    """
+    if not git_dir or not head:
+        return None
+    try:
+        with _findings_log_path(git_dir).open("r", encoding="utf-8", errors="replace") as fh:
+            tail = deque(fh, maxlen=cap or None)
+    except OSError:
+        return None
+    for line in reversed(tail):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except Exception:
+            continue  # half-written line from a killed process; keep looking
+        if isinstance(obj, dict) and obj.get("head") == head:
+            return obj
+    return None
+
+
+def _cd_targets(cmd):
+    """Directories a shell command cds into before it reaches `git push`.
+
+    Newest last, so callers should try them in reverse.
+    """
+    if not cmd:
+        return []
+    head = cmd.split("git push", 1)[0]
+    targets = []
+    for m in re.finditer(r'(?:^|[;&|]|&&)\s*cd\s+(?:"([^"]*)"|\'([^\']*)\'|([^\s;&|]+))', head):
+        target = next((g for g in m.groups() if g), "")
+        if target and target not in ("-", "~"):
+            targets.append(target)
+    return targets
+
+
+def _resolve_pushed_repo(payload):
+    """The repository the push actually happened in.
+
+    Neither the process cwd nor the payload's `cwd` is reliable: both are the
+    SESSION's directory, and Claude Code routinely runs pushes as
+    `cd <repo> && git push`. Reading the session dir instead cost us a real
+    failure in testing -- the hook reported a different repository's month-old
+    findings as though they described the push that had just completed, which
+    is worse than saying nothing at all.
+
+    So: the LAST `cd` before the push wins, then the payload's cwd, then the
+    process cwd. Each candidate is confirmed by asking git to resolve it.
+
+    Only the last `cd` -- never an earlier one. Shell parsing cannot expand
+    variables, so `cd "$T" && git push` yields the literal `$T`, which resolves
+    to nothing. Falling back to an EARLIER `cd` in the same command would then
+    answer with a directory the shell had already left, which is how this
+    function picked the wrong repository a second time after the first fix.
+    A superseded `cd` is not evidence; an unresolvable one means we do not
+    know, and the freshness check in _mode_post is what keeps "we do not know"
+    from turning into a confident report about the wrong repo.
+    """
+    cmd, cwd = "", ""
+    if isinstance(payload, dict):
+        cmd = (payload.get("tool_input") or {}).get("command", "") or ""
+        cwd = str(payload.get("cwd") or "")
+    targets = _cd_targets(cmd)
+    candidates = [targets[-1]] if targets else []
+    if cwd:
+        candidates.append(cwd)
+    candidates.append(os.getcwd())
+    for cand in candidates:
+        try:
+            cand = os.path.expanduser(cand)  # `cd ~/x` is ordinary; isdir does not expand it
+            if not os.path.isdir(cand):
+                continue
+        except Exception:
+            continue
+        out, rc = _git(["rev-parse", "--show-toplevel"], cwd=cand)
+        if rc == 0 and out:
+            return out
+    return ""
+
+
+def _fail_open_requested():
+    return os.environ.get("OCR_FAIL_OPEN", "").strip().lower() in ("1", "true", "yes")
+
+
+def _push_target_unknown(payload):
+    """True when the command cds somewhere we cannot resolve to a repository.
+
+    This is the distinction the GATE needs and the reporter does not. Both use
+    _resolve_pushed_repo, but its fallback chain always yields something -- and
+    for the gate, silently falling back to the session's repo is precisely the
+    fail-open being fixed: it reviews a repo nobody is pushing, finds nothing
+    unpushed, and allows.
+
+    So the gate asks this separately: was there a `cd` we could not follow?
+    "No cd at all" means the session's cwd IS the target and everything is
+    fine. "There was a cd and it resolved to nothing" -- an unexpanded `$VAR`,
+    a command substitution, a directory that is not a repo -- means we do not
+    know where these commits are going, and a gate that does not know what it
+    is looking at must not wave the push through.
+    """
+    cmd = ""
+    if isinstance(payload, dict):
+        cmd = (payload.get("tool_input") or {}).get("command", "") or ""
+    targets = _cd_targets(cmd)
+    if not targets:
+        return False
+    target = targets[-1]
+    try:
+        # expanduser, because `cd ~/x` is ordinary and os.path.isdir does not
+        # expand it -- without this, every tilde path looked unresolvable and
+        # would have been blocked. Not expandvars: `$T` was set by the shell
+        # running the command, not in OUR environment, so expanding it here
+        # would substitute an unrelated value and confidently answer wrong.
+        target = os.path.expanduser(target)
+        if not os.path.isdir(target):
+            return True
+    except Exception:
+        return True
+    out, rc = _git(["rev-parse", "--show-toplevel"], cwd=target)
+    return not (rc == 0 and out)
+
+
+# `git push` at a COMMAND position -- optionally behind env-var prefixes and
+# git's own flags -- rather than anywhere in the string.
+_REAL_PUSH = re.compile(
+    r"(?:^|[;&|]|&&|\|\|)\s*"           # start, or after a command separator
+    r"(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*"  # env-var prefixes: FOO=bar git push
+    r"git\s+"
+    r"(?:(?:-\S+|\S+=\S+)\s+)*"         # git's own flags AND their values: git -c a=b push
+    r"push\b"
+)
+
+
+def _looks_like_real_push(cmd):
+    """True when the command actually invokes `git push`, not merely mentions it.
+
+    The adapters gate on a bare "git push" SUBSTRING, which is deliberately
+    loose -- over-reviewing is cheap. Blocking is not. A command that merely
+    contains the words (a grep pattern, a heredoc, a commit message, a Python
+    string) must never be denied for a reason about pushing, so the block below
+    is held to this stricter test while the review trigger keeps the loose one.
+    """
+    return bool(_REAL_PUSH.search(cmd or ""))
+
+
+def _hookspath_shadowed(repo_root):
+    """True when a repo-local core.hooksPath hides the global git adapter.
+
+    install-git-hook.sh installs by setting the GLOBAL core.hooksPath, but git
+    resolves the LOCAL one first. So any repo that manages its own hooks --
+    husky, lefthook, a hand-rolled scripts/git-hooks -- silently drops the
+    global gate out of the chain, with nothing to announce it. Pushes made
+    through Claude Code are still covered by the PreToolUse adapter; pushes
+    from a plain terminal in such a repo are not gated at all.
+    """
+    local, rc = _git(["config", "--local", "--get", "core.hooksPath"], cwd=repo_root)
+    if rc != 0 or not local:
+        return False
+    glob_, rc = _git(["config", "--global", "--get", "core.hooksPath"], cwd=repo_root)
+    if rc != 0 or not glob_:
+        return False  # the global adapter is not installed; there is nothing to shadow
+    try:
+        if os.path.normcase(os.path.abspath(local)) == os.path.normcase(os.path.abspath(glob_)):
+            return False  # both point at the same hooks
+    except Exception:
+        pass
+    # A repo is free to chain into us from its own hook dir; that is not
+    # shadowing. Detecting that needs a STRONG signal, though. A bare
+    # "review-gate" substring is not one: the repo that prompted this check has
+    # a pre-push whose comments discuss review-gate at length precisely to
+    # explain that it does NOT invoke it, which read as "chained" and hid the
+    # very fail-open this function exists to report. Require something you only
+    # write when actually running the gate -- the script's own filename, or the
+    # global hooks dir being exec'd.
+    #
+    # The bias is deliberate: a false "shadowed" on a repo that does chain is
+    # noise, while a false "not shadowed" is the silent fail-open itself.
+    try:
+        hook = Path(repo_root or ".") / local / "pre-push"
+        if hook.is_file():
+            body = hook.read_text(encoding="utf-8", errors="replace")
+            if "review-gate.py" in body or glob_ in body:
+                return False
+    except Exception:
+        pass
+    return True
 
 
 def _extract_json(text):
@@ -788,7 +1071,7 @@ def _run_review(repo_root, mode, git_dir=None, head_sha=""):
     """
     claude = _find_claude()
     if not claude:
-        _warn("`claude` CLI not found on PATH or CLAUDE_CODE_EXECPATH — skipping review (fail-open).")
+        _warn("`claude` CLI not found on PATH or CLAUDE_CODE_EXECPATH - skipping review (fail-open).")
         return None, False, ""
     # OCR_CLAUDE_ARGS replaces the defaults wholesale (full escape hatch, also
     # discards the cost controls AND the read-only tool allowlist);
@@ -813,6 +1096,15 @@ def _run_review(repo_root, mode, git_dir=None, head_sha=""):
             cwd=repo_root,
             capture_output=True,
             text=True,
+            # Explicit, because text=True alone decodes with
+            # locale.getpreferredencoding() -- cp1252 on a default Windows box.
+            # The reviewer emits UTF-8, so every em-dash in a finding was being
+            # mangled at capture and then stored mangled forever: the findings
+            # log, the raw snapshot, and now the context injected into the
+            # session all carried it. errors="replace" because a corrupted byte
+            # must not take the whole review down.
+            encoding="utf-8",
+            errors="replace",
             timeout=TIMEOUT,
             env=child_env,
         )
@@ -837,13 +1129,13 @@ def _run_review(repo_root, mode, git_dir=None, head_sha=""):
         else:
             escalation = f"  Give Claude more time : OCR_TIMEOUT={TIMEOUT * 2} git commit ..."
         raise ReviewGateError(
-            f"review timed out after {TIMEOUT}s — blocking commit to preserve gate integrity.\n"
+            f"review timed out after {TIMEOUT}s - blocking commit to preserve gate integrity.\n"
             f"{escalation}\n"
             f"{bypass}"
         )
     except Exception as exc:
         raise ReviewGateError(
-            f"review process error ({exc}) — blocking commit to preserve gate integrity.\n"
+            f"review process error ({exc}) - blocking commit to preserve gate integrity.\n"
             f"{bypass}"
         )
     raw_name = _save_raw_output(git_dir, proc.stdout, head_sha)
@@ -870,7 +1162,7 @@ def _run_review(repo_root, mode, git_dir=None, head_sha=""):
         # Exit 0 but no JSON. Auth failures have been seen to exit 0 too
         # (the Desktop-bundled claude.exe does exactly this), so still check.
         raise ReviewGateError(
-            "could not parse review output — blocking commit to preserve gate integrity.\n"
+            "could not parse review output - blocking commit to preserve gate integrity.\n"
             f"  Claude stdout (first 400 chars): {proc.stdout[:400]!r}\n"
             f"{_auth_hint(proc.stdout or '')}"
             f"{bypass}"
@@ -893,7 +1185,7 @@ def _format_reasons(result, limit=20):
         # bare "- " that looks like display truncation rather than a defect
         # in the review itself.
         content = _sanitize(f.get("content") or "").strip() or (
-            "(reviewer omitted a description for this finding — see raw output log)"
+            "(reviewer omitted a description for this finding - see raw output log)"
         )
         lines.append(f"  [{sev}] {loc} - {content}")
     # limit=0 means "all of them" -- used by --history, which is read on demand
@@ -964,6 +1256,146 @@ def _print_history(argv):
     return 0
 
 
+def _post_label(entry):
+    n = entry.get("finding_count") or 0
+    verdict = _sanitize(entry.get("verdict") or "?", 16)
+    if verdict == "block" and entry.get("advisory"):
+        # The loudest case in the whole mode: a block-level finding that let the
+        # push through because blocking is off. Nothing else stops it, so the
+        # wording has to carry the weight the exit code no longer does.
+        return f"BLOCK-level findings, NOT enforced (advisory mode) - {n} finding(s)"
+    return f"verdict: {verdict} - {n} finding(s)"
+
+
+def _post_context(entry, git_dir, shadow=False):
+    """additionalContext body for one recorded review; "" means stay silent."""
+    verdict = str(entry.get("verdict") or "")
+    count = entry.get("finding_count") or 0
+    # A clean pass says nothing. This body is injected on every push forever,
+    # and "the gate ran" is already observable: the PreToolUse hook shows its
+    # status line for the whole review, and --history replays any of them.
+    if verdict == "pass" and not count:
+        return ""
+    lines = ["review-gate: " + _post_label(entry)]
+    body = _format_reasons(entry, limit=POST_FINDING_LIMIT)
+    if body:
+        lines.append(body)
+    shown = len(entry.get("findings") or [])
+    if count > shown:
+        # _record_review sheds findings to fit _MAX_LOG_LINE, all the way to
+        # zero. Say so, rather than rendering an empty block that reads like
+        # the review found nothing worth describing.
+        lines.append(f"  ({count - shown} more finding(s) not recorded in the log line)")
+    raw = entry.get("raw")
+    if raw and git_dir:
+        lines.append(f"  Raw reviewer output: {Path(git_dir) / _sanitize(str(raw), 200)}")
+    lines.append(f'  Replay: python "{os.path.abspath(__file__)}" --history 1')
+    if shadow:
+        lines.append(
+            "  NOTE: this repo sets its own core.hooksPath, which shadows the global "
+            "review-gate git hook - pushes from a plain terminal here are NOT gated."
+        )
+    return "\n".join(lines)[:POST_MAX_CONTEXT]
+
+
+def _mode_post(argv):
+    """`--mode post`: replay this HEAD's recorded review as PostToolUse context.
+
+    This is the ONLY channel that puts non-blocking findings in front of the
+    model. Verified 2026-09 against Claude Code's own transcripts: a PostToolUse
+    hook returning additionalContext produces a `hook_additional_context`
+    record -- the delivery vehicle -- while a PreToolUse
+    `permissionDecisionReason` on an ALLOW produces none. It is logged UI-side
+    and goes nowhere else, which is why blocks (delivered as the tool_result of
+    a deny) were never the problem and warns always were.
+
+    PostToolUse fires only for a tool call that actually ran and succeeded
+    (verified: 760 failed Bash calls produced 0 PostToolUse hooks), so a
+    rejected push never reaches this code. That is deliberate rather than a
+    hole: the delivered-marker is claimed here, so an attempt that never got
+    here leaves it unset and the retry -- same HEAD, same record -- reports
+    then. The residual gap is a command that updates the reviewed ref yet exits
+    non-zero and is never retried (a multi-ref push where one ref is rejected;
+    `git push && gh pr create` where gh fails). Those findings stay in
+    FINDINGS_LOG, reachable via --history.
+
+    Best-effort and silent throughout. This stdout is parsed by Claude Code, so
+    the only acceptable outputs are one JSON object or nothing -- never a
+    traceback.
+    """
+    session_id = ""
+    try:
+        payload = json.load(sys.stdin)
+    except Exception:
+        payload = {}
+    if isinstance(payload, dict):
+        session_id = str(payload.get("session_id") or "")
+        cmd = (payload.get("tool_input") or {}).get("command", "")
+        # Same substring rule the PreToolUse adapter applies. The shell adapter
+        # already checked; this guards a direct invocation.
+        if cmd and "git push" not in cmd:
+            return 0
+
+    # Resolved from the COMMAND, not the process cwd -- see _resolve_pushed_repo.
+    repo_root = _resolve_pushed_repo(payload)
+    if not repo_root:
+        return 0
+    git_dir = _git_dir(repo_root)
+    head = _head_sha(repo_root)
+    if not git_dir or not head:
+        return 0  # not a repo, or a detached/unborn HEAD -- nothing to replay
+
+    entry = _latest_record_for_head(git_dir, head)
+    if not entry:
+        return 0  # no review recorded for these commits
+
+    # The record must describe THIS push, not merely this HEAD. Resolving the
+    # repo from a shell command is best-effort (see _resolve_pushed_repo), so
+    # when it guesses wrong it tends to land on whatever repository the session
+    # happens to sit in -- whose HEAD has a record too, often months old. That
+    # is exactly how a live test reported a different repo's stale findings as
+    # though they were this push's. A real push's review is seconds old, so
+    # requiring freshness turns "we guessed wrong" into silence rather than
+    # into a confident, wrong report. Same window the gate already treats a
+    # review as still describing the current push.
+    try:
+        if time.time() - float(entry.get("ts") or 0) > MARKER_TTL:
+            return 0
+    except (TypeError, ValueError):
+        return 0
+
+    # Claim BEFORE emitting, not after: both adapters can run against one push,
+    # and check-then-act would let both report. Claiming a marker we then decide
+    # not to use (a clean pass) costs nothing -- we would have stayed silent.
+    key = _marker_digest(head, entry.get("ts") or entry.get("at") or "", session_id)
+    delivered = Path(git_dir) / f"{POST_DELIVERED_PREFIX}{key}"
+    if not _claim_marker(delivered):
+        return 0  # this exact review is already in this session's context
+
+    # Once per session, not once per push: the condition is a static property of
+    # the repo, and repeating it every time trains the reader to skip it.
+    shadow = False
+    if _hookspath_shadowed(repo_root):
+        warned = Path(git_dir) / f"{HOOKSPATH_WARNED_PREFIX}{_marker_digest(session_id or head)}"
+        shadow = _claim_marker(warned)
+
+    text = _post_context(entry, git_dir, shadow)
+    if not text:
+        return 0
+    sys.stdout.write(
+        json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "additionalContext": text,
+                }
+            }
+        )
+    )
+    _reap_markers(git_dir, keep=delivered)
+    return 0
+
+
 def _emit_hook(decision, reason=""):
     out = {
         "hookSpecificOutput": {
@@ -1001,6 +1433,27 @@ def main(argv):
     if "--history" in argv:
         sys.exit(_print_history(argv))
 
+    # --mode post REPORTS; it does not decide. Handled here, ahead of the
+    # fail-closed safety net below, because that net answers an unhandled
+    # exception with a deny payload -- which for a PostToolUse hook would be
+    # both meaningless and noisy. A reporting path that cannot run must go
+    # quiet, never block: the whole reason this mode exists is that findings
+    # were being lost, and a crash here must not also cost a push.
+    _mode_arg = ""
+    if "--mode" in argv:
+        _i = argv.index("--mode")
+        _mode_arg = argv[_i + 1] if _i + 1 < len(argv) else ""
+    if _mode_arg == "post":
+        try:
+            # Inside the headless review session this plugin is loaded via
+            # --plugin-dir, so this hook is registered there too and would fire
+            # on every Bash call the reviewer makes.
+            sys.exit(0 if _in_review() else _mode_post(argv))
+        except SystemExit:
+            raise
+        except Exception:
+            sys.exit(0)
+
     # Top-level safety net: any unhandled exception in main() fails closed.
     # Without this, a crash in compute_verdict(), _format_reasons(), or any
     # other helper exits the process with a non-zero code WITHOUT emitting a
@@ -1013,7 +1466,7 @@ def main(argv):
     except SystemExit:
         raise  # propagate intentional exits (allow/deny both use sys.exit)
     except Exception as exc:  # noqa: BLE001
-        _fail_closed(mode, f"review-gate internal error ({type(exc).__name__}: {exc}) — blocking commit.")
+        _fail_closed(mode, f"review-gate internal error ({type(exc).__name__}: {exc}) - blocking commit.")
 
 
 def _main_inner(argv, mode):
@@ -1034,33 +1487,84 @@ def _main_inner(argv, mode):
     _write_gate_pointer()
 
     # Hook mode: consume the PreToolUse payload on stdin (and only gate pushes).
+    payload = {}
     if mode == "hook":
         try:
-            payload = json.load(sys.stdin)
+            payload = json.load(sys.stdin) or {}
             cmd = (payload.get("tool_input") or {}).get("command", "")
             if "git push" not in cmd:
                 _emit_hook("allow")
         except Exception:
-            pass  # if we can't read it, fall through and review anyway
+            payload = {}  # if we can't read it, fall through and review anyway
 
-    repo_root = _repo_root()
-    # allow() takes an optional reason: in hook mode a non-blocking review's
-    # findings ride back in permissionDecisionReason, so the calling session
-    # actually sees them. Previously "pass" and "warn" were equally silent
-    # there -- the findings went to a stderr stream Claude Code does not show
-    # on an allow decision.
+    # WHICH repository is being pushed. In git mode the pre-push hook already
+    # runs inside it, so the process cwd is right by construction. In hook mode
+    # it is not: this process inherits the cwd Claude Code was launched from,
+    # and Claude routinely pushes as `cd <repo> && git push`. Reading the
+    # process cwd there gated the SESSION's repo instead -- which usually has
+    # nothing unpushed, so the gate allowed a push it had never reviewed. That
+    # is a silent fail-open, and it is total in any repo where the global git
+    # hook is absent or shadowed by a repo-local core.hooksPath.
+    if mode == "hook":
+        # Both conditions, and the second is what keeps this safe: the review
+        # trigger is a loose "git push" substring, so without it any command
+        # merely CONTAINING those words behind an unresolvable cd would be
+        # denied -- a grep pattern, a heredoc, a Python string. Over-reviewing
+        # is cheap; over-blocking is not.
+        if _push_target_unknown(payload) and _looks_like_real_push(
+            (payload.get("tool_input") or {}).get("command", "") if isinstance(payload, dict) else ""
+        ):
+            # There is a `cd` we cannot follow, so we do not know what these
+            # commits are. Blocking is the same rule the rest of this file
+            # applies to every other "cannot run" case: a gate that does not
+            # know what it is looking at must not wave a push through.
+            if _fail_open_requested():
+                _emit_hook("allow")
+            _fail_closed(
+                mode,
+                "review-gate: could not determine which repository this push targets, so it "
+                "was not reviewed. Blocking, because a gate that cannot see the commits must "
+                "not wave them through.\n\nThe push command changes directory to something "
+                "this hook cannot resolve (an unexpanded shell variable, a command "
+                "substitution, or a path that is not a git repository).\n\nFix it:\n"
+                "  - Use a literal path: cd /full/path/to/repo && git push\n"
+                "  - Or run the push from the directory Claude Code was started in.\n"
+                "  - Emergency bypass: set OCR_FAIL_OPEN=1 in the environment Claude Code "
+                "itself was launched from.\n"
+                "  - Or push from a plain terminal, which this adapter does not gate.",
+            )
+        repo_root = _resolve_pushed_repo(payload) or _repo_root()
+    else:
+        repo_root = _repo_root()
+    # allow() takes an optional reason, and it is worth being precise about
+    # where that reason ends up, because this comment used to claim the
+    # opposite and a fix was built on the claim.
+    #
+    # VERIFIED 2026-09 against Claude Code's transcripts: permissionDecisionReason
+    # on an ALLOW decision does NOT reach the model. It is recorded in the
+    # hook's own `hook_success` entry -- visible UI-side, useful when debugging
+    # -- and produces no `hook_additional_context` companion, which is the
+    # record that actually delivers text into the session. Only the DENY path
+    # reaches the model, as the tool_result of the refused call. That asymmetry
+    # is the entire bug: blocks were always seen, non-blocking findings never
+    # were.
+    #
+    # Model delivery for the non-blocking case is the PostToolUse hook
+    # (--mode post). The reason string below is kept because it costs nothing
+    # and is genuinely useful in the hook record; it is not a delivery channel.
     allow = (
         (lambda reason="": _emit_hook("allow", reason))
         if mode == "hook"
         else (lambda reason="": sys.exit(0))
     )
 
-    if not _has_unpushed_commits():
+    if not _has_unpushed_commits(repo_root):
         allow()
 
-    # Anchored on repo_root, not the process cwd: in hook mode this process
-    # inherits the cwd Claude Code was launched from, which need not be the
-    # repo being pushed. Either may be "" outside a repo -- every consumer
+    # Anchored on repo_root, which is now genuinely the repo being pushed
+    # rather than whatever directory this process happens to sit in (see the
+    # resolution above -- this comment described the intent long before the
+    # code achieved it). It may still be "" outside a repo, so every consumer
     # below guards for that rather than inventing a path.
     git_dir = _git_dir(repo_root)
     head_sha = _head_sha(repo_root)
@@ -1081,7 +1585,7 @@ def _main_inner(argv, mode):
         # Fail closed: block the commit unless OCR_FAIL_OPEN=1 is set.
         if os.environ.get("OCR_FAIL_OPEN", "").strip().lower() in ("1", "true", "yes"):
             _warn(
-                f"OCR_FAIL_OPEN=1 set — bypassing fail-closed gate. Reason:\n  {exc}\n"
+                f"OCR_FAIL_OPEN=1 set - bypassing fail-closed gate. Reason:\n  {exc}\n"
                 "[!] This bypass should be used sparingly and intentionally."
             )
             allow()
@@ -1123,7 +1627,7 @@ def _main_inner(argv, mode):
     note = ""
     if reasons:
         label = "advisory (blocking disabled)" if advisory else f"verdict: {verdict}"
-        note = f"{label} — findings:\n{reasons}"
+        note = f"{label} - findings:\n{reasons}"
         _warn(note + hints)
     allow(note)
 
