@@ -57,7 +57,7 @@ the file, since a hook that exits early would never reach an appended block.
 Run it after the repo's own checks so a review is only paid for on code that
 already passed them.
 
-    # ── review-gate: AI review of the commits being pushed ──
+    # --- review-gate: AI review of the commits being pushed ---
     # Resolves the reviewer through the pointer the plugin refreshes on every
     # run, so this keeps working across plugin upgrades (the versioned cache
     # path does not). Calls review-gate.py directly rather than the global
@@ -69,14 +69,31 @@ already passed them.
         _d="$(cat "$_p" 2>/dev/null || true)"
         if [ -n "$_d" ] && [ -f "$_d/review-gate.py" ]; then _rg_dir="$_d"; break; fi
     done
-    if [ -n "$_rg_dir" ]; then
-        _rg_py=""
-        for _c in python3 python py; do
-            _rg_py="$(command -v "$_c" 2>/dev/null)" && break
-        done
-        [ -n "$_rg_py" ] && { "$_rg_py" "$_rg_dir/review-gate.py" --mode git </dev/null || exit $?; }
+    _rg_py=""
+    for _c in python3 python py; do
+        _p2="$(command -v "$_c" 2>/dev/null)" || continue
+        case "$_p2" in *[Ww]indows[Aa]pps*) continue ;; esac   # Store alias stubs
+        if "$_p2" -c "import sys" >/dev/null 2>&1; then _rg_py="$_p2"; break; fi
+    done
+    if [ -n "$_rg_dir" ] && [ -n "$_rg_py" ]; then
+        "$_rg_py" "$_rg_dir/review-gate.py" --mode git </dev/null || exit $?
+    else
+        # FAIL CLOSED, matching the gate's own pre-push. Skipping here is the
+        # one place it would be least visible: this repo's core.hooksPath
+        # shadows the global hook, so nothing else reviews these commits.
+        case "${OCR_FAIL_OPEN:-}" in
+            1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]) : ;;
+            *)
+                echo "[review-gate] BLOCKED: no reviewer or no working Python 3, so these" >&2
+                echo "  commits were not reviewed. This repo sets its own core.hooksPath, so" >&2
+                echo "  the global gate does not run here either -- nothing else catches it." >&2
+                echo "  Fix: install Python 3, or re-run install-git-hook.sh to refresh the" >&2
+                echo "  pointer. Bypass once: OCR_FAIL_OPEN=1 git push" >&2
+                exit 1
+                ;;
+        esac
     fi
-    # ── end review-gate ──
+    # --- end review-gate ---
 SNIPPET
   echo
   echo "Target hook: $hookfile"
@@ -117,7 +134,7 @@ if [ -f "$STALE" ]; then
     rm -f "$STALE"
     echo "Removed stale review-gate pre-commit hook (superseded by pre-push)."
   else
-    echo "WARNING: $STALE exists and is not ours — leaving it in place."
+    echo "WARNING: $STALE exists and is not ours - leaving it in place."
   fi
 fi
 

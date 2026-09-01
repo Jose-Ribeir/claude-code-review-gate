@@ -191,3 +191,54 @@ def test_chain_into_rejects_a_path_that_is_not_a_directory(tmp_path):
     r = _chain_into(tmp_path / "nope")
     assert r.returncode == 2
     assert "usage:" in r.stderr
+
+
+def _extract_snippet(stdout):
+    """The runnable part of what --chain-into prints, dedented."""
+    lines = stdout.splitlines()
+    start = next(i for i, ln in enumerate(lines) if "--- review-gate:" in ln)
+    end = next(i for i, ln in enumerate(lines) if "--- end review-gate ---" in ln)
+    return "\n".join(
+        ln[4:] if ln.startswith("    ") else ln for ln in lines[start : end + 1]
+    )
+
+
+def _run_snippet(tmp_path, stdout, env_extra=None):
+    script = tmp_path / "snippet.sh"
+    script.write_text(_extract_snippet(stdout) + "\necho REACHED_END\n", encoding="utf-8")
+    env = dict(os.environ)
+    # No gate-dir pointer anywhere, so the reviewer cannot be resolved.
+    env["CLAUDE_CONFIG_DIR"] = str(tmp_path / "empty-config")
+    env.pop("OCR_FAIL_OPEN", None)
+    env.update(env_extra or {})
+    return subprocess.run(
+        [_BASH, str(script)], capture_output=True, text=True, timeout=60, env=env
+    )
+
+
+def test_the_printed_snippet_fails_closed_when_the_reviewer_is_missing(tmp_path):
+    # The snippet is for repos whose own core.hooksPath shadows the global
+    # hook, so skipping silently there is the LEAST visible place to fail open
+    # -- nothing else would review those commits. It must match scripts/pre-push
+    # and block instead.
+    repo = _repo_with_local_hookspath(tmp_path, "myhooks")
+    printed = _chain_into(repo).stdout
+    r = _run_snippet(tmp_path, printed)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "BLOCKED" in r.stderr
+    assert "REACHED_END" not in r.stdout
+
+
+def test_the_printed_snippet_honours_the_fail_open_escape_hatch(tmp_path):
+    repo = _repo_with_local_hookspath(tmp_path, "myhooks")
+    printed = _chain_into(repo).stdout
+    r = _run_snippet(tmp_path, printed, {"OCR_FAIL_OPEN": "1"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "REACHED_END" in r.stdout
+
+
+def test_the_printed_snippet_is_ascii_only(tmp_path):
+    # It is echoed to a terminal by the installer and pasted into a hook whose
+    # output goes through git on Windows.
+    repo = _repo_with_local_hookspath(tmp_path, "myhooks")
+    _chain_into(repo).stdout.encode("ascii")
