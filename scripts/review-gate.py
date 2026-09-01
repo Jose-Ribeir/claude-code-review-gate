@@ -728,7 +728,16 @@ _CD_TARGET = re.compile(
 
 
 # `cmd <<MARKER` / `<<'MARKER'` / `<<-MARKER`, which opens a heredoc.
-_HEREDOC = re.compile(r"""<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1""")
+#
+# The lookahead is load-bearing. A real opener ENDS its line, bar trailing
+# redirections (`cat <<'EOF' > out`), so requiring that rules out the same
+# characters appearing as data mid-line -- `echo "a <<EOF b"`, a grep pattern,
+# a log message. Without it, any line merely containing `<<WORD` was read as an
+# opener and everything after it was discarded as a body, which could swallow a
+# genuine cd and a genuine push and leave the parser blind.
+_HEREDOC = re.compile(
+    r"""<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1(?=\s*(?:[0-9]*[<>]+\s*\S+\s*)*$)"""
+)
 
 
 def _strip_heredocs(cmd):
@@ -754,9 +763,16 @@ def _strip_heredocs(cmd):
         if not m:
             continue
         marker = m.group(2)
-        while i < len(lines) and lines[i].strip() != marker:
-            i += 1
-        i += 1  # and the terminator line itself
+        j = i
+        while j < len(lines) and lines[j].strip() != marker:
+            j += 1
+        if j >= len(lines):
+            # No terminator anywhere. Then this was not a heredoc we can trust
+            # -- and stripping to the end of the command would delete real
+            # commands, including the cd and the push this parse exists to
+            # find. Strip nothing and keep reading.
+            continue
+        i = j + 1  # past the body AND the terminator line
     return "\n".join(out)
 
 

@@ -1380,3 +1380,29 @@ def test_a_real_push_after_a_heredoc_still_counts():
 def test_an_unquoted_heredoc_marker_is_handled_too():
     cmd = f"cat > x <<EOF\ncd /elsewhere && {_PUSH}\nEOF\ncd /real && {_PUSH}"
     assert _cd_targets(cmd) == ["/real"]
+
+
+# --- ...but stripping must never eat real commands ----------------------------
+# The gate blocked the release of the heredoc handling above (high): _HEREDOC
+# matched `<<WORD` anywhere on a line with no quoting awareness, and when no
+# terminator existed it discarded everything to the end of the command. That
+# could swallow a genuine cd and a genuine push, leaving the parser blind --
+# a way to silently defeat the gate, introduced by a fix meant to protect it.
+
+def test_two_angle_brackets_as_data_do_not_open_a_heredoc():
+    # A real opener ENDS its line; this one is mid-line, inside a string.
+    cmd = f'echo "a <<EOF b"\ncd /repo\n{_PUSH}'
+    assert _cd_targets(cmd) == ["/repo"]
+    assert review_gate._looks_like_real_push(cmd) is True
+
+
+def test_an_unterminated_heredoc_strips_nothing():
+    # No terminator anywhere means this cannot be trusted as a heredoc, and
+    # stripping to end-of-command would delete the real commands after it.
+    cmd = f"cat > x <<EOF\nbody\ncd /repo\n{_PUSH}"
+    assert review_gate._strip_heredocs(cmd) == cmd
+
+
+def test_an_opener_with_a_trailing_redirection_is_still_an_opener():
+    cmd = f"cat <<'EOF' > out\ncd /elsewhere\nEOF\ncd /repo && {_PUSH}"
+    assert _cd_targets(cmd) == ["/repo"]
