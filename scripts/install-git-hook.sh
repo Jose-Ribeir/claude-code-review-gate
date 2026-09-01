@@ -57,6 +57,11 @@ the file, since a hook that exits early would never reach an appended block.
 Run it after the repo's own checks so a review is only paid for on code that
 already passed them.
 
+One thing to wire up by hand: the block forwards the ref updates git gave your
+hook on stdin, via `_rg_refs`. It is preset to `$PUSH_REFS`; change that to
+whatever variable your hook stored them in. Without them the gate compares HEAD
+against its own upstream, which misses a push aimed at a different ref.
+
     # --- review-gate: AI review of the commits being pushed ---
     # Resolves the reviewer through the pointer the plugin refreshes on every
     # run, so this keeps working across plugin upgrades (the versioned cache
@@ -84,7 +89,14 @@ already passed them.
         if [ -n "$_rg_dir" ] && [ -n "$_rg_py" ]; then
             # Pass the ref updates through: they say what is being sent and where,
         # which is what stops a `branch:main` push from being skipped.
-        echo "$PUSH_REFS" | "$_rg_py" "$_rg_dir/review-gate.py" --mode git || exit $?
+        # git feeds pre-push the ref updates on stdin, and your hook has
+        # already consumed them by this point -- that is why this block sits
+        # at a success exit. Point _rg_refs at wherever your hook saved them.
+        # Leave it empty and the gate falls back to comparing HEAD against its
+        # own upstream, which MISSES a push to a different ref
+        # (`git push origin mybranch:main`).
+        _rg_refs="${PUSH_REFS-}"
+        echo "$_rg_refs" | "$_rg_py" "$_rg_dir/review-gate.py" --mode git || exit $?
         else
             # FAIL CLOSED, matching the gate's own pre-push. Skipping here is
             # the one place it would be least visible: this repo's
