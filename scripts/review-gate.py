@@ -729,6 +729,49 @@ def _latest_record_for_head(git_dir, head, cap=POST_SCAN_CAP):
     return None
 
 
+# `cmd <<MARKER` / `<<'MARKER'` / `<<-MARKER`, opening a heredoc.
+#
+# This is the ONE piece of the removed command parser that came back, and it
+# came back because the simplification broke a real workflow within minutes of
+# shipping: a `git commit` whose MESSAGE discussed a cd chain and a push was
+# denied as an ambiguous push. In this repo, whose commit messages routinely
+# quote commands, that is not an edge case.
+#
+# A heredoc body is data the command WRITES. The shell never runs it, so
+# parsing it as code is simply wrong -- unlike quoted arguments or `bash -c`,
+# where the old parser was guessing at intent and kept guessing wrong. That is
+# the line: this transformation is decidable, the others were not.
+#
+# The opener must END its line, bar a redirection or pipe/separator; a body is
+# dropped only when a terminator is actually found, since stripping to
+# end-of-command would delete the real commands after it.
+_HEREDOC = re.compile(
+    r"""<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1(?=\s*(?:[0-9]*[<>|&;]|$))"""
+)
+
+
+def _strip_heredocs(cmd):
+    """Drop heredoc BODIES before scanning a command for cds and pushes."""
+    if not cmd or "<<" not in cmd:
+        return cmd or ""
+    lines, out, i = cmd.splitlines(), [], 0
+    while i < len(lines):
+        line = lines[i]
+        out.append(line)
+        i += 1
+        m = _HEREDOC.search(line)
+        if not m:
+            continue
+        marker = m.group(2)
+        j = i
+        while j < len(lines) and lines[j].strip() != marker:
+            j += 1
+        if j >= len(lines):
+            continue  # no terminator: not a heredoc we can trust; strip nothing
+        i = j + 1  # past the body AND the terminator line
+    return "\n".join(out)
+
+
 # Which repository a push targets, and whether we can be sure.
 #
 # This replaces ~400 lines of shell parsing -- heredoc stripping, quote
@@ -765,8 +808,9 @@ def _cd_targets(cmd):
     """
     if not cmd:
         return []
-    stop = _REAL_PUSH.search(cmd)
-    head = cmd[: stop.start()] if stop else cmd
+    code = _strip_heredocs(cmd)
+    stop = _REAL_PUSH.search(code)
+    head = code[: stop.start()] if stop else code
     return [next(g for g in m.groups() if g is not None and g != "") or ""
             for m in _CD.finditer(head)
             if any(g for g in m.groups())]
@@ -841,7 +885,7 @@ _REAL_PUSH = re.compile(
 
 def _looks_like_real_push(cmd):
     """True when the command actually invokes `git push`, not merely mentions it."""
-    return bool(_REAL_PUSH.search(cmd or ""))
+    return bool(_REAL_PUSH.search(_strip_heredocs(cmd or "")))
 
 
 def _hookspath_shadowed(repo_root):
