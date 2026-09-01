@@ -1296,3 +1296,58 @@ def test_a_mention_of_a_push_does_not_truncate_the_cd_scan(tmp_path, monkeypatch
     root, ambiguous = _gate_repo(_payload(cmd, tmp_path))
     assert ambiguous is False
     assert os.path.normcase(root) == os.path.normcase(str(tmp_path / "real"))
+
+
+def test_an_absolute_hop_re_anchors_after_an_unresolvable_one(tmp_path, monkeypatch):
+    # `cd "$OLDPWD" && cd /srv/repo && git push` is legitimate: the absolute
+    # hop fully determines where we end up regardless of what came before, so
+    # the chain IS knowable. Returning ambiguous on the first unresolvable hop
+    # contradicted the docstring and would have blocked it.
+    real = tmp_path / "srv"
+    real.mkdir()
+    _repo_at(monkeypatch, real)
+    cmd = 'cd "$OLDPWD" && cd ' + str(real) + ' && git push'
+    root, ambiguous = _gate_repo(_payload(cmd, tmp_path))
+    assert ambiguous is False
+    assert os.path.normcase(root) == os.path.normcase(str(real))
+
+
+def test_a_relative_hop_after_an_unresolvable_one_stays_ambiguous(tmp_path, monkeypatch):
+    # Nothing to join it onto. Guessing here is what produced a confident
+    # answer about the wrong repository in the first place.
+    _repo_at(monkeypatch, tmp_path)
+    assert _gate_repo(_payload('cd "$T" && cd sub && git push', tmp_path)) == ("", True)
+
+
+# --- heredoc bodies are data, and that one distinction earned its way back ---
+# The simplification removed all command parsing, and within minutes a
+# `git commit` whose MESSAGE discussed a cd chain and a push was denied as an
+# ambiguous push. In this repo, whose commit messages routinely quote commands,
+# that is not an edge case.
+#
+# A heredoc body is data the command WRITES; the shell never runs it, so
+# parsing it as code is simply wrong. That is decidable, which is why this one
+# transformation came back while quoted-argument and `bash -c` guessing did
+# not: those were guesses at intent, and they kept guessing wrong.
+
+def test_a_commit_message_written_via_heredoc_does_not_read_as_a_push(tmp_path, monkeypatch):
+    _repo_at(monkeypatch, tmp_path)
+    cmd = (
+        "git commit -F - <<'MSG'\n"
+        "explains that cd \"$OLDPWD\" && cd /srv/repo && git push was denied\n"
+        "MSG\n"
+        "git log --oneline -1"
+    )
+    assert review_gate._looks_like_real_push(cmd) is False
+    assert _gate_repo(_payload(cmd, tmp_path)) == (str(tmp_path), False)
+
+
+def test_an_unterminated_heredoc_strips_nothing(tmp_path):
+    # Stripping to end-of-command would delete the real commands after it.
+    cmd = "cat > x <<EOF\nbody\ncd /repo\ngit push"
+    assert review_gate._strip_heredocs(cmd) == cmd
+
+
+def test_an_opener_followed_by_a_pipe_is_still_an_opener(tmp_path):
+    cmd = "python - <<'PY' 2>&1 | head -5\ncd /elsewhere && git push\nPY\necho done"
+    assert review_gate._looks_like_real_push(cmd) is False
