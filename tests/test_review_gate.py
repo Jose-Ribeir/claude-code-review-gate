@@ -1487,10 +1487,33 @@ def test_masking_stays_linear_across_many_quoted_spans():
     # Re-splitting the whole prefix for each span made this O(n * spans); a
     # generated script with thousands of quoted strings is exactly the input
     # a hook on every Bash call must not choke on.
-    big = " ".join(f'echo "span {i}"' for i in range(4000))
+    big = " ".join(f'echo "span {i}"' for i in range(6000))
     started = time.time()
     review_gate._mask_quoted(big)
     assert time.time() - started < 2.0
+
+
+def test_a_runner_far_before_its_quote_is_still_found():
+    # The first attempt at making the lookup linear truncated it to a fixed
+    # 200-character window, which traded the quadratic cost for a correctness
+    # hole: a runner past the cutoff failed the shell test, so a real
+    # `bash -c "cd /x && <push>"` was blanked as data and the push went
+    # invisible to the gate. Tokens are accumulated incrementally now, so
+    # distance does not matter.
+    long_flags = " ".join(f"--flag-number-{i}" for i in range(30))
+    cmd = f'bash {long_flags} -c "cd /real && {_PUSH}"'
+    assert cmd.index('"') > 400  # well past any fixed window
+    assert _cd_targets(cmd) == ["/real"]
+    assert review_gate._looks_like_real_push(cmd) is True
+
+
+def test_data_is_still_masked_after_many_preceding_spans():
+    # The incremental tokenizer must not drift: a quoted span counts as one
+    # token, so a later commit message is still recognised as data.
+    prefix = " ".join(f'echo "x{i}"' for i in range(500))
+    cmd = f'{prefix} && git commit -m "cd /a && {_PUSH}"'
+    assert _cd_targets(cmd) == []
+    assert review_gate._looks_like_real_push(cmd) is False
 
 
 def test_a_non_shell_dash_c_argument_is_not_code():
