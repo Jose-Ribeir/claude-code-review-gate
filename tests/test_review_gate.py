@@ -1480,9 +1480,16 @@ def test_every_ordinary_shell_dash_c_form_is_still_code():
         # Flags that take a SEPARATE value: walking back over tokens starting
         # with "-" stopped at the value and never reached the shell name.
         "bash --rcfile /etc/bashrc -c", "bash -o pipefail -c",
-        # The runner is the first word of the command, which env assignments
-        # and `env` itself precede rather than replace.
-        "FOO=1 bash -c", "env FOO=1 bash -c",
+        # Things that precede the shell rather than being it. Taking the first
+        # word of the command missed every one of these.
+        "FOO=1 bash -c", "env FOO=1 bash -c", "sudo bash -c",
+        "nohup /bin/bash -lc",
+        # A wrapper with an argument of its own, which a fixed skip-list of
+        # wrapper NAMES still got wrong.
+        "timeout 30 bash -c",
+        # A newline is a command separator, but str.split() discarded it, so
+        # the previous line's first word looked like the runner.
+        "ls\nbash -c",
     ):
         cmd = f'{runner} "cd /real && {_PUSH}"'
         assert _cd_targets(cmd) == ["/real"], runner
@@ -1502,6 +1509,12 @@ def test_a_shell_dash_c_after_a_separator_still_resolves(tmp_path):
 def test_a_remote_runners_dash_c_is_not_local_shell():
     # `ssh host -c ...` does not run its argument as a local shell.
     cmd = f"""ssh host -c "cd /real && {_PUSH}" """
+    assert review_gate._looks_like_real_push(cmd) is False
+
+
+def test_a_wrapped_non_shell_is_still_not_shell():
+    # The membership test must not be so loose that any wrapper qualifies.
+    cmd = f"""sudo python -c "print('{_PUSH}')" """
     assert review_gate._looks_like_real_push(cmd) is False
 
 
