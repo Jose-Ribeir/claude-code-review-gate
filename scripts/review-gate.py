@@ -148,7 +148,19 @@ MARKER_PREFIX = "scr-push-reviewed-"
 #                          repeating it every push trains the reader to skip it.
 POST_DELIVERED_PREFIX = "scr-post-delivered-"
 HOOKSPATH_WARNED_PREFIX = "scr-hookspath-warned-"
-_MARKER_PREFIXES = (MARKER_PREFIX, POST_DELIVERED_PREFIX, HOOKSPATH_WARNED_PREFIX)
+
+# The pre-0.3.x per-commit marker. Nothing writes it any more, but the sweep
+# only ever globbed the prefixes in use, so every one ever written is still
+# sitting in .git -- 516 of them in one real repo, one per commit reviewed by
+# the old pre-commit gate. Reaping is keyed on mtime, so listing it here
+# collects the stragglers on the next push and then costs nothing.
+_LEGACY_MARKER_PREFIX = "scr-reviewed-"
+_MARKER_PREFIXES = (
+    MARKER_PREFIX,
+    POST_DELIVERED_PREFIX,
+    HOOKSPATH_WARNED_PREFIX,
+    _LEGACY_MARKER_PREFIX,
+)
 
 # --mode post limits. The findings log is append-only and never pruned, so the
 # scan is bounded from the newest end rather than reading the whole file; the

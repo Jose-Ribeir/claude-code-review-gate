@@ -198,6 +198,22 @@ def test_reap_never_removes_the_marker_just_written(tmp_path):
     assert current.exists()
 
 
+def test_reap_collects_the_pre_0_3_legacy_markers(tmp_path):
+    # Nothing writes scr-reviewed-* any more, but the sweep only globbed the
+    # prefixes in use, so every one the old per-commit gate ever wrote is still
+    # in .git -- 516 of them in one real repo. Same mtime rule as the rest.
+    old = tmp_path / ("scr-reviewed-" + "a" * 40)
+    old.write_text("x", encoding="utf-8")
+    stamp = time.time() - (MARKER_TTL + 60)
+    os.utime(old, (stamp, stamp))
+    fresh = tmp_path / ("scr-reviewed-" + "b" * 40)
+    fresh.write_text("x", encoding="utf-8")
+
+    _reap_markers(str(tmp_path))
+    assert not old.exists()
+    assert fresh.exists()  # mtime rule, not a blanket delete
+
+
 def test_reap_ignores_unrelated_files_in_the_git_dir(tmp_path):
     # The sweep globs inside the real .git directory -- it must not touch HEAD,
     # config, or anything else that happens to be old.
