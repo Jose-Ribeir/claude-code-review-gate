@@ -2,7 +2,7 @@
   "name": "review-gate",
   "displayName": "Review Gate",
   "description": "Native Claude Code AI code review + blocking pre-push gate on your Claude subscription. Isolated headless reviewer, severity/confidence verdicts, fails closed. open-code-review, done compliantly.",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "author": {
     "name": "José Ribeiro"
   },
