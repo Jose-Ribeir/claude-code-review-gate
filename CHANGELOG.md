@@ -6,6 +6,17 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.9] - 2026-09-01
+
+### Fixed
+- **The pre-0.3 markers were never reaped.** `_reap_markers` only globbed the
+  prefixes currently in use, so every `scr-reviewed-*` file the old per-commit
+  gate wrote is still in `.git` and always would be — 516 of them in one real
+  repo, found while testing `--chain-into`. That is the same defect 0.3.3's
+  reaper was added to fix, for the prefix the commit→push migration left
+  behind. Reaping is keyed on mtime, so listing the legacy prefix collects the
+  stragglers on the next push and then costs nothing.
+
 ## [0.4.8] - 2026-09-01
 
 ### Fixed
