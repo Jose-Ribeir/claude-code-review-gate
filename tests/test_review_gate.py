@@ -1522,6 +1522,54 @@ def test_a_wrapped_non_shell_is_still_not_shell():
     assert review_gate._looks_like_real_push(cmd) is False
 
 
+# --- the tokenizer and the masking state machine, directly -------------------
+# These have interacting edge cases (segment resets, the newline token, the
+# stray-quote fallback, the -c cluster pattern) and five prior spellings were
+# each wrong in a different way, so they are pinned here rather than only
+# exercised through _cd_targets / _looks_like_real_push.
+
+_tokenize = review_gate._tokenize
+
+
+def test_tokenize_separates_punctuation_written_without_spaces():
+    assert _tokenize("echo done;bash -c") == ["echo", "done", ";", "bash", "-c"]
+    assert "&&" in _tokenize("a&&b")
+
+
+def test_tokenize_keeps_a_newline_as_its_own_token():
+    # shlex treats a newline as plain whitespace, so lines are fed separately
+    # and the separator is re-inserted; without it the previous line's first
+    # word looked like the runner of the next line's command.
+    assert _tokenize("ls\nbash -c") == ["ls", "\n", "bash", "-c"]
+
+
+def test_tokenize_falls_back_when_a_quote_is_unbalanced():
+    # shlex raises on an unterminated quote; losing the line entirely would
+    # hide whatever came before it.
+    assert _tokenize("echo don't stop") == ["echo", "don't", "stop"]
+
+
+def test_a_shell_in_an_earlier_segment_does_not_leak_into_a_later_one():
+    # The running seg_has_shell flag must reset at a separator, or every
+    # command after a `bash -c` would have its quotes treated as code.
+    cmd = f"""bash -c "echo hi" ; python -c "print('{_PUSH}')" """
+    assert review_gate._looks_like_real_push(cmd) is False
+
+
+def test_a_long_option_merely_ending_in_c_is_not_a_shell_dash_c():
+    # `-[A-Za-z]*c$` also matched -exec, -sync, -static, -public and friends,
+    # so a quoted argument after one of them was parsed as executable shell.
+    for flag in ("-exec", "-sync", "-async", "-static", "-atomic", "-public"):
+        assert not review_gate._DASH_C.match(flag), flag
+    cmd = f"""bash script.sh && find . -exec "cd /x && {_PUSH}" ;"""
+    assert _cd_targets(cmd) == []
+
+
+def test_the_short_clusters_that_do_mean_dash_c_still_match():
+    for flag in ("-c", "-lc", "-ec", "-xc", "-euc"):
+        assert review_gate._DASH_C.match(flag), flag
+
+
 def test_masking_stays_linear_across_many_quoted_spans():
     # Re-splitting the whole prefix for each span made this O(n * spans); a
     # generated script with thousands of quoted strings is exactly the input
