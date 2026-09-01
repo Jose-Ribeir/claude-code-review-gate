@@ -6,6 +6,47 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-01
+
+### Changed
+- **The gate denies ambiguous commands instead of parsing shell harder.**
+  ~290 lines go: heredoc stripping, quoted-span masking, a shlex tokenizer,
+  the shell `-c` recognizer, and the multi-stage `cd` resolver. All of it
+  existed to make exotic commands *work*, and between 0.4.2 and 0.4.7 it
+  produced eleven repair releases — several of them fail-opens this gate
+  caught on its own pushes. In a fail-closed tool the answer to an ambiguous
+  command is not a better parser; it is to refuse and say so.
+  - `_gate_repo` folds a `cd` chain of literal paths and calls everything else
+    unknown: an unexpanded `$VAR`, a command substitution, `cd -`, a target
+    that is not a directory. Ambiguous **and** a real push ⇒ denied, with the
+    message that already existed for that case. `OCR_FAIL_OPEN=1` still
+    bypasses.
+  - **Deliberate trade:** a quoted argument containing `cd … && git push` now
+    reads as ambiguous and **blocks**, where the old parser tried to tell code
+    from data and repeatedly got it wrong. Blocking is visible and bypassable;
+    misrouting is neither.
+  - **One exception, learned the hard way:** heredoc-body stripping stayed.
+    Removing it denied a plain `git commit` whose *message* discussed a
+    directory change and a push, within minutes of shipping. The line is
+    decidability — a heredoc body is data the command *writes*, and the shell
+    never runs it, so parsing it as code is a mistake rather than a judgement
+    call. Quoted arguments and shell `-c` are guesses at intent, and eleven
+    repair commits say those guesses kept being wrong; they stay gone.
+  - **Strictly better:** a quote now counts as a command boundary, so
+    `bash -c "cd /repo && git push"` resolves instead of silently falling back
+    to the session directory — the exact fail-open that five successive
+    spellings of the `-c` detector were chasing.
+- **Delivery does no command parsing at all.** The gate must resolve the pushed
+  repo to review it, so it records that (keyed by session, beside the gate-dir
+  pointer) and `--mode post` reads it — ignoring a breadcrumb older than
+  `MARKER_TTL` or pointing at a vanished directory. Re-deriving the repo by
+  parsing the command a second time was duplicated fragility with its own
+  failure modes.
+
+### Removed
+- The **"commit pushed unreviewed"** notice added in 0.4.4. It was never asked
+  for and existed only because the parser made it cheap.
+
 ## [0.4.9] - 2026-09-01
 
 ### Fixed
