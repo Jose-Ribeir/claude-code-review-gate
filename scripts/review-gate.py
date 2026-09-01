@@ -717,6 +717,16 @@ def _latest_record_for_head(git_dir, head, cap=POST_SCAN_CAP):
     return None
 
 
+# A `cd` at a command position. The separator class carries \n and \r
+# explicitly: a Bash tool call is routinely MULTI-LINE, and without them
+# `cd repo\ngit push` matched nothing at all (re.finditer is not re.MULTILINE,
+# so `^` only ever meant the start of the whole string). Same omission is what
+# made _REAL_PUSH below miss a push on its own line.
+_CD_TARGET = re.compile(
+    r"""(?:^|[;&|\n\r]|&&|\|\|)\s*cd\s+(?:"([^"]*)"|'([^']*)'|([^\s;&|]+))"""
+)
+
+
 def _cd_targets(cmd):
     """Directories a shell command cds into before it reaches `git push`.
 
@@ -726,11 +736,31 @@ def _cd_targets(cmd):
         return []
     head = cmd.split("git push", 1)[0]
     targets = []
-    for m in re.finditer(r'(?:^|[;&|]|&&)\s*cd\s+(?:"([^"]*)"|\'([^\']*)\'|([^\s;&|]+))', head):
+    for m in _CD_TARGET.finditer(head):
         target = next((g for g in m.groups() if g), "")
         if target and target not in ("-", "~"):
             targets.append(target)
     return targets
+
+
+def _cd_candidate(target, base):
+    """Turn a captured `cd` target into a path that can actually be tested.
+
+    The raw capture is neither expanded (`cd ~/x`) nor necessarily absolute
+    (`cd myrepo`). A RELATIVE target must be joined against the session's
+    directory: os.path.isdir would otherwise resolve it against the hook
+    process's own cwd, which is exactly the confusion this whole code path
+    exists to correct. Returns "" when it cannot be made testable.
+    """
+    try:
+        t = os.path.expanduser(target)
+        if not os.path.isabs(t):
+            if not base:
+                return ""  # relative, and nothing to resolve it against
+            t = os.path.join(base, t)
+        return t
+    except Exception:
+        return ""
 
 
 def _resolve_pushed_repo(payload):
@@ -759,15 +789,16 @@ def _resolve_pushed_repo(payload):
     if isinstance(payload, dict):
         cmd = (payload.get("tool_input") or {}).get("command", "") or ""
         cwd = str(payload.get("cwd") or "")
+    base = cwd or os.getcwd()
     targets = _cd_targets(cmd)
-    candidates = [targets[-1]] if targets else []
+    # _cd_candidate expands ~ and anchors a RELATIVE `cd` to the session dir.
+    candidates = [_cd_candidate(targets[-1], base)] if targets else []
     if cwd:
         candidates.append(cwd)
     candidates.append(os.getcwd())
     for cand in candidates:
         try:
-            cand = os.path.expanduser(cand)  # `cd ~/x` is ordinary; isdir does not expand it
-            if not os.path.isdir(cand):
+            if not cand or not os.path.isdir(cand):
                 continue
         except Exception:
             continue
@@ -797,21 +828,21 @@ def _push_target_unknown(payload):
     know where these commits are going, and a gate that does not know what it
     is looking at must not wave the push through.
     """
-    cmd = ""
+    cmd, cwd = "", ""
     if isinstance(payload, dict):
         cmd = (payload.get("tool_input") or {}).get("command", "") or ""
+        cwd = str(payload.get("cwd") or "")
     targets = _cd_targets(cmd)
     if not targets:
         return False
-    target = targets[-1]
+    # _cd_candidate expands ~ (ordinary, and isdir does not do it -- without
+    # that every tilde path looked unresolvable and would have been blocked)
+    # and anchors a relative target to the session dir. It does NOT expandvars:
+    # `$T` was set by the shell running the command, not in OUR environment, so
+    # substituting our value would confidently answer wrong.
+    target = _cd_candidate(targets[-1], cwd or os.getcwd())
     try:
-        # expanduser, because `cd ~/x` is ordinary and os.path.isdir does not
-        # expand it -- without this, every tilde path looked unresolvable and
-        # would have been blocked. Not expandvars: `$T` was set by the shell
-        # running the command, not in OUR environment, so expanding it here
-        # would substitute an unrelated value and confidently answer wrong.
-        target = os.path.expanduser(target)
-        if not os.path.isdir(target):
+        if not target or not os.path.isdir(target):
             return True
     except Exception:
         return True
@@ -822,7 +853,10 @@ def _push_target_unknown(payload):
 # `git push` at a COMMAND position -- optionally behind env-var prefixes and
 # git's own flags -- rather than anywhere in the string.
 _REAL_PUSH = re.compile(
-    r"(?:^|[;&|]|&&|\|\|)\s*"           # start, or after a command separator
+    r"(?:^|[;&|\n\r]|&&|\|\|)\s*"       # start, a separator, or a new LINE
+    # \n matters: a multi-line Bash call putting `git push` on its own line
+    # matched none of the alternatives, so this returned False for a genuine
+    # push and the unknown-target block it gates silently never fired.
     r"(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*"  # env-var prefixes: FOO=bar git push
     r"git\s+"
     r"(?:(?:-\S+|\S+=\S+)\s+)*"         # git's own flags AND their values: git -c a=b push
