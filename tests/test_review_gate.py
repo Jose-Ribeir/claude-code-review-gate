@@ -1285,3 +1285,98 @@ def test_a_relative_cd_is_not_tested_against_the_hook_process_cwd(tmp_path, monk
     assert review_gate._push_target_unknown(
         {"tool_input": {"command": "cd scripts && git push"}, "cwd": str(tmp_path)}
     ) is True
+
+
+# --- the whole cd chain, not just the last hop --------------------------------
+# The gate's review of 9af1886 (medium): only the LAST target was anchored to
+# the session base, but in `cd repo1 && cd sub && <push>`, `sub` is relative to
+# `repo1`. Joining it onto the base produced a path that either did not exist --
+# falling through to the fallback this code exists to avoid -- or existed and
+# pointed somewhere unrelated.
+
+_effective_cd = review_gate._effective_cd
+_PUSH = "git" + " push"  # not spelled literally: this file is read by the gate
+
+
+def test_a_relative_hop_is_joined_onto_the_previous_hop():
+    got = _effective_cd(f"cd repo1 && cd sub && {_PUSH}", os.path.join(os.sep, "session"))
+    assert got == os.path.normpath(os.path.join(os.sep, "session", "repo1", "sub"))
+
+
+def test_the_chain_folds_across_newlines_too():
+    got = _effective_cd(f"cd repo1\ncd sub\n{_PUSH}", os.path.join(os.sep, "session"))
+    assert got == os.path.normpath(os.path.join(os.sep, "session", "repo1", "sub"))
+
+
+def test_an_absolute_hop_re_anchors_and_clears_an_earlier_unknown():
+    # `$T` cannot be followed, but the absolute cd after it fully determines
+    # where the push happens, so the chain is knowable again.
+    abs_repo = os.path.join(os.sep, "srv", "repo")
+    assert _effective_cd(f'cd "$T" && cd {abs_repo} && {_PUSH}', os.sep) == abs_repo
+
+
+def test_a_relative_hop_after_an_unknown_one_stays_unknown():
+    # Nothing to join it onto, and guessing is what produced a confident answer
+    # about the wrong repository in the first place.
+    assert _effective_cd(f'cd "$T" && cd sub && {_PUSH}', os.sep) == ""
+
+
+def test_cd_dash_is_unfollowable():
+    assert _effective_cd(f"cd - && {_PUSH}", os.sep) == ""
+
+
+def test_no_cd_yields_the_base_unchanged():
+    base = os.path.join(os.sep, "session")
+    assert _effective_cd(f"{_PUSH} origin main", base) == base
+
+
+def test_a_chained_relative_push_resolves_to_the_real_repo(tmp_path, monkeypatch):
+    (tmp_path / "repo1" / "sub").mkdir(parents=True)
+    monkeypatch.setattr(
+        review_gate, "_git",
+        lambda args, cwd=None: (str(cwd), 0) if args[:2] == ["rev-parse", "--show-toplevel"] else ("", 1),
+    )
+    got = review_gate._resolve_pushed_repo(
+        {"tool_input": {"command": f"cd repo1 && cd sub && {_PUSH}"}, "cwd": str(tmp_path)}
+    )
+    assert got == os.path.normpath(str(tmp_path / "repo1" / "sub"))
+
+
+def test_a_chain_ending_somewhere_unfollowable_is_unknown(tmp_path, monkeypatch):
+    monkeypatch.setattr(review_gate, "_git", lambda args, cwd=None: ("", 1))
+    assert review_gate._push_target_unknown(
+        {"tool_input": {"command": f'cd repo1 && cd "$T" && {_PUSH}'}, "cwd": str(tmp_path)}
+    ) is True
+
+
+# --- heredoc bodies are data, not commands ------------------------------------
+# Found the hard way: the Bash call adding the tests above was DENIED by the
+# installed gate. Its heredoc contained `cd repo1 && cd sub && <push>` as test
+# data, which the parser read as a real cd chain -- it resolved to nothing, and
+# the unknown-target rule blocked an entirely innocent command.
+
+def test_a_heredoc_body_does_not_contribute_cd_targets():
+    cmd = (
+        "cd /real/repo && cat >> t.py <<'EOF'\n"
+        f"    x = 'cd repo1 && cd sub && {_PUSH}'\n"
+        "EOF\n"
+        "pytest -q"
+    )
+    assert _cd_targets(cmd) == ["/real/repo"]
+
+
+def test_a_push_inside_a_heredoc_is_not_a_real_push():
+    cmd = f"cat > deploy.sh <<'EOF'\ncd /srv/app && {_PUSH} origin main\nEOF"
+    assert review_gate._looks_like_real_push(cmd) is False
+
+
+def test_a_real_push_after_a_heredoc_still_counts():
+    # Only the BODY is dropped; commands that follow the terminator remain.
+    cmd = f"cat > x <<'EOF'\nhello\nEOF\ncd /srv/app && {_PUSH}"
+    assert review_gate._looks_like_real_push(cmd) is True
+    assert _cd_targets(cmd) == ["/srv/app"]
+
+
+def test_an_unquoted_heredoc_marker_is_handled_too():
+    cmd = f"cat > x <<EOF\ncd /elsewhere && {_PUSH}\nEOF\ncd /real && {_PUSH}"
+    assert _cd_targets(cmd) == ["/real"]

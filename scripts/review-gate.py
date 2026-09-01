@@ -727,40 +727,97 @@ _CD_TARGET = re.compile(
 )
 
 
-def _cd_targets(cmd):
-    """Directories a shell command cds into before it reaches `git push`.
+# `cmd <<MARKER` / `<<'MARKER'` / `<<-MARKER`, which opens a heredoc.
+_HEREDOC = re.compile(r"""<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1""")
 
-    Newest last, so callers should try them in reverse.
+
+def _strip_heredocs(cmd):
+    """Drop heredoc BODIES before parsing a command for cds and pushes.
+
+    A heredoc body is data the command writes, not commands the shell runs.
+    Parsing it as code is not academic: writing a test file that happens to
+    contain the string `cd repo && cd sub && git push` made this very gate
+    block the Bash call adding those tests. The body determined a `cd` chain
+    that never executed, the chain resolved to nothing, and the
+    unknown-target rule denied an entirely innocent command.
+
+    Only the body goes; the opener line stays, since a real `cd` can share it.
+    """
+    if not cmd or "<<" not in cmd:
+        return cmd or ""
+    lines, out, i = cmd.splitlines(), [], 0
+    while i < len(lines):
+        line = lines[i]
+        out.append(line)
+        i += 1
+        m = _HEREDOC.search(line)
+        if not m:
+            continue
+        marker = m.group(2)
+        while i < len(lines) and lines[i].strip() != marker:
+            i += 1
+        i += 1  # and the terminator line itself
+    return "\n".join(out)
+
+
+def _cd_targets(cmd):
+    """Every directory a shell command cds into before it reaches `git push`.
+
+    In command order. `~` and `-` are kept rather than filtered: _effective_cd
+    gives them meaning (expandable, and unfollowable, respectively), and
+    dropping a hop silently would misplace every hop after it.
     """
     if not cmd:
         return []
-    head = cmd.split("git push", 1)[0]
+    head = _strip_heredocs(cmd).split("git push", 1)[0]
     targets = []
     for m in _CD_TARGET.finditer(head):
         target = next((g for g in m.groups() if g), "")
-        if target and target not in ("-", "~"):
+        if target:
             targets.append(target)
     return targets
 
 
-def _cd_candidate(target, base):
-    """Turn a captured `cd` target into a path that can actually be tested.
+# A target we cannot resolve lexically: `$VAR`, `${VAR}`, `$(cmd)`, backticks.
+# Deliberately not expanded from OUR environment -- those were set by the shell
+# running the command, so substituting our values would answer confidently wrong.
+_UNEXPANDABLE = re.compile(r"[$`]")
 
-    The raw capture is neither expanded (`cd ~/x`) nor necessarily absolute
-    (`cd myrepo`). A RELATIVE target must be joined against the session's
-    directory: os.path.isdir would otherwise resolve it against the hook
-    process's own cwd, which is exactly the confusion this whole code path
-    exists to correct. Returns "" when it cannot be made testable.
+
+def _effective_cd(cmd, base):
+    """The directory a command has reached by the time it runs `git push`.
+
+    Folds the WHOLE chain instead of looking only at the last hop, because a
+    relative hop is relative to the PREVIOUS one: in `cd repo && cd sub &&
+    git push`, `sub` lives under `repo`, not under the session directory.
+    Joining it against the session base produced a path that either did not
+    exist (falling through to a fallback) or, worse, existed and pointed
+    somewhere unrelated.
+
+    Returns "" when the chain cannot be followed. An absolute hop re-anchors
+    and clears an earlier unknown -- `cd $T && cd /srv/repo` ends at
+    /srv/repo no matter what `$T` was -- while a relative hop after an
+    unknown one stays unknown, since there is nothing to join it onto.
     """
-    try:
-        t = os.path.expanduser(target)
-        if not os.path.isabs(t):
-            if not base:
-                return ""  # relative, and nothing to resolve it against
-            t = os.path.join(base, t)
-        return t
-    except Exception:
-        return ""
+    targets = _cd_targets(cmd)
+    if not targets:
+        return base or ""
+    cur, unknown = base or "", False
+    for raw in targets:
+        if raw == "-" or _UNEXPANDABLE.search(raw):
+            unknown = True  # `cd -` needs shell history; `$VAR` needs its shell
+            continue
+        try:
+            t = os.path.expanduser(raw)
+            if os.path.isabs(t):
+                cur, unknown = t, False
+            elif unknown or not cur:
+                continue
+            else:
+                cur = os.path.normpath(os.path.join(cur, t))
+        except Exception:
+            unknown = True
+    return "" if unknown else cur
 
 
 def _resolve_pushed_repo(payload):
@@ -789,10 +846,9 @@ def _resolve_pushed_repo(payload):
     if isinstance(payload, dict):
         cmd = (payload.get("tool_input") or {}).get("command", "") or ""
         cwd = str(payload.get("cwd") or "")
-    base = cwd or os.getcwd()
-    targets = _cd_targets(cmd)
-    # _cd_candidate expands ~ and anchors a RELATIVE `cd` to the session dir.
-    candidates = [_cd_candidate(targets[-1], base)] if targets else []
+    # _effective_cd folds the whole cd chain onto the session dir, so a
+    # relative hop is joined onto the hop before it rather than onto the base.
+    candidates = [_effective_cd(cmd, cwd or os.getcwd())]
     if cwd:
         candidates.append(cwd)
     candidates.append(os.getcwd())
@@ -832,15 +888,11 @@ def _push_target_unknown(payload):
     if isinstance(payload, dict):
         cmd = (payload.get("tool_input") or {}).get("command", "") or ""
         cwd = str(payload.get("cwd") or "")
-    targets = _cd_targets(cmd)
-    if not targets:
-        return False
-    # _cd_candidate expands ~ (ordinary, and isdir does not do it -- without
-    # that every tilde path looked unresolvable and would have been blocked)
-    # and anchors a relative target to the session dir. It does NOT expandvars:
-    # `$T` was set by the shell running the command, not in OUR environment, so
-    # substituting our value would confidently answer wrong.
-    target = _cd_candidate(targets[-1], cwd or os.getcwd())
+    if not _cd_targets(cmd):
+        return False  # no cd at all: the session's cwd IS the target
+    # The whole chain, folded. "" means a hop we could not follow -- `cd $VAR`,
+    # `cd -`, or a relative hop after one of those.
+    target = _effective_cd(cmd, cwd or os.getcwd())
     try:
         if not target or not os.path.isdir(target):
             return True
@@ -872,8 +924,12 @@ def _looks_like_real_push(cmd):
     contains the words (a grep pattern, a heredoc, a commit message, a Python
     string) must never be denied for a reason about pushing, so the block below
     is held to this stricter test while the review trigger keeps the loose one.
+
+    Heredoc bodies go first, for the same reason: a script or test file being
+    written by the command is data, and a `git push` inside it is not one the
+    shell will run.
     """
-    return bool(_REAL_PUSH.search(cmd or ""))
+    return bool(_REAL_PUSH.search(_strip_heredocs(cmd or "")))
 
 
 def _hookspath_shadowed(repo_root):
