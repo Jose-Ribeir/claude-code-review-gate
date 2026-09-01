@@ -80,9 +80,15 @@ _resolve_gate_dir() {
   return 1
 }
 
-# git feeds pre-push the ref updates on stdin. review-gate.py --mode git does
-# not read stdin (only --mode hook does), so capture the lines here and pass
-# them on to any chained repo-local hook, which may well expect them.
+# git feeds pre-push the ref updates on stdin: `<local ref> <local sha>
+# <remote ref> <remote sha>`. That is the authoritative answer to "what is
+# being sent, and where", so it goes to the reviewer AND on to any chained
+# repo-local hook, which may well expect it.
+#
+# It used to go only to the chained hook, with the reviewer given /dev/null --
+# so the gate asked `@{u}..HEAD` instead and answered a different question. A
+# `git push origin mybranch:main` whose branch was already pushed reports zero
+# unpushed commits, and five commits reached main reviewed by nothing.
 REFS="$(cat || true)"
 
 _fail_open_requested() {
@@ -107,7 +113,7 @@ if [ "${OCR_IN_REVIEW:-}" = "1" ]; then
   :
 elif GATE_DIR="$(_resolve_gate_dir)"; then
   if [ -n "$PY" ]; then
-    "$PY" "$GATE_DIR/review-gate.py" --mode git </dev/null || RC=$?
+    echo "$REFS" | "$PY" "$GATE_DIR/review-gate.py" --mode git || RC=$?
   elif _fail_open_requested; then
     echo "review-gate: no working Python 3 found; OCR_FAIL_OPEN set, skipping review." >&2
   else

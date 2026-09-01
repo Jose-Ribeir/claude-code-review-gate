@@ -640,10 +640,10 @@ def _stub_gate(monkeypatch, tmp_path, result=_WARN_RESULT, calls=None):
     monkeypatch.setattr(review_gate, "_git_dir", lambda repo_root=None: str(tmp_path))
     monkeypatch.setattr(review_gate, "_head_sha", lambda repo_root=None: "a" * 40)
     monkeypatch.setattr(review_gate, "_branch", lambda repo_root=None: "feat/x")
-    monkeypatch.setattr(review_gate, "_has_unpushed_commits", lambda repo_root=None: True)
+    monkeypatch.setattr(review_gate, "_has_unpushed_commits", lambda repo_root=None, push_range=None: True)
     monkeypatch.delenv("OCR_IN_REVIEW", raising=False)
 
-    def _fake_review(repo_root, mode, git_dir=None, head_sha=""):
+    def _fake_review(repo_root, mode, git_dir=None, head_sha="", push_range=""):
         if calls is not None:
             calls.append(head_sha)
         raw_name = review_gate._save_raw_output(git_dir, json.dumps(result), head_sha)
@@ -1067,11 +1067,11 @@ def _gate_hook(monkeypatch, command, **patches):
     for name, value in patches.items():
         monkeypatch.setattr(review_gate, name, value)
 
-    def _unpushed(repo_root=None):
+    def _unpushed(repo_root=None, push_range=None):
         seen["unpushed_root"] = repo_root
         return True
 
-    def _review(repo_root, mode, git_dir=None, head_sha=""):
+    def _review(repo_root, mode, git_dir=None, head_sha="", push_range=""):
         seen["review_root"] = repo_root
         return {"findings": []}, True, ""
 
@@ -1351,3 +1351,138 @@ def test_an_unterminated_heredoc_strips_nothing(tmp_path):
 def test_an_opener_followed_by_a_pipe_is_still_an_opener(tmp_path):
     cmd = "python - <<'PY' 2>&1 | head -5\ncd /elsewhere && git push\nPY\necho done"
     assert review_gate._looks_like_real_push(cmd) is False
+
+
+# --- what is being pushed, and where ----------------------------------------
+# The branch:main bypass. `_has_unpushed_commits` asked "is HEAD ahead of its
+# own upstream?" when the question is "what is the remote about to gain?".
+# Those diverge the moment you push to a ref that is not your upstream:
+# `git push origin mybranch:main`, with mybranch already pushed, reports zero
+# unpushed commits -- so the gate allowed five commits onto main having
+# reviewed none of them. Observed in a real repo.
+#
+# Git hands a pre-push hook the answer on stdin and the gate used to discard it.
+
+_ZERO = "0" * 40
+
+
+def _stdin(monkeypatch, text):
+    monkeypatch.setattr(sys, "stdin", _io.StringIO(text))
+
+
+def test_push_refs_are_read_from_stdin(monkeypatch):
+    _stdin(monkeypatch, "refs/heads/x " + "a" * 40 + " refs/heads/main " + "b" * 40 + "\n")
+    assert review_gate._read_push_refs() == [("a" * 40, "b" * 40)]
+
+
+def test_a_branch_deletion_carries_nothing_to_review(monkeypatch):
+    _stdin(monkeypatch, "(delete) " + _ZERO + " refs/heads/main " + "b" * 40 + "\n")
+    assert review_gate._read_push_refs() == []
+
+
+def test_malformed_and_empty_stdin_fall_back_rather_than_fail(monkeypatch):
+    _stdin(monkeypatch, "nonsense\n\n")
+    assert review_gate._read_push_refs() == []
+    _stdin(monkeypatch, "")
+    assert review_gate._read_push_refs() == []
+
+
+def test_the_range_is_what_the_remote_gains(monkeypatch):
+    # Not @{u}..HEAD -- the remote sha of the ref actually being written.
+    monkeypatch.setattr(
+        review_gate, "_git",
+        lambda args, cwd=None: ("commit1", 0) if args[:1] == ["log"] else ("", 1),
+    )
+    rng = review_gate._range_for_refs([("a" * 40, "b" * 40)])
+    assert rng == "b" * 40 + ".." + "a" * 40
+
+
+def test_a_range_with_no_commits_is_not_offered(monkeypatch):
+    monkeypatch.setattr(
+        review_gate, "_git",
+        lambda args, cwd=None: ("", 0) if args[:1] == ["log"] else ("", 1),
+    )
+    assert review_gate._range_for_refs([("a" * 40, "b" * 40)]) == ""
+
+
+def test_a_brand_new_remote_ref_falls_back_to_the_default_branch(monkeypatch):
+    seen = {}
+
+    def _fake_git(args, cwd=None):
+        if args[:2] == ["rev-parse", "--verify"]:
+            return ("origin/main", 0) if args[-1] == "origin/main" else ("", 1)
+        if args[:1] == ["log"]:
+            seen["range"] = args[1]
+            return "commit1", 0
+        return "", 1
+
+    monkeypatch.setattr(review_gate, "_git", _fake_git)
+    rng = review_gate._range_for_refs([("a" * 40, _ZERO)])
+    assert rng == "origin/main.." + "a" * 40
+    assert seen["range"] == rng
+
+
+def test_the_push_range_decides_whether_there_is_anything_to_review(monkeypatch):
+    # THE bypass, in one assertion. The branch is level with its upstream, so
+    # the old question answers "nothing unpushed" -- but the range being sent
+    # to main carries commits, so there is plenty to review.
+    def _fake_git(args, cwd=None):
+        if args[:1] != ["log"]:
+            return "", 1
+        rng = args[1]
+        if rng.startswith("@{u}"):
+            return "", 0          # level with upstream
+        return "deadbee some commit", 0   # but the push carries commits
+
+    monkeypatch.setattr(review_gate, "_git", _fake_git)
+    assert review_gate._has_unpushed_commits("/repo") is False
+    assert review_gate._has_unpushed_commits("/repo", push_range="aaa..bbb") is True
+
+
+def test_without_refs_the_old_upstream_heuristic_still_applies(monkeypatch):
+    # Hook mode runs BEFORE git, so no refs exist yet and this is all there is.
+    monkeypatch.setattr(
+        review_gate, "_git",
+        lambda args, cwd=None: ("commit1", 0) if args[:1] == ["log"] else ("", 1),
+    )
+    assert review_gate._has_unpushed_commits("/repo") is True
+
+
+def test_the_review_is_told_the_range(monkeypatch, tmp_path):
+    # Detecting the right thing is only half of it: without passing the range
+    # on, the skill re-derives @{u}..HEAD and reviews nothing.
+    seen = {}
+
+    class _Proc:
+        returncode = 0
+        stdout = '{"findings": []}'
+        stderr = ""
+
+    def _fake_run(cmd, **kw):
+        seen["prompt"] = cmd[2]
+        return _Proc()
+
+    monkeypatch.setattr(review_gate.subprocess, "run", _fake_run)
+    monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
+    review_gate._run_review(str(tmp_path), "git", str(tmp_path), "a" * 40, "aaa..bbb")
+    assert "--range aaa..bbb" in seen["prompt"]
+    assert "--unpushed" not in seen["prompt"]
+
+
+def test_without_a_range_the_prompt_is_unchanged(monkeypatch, tmp_path):
+    seen = {}
+
+    class _Proc:
+        returncode = 0
+        stdout = '{"findings": []}'
+        stderr = ""
+
+    def _fake_run(cmd, **kw):
+        seen["prompt"] = cmd[2]
+        return _Proc()
+
+    monkeypatch.setattr(review_gate.subprocess, "run", _fake_run)
+    monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
+    review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40)
+    assert "--unpushed" in seen["prompt"]
+    assert "--range" not in seen["prompt"]

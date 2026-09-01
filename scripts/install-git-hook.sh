@@ -82,7 +82,9 @@ already passed them.
             if "$_p2" -c "import sys" >/dev/null 2>&1; then _rg_py="$_p2"; break; fi
         done
         if [ -n "$_rg_dir" ] && [ -n "$_rg_py" ]; then
-            "$_rg_py" "$_rg_dir/review-gate.py" --mode git </dev/null || exit $?
+            # Pass the ref updates through: they say what is being sent and where,
+        # which is what stops a `branch:main` push from being skipped.
+        echo "$PUSH_REFS" | "$_rg_py" "$_rg_dir/review-gate.py" --mode git || exit $?
         else
             # FAIL CLOSED, matching the gate's own pre-push. Skipping here is
             # the one place it would be least visible: this repo's
