@@ -63,35 +63,43 @@ already passed them.
     # path does not). Calls review-gate.py directly rather than the global
     # pre-push wrapper: that wrapper also chains $GITDIR/hooks/pre-push, which
     # in a repo like this one would re-run the checks that just passed.
-    _rg_dir=""
-    for _p in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/data/*/gate-dir; do
-        [ -f "$_p" ] || continue
-        _d="$(cat "$_p" 2>/dev/null || true)"
-        if [ -n "$_d" ] && [ -f "$_d/review-gate.py" ]; then _rg_dir="$_d"; break; fi
-    done
-    _rg_py=""
-    for _c in python3 python py; do
-        _p2="$(command -v "$_c" 2>/dev/null)" || continue
-        case "$_p2" in *[Ww]indows[Aa]pps*) continue ;; esac   # Store alias stubs
-        if "$_p2" -c "import sys" >/dev/null 2>&1; then _rg_py="$_p2"; break; fi
-    done
-    if [ -n "$_rg_dir" ] && [ -n "$_rg_py" ]; then
-        "$_rg_py" "$_rg_dir/review-gate.py" --mode git </dev/null || exit $?
-    else
-        # FAIL CLOSED, matching the gate's own pre-push. Skipping here is the
-        # one place it would be least visible: this repo's core.hooksPath
-        # shadows the global hook, so nothing else reviews these commits.
-        case "${OCR_FAIL_OPEN:-}" in
-            1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]) : ;;
-            *)
-                echo "[review-gate] BLOCKED: no reviewer or no working Python 3, so these" >&2
-                echo "  commits were not reviewed. This repo sets its own core.hooksPath, so" >&2
-                echo "  the global gate does not run here either -- nothing else catches it." >&2
-                echo "  Fix: install Python 3, or re-run install-git-hook.sh to refresh the" >&2
-                echo "  pointer. Bypass once: OCR_FAIL_OPEN=1 git push" >&2
-                exit 1
-                ;;
-        esac
+    #
+    # Skipped inside the headless review session, matching the plugin's other
+    # two adapters: review-gate.py sets OCR_IN_REVIEW=1 for its child, and
+    # without this every push the reviewer makes would spawn a Python process
+    # just to be told to stop.
+    if [ "${OCR_IN_REVIEW:-}" != "1" ]; then
+        _rg_dir=""
+        for _p in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/data/*/gate-dir; do
+            [ -f "$_p" ] || continue
+            _d="$(cat "$_p" 2>/dev/null || true)"
+            if [ -n "$_d" ] && [ -f "$_d/review-gate.py" ]; then _rg_dir="$_d"; break; fi
+        done
+        _rg_py=""
+        for _c in python3 python py; do
+            _p2="$(command -v "$_c" 2>/dev/null)" || continue
+            case "$_p2" in *[Ww]indows[Aa]pps*) continue ;; esac   # Store alias stubs
+            if "$_p2" -c "import sys" >/dev/null 2>&1; then _rg_py="$_p2"; break; fi
+        done
+        if [ -n "$_rg_dir" ] && [ -n "$_rg_py" ]; then
+            "$_rg_py" "$_rg_dir/review-gate.py" --mode git </dev/null || exit $?
+        else
+            # FAIL CLOSED, matching the gate's own pre-push. Skipping here is
+            # the one place it would be least visible: this repo's
+            # core.hooksPath shadows the global hook, so nothing else reviews
+            # these commits.
+            case "${OCR_FAIL_OPEN:-}" in
+                1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]) : ;;
+                *)
+                    echo "[review-gate] BLOCKED: no reviewer or no working Python 3, so" >&2
+                    echo "  these commits were not reviewed. This repo sets its own" >&2
+                    echo "  core.hooksPath, so the global gate does not run here either --" >&2
+                    echo "  nothing else catches it. Fix: install Python 3, or re-run" >&2
+                    echo "  install-git-hook.sh. Bypass once: OCR_FAIL_OPEN=1 git push" >&2
+                    exit 1
+                    ;;
+            esac
+        fi
     fi
     # --- end review-gate ---
 SNIPPET
