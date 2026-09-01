@@ -242,3 +242,16 @@ def test_the_printed_snippet_is_ascii_only(tmp_path):
     # output goes through git on Windows.
     repo = _repo_with_local_hookspath(tmp_path, "myhooks")
     _chain_into(repo).stdout.encode("ascii")
+
+
+def test_the_printed_snippet_skips_itself_inside_a_review(tmp_path):
+    # Third adapter, same re-entry rule as the other two: review-gate.py sets
+    # OCR_IN_REVIEW=1 for its child, so a push made by the reviewer must not
+    # spawn another one. Reaching the end without blocking proves it skipped
+    # rather than hitting the fail-closed branch.
+    repo = _repo_with_local_hookspath(tmp_path, "myhooks")
+    printed = _chain_into(repo).stdout
+    r = _run_snippet(tmp_path, printed, {"OCR_IN_REVIEW": "1"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "REACHED_END" in r.stdout
+    assert "BLOCKED" not in r.stderr
