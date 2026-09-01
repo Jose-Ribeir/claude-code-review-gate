@@ -6,6 +6,52 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-09-01
+
+Closes the two issues 0.4.2 and 0.4.3 documented rather than fixed.
+
+### Fixed
+- **A `cd` chain inside a quoted argument was parsed as code.**
+  `git commit -m "cd repo && cd sub && git push"` is a message, not a chain, and
+  a grep pattern is a pattern. Read as code, the chain resolved to nothing and
+  the unknown-target rule could deny an entirely innocent command. Quoted spans
+  are now blanked before parsing, with two exceptions that are load-bearing:
+  after `cd` (`cd "path with spaces"` *is* the hop being followed) and after a
+  **shell's** `-c` (`bash -c "cd /repo && git push"` really does execute its
+  argument). The shell name is checked, not just the flag — keying on `-c`
+  alone made `python -c "print('git push')"` read as a real push.
+  - Masking also allows a **quote** to count as a command boundary, which was
+    not safe before. That fixes `bash -c "cd /real && git push"`, whose `cd`
+    sits immediately after a quote and was previously invisible — the gate
+    resolved the session's repo instead of `/real`.
+
+- **Quote matching could hang the hook.** The first `_QUOTED` matched a span as
+  `(['"])(?:\\.|(?!\1).)*\1`, where both alternatives can consume a backslash —
+  so inside a run of them the engine tries every pairing, and an unterminated
+  quote gives it no early exit. Exponential, in a hook that runs on every Bash
+  call, reachable from any command with a stray quote. Both branches are now
+  unambiguous; 20000 backslashes after an open quote completes in ~1.5 ms.
+- **The push was located by raw substring in two places.** `_cd_targets` and
+  `_commits_in_same_command` used `find("git push")` — no word boundary, no
+  command position — while everything else uses the stricter pattern. Masking
+  only blanks *quoted* spans, so an unquoted mention survived: `git commit -m
+  "wip" && echo remember to git push later` would have been reported as a
+  commit pushed unreviewed, and a real `cd` after such a mention was hidden.
+
+### Added
+- **A commit pushed in the same command is now reported as unreviewed.**
+  `git commit && git push` in one command is never seen by the PreToolUse
+  adapter: it runs *before* the command, so the commit does not exist yet, HEAD
+  points at its parent, nothing is unpushed, and the gate allows without
+  looking at anything. The git pre-push adapter does cover it, so the gap is
+  real only where that adapter is absent or shadowed by a repo-local
+  `core.hooksPath` — the configuration this release line already found in the
+  wild. No pre-tool hook can review a commit that does not exist, so this is
+  surfaced rather than fixed: `--mode post` detects the shape and says so in
+  the session's context. Guarded three ways so it cannot become noise — the
+  shape must match, the push must not have been a no-op, and the notice is
+  claimed with the usual delivered-marker so it appears once.
+
 ## [0.4.3] - 2026-09-01
 
 ### Fixed
