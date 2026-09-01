@@ -11,6 +11,80 @@ set -euo pipefail
 SCR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOOKS_DIR="${SCR_HOOKS_DIR:-$HOME/.config/review-gate/hooks}"
 
+# --chain-into <repo>: print the snippet that runs the gate from a repo which
+# sets its OWN core.hooksPath.
+#
+# Why this exists: git resolves a repo-local core.hooksPath before the global
+# one, so a repo managing its own hooks (husky, lefthook, a hand-rolled
+# scripts/git-hooks) silently takes this gate out of the chain -- pushes from a
+# plain terminal there are not gated at all, and nothing announces it.
+# /review-gate:doctor reports the condition; this prints the cure.
+#
+# It PRINTS and does not edit. That hook file belongs to the repo and is under
+# its version control; a generated edit landing in someone's commit unannounced
+# is not a trade this installer gets to make.
+if [ "${1:-}" = "--chain-into" ]; then
+  target="${2:-}"
+  if [ -z "$target" ] || [ ! -d "$target" ]; then
+    echo "usage: install-git-hook.sh --chain-into <path-to-repo>" >&2
+    exit 2
+  fi
+  local_hp="$(git -C "$target" config --local --get core.hooksPath || true)"
+  # core.hooksPath may be absolute or repo-relative; joining an absolute one
+  # onto $target yields nonsense like /repo/C:/repo/hooks.
+  case "$local_hp" in
+    "")            hookdir="$target/.git/hooks" ;;
+    /*|[A-Za-z]:*) hookdir="$local_hp" ;;
+    *)             hookdir="$target/$local_hp" ;;
+  esac
+  hookfile="$hookdir/pre-push"
+
+  if [ -f "$hookfile" ] && grep -q "review-gate.py" "$hookfile" 2>/dev/null; then
+    echo "Already chained: $hookfile invokes review-gate.py. Nothing to do."
+    exit 0
+  fi
+  if [ -z "$local_hp" ]; then
+    echo "$target does not set a repo-local core.hooksPath, so the global gate"
+    echo "already applies there. Nothing to chain."
+    exit 0
+  fi
+
+  cat <<'SNIPPET'
+Add this to the repo's own pre-push, at the point where it has decided to let
+the push proceed -- immediately BEFORE its success `exit 0`, not at the end of
+the file, since a hook that exits early would never reach an appended block.
+
+Run it after the repo's own checks so a review is only paid for on code that
+already passed them.
+
+    # ── review-gate: AI review of the commits being pushed ──
+    # Resolves the reviewer through the pointer the plugin refreshes on every
+    # run, so this keeps working across plugin upgrades (the versioned cache
+    # path does not). Calls review-gate.py directly rather than the global
+    # pre-push wrapper: that wrapper also chains $GITDIR/hooks/pre-push, which
+    # in a repo like this one would re-run the checks that just passed.
+    _rg_dir=""
+    for _p in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/data/*/gate-dir; do
+        [ -f "$_p" ] || continue
+        _d="$(cat "$_p" 2>/dev/null || true)"
+        if [ -n "$_d" ] && [ -f "$_d/review-gate.py" ]; then _rg_dir="$_d"; break; fi
+    done
+    if [ -n "$_rg_dir" ]; then
+        _rg_py=""
+        for _c in python3 python py; do
+            _rg_py="$(command -v "$_c" 2>/dev/null)" && break
+        done
+        [ -n "$_rg_py" ] && { "$_rg_py" "$_rg_dir/review-gate.py" --mode git </dev/null || exit $?; }
+    fi
+    # ── end review-gate ──
+SNIPPET
+  echo
+  echo "Target hook: $hookfile"
+  echo "Verify afterwards with /review-gate:doctor -- it should stop reporting"
+  echo "the git adapter as shadowed in that repo."
+  exit 0
+fi
+
 # Stamped into the installed hook purely so /review-gate:doctor can report
 # version skew between this copy and the running plugin.
 SCR_VERSION="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \

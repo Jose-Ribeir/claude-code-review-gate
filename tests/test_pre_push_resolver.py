@@ -118,3 +118,76 @@ def test_writer_and_reader_agree_on_the_pointer_location(tmp_path):
     assert found, "writer put the pointer where pre-push's glob will not find it"
     assert os.path.isfile(os.path.join(open(found[0], encoding="utf-8").read().strip(),
                                        "review-gate.py"))
+
+
+# --- install-git-hook.sh --chain-into -----------------------------------------
+# A repo-local core.hooksPath is resolved by git BEFORE the global one, so a
+# repo managing its own hooks silently drops this gate: pushes from a plain
+# terminal there are not gated at all. --chain-into prints the cure. It only
+# prints -- the hook belongs to that repo and is under its version control.
+
+_INSTALLER = os.path.join(_REPO, "scripts", "install-git-hook.sh")
+
+
+def _chain_into(path):
+    return subprocess.run(
+        [_BASH, _INSTALLER, "--chain-into", str(path)],
+        capture_output=True, text=True, timeout=60,
+    )
+
+
+def _repo_with_local_hookspath(tmp_path, hookspath, hook_body="#!/bin/sh\nexit 0\n"):
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(repo)], capture_output=True, timeout=60)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "core.hooksPath", str(hookspath)],
+        capture_output=True, timeout=60,
+    )
+    d = hookspath if os.path.isabs(str(hookspath)) else repo / hookspath
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(str(d), "pre-push"), "w", encoding="utf-8") as fh:
+        fh.write(hook_body)
+    return repo
+
+
+def test_chain_into_reports_the_right_hook_for_an_absolute_hookspath(tmp_path):
+    # The bug this caught in review: core.hooksPath may be ABSOLUTE, and
+    # joining it onto the repo path produced nonsense like /repo/C:/repo/hooks.
+    hooks = tmp_path / "abs-hooks"
+    repo = _repo_with_local_hookspath(tmp_path, hooks)
+    r = _chain_into(repo)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert os.path.join(str(hooks), "pre-push") in r.stdout.replace("/", os.sep)
+
+
+def test_chain_into_reports_the_right_hook_for_a_relative_hookspath(tmp_path):
+    repo = _repo_with_local_hookspath(tmp_path, "myhooks")
+    r = _chain_into(repo)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "myhooks" in r.stdout and "pre-push" in r.stdout
+
+
+def test_chain_into_says_nothing_to_do_when_already_chained(tmp_path):
+    repo = _repo_with_local_hookspath(
+        tmp_path, "myhooks",
+        hook_body='#!/bin/sh\npython "$D/review-gate.py" --mode git\n',
+    )
+    r = _chain_into(repo)
+    assert r.returncode == 0
+    assert "Already chained" in r.stdout
+
+
+def test_chain_into_says_nothing_to_do_without_a_local_hookspath(tmp_path):
+    repo = tmp_path / "plain"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], capture_output=True, timeout=60)
+    r = _chain_into(repo)
+    assert r.returncode == 0
+    assert "does not set a repo-local core.hooksPath" in r.stdout
+
+
+def test_chain_into_rejects_a_path_that_is_not_a_directory(tmp_path):
+    r = _chain_into(tmp_path / "nope")
+    assert r.returncode == 2
+    assert "usage:" in r.stderr

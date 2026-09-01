@@ -1557,17 +1557,34 @@ def test_a_shell_in_an_earlier_segment_does_not_leak_into_a_later_one():
 
 
 def test_a_long_option_merely_ending_in_c_is_not_a_shell_dash_c():
-    # `-[A-Za-z]*c$` also matched -exec, -sync, -static, -public and friends,
-    # so a quoted argument after one of them was parsed as executable shell.
-    for flag in ("-exec", "-sync", "-async", "-static", "-atomic", "-public"):
-        assert not review_gate._DASH_C.match(flag), flag
+    # `-[A-Za-z]*c$` matched -exec, -sync, -static, -public and friends, so a
+    # quoted argument after one of them was parsed as executable shell.
+    for flag in (
+        "-exec",      # four letters, so a length cap alone cannot reject it;
+                      # the repeated `e` is what does
+        "-static",    # repeated `t`
+        "-mimic",     # repeated `m` and `i`
+        "-sync", "-async",   # `y` is not a bash short option
+        "-magic",            # `g` is not either
+        "-atomic", "-public", "-classic", "-generic", "-periodic", "-topic",
+        "--sync",     # a long option is never a cluster
+    ):
+        assert not review_gate._is_dash_c(flag), flag
     cmd = f"""bash script.sh && find . -exec "cd /x && {_PUSH}" ;"""
     assert _cd_targets(cmd) == []
 
 
 def test_the_short_clusters_that_do_mean_dash_c_still_match():
-    for flag in ("-c", "-lc", "-ec", "-xc", "-euc"):
-        assert review_gate._DASH_C.match(flag), flag
+    # -euxc is the regression this list guards: a two-letter cap rejected it,
+    # and a miss blanks a real `bash -euxc "... push"` into data.
+    for flag in ("-c", "-lc", "-ec", "-xc", "-euc", "-euxc"):
+        assert review_gate._is_dash_c(flag), flag
+
+
+def test_a_long_cluster_shell_invocation_is_still_code():
+    cmd = f'bash -euxc "cd /real && {_PUSH}"'
+    assert _cd_targets(cmd) == ["/real"]
+    assert review_gate._looks_like_real_push(cmd) is True
 
 
 def test_masking_stays_linear_across_many_quoted_spans():
