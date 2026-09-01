@@ -1229,3 +1229,59 @@ def test_an_unknown_target_does_not_block_when_the_push_is_only_text(monkeypatch
     payload = json.loads(capsys.readouterr().out)["hookSpecificOutput"]
     assert payload["permissionDecision"] != "deny"
     assert seen  # it went down the normal path rather than short-circuiting to a block
+
+
+# --- multi-line commands and relative cd targets ------------------------------
+# All three found by the gate reviewing its own change (verdict warn, three
+# high findings against 94b69df). A Bash tool call is routinely multi-line, and
+# the separator alternation had no newline case while re.finditer is not
+# re.MULTILINE -- so `cd repo\ngit push` produced no cd target at all, and
+# _looks_like_real_push returned False for a genuine push, silently disabling
+# the unknown-target block it gates. Relative targets were tested with
+# os.path.isdir against the HOOK PROCESS's cwd, which is the very confusion
+# this code path exists to correct.
+
+def test_cd_is_found_when_it_sits_on_its_own_line():
+    assert _cd_targets("cd /a/b\ngit push origin main") == ["/a/b"]
+    assert _cd_targets("echo start\ncd /a/b\ngit push") == ["/a/b"]
+
+
+def test_a_push_on_its_own_line_is_still_a_real_push():
+    assert review_gate._looks_like_real_push("cd /repo\ngit push") is True
+    assert review_gate._looks_like_real_push("set -e\nPYTEST_WORKERS=4 git push origin main") is True
+
+
+def test_a_relative_cd_is_anchored_to_the_session_directory(tmp_path, monkeypatch):
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+    seen = {}
+
+    def _fake_git(args, cwd=None):
+        seen["cwd"] = cwd
+        return (str(cwd), 0) if args[:2] == ["rev-parse", "--show-toplevel"] else ("", 1)
+
+    monkeypatch.setattr(review_gate, "_git", _fake_git)
+    got = review_gate._resolve_pushed_repo(
+        {"tool_input": {"command": "cd myrepo && git push"}, "cwd": str(tmp_path)}
+    )
+    assert got == str(repo)
+
+
+def test_a_relative_cd_that_does_not_exist_under_the_session_dir_is_unknown(tmp_path, monkeypatch):
+    monkeypatch.setattr(review_gate, "_git", lambda args, cwd=None: ("", 1))
+    assert review_gate._push_target_unknown(
+        {"tool_input": {"command": "cd nope && git push"}, "cwd": str(tmp_path)}
+    ) is True
+
+
+def test_a_relative_cd_is_not_tested_against_the_hook_process_cwd(tmp_path, monkeypatch):
+    # The regression itself: "scripts" exists under the plugin repo, which is
+    # where the hook process runs. Anchored to an unrelated session dir it must
+    # NOT resolve, no matter what the process cwd happens to contain.
+    monkeypatch.setattr(
+        review_gate, "_git",
+        lambda args, cwd=None: (str(cwd), 0) if args[:2] == ["rev-parse", "--show-toplevel"] else ("", 1),
+    )
+    assert review_gate._push_target_unknown(
+        {"tool_input": {"command": "cd scripts && git push"}, "cwd": str(tmp_path)}
+    ) is True
