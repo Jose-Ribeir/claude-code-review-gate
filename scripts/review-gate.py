@@ -779,10 +779,19 @@ _UNEXPANDABLE = re.compile(r"[$`]")
 
 
 def _cd_targets(cmd):
-    """Directories a command cds into before it reaches `git push`, in order."""
+    """Directories a command cds into before it reaches `git push`, in order.
+
+    Bounded at the push COMMAND, not at the first literal occurrence of the
+    words. Splitting on the substring truncates at a mere mention -- `echo
+    "remember to git push later" && cd /real-repo && git push` would lose the
+    real cd, fall back to the session directory, and review the wrong repo
+    without saying so. That is the fail-open this whole resolution exists to
+    close, so it must not be reintroduced by the thing that simplifies it.
+    """
     if not cmd:
         return []
-    head = cmd.split("git push", 1)[0]
+    stop = _REAL_PUSH.search(cmd)
+    head = cmd[: stop.start()] if stop else cmd
     return [next(g for g in m.groups() if g is not None and g != "") or ""
             for m in _CD.finditer(head)
             if any(g for g in m.groups())]
