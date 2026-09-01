@@ -6,6 +6,20 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.8] - 2026-09-01
+
+### Fixed
+- **The `--chain-into` snippet lacked the re-entry guard** the other two
+  adapters have. `review-gate.py` sets `OCR_IN_REVIEW=1` for its child so a
+  push made from inside the headless review does not spawn another reviewer,
+  and both `scripts/pre-push` and `gate-hook.sh` short-circuit on it. The
+  Python side would still have exited early, so this was a wasted process per
+  Bash call inside a review rather than a nested review — but a third adapter
+  ignoring the convention is the kind of drift that becomes a real divergence.
+  The block is also re-indented: it is code people paste into their own hook,
+  so a body at the wrong level under its guard is a defect in the shipped
+  thing, not cosmetics.
+
 ## [0.4.7] - 2026-09-01
 
 ### Fixed
