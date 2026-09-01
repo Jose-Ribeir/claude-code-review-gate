@@ -722,8 +722,12 @@ def _latest_record_for_head(git_dir, head, cap=POST_SCAN_CAP):
 # `cd repo\ngit push` matched nothing at all (re.finditer is not re.MULTILINE,
 # so `^` only ever meant the start of the whole string). Same omission is what
 # made _REAL_PUSH below miss a push on its own line.
+# A quote counts as a command boundary because `bash -c "cd /repo && ..."`
+# really does start a command right after it. That is only safe because
+# _mask_quoted has already blanked every quoted span that is DATA -- the only
+# quotes reaching this pattern are a cd's own target and the body of a -c.
 _CD_TARGET = re.compile(
-    r"""(?:^|[;&|\n\r]|&&|\|\|)\s*cd\s+(?:"([^"]*)"|'([^']*)'|([^\s;&|]+))"""
+    r"""(?:^|[;&|\n\r"']|&&|\|\|)\s*cd\s+(?:"([^"]*)"|'([^']*)'|([^\s;&|]+))"""
 )
 
 
@@ -779,6 +783,63 @@ def _strip_heredocs(cmd):
     return "\n".join(out)
 
 
+_QUOTED = re.compile(r"""(['"])(?:\\.|(?!\1).)*\1""", re.S)
+# Runners whose `-c` argument is SHELL. Deliberately not every program with a
+# -c flag: python's is Python, and reading it as shell turned a harmless
+# `python -c "print('git push')"` into a push.
+_SHELLS = ("bash", "sh", "zsh", "dash", "ksh", "bash.exe", "sh.exe")
+
+
+def _mask_quoted(cmd):
+    """Blank the inside of quoted spans that are DATA rather than code.
+
+    `git commit -m "cd repo && git push"` contains neither a cd chain nor a
+    push -- it contains a message. Parsing it as code was the last known way
+    to make this gate misread a command: a chain that never ran resolved to
+    nothing, and the unknown-target rule denied something innocent.
+
+    Two spans are kept verbatim, decided by the tokens before the opening
+    quote:
+      cd        -- `cd "path with spaces"` really is the target, and blanking
+                   it would lose the very hop we are trying to follow.
+      <shell> -c -- `bash -c "cd /repo && git push"` really does execute its
+                   argument as shell, so it must stay parseable.
+
+    The shell name is checked, not just `-c`: `python -c "print('git push')"`
+    also has a `-c`, but its argument is Python, and treating it as shell made
+    an innocent one-liner read as a push.
+
+    Quotes themselves are preserved so token boundaries do not shift, and an
+    unbalanced quote simply fails to match and is left alone.
+    """
+    if not cmd or ("'" not in cmd and '"' not in cmd):
+        return cmd or ""
+    out, last = [], 0
+    for m in _QUOTED.finditer(cmd):
+        toks = cmd[: m.start()].split()
+        prev = toks[-1] if toks else ""
+        runner = os.path.basename(toks[-2]) if len(toks) > 1 else ""
+        out.append(cmd[last : m.start()])
+        if prev == "cd" or (prev == "-c" and runner in _SHELLS):
+            out.append(m.group(0))
+        else:
+            q = m.group(1)
+            out.append(q + " " * (len(m.group(0)) - 2) + q)
+        last = m.end()
+    out.append(cmd[last:])
+    return "".join(out)
+
+
+def _shell_code(cmd):
+    """The part of a command the shell will actually RUN, for parsing.
+
+    Heredoc bodies go first (they are written, not run), then quoted data is
+    blanked. Everything that reads a command for cds or pushes goes through
+    here, so the two rules stay in one place.
+    """
+    return _mask_quoted(_strip_heredocs(cmd or ""))
+
+
 def _cd_targets(cmd):
     """Every directory a shell command cds into before it reaches `git push`.
 
@@ -788,7 +849,7 @@ def _cd_targets(cmd):
     """
     if not cmd:
         return []
-    head = _strip_heredocs(cmd).split("git push", 1)[0]
+    head = _shell_code(cmd).split("git push", 1)[0]
     targets = []
     for m in _CD_TARGET.finditer(head):
         target = next((g for g in m.groups() if g), "")
@@ -926,7 +987,7 @@ def _push_target_unknown(payload):
 # `git push` at a COMMAND position -- optionally behind env-var prefixes and
 # git's own flags -- rather than anywhere in the string.
 _REAL_PUSH = re.compile(
-    r"(?:^|[;&|\n\r]|&&|\|\|)\s*"       # start, a separator, or a new LINE
+    r"(?:^|[;&|\n\r\"']|&&|\|\|)\s*"    # start, separator, new LINE, or a quote
     # \n matters: a multi-line Bash call putting `git push` on its own line
     # matched none of the alternatives, so this returned False for a genuine
     # push and the unknown-target block it gates silently never fired.
@@ -950,7 +1011,7 @@ def _looks_like_real_push(cmd):
     written by the command is data, and a `git push` inside it is not one the
     shell will run.
     """
-    return bool(_REAL_PUSH.search(_strip_heredocs(cmd or "")))
+    return bool(_REAL_PUSH.search(_shell_code(cmd)))
 
 
 def _hookspath_shadowed(repo_root):
@@ -1409,6 +1470,57 @@ def _post_context(entry, git_dir, shadow=False):
     return "\n".join(lines)[:POST_MAX_CONTEXT]
 
 
+_COMMIT = re.compile(
+    r"(?:^|[;&|\n\r\"']|&&|\|\|)\s*"
+    r"(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*git\s+(?:(?:-\S+|\S+=\S+)\s+)*commit\b"
+)
+
+
+def _commits_in_same_command(cmd):
+    """True when the command creates the commit it then pushes.
+
+    A PreToolUse hook runs BEFORE the command, so at gate time the new commit
+    does not exist yet and HEAD still points at its parent: there is nothing
+    unpushed to review, and the plugin adapter allows without looking at
+    anything. The git pre-push adapter does see it, because it runs after the
+    commit -- so this is a gap only where that adapter is absent or shadowed
+    by a repo-local core.hooksPath.
+
+    Structural: no pre-tool hook can review a commit that does not exist. The
+    least it can do is not let the push pass in silence.
+    """
+    code = _shell_code(cmd)
+    m = _COMMIT.search(code)
+    if not m:
+        return False
+    at = code.find("git push")
+    return at != -1 and m.start() < at
+
+
+def _push_was_a_noop(payload):
+    """True when git had nothing to push, so "unreviewed" would be noise."""
+    try:
+        resp = payload.get("tool_response") or {}
+        blob = f"{resp.get('stdout', '')}\n{resp.get('stderr', '')}"
+    except Exception:
+        return False
+    return "Everything up-to-date" in blob
+
+
+def _emit_post_context(text):
+    """The one place a PostToolUse payload is written to stdout."""
+    sys.stdout.write(
+        json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "additionalContext": text,
+                }
+            }
+        )
+    )
+
+
 def _mode_post(argv):
     """`--mode post`: replay this HEAD's recorded review as PostToolUse context.
 
@@ -1434,7 +1546,7 @@ def _mode_post(argv):
     the only acceptable outputs are one JSON object or nothing -- never a
     traceback.
     """
-    session_id = ""
+    session_id, cmd = "", ""
     try:
         payload = json.load(sys.stdin)
     except Exception:
@@ -1458,7 +1570,25 @@ def _mode_post(argv):
 
     entry = _latest_record_for_head(git_dir, head)
     if not entry:
-        return 0  # no review recorded for these commits
+        # Usually uninteresting: nothing was pushed, or this repo is not gated.
+        # One shape is worth saying out loud rather than passing in silence --
+        # see _commits_in_same_command.
+        if not _commits_in_same_command(cmd) or _push_was_a_noop(payload):
+            return 0
+        marker = Path(git_dir) / f"{POST_DELIVERED_PREFIX}{_marker_digest('unreviewed', head, session_id)}"
+        if not _claim_marker(marker):
+            return 0
+        _emit_post_context(
+            "review-gate: these commits were NOT reviewed.\n"
+            "  The command created the commit and pushed it in one step, so the gate ran\n"
+            "  before that commit existed and had nothing to look at. The global git hook\n"
+            "  covers this shape, but it did not run here (not installed, or shadowed by a\n"
+            "  repo-local core.hooksPath -- /review-gate:doctor will say which).\n"
+            "  To review them now: commit and push as two separate commands next time, or\n"
+            "  run /review-gate:review over the pushed range."
+        )
+        _reap_markers(git_dir, keep=marker)
+        return 0
 
     # The record must describe THIS push, not merely this HEAD. Resolving the
     # repo from a shell command is best-effort (see _resolve_pushed_repo), so
@@ -1493,16 +1623,7 @@ def _mode_post(argv):
     text = _post_context(entry, git_dir, shadow)
     if not text:
         return 0
-    sys.stdout.write(
-        json.dumps(
-            {
-                "hookSpecificOutput": {
-                    "hookEventName": "PostToolUse",
-                    "additionalContext": text,
-                }
-            }
-        )
-    )
+    _emit_post_context(text)
     _reap_markers(git_dir, keep=delivered)
     return 0
 
