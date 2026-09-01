@@ -40,11 +40,17 @@ if a command fails — a failure *is* a result.
 
 - Read `${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json` and report `version`.
 - Read `${CLAUDE_PLUGIN_ROOT}/hooks/hooks.json`. Confirm there is a `PreToolUse`
-  entry matching `Bash` with `if` set to `Bash(*git push*)`, and report each
-  entry's `timeout`.
-- Check both adapter scripts exist and are readable:
-  `${CLAUDE_PLUGIN_ROOT}/scripts/gate-hook.sh` and
-  `${CLAUDE_PLUGIN_ROOT}/scripts/gate-hook.ps1`.
+  entry matching `Bash` (it carries `if: "Bash(git *)"`, which is best-effort
+  only — the adapters re-check the command themselves, so treat a missing or
+  different `if` as cosmetic, not a fault), and report each entry's `timeout`.
+- Confirm there is also a `PostToolUse` entry matching `Bash`. This is the
+  adapter that puts **non-blocking** findings into the session's context after
+  a push; without it, a `warn` verdict is recorded but never surfaced to the
+  model. It deliberately has **no** `if` clause and a short `timeout` (30s) —
+  it only reads a file. Flag a large timeout here as wrong, not as safe.
+- Check all four adapter scripts exist and are readable:
+  `${CLAUDE_PLUGIN_ROOT}/scripts/gate-hook.sh`, `gate-hook.ps1`,
+  `post-hook.sh`, and `post-hook.ps1`.
 - Confirm each hook `timeout` is **greater than** `OCR_TIMEOUT` (default 1800).
   If not, say so loudly: Claude Code kills the hook at its own deadline
   regardless, and a killed hook is non-blocking — i.e. a silent fail-open.
@@ -53,6 +59,21 @@ if a command fails — a failure *is* a result.
 
 - `git config --global --get core.hooksPath` — empty means this adapter is not
   installed, which is fine and the default. Say so without alarm.
+- `git config --local --get core.hooksPath` — **check this even when the global
+  one looks healthy.** Git resolves the local setting first, so a repo that
+  manages its own hooks (husky, lefthook, a hand-rolled `scripts/git-hooks`)
+  silently takes the global gate out of the chain. If a local value is set, it
+  differs from the global one, and `<local>/pre-push` does not mention
+  `review-gate`, report it as **`fail`**:
+
+  > git adapter **shadowed** in this repo — the global hook is installed but a
+  > repo-local `core.hooksPath` overrides it. Pushes from a plain terminal here
+  > are **not gated at all**. Pushes made through Claude Code are still covered
+  > by the plugin adapter.
+
+  This is a config-induced silent fail-open and nothing else announces it, so
+  do not soften it. The repo owns that setting, so the fix is theirs: chain the
+  global hook from their own `pre-push`, or accept plugin-only coverage.
 - If set, read `<hooksPath>/pre-push` and report its stamped
   `SCR_INSTALLED_VERSION`. Compare with `plugin.json`'s version and flag any
   mismatch as **version skew**: the hook is a copy made at install time and is
@@ -99,6 +120,8 @@ a one-line verdict:
 Then list any recommended actions, most important first. If everything passes,
 say so in one line and stop — do not pad the report.
 
-Finally, remind the user of the two limits no configuration removes:
+Finally, remind the user of the limits no configuration removes:
 `git push --no-verify` bypasses the git-hook adapter, and pushing from a plain
-terminal bypasses the plugin adapter unless the global hook is installed.
+terminal bypasses the plugin adapter unless the global hook is installed **and
+is not shadowed by a repo-local `core.hooksPath`** (check 3 above — installing
+the global hook is necessary but not sufficient).
