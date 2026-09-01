@@ -6,6 +6,23 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-09-02
+
+### Fixed
+- **An unevaluable range counted as an empty one.** The remote sha in a pre-push
+  ref line is what the *remote* reported during negotiation, and the client only
+  needs the objects it must **send** — so that commit need not exist locally.
+  `git log <missing>..<local>` then fails, and a non-zero exit was treated
+  identically to "no commits": the range was dropped, nothing looked reviewable,
+  and the push went through unreviewed. Skipping the review precisely when the
+  base is least certain is the same fail-open in a new place. The base is now
+  confirmed with `git cat-file -e` and falls back to the default branch when
+  absent; a range that is still unevaluable counts as carrying commits, because
+  over-reviewing costs a review and under-reviewing costs the gate.
+- The `--chain-into` snippet's comment block was indented one level shallower
+  than the code it sits in. That text is printed verbatim for someone to paste
+  into their own hook, so its indentation is shipped output, not formatting.
+
 ## [0.5.1] - 2026-09-01
 
 ### Fixed
