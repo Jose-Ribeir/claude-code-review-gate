@@ -1477,10 +1477,32 @@ def test_every_ordinary_shell_dash_c_form_is_still_code():
     for runner in (
         "bash -c", "bash -lc", "bash -eu -c", "sh -e -c",
         "bash --noprofile --norc -c", "/bin/bash -lc",
+        # Flags that take a SEPARATE value: walking back over tokens starting
+        # with "-" stopped at the value and never reached the shell name.
+        "bash --rcfile /etc/bashrc -c", "bash -o pipefail -c",
+        # The runner is the first word of the command, which env assignments
+        # and `env` itself precede rather than replace.
+        "FOO=1 bash -c", "env FOO=1 bash -c",
     ):
         cmd = f'{runner} "cd /real && {_PUSH}"'
         assert _cd_targets(cmd) == ["/real"], runner
         assert review_gate._looks_like_real_push(cmd) is True, runner
+
+
+def test_a_shell_dash_c_after_a_separator_still_resolves(tmp_path):
+    # The -c belongs to the command after `&&`, and both hops are real, so the
+    # chain folds onto the inner one.
+    cmd = f'cd /x && bash -c "cd /real && {_PUSH}"'
+    assert _cd_targets(cmd) == ["/x", "/real"]
+    # An absolute hop is returned as written -- it re-anchors the chain, and
+    # it is handed straight to `git -C`.
+    assert _effective_cd(cmd, os.sep) == "/real"
+
+
+def test_a_remote_runners_dash_c_is_not_local_shell():
+    # `ssh host -c ...` does not run its argument as a local shell.
+    cmd = f"""ssh host -c "cd /real && {_PUSH}" """
+    assert review_gate._looks_like_real_push(cmd) is False
 
 
 def test_masking_stays_linear_across_many_quoted_spans():

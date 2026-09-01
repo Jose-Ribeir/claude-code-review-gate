@@ -801,23 +801,40 @@ _QUOTED = re.compile(
 _SHELLS = ("bash", "sh", "zsh", "dash", "ksh", "bash.exe", "sh.exe")
 # `-c`, or a combined short-flag cluster ending in it: `-lc`, `-ec`.
 _DASH_C = re.compile(r"-[A-Za-z]*c$")
+# Tokens that end one simple command and begin the next.
+_SEPARATORS = ("&&", "||", ";", "|", "&", ";;", "(", ")", "{", "}")
+# A leading `FOO=bar` assignment, which precedes the runner rather than being it.
+_ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 
 def _is_shell_dash_c(toks):
     """True when these tokens end in `<shell> [flags] -c`, so a quote is CODE.
 
-    Checking only the token immediately before `-c` missed every ordinary
-    variant -- `bash -lc "..."` (combined cluster, never equal to "-c"),
-    `bash -eu -c "..."`, `bash --noprofile --norc -c "..."`. Each of those
-    really does execute its argument as shell, and blanking it hid a genuine
-    cd and a genuine push from the parser.
+    The runner is the FIRST word of the simple command that owns the `-c`, not
+    "whatever sits before the flags". Two earlier spellings got this wrong and
+    each was a fail-open, because a false negative blanks a real
+    `bash -c "cd /repo && git push"` into invisibility:
+      - checking only the token before `-c` missed `bash -lc` (a combined
+        cluster, never equal to "-c") and `bash -eu -c`;
+      - walking back over tokens starting with "-" missed any flag that takes
+        a separate value -- `--rcfile FILE`, `-o pipefail` -- because the value
+        does not start with a dash and stopped the walk early.
+
+    So: scan back to the nearest command separator, then skip leading env
+    assignments and `env` itself, and ask whether what remains is a shell.
     """
     if not toks or not _DASH_C.match(toks[-1]):
         return False
-    i = len(toks) - 2
-    while i >= 0 and toks[i].startswith("-"):
-        i -= 1  # skip the runner's own flags
-    return i >= 0 and os.path.basename(toks[i]) in _SHELLS
+    start = 0
+    for i in range(len(toks) - 2, -1, -1):
+        if toks[i] in _SEPARATORS:
+            start = i + 1
+            break
+    while start < len(toks) - 1 and (
+        _ENV_ASSIGN.match(toks[start]) or os.path.basename(toks[start]) in ("env", "env.exe")
+    ):
+        start += 1
+    return start < len(toks) - 1 and os.path.basename(toks[start]) in _SHELLS
 
 
 def _mask_quoted(cmd):
