@@ -729,14 +729,17 @@ _CD_TARGET = re.compile(
 
 # `cmd <<MARKER` / `<<'MARKER'` / `<<-MARKER`, which opens a heredoc.
 #
-# The lookahead is load-bearing. A real opener ENDS its line, bar trailing
-# redirections (`cat <<'EOF' > out`), so requiring that rules out the same
-# characters appearing as data mid-line -- `echo "a <<EOF b"`, a grep pattern,
-# a log message. Without it, any line merely containing `<<WORD` was read as an
-# opener and everything after it was discarded as a body, which could swallow a
-# genuine cd and a genuine push and leave the parser blind.
+# The lookahead is load-bearing, and its exact shape has been wrong twice.
+#
+# What separates a real opener from the same characters used as data is what
+# FOLLOWS the marker: an opener is followed by end-of-line, a redirection, or a
+# pipe/separator -- never by a bare word. `echo "a <<EOF b"` fails on the ` b"`.
+#
+# It first allowed only redirections, which rejected the extremely ordinary
+# `python - <<'PY' | tee log` and `cat <<'EOF' | grep x`, so their bodies went
+# unstripped and the misparse it exists to prevent came straight back.
 _HEREDOC = re.compile(
-    r"""<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1(?=\s*(?:[0-9]*[<>]+\s*\S+\s*)*$)"""
+    r"""<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1(?=\s*(?:[0-9]*[<>|&;]|$))"""
 )
 
 
@@ -846,17 +849,19 @@ def _resolve_pushed_repo(payload):
     findings as though they described the push that had just completed, which
     is worse than saying nothing at all.
 
-    So: the LAST `cd` before the push wins, then the payload's cwd, then the
-    process cwd. Each candidate is confirmed by asking git to resolve it.
+    So: the folded `cd` chain wins (see _effective_cd), then the payload's
+    cwd, then the process cwd. Each candidate is confirmed by asking git to
+    resolve it.
 
-    Only the last `cd` -- never an earlier one. Shell parsing cannot expand
-    variables, so `cd "$T" && git push` yields the literal `$T`, which resolves
-    to nothing. Falling back to an EARLIER `cd` in the same command would then
-    answer with a directory the shell had already left, which is how this
-    function picked the wrong repository a second time after the first fix.
-    A superseded `cd` is not evidence; an unresolvable one means we do not
-    know, and the freshness check in _mode_post is what keeps "we do not know"
-    from turning into a confident report about the wrong repo.
+    The chain is FOLDED, not sampled. An earlier version took only the last
+    hop and joined it onto the session dir, which is wrong whenever that hop
+    is relative -- it belongs under the hop before it, not under the base.
+    _effective_cd also decides what "unresolvable" means: shell parsing cannot
+    expand variables, so `cd "$T"` yields a literal `$T` and the chain goes
+    unknown from there unless a later ABSOLUTE hop re-anchors it. An
+    unresolvable chain means we do not know, and the freshness check in
+    _mode_post is what keeps "we do not know" from turning into a confident
+    report about the wrong repo.
     """
     cmd, cwd = "", ""
     if isinstance(payload, dict):
