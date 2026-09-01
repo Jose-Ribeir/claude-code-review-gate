@@ -6,6 +6,81 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-01
+
+### Added
+- **Findings now actually reach the model, via a PostToolUse adapter.** This is
+  the headline fix, and it exists because the 0.3.3 mechanism below never
+  worked. Verified against Claude Code's own transcript records: a PreToolUse
+  `permissionDecisionReason` on an **allow** decision produces a `hook_success`
+  entry and nothing else, while a PostToolUse `additionalContext` produces a
+  separate `hook_additional_context` record — and that companion record is what
+  delivers text into the session. So blocking findings (delivered as the
+  `tool_result` of a deny) were always seen, and non-blocking ones never were,
+  no matter how loudly they were printed.
+  - `hooks/hooks.json` gains a `PostToolUse` entry matching `Bash`, dispatching
+    to new `scripts/post-hook.sh` / `post-hook.ps1`. Timeout 30s, not 1920: this
+    path only reads a file and must never be able to stall a session.
+  - The new adapters **fail open**, the deliberate inverse of `gate-hook.*`.
+    That pair decides whether a push proceeds, so it must block when it cannot
+    run; this pair decides only whether a report is printed, so it goes quiet.
+    Nothing but a JSON object ever reaches its stdout.
+  - `review-gate.py --mode post` replays the record an earlier review already
+    wrote to `FINDINGS_LOG`. Silent on a clean pass, loud about a block-level
+    finding that advisory mode let through, and never renders an empty findings
+    block when the log shed them to fit `_MAX_LOG_LINE`.
+  - Delivery is deduplicated by `scr-post-delivered-*` markers, claimed with
+    `O_CREAT|O_EXCL` and swept by the existing `MARKER_TTL` reaper: silent on a
+    repeat within one session, re-delivered to a new session whose context
+    genuinely lacks the findings.
+  - Known gap: PostToolUse does not fire for a tool call that fails, so a
+    rejected push delivers nothing. The marker is claimed only after emitting,
+    so the retry reports instead. A command that updates the ref yet exits
+    non-zero and is never retried (a multi-ref push with one ref rejected,
+    `git push && gh pr create` where `gh` fails) leaves the findings in the log
+    for `--history`.
+- **`/review-gate:doctor` detects a shadowed git adapter.** It only ever read
+  `core.hooksPath` from **global** config, but git resolves the **local** one
+  first — so any repo managing its own hooks (husky, lefthook, a hand-rolled
+  `scripts/git-hooks`) silently drops the global gate out of the chain while
+  the doctor reported a clean bill of health. Plain-terminal pushes in such a
+  repo are ungated, and nothing announced it. `--mode post` surfaces the same
+  warning once per session.
+
+### Fixed
+- **0.3.3's "hook mode reports non-blocking findings to the calling session"
+  was not true.** `permissionDecisionReason` on an allow reaches the hook's own
+  record, visible UI-side and useful when debugging, and goes no further. The
+  reason string is kept for that purpose; the comment asserting it was a
+  delivery channel is corrected in place, because in a fail-closed tool a false
+  load-bearing comment is how the next regression ships.
+- **The gate reviewed whatever repo the process happened to sit in.** In hook
+  mode `repo_root` came from the process cwd — the directory Claude Code was
+  launched from — while Claude routinely pushes as `cd <repo> && git push`. The
+  gate therefore inspected the *session's* repo, found nothing unpushed, and
+  allowed a push it had never looked at. Silent, and total in any repo where
+  the git adapter is absent or shadowed. `_resolve_pushed_repo` now derives the
+  target from the command, and `_has_unpushed_commits` takes the repo instead
+  of asking the cwd. (A comment at the call site had described this intent
+  since before the code could deliver it.)
+- **Reviewer output was decoded with the locale's codepage.** Both
+  `subprocess.run` calls used `text=True` with no `encoding=`, so on a default
+  Windows box the reviewer's UTF-8 was read as cp1252: every em-dash in a
+  finding became `â€"` and was then stored that way permanently, in the
+  findings log, the raw snapshot, and the context injected into the session.
+- **Em-dashes and ellipses in terminal-bound strings** mojibake through git's
+  stderr on Windows. All such strings are ASCII now.
+
+### Changed
+- **The gate blocks when it cannot determine which repository a push targets**
+  (an unexpanded `$VAR`, a command substitution, a path that is not a repo),
+  honouring `OCR_FAIL_OPEN`. Same rule the rest of the tool applies to every
+  "cannot run" case. Deliberately narrower than the review trigger: reviews
+  fire on a loose `git push` substring because over-reviewing is cheap, but a
+  block additionally requires `git push` at a command position, so a command
+  that merely *mentions* it — a grep pattern, a heredoc, a commit message —
+  is never denied for a reason about pushing.
+
 ## [0.3.3] - 2026-08-28
 
 ### Added
