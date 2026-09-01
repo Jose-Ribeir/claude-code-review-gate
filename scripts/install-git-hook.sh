@@ -87,16 +87,15 @@ against its own upstream, which misses a push aimed at a different ref.
             if "$_p2" -c "import sys" >/dev/null 2>&1; then _rg_py="$_p2"; break; fi
         done
         if [ -n "$_rg_dir" ] && [ -n "$_rg_py" ]; then
-            # Pass the ref updates through: they say what is being sent and where,
-        # which is what stops a `branch:main` push from being skipped.
-        # git feeds pre-push the ref updates on stdin, and your hook has
-        # already consumed them by this point -- that is why this block sits
-        # at a success exit. Point _rg_refs at wherever your hook saved them.
-        # Leave it empty and the gate falls back to comparing HEAD against its
-        # own upstream, which MISSES a push to a different ref
-        # (`git push origin mybranch:main`).
-        _rg_refs="${PUSH_REFS-}"
-        echo "$_rg_refs" | "$_rg_py" "$_rg_dir/review-gate.py" --mode git || exit $?
+            # git feeds pre-push the ref updates on stdin, and your hook has
+            # already consumed them by this point -- that is why this block
+            # sits at a success exit. They say what is being sent and where,
+            # which is what stops a `branch:main` push from being skipped, so
+            # point _rg_refs at wherever your hook saved them. Left empty, the
+            # gate falls back to comparing HEAD against its own upstream and
+            # misses a push aimed at a different ref.
+            _rg_refs="${PUSH_REFS-}"
+            echo "$_rg_refs" | "$_rg_py" "$_rg_dir/review-gate.py" --mode git || exit $?
         else
             # FAIL CLOSED, matching the gate's own pre-push. Skipping here is
             # the one place it would be least visible: this repo's
