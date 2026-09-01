@@ -799,6 +799,28 @@ _QUOTED = re.compile(
 # -c flag: python's is Python, and reading it as shell turned a harmless
 # `python -c "print('git push')"` into a push.
 _SHELLS = ("bash", "sh", "zsh", "dash", "ksh", "bash.exe", "sh.exe")
+# How far back to look for the runner that owns a quoted span. A few tokens is
+# all the decision needs, and a bound is what keeps _mask_quoted linear.
+_RUNNER_WINDOW = 200
+# `-c`, or a combined short-flag cluster ending in it: `-lc`, `-ec`.
+_DASH_C = re.compile(r"-[A-Za-z]*c$")
+
+
+def _is_shell_dash_c(toks):
+    """True when these tokens end in `<shell> [flags] -c`, so a quote is CODE.
+
+    Checking only the token immediately before `-c` missed every ordinary
+    variant -- `bash -lc "..."` (combined cluster, never equal to "-c"),
+    `bash -eu -c "..."`, `bash --noprofile --norc -c "..."`. Each of those
+    really does execute its argument as shell, and blanking it hid a genuine
+    cd and a genuine push from the parser.
+    """
+    if not toks or not _DASH_C.match(toks[-1]):
+        return False
+    i = len(toks) - 2
+    while i >= 0 and toks[i].startswith("-"):
+        i -= 1  # skip the runner's own flags
+    return i >= 0 and os.path.basename(toks[i]) in _SHELLS
 
 
 def _mask_quoted(cmd):
@@ -827,11 +849,14 @@ def _mask_quoted(cmd):
         return cmd or ""
     out, last = [], 0
     for m in _QUOTED.finditer(cmd):
-        toks = cmd[: m.start()].split()
+        # Only a bounded window back, not the whole prefix: re-splitting
+        # everything before each span made this O(n * spans), and a generated
+        # script with thousands of quoted strings is exactly the kind of input
+        # this function must not choke on. The decision needs a few tokens.
+        toks = cmd[max(0, m.start() - _RUNNER_WINDOW) : m.start()].split()
         prev = toks[-1] if toks else ""
-        runner = os.path.basename(toks[-2]) if len(toks) > 1 else ""
         out.append(cmd[last : m.start()])
-        if prev == "cd" or (prev == "-c" and runner in _SHELLS):
+        if prev == "cd" or _is_shell_dash_c(toks):
             out.append(m.group(0))
         else:
             q = m.group(0)[0]  # the pattern no longer captures it

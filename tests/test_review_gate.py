@@ -1469,6 +1469,30 @@ def test_a_shell_dash_c_argument_is_still_code(tmp_path):
         assert review_gate._looks_like_real_push(cmd) is True, runner
 
 
+def test_every_ordinary_shell_dash_c_form_is_still_code():
+    # Checking only the token before `-c` missed all of these. `-lc` never
+    # equals "-c" at all, and `-eu -c` / `--norc -c` put flags in between --
+    # yet each really does execute its argument, so blanking it hid a genuine
+    # cd and push from the parser.
+    for runner in (
+        "bash -c", "bash -lc", "bash -eu -c", "sh -e -c",
+        "bash --noprofile --norc -c", "/bin/bash -lc",
+    ):
+        cmd = f'{runner} "cd /real && {_PUSH}"'
+        assert _cd_targets(cmd) == ["/real"], runner
+        assert review_gate._looks_like_real_push(cmd) is True, runner
+
+
+def test_masking_stays_linear_across_many_quoted_spans():
+    # Re-splitting the whole prefix for each span made this O(n * spans); a
+    # generated script with thousands of quoted strings is exactly the input
+    # a hook on every Bash call must not choke on.
+    big = " ".join(f'echo "span {i}"' for i in range(4000))
+    started = time.time()
+    review_gate._mask_quoted(big)
+    assert time.time() - started < 2.0
+
+
 def test_a_non_shell_dash_c_argument_is_not_code():
     # python -c takes PYTHON, not shell. Treating every `-c` as shell made this
     # harmless one-liner read as a real push.
