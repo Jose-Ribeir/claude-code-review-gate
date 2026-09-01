@@ -729,31 +729,6 @@ def _latest_record_for_head(git_dir, head, cap=POST_SCAN_CAP):
     return None
 
 
-# A `cd` at a command position. The separator class carries \n and \r
-# explicitly: a Bash tool call is routinely MULTI-LINE, and without them
-# `cd repo\ngit push` matched nothing at all (re.finditer is not re.MULTILINE,
-# so `^` only ever meant the start of the whole string). Same omission is what
-# made _REAL_PUSH below miss a push on its own line.
-# A quote counts as a command boundary because `bash -c "cd /repo && ..."`
-# really does start a command right after it. That is only safe because
-# _mask_quoted has already blanked every quoted span that is DATA -- the only
-# quotes reaching this pattern are a cd's own target and the body of a -c.
-_CD_TARGET = re.compile(
-    r"""(?:^|[;&|\n\r"']|&&|\|\|)\s*cd\s+(?:"([^"]*)"|'([^']*)'|([^\s;&|]+))"""
-)
-
-
-# `cmd <<MARKER` / `<<'MARKER'` / `<<-MARKER`, which opens a heredoc.
-#
-# The lookahead is load-bearing, and its exact shape has been wrong twice.
-#
-# What separates a real opener from the same characters used as data is what
-# FOLLOWS the marker: an opener is followed by end-of-line, a redirection, or a
-# pipe/separator -- never by a bare word. `echo "a <<EOF b"` fails on the ` b"`.
-#
-# It first allowed only redirections, which rejected the extremely ordinary
-# `python - <<'PY' | tee log` and `cat <<'EOF' | grep x`, so their bodies went
-# unstripped and the misparse it exists to prevent came straight back.
 # Which repository a push targets, and whether we can be sure.
 #
 # This replaces ~400 lines of shell parsing -- heredoc stripping, quote
@@ -817,18 +792,28 @@ def _gate_repo(payload):
     if isinstance(payload, dict):
         cmd = (payload.get("tool_input") or {}).get("command", "") or ""
         cwd = str(payload.get("cwd") or "")
-    base = cwd or os.getcwd()
-    cur = base
+    cur, unknown = (cwd or os.getcwd()), False
     for raw in _cd_targets(cmd):
-        if raw == "-" or _UNEXPANDABLE.search(raw):
-            return "", True
         try:
+            if raw == "-" or _UNEXPANDABLE.search(raw):
+                unknown = True  # cannot follow THIS hop -- but see below
+                continue
             t = os.path.expanduser(raw)
-            cur = t if os.path.isabs(t) else os.path.normpath(os.path.join(cur, t))
-            if not os.path.isdir(cur):
+            if os.path.isabs(t):
+                # An absolute hop re-anchors and clears an earlier unknown: it
+                # fully determines where we are regardless of what came before,
+                # so `cd "$OLDPWD" && cd /srv/repo && git push` is knowable.
+                cur, unknown = t, False
+            elif unknown:
+                continue  # relative to a place we do not know; still unknown
+            else:
+                cur = os.path.normpath(os.path.join(cur, t))
+            if not unknown and not os.path.isdir(cur):
                 return "", True
         except Exception:
             return "", True
+    if unknown:
+        return "", True
     out, rc = _git(["rev-parse", "--show-toplevel"], cwd=cur)
     if rc == 0 and out:
         return out, False
