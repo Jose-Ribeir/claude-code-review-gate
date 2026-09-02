@@ -37,7 +37,22 @@ fi
 payload="$(cat)"
 case "$payload" in
   *'git push'*) ;;
-  *) exit 0 ;;
+  *)
+    # Not a push -- but a review may still be PARKED from one that already
+    # happened and never got reported, because PostToolUse does not fire for a
+    # tool call that failed. Flushing that is the whole reason this hook runs
+    # on commands other than pushes.
+    #
+    # The glob below is the entire cheap test: no subprocess, no Python, and on
+    # the overwhelmingly common path -- nothing parked -- it costs one readdir.
+    # Mirrors _gate_data_dir() in review-gate.py; keep the two in step.
+    _data="${CLAUDE_PLUGIN_DATA:-}"
+    if [ -z "$_data" ]; then
+      _data="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/data/review-gate-local"
+    fi
+    set -- "$_data"/pending-*
+    [ -e "$1" ] || exit 0
+    ;;
 esac
 
 # Pick a WORKING Python interpreter; skip Windows Store alias stubs.

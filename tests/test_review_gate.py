@@ -626,6 +626,21 @@ import io as _io  # noqa: E402
 _WARN_RESULT = {"findings": [dict(_FINDING, content="unchecked index")]}
 
 
+def _isolate_gate_data(monkeypatch, tmp_path):
+    """Point the plugin's scratch dir at tmp_path.
+
+    Load-bearing, not hygiene: parked reports live there, and without this a
+    test would read -- and delete -- the pending notes of whatever real session
+    happens to be running on the machine executing the suite.
+    """
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(tmp_path / "gate-data"))
+
+
+def _pending_files(tmp_path):
+    d = tmp_path / "gate-data"
+    return sorted(p.name for p in d.glob("pending-*")) if d.is_dir() else []
+
+
 def _stub_gate(monkeypatch, tmp_path, result=_WARN_RESULT, calls=None):
     """A gate whose review always returns `result`, anchored on tmp_path.
 
@@ -637,6 +652,7 @@ def _stub_gate(monkeypatch, tmp_path, result=_WARN_RESULT, calls=None):
     monkeypatch.setattr(review_gate, "_repo_root", lambda: str(tmp_path))
     monkeypatch.setattr(review_gate, "_gate_repo", lambda payload: (str(tmp_path), False))
     monkeypatch.setattr(review_gate, "_drop_breadcrumb", lambda session_id, repo: None)
+    _isolate_gate_data(monkeypatch, tmp_path)
     monkeypatch.setattr(review_gate, "_git_dir", lambda repo_root=None: str(tmp_path))
     monkeypatch.setattr(review_gate, "_head_sha", lambda repo_root=None: "a" * 40)
     monkeypatch.setattr(review_gate, "_branch", lambda repo_root=None: "feat/x")
@@ -667,6 +683,8 @@ def _run_post(monkeypatch, tmp_path, command="git push", session_id="s1", shadow
     monkeypatch.setattr(review_gate, "_git_dir", lambda repo_root=None: str(tmp_path))
     monkeypatch.setattr(review_gate, "_head_sha", lambda repo_root=None: head)
     monkeypatch.setattr(review_gate, "_hookspath_shadowed", lambda repo_root: shadowed)
+    monkeypatch.setattr(review_gate, "_repo_root", lambda: str(tmp_path))
+    _isolate_gate_data(monkeypatch, tmp_path)
     monkeypatch.delenv("OCR_IN_REVIEW", raising=False)
     assert review_gate._mode_post(["review-gate.py", "--mode", "post"]) == 0
 
@@ -803,8 +821,20 @@ def test_post_redelivers_when_the_same_head_is_reviewed_again(tmp_path, monkeypa
     assert "unchecked index" in _post_context(capsys)
 
 
-def test_post_is_silent_on_a_clean_pass(tmp_path, monkeypatch, capsys):
+def test_post_reports_a_clean_pass_in_one_line(tmp_path, monkeypatch, capsys):
+    # Silence used to be the answer here, and it read as "no review happened" --
+    # so the model went and checked the log every time, which is the chore this
+    # whole mode exists to remove. One line, and nothing to go and read.
     _seed_record(tmp_path, verdict="pass", findings=[])
+    _run_post(monkeypatch, tmp_path)
+    ctx = _post_context(capsys)
+    assert ctx == "review-gate: pass - no findings."
+
+
+def test_post_says_a_clean_pass_only_once_per_session(tmp_path, monkeypatch, capsys):
+    _seed_record(tmp_path, verdict="pass", findings=[])
+    _run_post(monkeypatch, tmp_path)
+    assert _post_context(capsys)
     _run_post(monkeypatch, tmp_path)
     assert _post_context(capsys) == ""
 
@@ -815,7 +845,10 @@ def test_post_is_silent_when_no_review_was_recorded_for_this_head(tmp_path, monk
     assert _post_context(capsys) == ""
 
 
-def test_post_is_silent_for_a_command_that_is_not_a_push(tmp_path, monkeypatch, capsys):
+def test_post_is_silent_for_a_non_push_with_nothing_parked(tmp_path, monkeypatch, capsys):
+    # A non-push call now looks for an undelivered review instead of returning
+    # immediately. With nothing parked it must still say nothing at all -- this
+    # is the hot path, running on every Bash call the session makes.
     _seed_record(tmp_path)
     _run_post(monkeypatch, tmp_path, command="git status")
     assert _post_context(capsys) == ""
@@ -1051,6 +1084,138 @@ def test_post_ignores_a_record_with_an_unusable_timestamp(tmp_path, monkeypatch,
 
     _run_post(monkeypatch, tmp_path)
     assert _post_context(capsys) == ""
+
+
+# --------------------------------------------------------------------------
+# Delivery must survive the push FAILING.
+#
+# PostToolUse does not fire for a tool call that exited non-zero, so hanging
+# the report off the push itself lost every finding from a rejected push. The
+# gate parks a note at review time; any later tool call cashes it in. Observed
+# in the wild: two reviewed pushes, one finding each, both with a
+# scr-push-reviewed marker and no scr-post-delivered companion.
+# --------------------------------------------------------------------------
+
+
+def _park(monkeypatch, tmp_path, session="s1", repo=None, head="a" * 40):
+    """Park a note as the gate would. Isolates the scratch dir FIRST -- without
+    that this writes into the real one on the machine running the suite."""
+    _isolate_gate_data(monkeypatch, tmp_path)
+    review_gate._park_pending(session, repo if repo is not None else str(tmp_path), head)
+
+
+def test_gate_parks_a_report_before_the_push_runs(tmp_path, monkeypatch, capsys):
+    _stub_gate(monkeypatch, tmp_path)
+    _run_hook(monkeypatch)
+    capsys.readouterr()
+    assert _pending_files(tmp_path), "a review the push may never report must be parked"
+
+
+def test_a_failed_push_still_reports_on_the_next_command(tmp_path, monkeypatch, capsys):
+    _seed_record(tmp_path)
+    _park(monkeypatch, tmp_path)
+    # The push blew up, so no PostToolUse fired for it. The next command does.
+    _run_post(monkeypatch, tmp_path, command="git status")
+    assert "unchecked index" in _post_context(capsys)
+
+
+def test_a_flushed_report_is_not_delivered_twice(tmp_path, monkeypatch, capsys):
+    _seed_record(tmp_path)
+    _park(monkeypatch, tmp_path)
+    _run_post(monkeypatch, tmp_path, command="git status")
+    assert _post_context(capsys)
+    assert _pending_files(tmp_path) == []
+    _run_post(monkeypatch, tmp_path, command="ls")
+    assert _post_context(capsys) == ""
+
+
+def test_a_spent_note_is_cleared_even_when_there_was_nothing_to_say(tmp_path, monkeypatch, capsys):
+    # Otherwise the same dead question is re-asked on every tool call for an
+    # hour, spawning a Python process each time.
+    _seed_record(tmp_path, verdict="pass", findings=[])
+    _run_post(monkeypatch, tmp_path)  # the push reports the pass and spends the note
+    capsys.readouterr()
+    _park(monkeypatch, tmp_path)
+    _run_post(monkeypatch, tmp_path, command="git status")
+    assert _post_context(capsys) == ""  # already delivered to this session
+    assert _pending_files(tmp_path) == []
+
+
+def test_a_successful_push_clears_its_own_note(tmp_path, monkeypatch, capsys):
+    _seed_record(tmp_path)
+    _park(monkeypatch, tmp_path)
+    _run_post(monkeypatch, tmp_path, command="git push")
+    assert _post_context(capsys)
+    assert _pending_files(tmp_path) == []
+
+
+def test_a_push_does_not_clear_another_sessions_note_for_the_same_repo(
+    tmp_path, monkeypatch, capsys
+):
+    # Two sessions pushing one repo. Clearing the other's note on the way past
+    # would leave it holding a review nothing will ever report -- exactly the
+    # hole the note exists to close.
+    _seed_record(tmp_path)
+    _park(monkeypatch, tmp_path, session="s2")
+    _run_post(monkeypatch, tmp_path, command="git push", session_id="s1")
+    assert _post_context(capsys)
+    assert _pending_files(tmp_path), "s2's note must survive s1's push"
+
+
+def test_one_sessions_parked_report_is_not_flushed_into_another(tmp_path, monkeypatch, capsys):
+    # The failure this guards: two concurrent sessions in different repos, and
+    # one gets told about the other's findings as though they were its own.
+    _seed_record(tmp_path)
+    _park(monkeypatch, tmp_path, session="s1")
+    _run_post(monkeypatch, tmp_path, command="git status", session_id="s2")
+    assert _post_context(capsys) == ""
+    assert _pending_files(tmp_path), "s1's note must survive for s1"
+    _run_post(monkeypatch, tmp_path, command="git status", session_id="s1")
+    assert "unchecked index" in _post_context(capsys)
+
+
+def test_a_terminal_pushs_report_goes_to_whoever_is_in_that_repo(tmp_path, monkeypatch, capsys):
+    # The git adapter has no session id, so its note is addressed to nobody --
+    # it belongs to whichever session is actually sitting in that repository.
+    _seed_record(tmp_path)
+    _park(monkeypatch, tmp_path, session="")
+    _run_post(monkeypatch, tmp_path, command="git status", session_id="whoever")
+    assert "unchecked index" in _post_context(capsys)
+
+
+def test_a_sessionless_note_from_another_repo_is_not_flushed_here(tmp_path, monkeypatch, capsys):
+    _seed_record(tmp_path)
+    _park(monkeypatch, tmp_path, session="", repo=str(tmp_path / "elsewhere"))
+    _run_post(monkeypatch, tmp_path, command="git status")
+    assert _post_context(capsys) == ""
+
+
+def test_a_note_older_than_any_push_it_could_describe_is_swept(tmp_path, monkeypatch, capsys):
+    _seed_record(tmp_path)
+    _park(monkeypatch, tmp_path)
+    stale = time.time() - review_gate.MARKER_TTL - 60
+    for p in (tmp_path / "gate-data").glob("pending-*"):
+        os.utime(p, (stale, stale))
+    _run_post(monkeypatch, tmp_path, command="git status")
+    assert _post_context(capsys) == ""
+    assert _pending_files(tmp_path) == []
+
+
+def test_an_unreadable_note_is_discarded_rather_than_crashing(tmp_path, monkeypatch, capsys):
+    _seed_record(tmp_path)
+    data = tmp_path / "gate-data"
+    data.mkdir(parents=True, exist_ok=True)
+    (data / "pending-garbage").write_text("{not json", encoding="utf-8")
+    _run_post(monkeypatch, tmp_path, command="git status")
+    assert _post_context(capsys) == ""
+    assert _pending_files(tmp_path) == []
+
+
+def test_flush_output_is_pure_ascii(tmp_path, monkeypatch, capsys):
+    _seed_record(tmp_path)
+    _park(monkeypatch, tmp_path)
+    _run_post(monkeypatch, tmp_path, command="git status")
+    _post_context(capsys).encode("ascii")
 
 
 # --- the gate must look at the repo being PUSHED ------------------------------

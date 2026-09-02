@@ -48,6 +48,11 @@ if a command fails — a failure *is* a result.
   a push; without it, a `warn` verdict is recorded but never surfaced to the
   model. It deliberately has **no** `if` clause and a short `timeout` (30s) —
   it only reads a file. Flag a large timeout here as wrong, not as safe.
+- List `pending-*` in the plugin data dir (`$CLAUDE_PLUGIN_DATA`, else
+  `~/.claude/plugins/data/review-gate-local`). These are reviews recorded but
+  not yet reported — the mechanism that lets findings survive a push that
+  failed. A handful is normal and they expire after an hour. Many, all stale,
+  means delivery is not running: check the `PostToolUse` entry above.
 - Check all four adapter scripts exist and are readable:
   `${CLAUDE_PLUGIN_ROOT}/scripts/gate-hook.sh`, `gate-hook.ps1`,
   `post-hook.sh`, and `post-hook.ps1`.
