@@ -6,6 +6,33 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-09-02
+
+### Fixed
+- **A push that failed reported nothing, though it had already been reviewed.**
+  Delivery rode on the pushing tool call's own `PostToolUse` hook, and that hook
+  does not fire for a tool call that exited non-zero — so a rejected push, or a
+  `git push && gh pr create` whose second half blew up, reviewed the commits,
+  wrote the findings to the log, and told nobody. Seen in this repo's own
+  markers: two reviewed pushes carrying a finding each, both with a
+  `scr-push-reviewed-` marker and no `scr-post-delivered-` companion.
+  The gate now parks a note when it records a review and clears it when the
+  report lands, so any later tool call can deliver one the push never did.
+  Notes live in the plugin data dir rather than `.git`, because the adapter has
+  to answer "is anything waiting?" before it knows what repository it is in;
+  they expire on the same hour-long TTL as every other marker here, are
+  addressed to the session that pushed (a terminal push, having no session, goes
+  to whichever session sits in that repo), and the shell adapters test for one
+  with a bare glob — no subprocess and no Python on the hot path.
+
+### Changed
+- **A clean pass now says so, in one line.** It used to say nothing at all, on
+  the theory that the `PreToolUse` status line already showed the gate running.
+  It does not, to the reader that matters: silence is indistinguishable from
+  "no review happened", so the model went and read the findings log after every
+  push — the exact chore this channel exists to remove. `review-gate: pass - no
+  findings.` and nothing else; a clean pass has no raw output worth pointing at.
+
 ## [0.5.2] - 2026-09-02
 
 ### Fixed
