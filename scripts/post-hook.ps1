@@ -26,7 +26,19 @@ try {
     $bytes = $stdinBytes.ToArray()
 
     $payloadText = [System.Text.Encoding]::UTF8.GetString($bytes)
-    if ($payloadText -notlike '*git push*') { exit 0 }
+    if ($payloadText -notlike '*git push*') {
+        # See post-hook.sh: a review parked by a push that never reported still
+        # has to reach the model, and a push that FAILED never reports -- no
+        # PostToolUse hook fires for it. Cheap existence test, nothing spawned.
+        # Mirrors _gate_data_dir() in review-gate.py; keep the two in step.
+        $data = $env:CLAUDE_PLUGIN_DATA
+        if (-not $data) {
+            $cfg = $env:CLAUDE_CONFIG_DIR
+            if (-not $cfg) { $cfg = Join-Path $env:USERPROFILE '.claude' }
+            $data = Join-Path $cfg 'plugins\data\review-gate-local'
+        }
+        if (-not (Test-Path (Join-Path $data 'pending-*'))) { exit 0 }
+    }
 
     # Defer to post-hook.sh when Git Bash is installed, mirroring
     # gate-hook.ps1's test (installation, not PATH -- Git for Windows'

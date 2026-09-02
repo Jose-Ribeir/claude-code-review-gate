@@ -13,6 +13,8 @@
 #                 replaying the record an earlier review already wrote. This is
 #                 the ONLY channel that puts non-blocking findings in front of
 #                 the model -- see _mode_post for why the obvious ones do not.
+#                 It reports on the push itself when that push succeeded, and
+#                 on any later tool call when it did not (see _flush_pending).
 #
 # Failure policy: FAIL CLOSED on timeout, subprocess error, or unparseable
 # output — and, as of 0.3.0, on a missing Python 3 or a reviewer the git hook
@@ -173,6 +175,25 @@ _MARKER_PREFIXES = (
 POST_SCAN_CAP = 200
 POST_FINDING_LIMIT = 10
 POST_MAX_CONTEXT = 3000
+
+# A review that has been recorded but not yet reported parks one of these, and
+# delivery clears it. It is what unties reporting from the pushing tool call:
+# PostToolUse does not fire for a call that FAILED, so a rejected push -- or a
+# `git push && gh pr create` whose second half blew up -- used to review the
+# commits, write the findings, and tell nobody. Any later Bash call flushes it.
+#
+# Deliberately NOT in .git, unlike every other marker here: the shell adapter
+# has to answer "is anything waiting?" before it knows which repository the
+# next tool call is even about, so this has to live at a path it can glob
+# without first resolving a repo. It sits beside the breadcrumb, in the one
+# directory that survives plugin upgrades.
+PENDING_PREFIX = "pending-"
+
+# Appended to whatever else is being reported, never on its own.
+_SHADOW_NOTE = (
+    "  NOTE: this repo sets its own core.hooksPath, which shadows the global "
+    "review-gate git hook - pushes from a plain terminal here are NOT gated."
+)
 
 # Where non-blocking findings survive. review-gate-last-output.json is
 # overwritten on every run and the push markers held nothing but an epoch
@@ -1425,11 +1446,14 @@ def _post_context(entry, git_dir, shadow=False):
     """additionalContext body for one recorded review; "" means stay silent."""
     verdict = str(entry.get("verdict") or "")
     count = entry.get("finding_count") or 0
-    # A clean pass says nothing. This body is injected on every push forever,
-    # and "the gate ran" is already observable: the PreToolUse hook shows its
-    # status line for the whole review, and --history replays any of them.
+    # A clean pass used to say nothing at all, on the theory that "the gate ran"
+    # was already observable from the PreToolUse status line. It is not, to the
+    # only reader that matters here: silence is indistinguishable from "no
+    # review happened", so the model went and checked the log anyway -- the
+    # exact chore this mode exists to remove. One line ends it. No raw-output
+    # or replay pointers: a clean pass has nothing to go and read.
     if verdict == "pass" and not count:
-        return ""
+        return "review-gate: pass - no findings." + ("\n" + _SHADOW_NOTE if shadow else "")
     lines = ["review-gate: " + _post_label(entry)]
     body = _format_reasons(entry, limit=POST_FINDING_LIMIT)
     if body:
@@ -1445,11 +1469,117 @@ def _post_context(entry, git_dir, shadow=False):
         lines.append(f"  Raw reviewer output: {Path(git_dir) / _sanitize(str(raw), 200)}")
     lines.append(f'  Replay: python "{os.path.abspath(__file__)}" --history 1')
     if shadow:
-        lines.append(
-            "  NOTE: this repo sets its own core.hooksPath, which shadows the global "
-            "review-gate git hook - pushes from a plain terminal here are NOT gated."
-        )
+        lines.append(_SHADOW_NOTE)
     return "\n".join(lines)[:POST_MAX_CONTEXT]
+
+
+def _gate_data_dir():
+    """Plugin-local scratch beside the gate-dir pointer: the one location that
+    survives plugin upgrades. Holds breadcrumbs and parked reports."""
+    data = os.environ.get("CLAUDE_PLUGIN_DATA", "").strip()
+    if not data:
+        cfg = os.environ.get("CLAUDE_CONFIG_DIR", "").strip() or os.path.join(
+            os.path.expanduser("~"), ".claude"
+        )
+        data = os.path.join(cfg, "plugins", "data", "review-gate-local")
+    return Path(data)
+
+
+def _unlink(path):
+    """Best-effort delete. Already gone is the same as deleted."""
+    try:
+        Path(path).unlink()
+    except OSError:
+        pass
+
+
+def _park_pending(session_id, repo_root, head):
+    """Note that a review is recorded and has not been reported yet.
+
+    Written for every verdict the gate lets through, cleared the moment it is
+    delivered. See PENDING_PREFIX for why this lives outside .git.
+    """
+    try:
+        data = _gate_data_dir()
+        data.mkdir(parents=True, exist_ok=True)
+        name = PENDING_PREFIX + _marker_digest(session_id, repo_root, head)
+        (data / name).write_text(
+            json.dumps({"session": session_id or "", "repo": repo_root or "", "head": head or ""}),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass  # a lost note costs a report, never a push
+
+
+def _pending_entries():
+    """Every parked report, newest first, sweeping the ones nobody will claim.
+
+    Same TTL discipline as _reap_markers, and self-limiting for the same
+    reason: the sweep rides on the next read rather than needing a cleanup
+    entry point somebody has to remember to run.
+    """
+    entries = []
+    try:
+        paths = sorted(
+            _gate_data_dir().glob(f"{PENDING_PREFIX}*"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+    except Exception:
+        return entries
+    cutoff = time.time() - MARKER_TTL
+    for path in paths:
+        try:
+            if path.stat().st_mtime < cutoff:
+                _unlink(path)  # older than any push it could still describe
+                continue
+            info = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            _unlink(path)  # unreadable or half-written: it will never be useful
+            continue
+        if isinstance(info, dict):
+            entries.append((path, info))
+    return entries
+
+
+def _pending_is_ours(info, session_id):
+    """Whose parked report is this?
+
+    One written by a Claude session belongs to that session and nobody else:
+    flushing it elsewhere would put one repository's findings in front of an
+    agent working in another, which is the same confident-and-wrong report the
+    freshness check in _deliver already exists to prevent. One written by the
+    git adapter has no session at all -- it came from a plain terminal push --
+    so it goes to whichever session is actually sitting in that repository.
+    """
+    owner = str(info.get("session") or "")
+    if owner:
+        return owner == session_id
+    repo, here = info.get("repo") or "", _repo_root()
+    if not repo or not here:
+        return False
+    try:
+        return os.path.realpath(repo) == os.path.realpath(here)
+    except OSError:
+        return False
+
+
+def _clear_pending(repo_root, session_id):
+    """Drop parked notes for repo_root that THIS session was entitled to flush.
+
+    Ownership is checked, not just the repo: two sessions can be pushing the
+    same repository, and clearing the other one's note would leave it with a
+    review nothing will ever report -- reintroducing the exact hole the note
+    was added to close.
+    """
+    for path, info in _pending_entries():
+        if (info.get("repo") or "") != (repo_root or ""):
+            continue
+        owner = str(info.get("session") or "")
+        # A sessionless note is one this session could have flushed itself, and
+        # the review it points at has just been delivered here.
+        if not owner or owner == session_id:
+            _unlink(path)
 
 
 def _breadcrumb_path(session_id):
@@ -1460,18 +1590,9 @@ def _breadcrumb_path(session_id):
     gate has already resolved it (it had to, in order to review the right
     thing), so it simply writes it down and the reporter reads it.
 
-    Keyed by session so two concurrent sessions cannot read each other's, and
-    kept beside the gate-dir pointer, which is the one location that survives
-    plugin upgrades.
+    Keyed by session so two concurrent sessions cannot read each other's.
     """
-    data = os.environ.get("CLAUDE_PLUGIN_DATA", "").strip()
-    if not data:
-        cfg = os.environ.get("CLAUDE_CONFIG_DIR", "").strip() or os.path.join(
-            os.path.expanduser("~"), ".claude"
-        )
-        data = os.path.join(cfg, "plugins", "data", "review-gate-local")
-    name = "pushed-repo-" + _marker_digest(session_id or "nosession")
-    return Path(data) / name
+    return _gate_data_dir() / ("pushed-repo-" + _marker_digest(session_id or "nosession"))
 
 
 def _drop_breadcrumb(session_id, repo_root):
@@ -1509,26 +1630,99 @@ def _emit_post_context(text):
     )
 
 
+def _deliver(repo_root, session_id):
+    """Report body for whatever review is recorded at repo_root's HEAD, or "".
+
+    Shared by both delivery paths -- the push that just ran, and a later flush
+    of one that never got reported -- so the two cannot drift apart.
+    """
+    git_dir = _git_dir(repo_root)
+    head = _head_sha(repo_root)
+    if not git_dir or not head:
+        return ""  # not a repo, or a detached/unborn HEAD -- nothing to replay
+
+    entry = _latest_record_for_head(git_dir, head)
+    if not entry:
+        return ""  # no review recorded for these commits
+
+    # The record must describe THIS push, not merely this HEAD. Resolving the
+    # repo from a shell command is best-effort (see _gate_repo), so
+    # when it guesses wrong it tends to land on whatever repository the session
+    # happens to sit in -- whose HEAD has a record too, often months old. That
+    # is exactly how a live test reported a different repo's stale findings as
+    # though they were this push's. A real push's review is seconds old, so
+    # requiring freshness turns "we guessed wrong" into silence rather than
+    # into a confident, wrong report. Same window the gate already treats a
+    # review as still describing the current push.
+    try:
+        if time.time() - float(entry.get("ts") or 0) > MARKER_TTL:
+            return ""
+    except (TypeError, ValueError):
+        return ""
+
+    # Claim BEFORE emitting, not after: both adapters can run against one push,
+    # and check-then-act would let both report.
+    key = _marker_digest(head, entry.get("ts") or entry.get("at") or "", session_id)
+    delivered = Path(git_dir) / f"{POST_DELIVERED_PREFIX}{key}"
+    if not _claim_marker(delivered):
+        return ""  # this exact review is already in this session's context
+
+    # Once per session, not once per push: the condition is a static property of
+    # the repo, and repeating it every time trains the reader to skip it.
+    shadow = False
+    if _hookspath_shadowed(repo_root):
+        warned = Path(git_dir) / f"{HOOKSPATH_WARNED_PREFIX}{_marker_digest(session_id or head)}"
+        shadow = _claim_marker(warned)
+
+    text = _post_context(entry, git_dir, shadow)
+    if text:
+        _reap_markers(git_dir, keep=delivered)
+    return text
+
+
+def _flush_pending(session_id):
+    """Deliver reviews that were recorded and never reported.
+
+    This is what makes reporting survive a push that failed. PostToolUse fires
+    only for a tool call that actually ran and SUCCEEDED (verified: 760 failed
+    Bash calls produced 0 PostToolUse hooks), so hanging delivery off the push
+    itself meant a rejected push -- or a `git push && gh pr create` whose second
+    half blew up -- reviewed the commits, wrote the findings to FINDINGS_LOG,
+    and told nobody. The gate parks a note at review time instead, and any
+    later tool call cashes it in.
+    """
+    out = []
+    for path, info in _pending_entries():
+        if not _pending_is_ours(info, session_id):
+            continue
+        repo_root = info.get("repo") or ""
+        if repo_root and os.path.isdir(repo_root):
+            text = _deliver(repo_root, session_id)
+            if text:
+                out.append(text)
+        # Cleared either way. A note we looked at and had nothing to say about
+        # is spent: leaving it would re-ask the same question on every
+        # subsequent tool call for the rest of the TTL.
+        _unlink(path)
+    if out:
+        _emit_post_context("\n\n".join(out)[:POST_MAX_CONTEXT])
+    return 0
+
+
 def _mode_post(argv):
-    """`--mode post`: replay this HEAD's recorded review as PostToolUse context.
+    """`--mode post`: put a recorded review in front of the model.
 
-    This is the ONLY channel that puts non-blocking findings in front of the
-    model. Verified 2026-09 against Claude Code's own transcripts: a PostToolUse
-    hook returning additionalContext produces a `hook_additional_context`
-    record -- the delivery vehicle -- while a PreToolUse
-    `permissionDecisionReason` on an ALLOW produces none. It is logged UI-side
-    and goes nowhere else, which is why blocks (delivered as the tool_result of
-    a deny) were never the problem and warns always were.
+    This is the ONLY channel that does so for non-blocking findings. Verified
+    2026-09 against Claude Code's own transcripts: a PostToolUse hook returning
+    additionalContext produces a `hook_additional_context` record -- the
+    delivery vehicle -- while a PreToolUse `permissionDecisionReason` on an
+    ALLOW produces none. It is logged UI-side and goes nowhere else, which is
+    why blocks (delivered as the tool_result of a deny) were never the problem
+    and warns always were.
 
-    PostToolUse fires only for a tool call that actually ran and succeeded
-    (verified: 760 failed Bash calls produced 0 PostToolUse hooks), so a
-    rejected push never reaches this code. That is deliberate rather than a
-    hole: the delivered-marker is claimed here, so an attempt that never got
-    here leaves it unset and the retry -- same HEAD, same record -- reports
-    then. The residual gap is a command that updates the reviewed ref yet exits
-    non-zero and is never retried (a multi-ref push where one ref is rejected;
-    `git push && gh pr create` where gh fails). Those findings stay in
-    FINDINGS_LOG, reachable via --history.
+    Two ways in. A `git push` that succeeded reports its own review directly.
+    Anything else flushes whatever earlier push never managed to -- see
+    _flush_pending for why that second path has to exist.
 
     Best-effort and silent throughout. This stdout is parsed by Claude Code, so
     the only acceptable outputs are one JSON object or nothing -- never a
@@ -1542,10 +1736,10 @@ def _mode_post(argv):
     if isinstance(payload, dict):
         session_id = str(payload.get("session_id") or "")
         cmd = (payload.get("tool_input") or {}).get("command", "")
-        # Same substring rule the PreToolUse adapter applies. The shell adapter
-        # already checked; this guards a direct invocation.
-        if cmd and "git push" not in cmd:
-            return 0
+
+    # Same substring rule the PreToolUse adapter applies.
+    if cmd and "git push" not in cmd:
+        return _flush_pending(session_id)
 
     # The repo the GATE resolved, not one re-derived here. Delivery does no
     # command parsing at all: the breadcrumb is written by the adapter that
@@ -1553,50 +1747,12 @@ def _mode_post(argv):
     repo_root = _read_breadcrumb(session_id) or _repo_root()
     if not repo_root:
         return 0
-    git_dir = _git_dir(repo_root)
-    head = _head_sha(repo_root)
-    if not git_dir or not head:
-        return 0  # not a repo, or a detached/unborn HEAD -- nothing to replay
-
-    entry = _latest_record_for_head(git_dir, head)
-    if not entry:
-        return 0  # no review recorded for these commits
-
-    # The record must describe THIS push, not merely this HEAD. Resolving the
-    # repo from a shell command is best-effort (see _gate_repo), so
-    # when it guesses wrong it tends to land on whatever repository the session
-    # happens to sit in -- whose HEAD has a record too, often months old. That
-    # is exactly how a live test reported a different repo's stale findings as
-    # though they were this push's. A real push's review is seconds old, so
-    # requiring freshness turns "we guessed wrong" into silence rather than
-    # into a confident, wrong report. Same window the gate already treats a
-    # review as still describing the current push.
-    try:
-        if time.time() - float(entry.get("ts") or 0) > MARKER_TTL:
-            return 0
-    except (TypeError, ValueError):
-        return 0
-
-    # Claim BEFORE emitting, not after: both adapters can run against one push,
-    # and check-then-act would let both report. Claiming a marker we then decide
-    # not to use (a clean pass) costs nothing -- we would have stayed silent.
-    key = _marker_digest(head, entry.get("ts") or entry.get("at") or "", session_id)
-    delivered = Path(git_dir) / f"{POST_DELIVERED_PREFIX}{key}"
-    if not _claim_marker(delivered):
-        return 0  # this exact review is already in this session's context
-
-    # Once per session, not once per push: the condition is a static property of
-    # the repo, and repeating it every time trains the reader to skip it.
-    shadow = False
-    if _hookspath_shadowed(repo_root):
-        warned = Path(git_dir) / f"{HOOKSPATH_WARNED_PREFIX}{_marker_digest(session_id or head)}"
-        shadow = _claim_marker(warned)
-
-    text = _post_context(entry, git_dir, shadow)
-    if not text:
-        return 0
-    _emit_post_context(text)
-    _reap_markers(git_dir, keep=delivered)
+    text = _deliver(repo_root, session_id)
+    # Reported, or deliberately silent about -- either way this push's note has
+    # served its purpose and must not be flushed again by the next tool call.
+    _clear_pending(repo_root, session_id)
+    if text:
+        _emit_post_context(text)
     return 0
 
 
@@ -1850,6 +2006,17 @@ def _main_inner(argv, mode):
         except Exception:
             pass
         _reap_markers(git_dir, keep=marker)
+
+    # Park the report before letting the push run. Delivery normally happens on
+    # the push's own PostToolUse hook and clears this note in passing; the note
+    # is what covers the case where that hook never fires because the push
+    # failed. Not done on the blocked path above: a block reaches the model as
+    # the tool_result of a deny, so it was never the channel that lost things.
+    _park_pending(
+        str(payload.get("session_id") or "") if isinstance(payload, dict) else "",
+        repo_root,
+        head_sha,
+    )
     note = ""
     if reasons:
         label = "advisory (blocking disabled)" if advisory else f"verdict: {verdict}"
