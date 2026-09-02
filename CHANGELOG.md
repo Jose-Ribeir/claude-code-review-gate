@@ -6,6 +6,20 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-09-02
+
+### Fixed
+- **A deferred report did not say which repository it was about.** 0.5.3's
+  parked notes are addressed to the session that pushed, and a session
+  routinely spans several repositories in one conversation — the gate exists
+  because Claude pushes as `cd <repo> && git push`. So a report flushed on a
+  later tool call could describe repo A while the reader had moved on to repo
+  B, and nothing in the body said so. It now names the repository. Withholding
+  the report unless the repo still matched would have re-opened the hole 0.5.3
+  was written to close, so the fix is to label it, not to suppress it.
+  Caught by the gate reviewing its own 0.5.3 push, through the delivery path
+  that release added.
+
 ## [0.5.3] - 2026-09-02
 
 ### Fixed
