@@ -1699,7 +1699,18 @@ def _flush_pending(session_id):
         if repo_root and os.path.isdir(repo_root):
             text = _deliver(repo_root, session_id)
             if text:
-                out.append(text)
+                # Say WHICH repository, always. A deferred report arrives
+                # detached from the push that earned it, and one session
+                # routinely spans several repos in a conversation -- the gate
+                # exists because Claude pushes as `cd <repo> && git push`. So
+                # the reader cannot assume this describes wherever they
+                # currently are, and the body never says. Naming it is the fix;
+                # withholding the report unless the repo still matches would
+                # re-open the hole this whole path was added to close.
+                out.append(
+                    f"review-gate: deferred report for {_sanitize(repo_root, 200)} - "
+                    "the push that triggered this review never reported it.\n" + text
+                )
         # Cleared either way. A note we looked at and had nothing to say about
         # is spent: leaving it would re-ask the same question on every
         # subsequent tool call for the rest of the TTL.

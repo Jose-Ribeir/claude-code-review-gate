@@ -1119,6 +1119,17 @@ def test_a_failed_push_still_reports_on_the_next_command(tmp_path, monkeypatch, 
     assert "unchecked index" in _post_context(capsys)
 
 
+def test_a_deferred_report_names_the_repo_it_describes(tmp_path, monkeypatch, capsys):
+    # It arrives detached from the push that earned it, and one session spans
+    # several repos in a conversation -- so "which repo is this about?" cannot
+    # be answered by "wherever you are now".
+    _seed_record(tmp_path)
+    _park(monkeypatch, tmp_path)
+    _run_post(monkeypatch, tmp_path, command="git status")
+    ctx = _post_context(capsys)
+    assert str(tmp_path) in ctx and "deferred report" in ctx
+
+
 def test_a_flushed_report_is_not_delivered_twice(tmp_path, monkeypatch, capsys):
     _seed_record(tmp_path)
     _park(monkeypatch, tmp_path)
