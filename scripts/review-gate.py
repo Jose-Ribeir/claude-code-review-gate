@@ -144,6 +144,16 @@ except ValueError:
 MARKER_TTL = 3600  # seconds
 MARKER_PREFIX = "scr-push-reviewed-"
 
+# Written just before _run_review starts, removed in its `finally` (see
+# _main_inner). Left behind on disk if and only if the reviewing process was
+# killed outright -- a `finally` block cannot run across TerminateProcess/
+# SIGKILL -- which is exactly the "a review was attempted here and never
+# finished" signal _marker_fresh alone cannot provide: a killed run never
+# reaches _write_marker, so the paired adapter used to see "never reviewed"
+# and silently redo the full review with no indication anything had already
+# been tried.
+INPROGRESS_PREFIX = "scr-push-inprogress-"
+
 # Markers written by --mode post (see _mode_post). Both follow MARKER_PREFIX's
 # discipline -- claimed atomically, swept by _reap_markers on the same TTL --
 # and exist only to make a repeated report shut up:
@@ -166,6 +176,7 @@ _MARKER_PREFIXES = (
     POST_DELIVERED_PREFIX,
     HOOKSPATH_WARNED_PREFIX,
     _LEGACY_MARKER_PREFIX,
+    INPROGRESS_PREFIX,
 )
 
 # --mode post limits. The findings log is append-only and never pruned, so the
@@ -761,6 +772,37 @@ def _prior_findings_note(prior):
     )
 
 
+def _inprogress_path(git_dir, head_sha):
+    """Path of the "a review of this commit is (or was) being attempted" marker.
+
+    Same head-sha keying as _marker_path. Deliberately has no freshness/TTL
+    check anywhere it is read -- see the comment in _main_inner where it is
+    consumed for why age is not used to decide anything.
+    """
+    return Path(git_dir) / f"{INPROGRESS_PREFIX}{head_sha}"
+
+
+def _interrupted_note(prior):
+    """Describe an in-progress marker found still on disk.
+
+    Deliberately non-committal about whether the earlier attempt is still
+    running elsewhere or was interrupted: there is no liveness check here (see
+    _main_inner) to tell those apart, and guessing wrong in either direction
+    is worse than saying so plainly.
+    """
+    try:
+        age_s = time.time() - float(prior.get("ts"))
+    except (TypeError, ValueError):
+        age_s = None
+    age = f"~{max(0, int(age_s // 60))}m ago" if age_s is not None else "at an unknown time"
+    started_mode = _sanitize(str(prior.get("mode") or "?"), 20)
+    return (
+        f"a review of this commit was already started ({started_mode} adapter, {age}) "
+        "and did not record a result - it may still be running elsewhere, or it was "
+        "interrupted. Re-running now."
+    )
+
+
 def _reap_markers(git_dir, keep=None):
     """Delete markers too old to short-circuit anything.
 
@@ -1235,6 +1277,78 @@ def _downgrade_hint(mode):
     return "Downgrade to advisory (warn-only): OCR_ADVISORY=1 git commit ..."
 
 
+def _debug_enabled():
+    return os.environ.get("OCR_DEBUG", "").strip().lower() in ("1", "true", "yes")
+
+
+def _debug_log(line):
+    """Append one line to the OCR_DEBUG forensic log. Best-effort and silent on
+    failure -- a diagnostic aid must never be able to break the gate it exists
+    to help debug. Lives beside _park_pending's data, outside .git, so it
+    survives whatever state the repo itself is in."""
+    try:
+        data = _gate_data_dir()
+        data.mkdir(parents=True, exist_ok=True)
+        with (data / "review-gate-debug.log").open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except Exception:
+        pass
+
+
+# Cheap secondary hardening with no supporting evidence either way: isolates
+# the reviewer child from the parent's console on Windows (no shared process
+# group, so a Ctrl-Break/Ctrl-C broadcast to the console can't reach the
+# parent through it; no console handle at all, safe since every stdio stream
+# below is piped, and it rules out the child resetting console modes on exit
+# and leaving the parent's terminal in a bad state). getattr guards let this
+# run harmlessly on a platform where the constants don't exist. The primary,
+# evidence-backed hypothesis is _SESSION_BRIDGE_ENV below -- keep this, but it
+# is not where the crash is most likely to actually be.
+_WIN_FLAGS = (
+    getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+)
+
+# Confirmed present on a real Claude Code Desktop session (a live OCR_DEBUG
+# smoke test on 2026-09-11 captured this exact list from an actual crash-prone
+# session, not a guess): together these tell a CLI process "you are the
+# desktop host's SDK child, on messaging channel X, tracking session Y" --
+# state an independent reviewer should not inherit regardless of whether it is
+# the crash's cause. The git pre-push adapter runs with NONE of these present
+# and that is the known-good baseline this restores. Scrubbed by default (see
+# OCR_UNSET_ENV) because the worst-case regression is a visible reviewer auth
+# error the gate already reports -- not a silent one -- which is a better
+# trade than leaving a live IPC channel and its token in a second process's
+# hands. Left inherited on purpose: CLAUDECODE (the CLI may use it to suppress
+# interactive behaviour, harmless to inherit; first thing to add via
+# OCR_UNSET_ENV if scrubbing this bundle alone doesn't stop the crash),
+# CLAUDE_CODE_EXECPATH (read directly by _find_claude, not identity), and the
+# per-feature flags (DISABLE_CRON, EAGER_FLUSH, etc.) which configure
+# behaviour rather than claim a session.
+_SESSION_BRIDGE_ENV = (
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_HOST_SESSION_ID",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_PID",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_AGENT_SDK_VERSION",
+    "CLAUDE_CODE_SDK_HAS_HOST_AUTH_REFRESH",
+    "CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH",
+    "CLAUDE_CODE_OAUTH_SCOPES",
+)
+
+# Values safe to log verbatim in the OCR_DEBUG breadcrumb (not secret-adjacent
+# -- unlike the socket/token/session-id members of _SESSION_BRIDGE_ENV, which
+# are logged as names only, same as everything else).
+_DEBUG_SAFE_VALUES = (
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_AGENT_SDK_VERSION",
+)
+
+
 def _run_review(repo_root, mode, git_dir=None, head_sha="", push_range=""):
     """Return (result_dict, True, raw_archive_name) on success.
 
@@ -1265,11 +1379,49 @@ def _run_review(repo_root, mode, git_dir=None, head_sha="", push_range=""):
     # second review. Both adapters short-circuit on this (see _in_review).
     child_env = dict(os.environ)
     child_env["OCR_IN_REVIEW"] = "1"
+    # unset/empty -> scrub _SESSION_BRIDGE_ENV (the default, see its comment);
+    # "none" (case-insensitive) -> scrub nothing, the pre-0.6 behaviour, for a
+    # repo whose reviewer genuinely needs the desktop host's auth relay;
+    # anything else -> exactly that list, REPLACING the default rather than
+    # adding to it (a partial scrub of this bundle is its own novel, untested
+    # state -- see _SESSION_BRIDGE_ENV). Unset and explicitly-empty are treated
+    # identically: `set X=` on Windows deletes the variable outright, so a
+    # script cannot tell "cleared" from "never set" apart anyway. Names split
+    # on comma, semicolon, or whitespace (a `;`-separated PATH habit is a
+    # common typo here) and matched case-insensitively on Windows, where
+    # os.environ's keys are already upper-cased by CPython regardless of how
+    # the variable was actually set.
+    _override = os.environ.get("OCR_UNSET_ENV", "").strip()
+    if not _override:
+        _unset_names = list(_SESSION_BRIDGE_ENV)
+    elif _override.lower() == "none":
+        _unset_names = []
+    else:
+        _unset_names = [n for n in re.split(r"[,;\s]+", _override) if n]
+    scrubbed = []
+    for _name in _unset_names:
+        _key = _name.upper() if os.name == "nt" else _name
+        if child_env.pop(_key, None) is not None:
+            scrubbed.append(_key)
+
+    debug = _debug_enabled()
+    creationflags = _WIN_FLAGS if sys.platform == "win32" else 0
+    cmd = [claude, "-p", PROMPT_RANGE.format(rng=push_range) if push_range else PROMPT] + args
+    # Wall-clock for the log line (so it lines up with Event Viewer/Task
+    # Manager timestamps when correlating with a crash); monotonic for the
+    # duration math below, which a wall-clock adjustment mid-review must not
+    # skew.
+    started_at = time.time()
+    started_mono = time.monotonic()
     try:
-        proc = subprocess.run(
-            [claude, "-p", PROMPT_RANGE.format(rng=push_range) if push_range else PROMPT] + args,
+        with subprocess.Popen(
+            cmd,
             cwd=repo_root,
-            capture_output=True,
+            # No shared stdin handle with the parent -- one fewer thing to have
+            # in common with whatever the parent's own console/pipes are doing.
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             # Explicit, because text=True alone decodes with
             # locale.getpreferredencoding() -- cp1252 on a default Windows box.
@@ -1280,9 +1432,66 @@ def _run_review(repo_root, mode, git_dir=None, head_sha="", push_range=""):
             # must not take the whole review down.
             encoding="utf-8",
             errors="replace",
-            timeout=TIMEOUT,
             env=child_env,
-        )
+            creationflags=creationflags,
+        ) as proc:
+            if debug:
+                # Names only for everything, except the short, non-secret
+                # allowlist in _DEBUG_SAFE_VALUES -- never the socket/token/
+                # session-id members of _SESSION_BRIDGE_ENV. ANTHROPIC* is
+                # included so a debug run also shows whether the reviewer's
+                # auth path is an inherited API key rather than the host relay.
+                present = sorted(
+                    k for k in child_env if k.upper().startswith(("CLAUDE", "ANTHROPIC"))
+                )
+                # From the ORIGINAL environment, not child_env: several
+                # _DEBUG_SAFE_VALUES names are also in _SESSION_BRIDGE_ENV, so
+                # by default they're already gone from child_env by this
+                # point -- reading child_env here would silently log {} and
+                # defeat the point of allowlisting them.
+                safe_values = {k: v for k, v in os.environ.items() if k in _DEBUG_SAFE_VALUES}
+                _debug_log(
+                    f"start ts={started_at:.3f} mode={mode} head={head_sha} own_pid={os.getpid()} "
+                    f"child_pid={proc.pid} cwd={repo_root!r} scrubbed={scrubbed} "
+                    f"present_after_scrub={present} safe_values={safe_values}"
+                )
+            # Mirrors subprocess.run's own Popen usage exactly, including which
+            # exceptions kill the child -- a rewrite that only handled
+            # TimeoutExpired would leave an orphaned `claude.exe` running (and
+            # burning tokens) whenever this hook is cancelled or errors out for
+            # any other reason, including KeyboardInterrupt (hence
+            # BaseException, not Exception, below).
+            #
+            # NOTE (not fixed here): proc.kill() is TerminateProcess on the
+            # immediate child only, not a tree kill. If _find_claude() ever
+            # resolves to a .cmd shim, the real node.exe it launches would
+            # survive a timeout kill. A scoped `taskkill /T /F /PID <pid>` is
+            # the fix, once needed -- not the kill-by-name pattern already
+            # ruled out elsewhere, since it targets one known pid.
+            try:
+                out_text, err_text = proc.communicate(timeout=TIMEOUT)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.communicate()
+                if debug:
+                    _debug_log(
+                        f"end child_pid={proc.pid} outcome=timeout "
+                        f"duration_s={time.monotonic()-started_mono:.1f}"
+                    )
+                raise
+            except BaseException:
+                proc.kill()
+                if debug:
+                    _debug_log(
+                        f"end child_pid={proc.pid} outcome=exception "
+                        f"duration_s={time.monotonic()-started_mono:.1f}"
+                    )
+                raise
+            if debug:
+                _debug_log(
+                    f"end child_pid={proc.pid} outcome=rc{proc.returncode} "
+                    f"duration_s={time.monotonic()-started_mono:.1f}"
+                )
     except subprocess.TimeoutExpired:
         if mode == "hook":
             # gate-hook.sh execs this script with no argv/stdin parsing of OCR_TIMEOUT
@@ -1313,7 +1522,7 @@ def _run_review(repo_root, mode, git_dir=None, head_sha="", push_range=""):
             f"review process error ({exc}) - blocking commit to preserve gate integrity.\n"
             f"{bypass}"
         )
-    raw_name = _save_raw_output(git_dir, proc.stdout, head_sha)
+    raw_name = _save_raw_output(git_dir, out_text, head_sha)
     # A non-zero exit means claude never got as far as producing a review, so the
     # output is an error string, not malformed JSON. Diagnose that separately:
     # reporting "could not parse review output" for a login failure sends people
@@ -1323,7 +1532,7 @@ def _run_review(repo_root, mode, git_dir=None, head_sha="", push_range=""):
         # Strip BEFORE falling through: a whitespace-only stdout is truthy, so
         # `stdout or stderr` would select it and discard a real stderr message,
         # leaving detail empty and hiding why the review failed.
-        detail = (proc.stdout or "").strip() or (proc.stderr or "").strip()
+        detail = (out_text or "").strip() or (err_text or "").strip()
         raise ReviewGateError(
             f"`claude` exited {proc.returncode} without running the review -- blocking commit "
             "to preserve gate integrity.\n"
@@ -1332,14 +1541,14 @@ def _run_review(repo_root, mode, git_dir=None, head_sha="", push_range=""):
             f"{_auth_hint(detail)}"
             f"{bypass}"
         )
-    result = _extract_json(proc.stdout)
+    result = _extract_json(out_text)
     if result is None:
         # Exit 0 but no JSON. Auth failures have been seen to exit 0 too
         # (the Desktop-bundled claude.exe does exactly this), so still check.
         raise ReviewGateError(
             "could not parse review output - blocking commit to preserve gate integrity.\n"
-            f"  Claude stdout (first 400 chars): {proc.stdout[:400]!r}\n"
-            f"{_auth_hint(proc.stdout or '')}"
+            f"  Claude stdout (first 400 chars): {out_text[:400]!r}\n"
+            f"{_auth_hint(out_text or '')}"
             f"{bypass}"
         )
     return result, True, raw_name
@@ -1972,6 +2181,32 @@ def _main_inner(argv, mode):
             _warn(note + _output_hints(git_dir, _findings_log_path(git_dir) if git_dir else None))
         allow(note)
 
+    # A review of this exact HEAD may already have been attempted and never
+    # finished -- e.g. the process running it was killed outright. There is no
+    # liveness check here (see _interrupted_note): an in-progress marker of
+    # ANY age only ever changes the message below, never whether the review
+    # below actually runs. Skipping a review because a marker file -- as
+    # forgeable as _marker_path's own done-marker -- claims one is already
+    # running would trade a wasted duplicate review for a silent bypass, and
+    # waiting inside this hook would spend its own external timeout budget on
+    # someone else's review. This check must stay AFTER the fresh-done-marker
+    # skip above (a skip has nothing to report) and _reap_markers must stay
+    # where it is below -- after a successful review, not before this check --
+    # so a marker is never swept out from under an in-flight warning.
+    inprogress = _inprogress_path(git_dir, head_sha) if (git_dir and head_sha) else None
+    interrupted_note = ""
+    if inprogress is not None and inprogress.exists():
+        interrupted_note = _interrupted_note(_read_marker(inprogress))
+        _warn(interrupted_note)
+    if inprogress is not None:
+        try:
+            inprogress.write_text(
+                json.dumps({"ts": time.time(), "mode": mode}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass  # degrade to "no marker" -- must never block the gate
+
     try:
         result, ran, raw_name = _run_review(repo_root, mode, git_dir, head_sha, push_range)
     except ReviewGateError as exc:
@@ -1985,9 +2220,36 @@ def _main_inner(argv, mode):
             return  # unreachable; allow() calls sys.exit / _emit_hook
         _fail_closed(mode, str(exc))
         return  # unreachable
+    finally:
+        # Reached on every path EXCEPT the process itself being killed outright
+        # -- which is exactly the case that should leave the marker behind for
+        # the next run to report on.
+        if inprogress is not None:
+            _unlink(inprogress)
 
     if not ran:
         allow()  # fail-open: only reaches here when claude is not installed
+
+    if interrupted_note and isinstance(result, dict):
+        # Folded in as a synthetic FINDING, not appended to `reasons` below --
+        # `reasons` is a throwaway string _format_reasons rebuilds from
+        # result["findings"] on every call (nothing persists it as text), and
+        # _record_review only stores the findings list. The severity "info" is
+        # not one compute_verdict ranks (see ocr_verdict._SEVERITY_RANK), so it
+        # can never itself cause a block. Storing it this way is what lets it
+        # reach the model in --mode hook: only _record_review's findings
+        # survive to the --mode post pipeline, which is the one channel a
+        # non-blocking message actually reaches the model through (see the
+        # VERIFIED comment above on `allow`).
+        existing = result.get("findings")
+        result = dict(result)
+        result["findings"] = [{
+            "severity": "info",
+            "path": "review-gate",
+            "start_line": "-",
+            "end_line": "-",
+            "content": interrupted_note,
+        }] + (existing if isinstance(existing, list) else [])
 
     verdict = compute_verdict(result)
     advisory = _is_advisory(repo_root)
