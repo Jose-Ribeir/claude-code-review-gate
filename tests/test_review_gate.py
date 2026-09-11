@@ -16,6 +16,39 @@ _format_reasons = review_gate._format_reasons
 compute_verdict = review_gate.compute_verdict
 
 
+def _fake_popen(seen, stdout='{"findings": []}', stderr="", returncode=0):
+    """subprocess.Popen stand-in for _run_review's tests.
+
+    Captures the constructor's positional cmd (as seen["cmd"]) and every
+    keyword argument (merged into `seen`) so tests can assert on encoding,
+    creationflags, stdin, etc. -- the same thing the old `_fake_run` did for
+    subprocess.run, before _run_review moved to Popen so OCR_DEBUG could log a
+    line the instant the child is spawned.
+    """
+
+    class _FakeProc:
+        pid = 4242
+
+        def __init__(self, cmd, **kw):
+            seen["cmd"] = cmd
+            seen.update(kw)
+            self.returncode = returncode
+
+        def communicate(self, timeout=None):
+            return stdout, stderr
+
+        def kill(self):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+    return _FakeProc
+
+
 def test_whole_string_json():
     assert _extract_json('{"findings": []}') == {"findings": []}
 
@@ -212,6 +245,22 @@ def test_reap_collects_the_pre_0_3_legacy_markers(tmp_path):
     _reap_markers(str(tmp_path))
     assert not old.exists()
     assert fresh.exists()  # mtime rule, not a blanket delete
+
+
+def test_reap_collects_abandoned_inprogress_markers(tmp_path):
+    # A review's in-progress marker (see _inprogress_path) is left behind only
+    # when the reviewing process was killed outright. It's just another marker
+    # family as far as sweeping goes -- same mtime rule as the rest.
+    old = tmp_path / (review_gate.INPROGRESS_PREFIX + "a" * 40)
+    old.write_text("x", encoding="utf-8")
+    stamp = time.time() - (MARKER_TTL + 60)
+    os.utime(old, (stamp, stamp))
+    fresh = tmp_path / (review_gate.INPROGRESS_PREFIX + "b" * 40)
+    fresh.write_text("x", encoding="utf-8")
+
+    _reap_markers(str(tmp_path))
+    assert not old.exists()
+    assert fresh.exists()
 
 
 def test_reap_ignores_unrelated_files_in_the_git_dir(tmp_path):
@@ -733,6 +782,61 @@ def test_the_paired_adapters_short_circuit_replays_instead_of_silencing(tmp_path
     assert "unchecked index" in payload["permissionDecisionReason"]
 
 
+# --- in-progress marker: interrupted-review reporting -------------------------
+# A review's process can be killed outright (the crash this was built for) with
+# no chance to run _write_marker, leaving the paired adapter no way to tell
+# "never reviewed" from "reviewed, but the reviewer got killed" -- it silently
+# redid the whole review with no indication anything had already been tried.
+
+def test_an_interrupted_review_is_reported_and_still_rerun(tmp_path, monkeypatch, capsys):
+    calls = []
+    _stub_gate(monkeypatch, tmp_path, calls=calls)
+    inprogress = review_gate._inprogress_path(str(tmp_path), "a" * 40)
+    inprogress.write_text(
+        json.dumps({"ts": time.time() - 120, "mode": "git"}), encoding="utf-8"
+    )
+
+    _run_hook(monkeypatch)
+
+    # Never skipped -- an in-progress marker only ever changes the message,
+    # never whether the review actually runs (see _main_inner).
+    assert calls == ["a" * 40]
+    assert not inprogress.exists()
+    findings = _read_history(str(tmp_path))[0]["findings"]
+    assert any("did not record a result" in f["content"] for f in findings)
+    assert any("git adapter" in f["content"] for f in findings)
+
+
+def test_a_successful_review_cleans_up_its_inprogress_marker(tmp_path, monkeypatch):
+    _stub_gate(monkeypatch, tmp_path)
+    _run_hook(monkeypatch)
+    assert not review_gate._inprogress_path(str(tmp_path), "a" * 40).exists()
+
+
+def test_a_blocked_review_still_cleans_up_its_inprogress_marker(tmp_path, monkeypatch, capsys):
+    _stub_gate(monkeypatch, tmp_path)
+
+    def _raise(*a, **kw):
+        raise review_gate.ReviewGateError("boom")
+
+    monkeypatch.setattr(review_gate, "_run_review", _raise)
+    _run_hook(monkeypatch)  # _fail_closed still exits 0 in hook mode (deny is in the payload)
+    assert not review_gate._inprogress_path(str(tmp_path), "a" * 40).exists()
+
+
+def test_fresh_done_marker_skip_never_touches_the_inprogress_marker(tmp_path, monkeypatch, capsys):
+    calls = []
+    _stub_gate(monkeypatch, tmp_path, calls=calls)
+    _run_hook(monkeypatch)
+    capsys.readouterr()
+
+    # Second adapter, same HEAD, done-marker still fresh: the short-circuit at
+    # the top of _main_inner returns before the in-progress check ever runs.
+    _run_hook(monkeypatch)
+    assert calls == ["a" * 40]
+    assert not review_gate._inprogress_path(str(tmp_path), "a" * 40).exists()
+
+
 def test_a_clean_run_records_a_pass_and_says_nothing(tmp_path, monkeypatch, capsys):
     _stub_gate(monkeypatch, tmp_path, result={"findings": []})
     _run_hook(monkeypatch)
@@ -1019,21 +1123,266 @@ def test_env_prefixed_push_still_resolves(tmp_path):
 
 def test_the_reviewer_subprocess_decodes_as_utf8(monkeypatch, tmp_path):
     seen = {}
-
-    class _Proc:
-        returncode = 0
-        stdout = '{"findings": []}'
-        stderr = ""
-
-    def _fake_run(cmd, **kw):
-        seen.update(kw)
-        return _Proc()
-
-    monkeypatch.setattr(review_gate.subprocess, "run", _fake_run)
+    monkeypatch.setattr(review_gate.subprocess, "Popen", _fake_popen(seen))
     monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
     review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40)
     assert seen.get("encoding") == "utf-8"
     assert seen.get("errors") == "replace"
+
+
+# --- reviewer process isolation on Windows -------------------------------------
+# The reviewer used to inherit the parent's stdin and share its console/process
+# group by default (no creationflags/startupinfo were ever set). Isolating it is
+# a best-effort mitigation for a session crash whose root cause is unconfirmed
+# -- see _WIN_FLAGS -- so these tests pin the mechanism, not a fixed root cause.
+
+def test_reviewer_gets_no_shared_stdin(monkeypatch, tmp_path):
+    seen = {}
+    monkeypatch.setattr(review_gate.subprocess, "Popen", _fake_popen(seen))
+    monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
+    review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40)
+    assert seen.get("stdin") is review_gate.subprocess.DEVNULL
+
+
+def test_reviewer_is_isolated_from_the_console_on_windows(monkeypatch, tmp_path):
+    # _WIN_FLAGS itself is computed once at import time from whichever
+    # constants this interpreter's subprocess module actually has (0 for both
+    # on a non-Windows CI runner, since the Windows-only constants don't exist
+    # there at all) -- so this pins the branch (win32 uses _WIN_FLAGS, not a
+    # hardcoded value), not the flag bits themselves.
+    seen = {}
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(review_gate.subprocess, "Popen", _fake_popen(seen))
+    monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
+    review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40)
+    assert seen.get("creationflags") == review_gate._WIN_FLAGS
+
+
+def test_reviewer_gets_no_special_flags_off_windows(monkeypatch, tmp_path):
+    seen = {}
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(review_gate.subprocess, "Popen", _fake_popen(seen))
+    monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
+    review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40)
+    assert seen.get("creationflags") == 0
+
+
+def test_a_cancelled_review_kills_the_child_instead_of_orphaning_it(monkeypatch, tmp_path):
+    # A rewrite that only handled TimeoutExpired would leave `claude.exe`
+    # running (and burning tokens) whenever this hook is cancelled or errors
+    # out for any other reason -- including KeyboardInterrupt, hence the
+    # generic exception case below, not just a timeout.
+    killed = []
+
+    class _HangingProc:
+        pid = 4242
+        returncode = None
+
+        def __init__(self, cmd, **kw):
+            pass
+
+        def communicate(self, timeout=None):
+            raise KeyboardInterrupt()
+
+        def kill(self):
+            killed.append(True)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+    monkeypatch.setattr(review_gate.subprocess, "Popen", _HangingProc)
+    monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
+    try:
+        review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40)
+        raise AssertionError("expected KeyboardInterrupt to propagate")
+    except KeyboardInterrupt:
+        pass
+    assert killed == [True]
+
+
+def test_a_timed_out_review_kills_the_child_and_fails_closed(monkeypatch, tmp_path):
+    class _StuckProc:
+        pid = 4242
+        returncode = None
+        killed = False
+
+        def __init__(self, cmd, **kw):
+            pass
+
+        def communicate(self, timeout=None):
+            if not self.killed:
+                raise review_gate.subprocess.TimeoutExpired(cmd="claude", timeout=timeout)
+            return "", ""
+
+        def kill(self):
+            type(self).killed = True
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+    monkeypatch.setattr(review_gate.subprocess, "Popen", _StuckProc)
+    monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
+    try:
+        review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40)
+        raise AssertionError("expected ReviewGateError")
+    except review_gate.ReviewGateError as exc:
+        assert "timed out" in str(exc)
+    assert _StuckProc.killed is True
+
+
+# --- OCR_UNSET_ENV / the default session-bridge scrub --------------------------
+# A live OCR_DEBUG smoke test against a real Claude Code Desktop session (see
+# _SESSION_BRIDGE_ENV's comment) confirmed these names are genuinely inherited
+# by the reviewer -- no longer a guess -- so they're scrubbed by default.
+
+def _clear_session_bridge_env(monkeypatch):
+    """Only OCR_UNSET_ENV itself is under test here -- make sure none of the
+    real vars this default list names happen to be set on the machine running
+    the suite, or a default-scrub assertion could pass/fail for the wrong
+    reason."""
+    monkeypatch.delenv("OCR_UNSET_ENV", raising=False)
+    for name in review_gate._SESSION_BRIDGE_ENV:
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_unset_env_default_scrubs_exactly_the_session_bridge_bundle(monkeypatch, tmp_path):
+    seen = {}
+    _clear_session_bridge_env(monkeypatch)
+    for name in review_gate._SESSION_BRIDGE_ENV:
+        monkeypatch.setenv(name, "x")
+    monkeypatch.setenv("SOME_CLAUDE_MARKER", "1")  # not in the bundle -- must survive
+    monkeypatch.setattr(review_gate.subprocess, "Popen", _fake_popen(seen))
+    monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
+    review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40)
+    for name in review_gate._SESSION_BRIDGE_ENV:
+        assert name not in seen["env"]
+    assert seen["env"]["SOME_CLAUDE_MARKER"] == "1"
+
+
+def test_unset_env_none_disables_the_default_scrub(monkeypatch, tmp_path):
+    seen = {}
+    _clear_session_bridge_env(monkeypatch)
+    monkeypatch.setenv("OCR_UNSET_ENV", "none")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "x")
+    monkeypatch.setattr(review_gate.subprocess, "Popen", _fake_popen(seen))
+    monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
+    review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40)
+    assert seen["env"]["CLAUDE_CODE_SESSION_ID"] == "x"
+
+
+def test_unset_env_none_is_case_insensitive(monkeypatch, tmp_path):
+    seen = {}
+    _clear_session_bridge_env(monkeypatch)
+    monkeypatch.setenv("OCR_UNSET_ENV", "None")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "x")
+    monkeypatch.setattr(review_gate.subprocess, "Popen", _fake_popen(seen))
+    monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
+    review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40)
+    assert seen["env"]["CLAUDE_CODE_SESSION_ID"] == "x"
+
+
+def test_unset_env_explicit_list_replaces_the_default_rather_than_adding_to_it(
+    monkeypatch, tmp_path
+):
+    seen = {}
+    _clear_session_bridge_env(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "x")  # in the default bundle
+    monkeypatch.setenv("SOME_CLAUDE_MARKER", "1")
+    monkeypatch.setenv("OCR_UNSET_ENV", "SOME_CLAUDE_MARKER")
+    monkeypatch.setattr(review_gate.subprocess, "Popen", _fake_popen(seen))
+    monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
+    review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40)
+    assert "SOME_CLAUDE_MARKER" not in seen["env"]
+    # An explicit list REPLACES the default -- it does not add to it, since a
+    # partial scrub of the bundle is its own untested state.
+    assert seen["env"]["CLAUDE_CODE_SESSION_ID"] == "x"
+
+
+def test_unset_env_accepts_semicolon_and_whitespace_separators(monkeypatch, tmp_path):
+    seen = {}
+    _clear_session_bridge_env(monkeypatch)
+    monkeypatch.setenv("A_VAR", "1")
+    monkeypatch.setenv("B_VAR", "1")
+    monkeypatch.setenv("OCR_UNSET_ENV", "A_VAR; B_VAR")
+    monkeypatch.setattr(review_gate.subprocess, "Popen", _fake_popen(seen))
+    monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
+    review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40)
+    assert "A_VAR" not in seen["env"]
+    assert "B_VAR" not in seen["env"]
+
+
+def test_unset_env_names_are_matched_case_insensitively_on_windows(monkeypatch, tmp_path):
+    # os.environ's keys are already upper-cased by CPython on Windows
+    # regardless of how the variable was actually set, so a lowercase name in
+    # OCR_UNSET_ENV must still find it there.
+    seen = {}
+    _clear_session_bridge_env(monkeypatch)
+    monkeypatch.setattr(review_gate.os, "name", "nt")
+    monkeypatch.setenv("SOME_CLAUDE_MARKER", "1")
+    monkeypatch.setenv("OCR_UNSET_ENV", "some_claude_marker")
+    monkeypatch.setattr(review_gate.subprocess, "Popen", _fake_popen(seen))
+    monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
+    review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40)
+    assert "SOME_CLAUDE_MARKER" not in seen["env"]
+
+
+def test_claude_code_execpath_survives_the_default_scrub(monkeypatch, tmp_path):
+    # Read directly by _find_claude, not a session-identity variable -- must
+    # never be in the default scrub bundle.
+    seen = {}
+    _clear_session_bridge_env(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_EXECPATH", "/path/to/claude")
+    monkeypatch.setattr(review_gate.subprocess, "Popen", _fake_popen(seen))
+    monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
+    review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40)
+    assert seen["env"]["CLAUDE_CODE_EXECPATH"] == "/path/to/claude"
+
+
+def test_ocr_debug_writes_a_spawn_and_completion_breadcrumb(monkeypatch, tmp_path):
+    monkeypatch.setenv("OCR_DEBUG", "1")
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(tmp_path / "gate-data"))
+    monkeypatch.setattr(review_gate.subprocess, "Popen", _fake_popen({}))
+    monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
+    review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40)
+    log = tmp_path / "gate-data" / "review-gate-debug.log"
+    lines = log.read_text(encoding="utf-8").splitlines()
+    assert any(line.startswith("start ") for line in lines)
+    assert any("scrubbed=" in line for line in lines)
+    assert any(line.startswith("end ") and "outcome=rc0" in line for line in lines)
+
+
+def test_ocr_debug_logs_safe_values_from_the_original_env_even_when_scrubbed(
+    monkeypatch, tmp_path
+):
+    # Regression: _DEBUG_SAFE_VALUES and _SESSION_BRIDGE_ENV overlap by design
+    # (CLAUDE_CODE_ENTRYPOINT, CLAUDE_CODE_CHILD_SESSION,
+    # CLAUDE_AGENT_SDK_VERSION are in both) -- reading the allowlisted values
+    # from child_env AFTER the default scrub silently logged {} for exactly
+    # the names it exists to surface. Caught by a live smoke test, not review.
+    _clear_session_bridge_env(monkeypatch)
+    monkeypatch.setenv("OCR_DEBUG", "1")
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(tmp_path / "gate-data"))
+    monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "claude-desktop")
+    monkeypatch.setattr(review_gate.subprocess, "Popen", _fake_popen({}))
+    monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
+    review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40)
+    log = (tmp_path / "gate-data" / "review-gate-debug.log").read_text(encoding="utf-8")
+    assert "'CLAUDE_CODE_ENTRYPOINT': 'claude-desktop'" in log
+
+
+def test_ocr_debug_off_by_default_writes_nothing(monkeypatch, tmp_path):
+    monkeypatch.delenv("OCR_DEBUG", raising=False)
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(tmp_path / "gate-data"))
+    monkeypatch.setattr(review_gate.subprocess, "Popen", _fake_popen({}))
+    monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
+    review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40)
+    assert not (tmp_path / "gate-data" / "review-gate-debug.log").exists()
 
 
 def test_git_subprocess_decodes_as_utf8(monkeypatch):
@@ -1628,40 +1977,22 @@ def test_the_review_is_told_the_range(monkeypatch, tmp_path):
     # Detecting the right thing is only half of it: without passing the range
     # on, the skill re-derives @{u}..HEAD and reviews nothing.
     seen = {}
-
-    class _Proc:
-        returncode = 0
-        stdout = '{"findings": []}'
-        stderr = ""
-
-    def _fake_run(cmd, **kw):
-        seen["prompt"] = cmd[2]
-        return _Proc()
-
-    monkeypatch.setattr(review_gate.subprocess, "run", _fake_run)
+    monkeypatch.setattr(review_gate.subprocess, "Popen", _fake_popen(seen))
     monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
     review_gate._run_review(str(tmp_path), "git", str(tmp_path), "a" * 40, "aaa..bbb")
-    assert "--range aaa..bbb" in seen["prompt"]
-    assert "--unpushed" not in seen["prompt"]
+    prompt = seen["cmd"][2]
+    assert "--range aaa..bbb" in prompt
+    assert "--unpushed" not in prompt
 
 
 def test_without_a_range_the_prompt_is_unchanged(monkeypatch, tmp_path):
     seen = {}
-
-    class _Proc:
-        returncode = 0
-        stdout = '{"findings": []}'
-        stderr = ""
-
-    def _fake_run(cmd, **kw):
-        seen["prompt"] = cmd[2]
-        return _Proc()
-
-    monkeypatch.setattr(review_gate.subprocess, "run", _fake_run)
+    monkeypatch.setattr(review_gate.subprocess, "Popen", _fake_popen(seen))
     monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
     review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40)
-    assert "--unpushed" in seen["prompt"]
-    assert "--range" not in seen["prompt"]
+    prompt = seen["cmd"][2]
+    assert "--unpushed" in prompt
+    assert "--range" not in prompt
 
 
 def test_a_tag_ref_is_not_counted_as_a_branch_update(monkeypatch):
