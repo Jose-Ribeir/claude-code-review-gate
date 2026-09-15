@@ -965,6 +965,32 @@ _CD = re.compile(
 # Anything we cannot expand ourselves: `$VAR`, `${VAR}`, `$(cmd)`, backticks.
 # `$` was set by the shell running the command, not by ours.
 _UNEXPANDABLE = re.compile(r"[$`]")
+# A Git Bash (MSYS) or Cygwin spelling of a Windows drive: `/j/codigo/repo`,
+# `/cygdrive/j/codigo/repo`. Claude's Bash tool on Windows IS Git Bash, whose
+# `pwd` prints paths this way, so Claude routinely pushes as `cd /j/... &&
+# git push`. That shell translates the prefix for programs linked against
+# its runtime; this hook runs under native Python, which is not one of them.
+_MSYS_DRIVE = re.compile(r"^(?:/cygdrive)?/([A-Za-z])(?:/(.*))?$")
+
+
+def _native_path(raw):
+    """A cd target as THIS process's filesystem understands it.
+
+    On Windows a drive-less rooted path such as `/j/codigo/repo` is not the
+    drive J: -- it is the directory `j/codigo/repo` off the root of whatever
+    drive the process happens to be on, which exists for nobody.
+    `os.path.isabs` still says True, so without this the hop re-anchored to a
+    directory that is not there and the push was denied as ambiguous. A gate
+    that cannot read the shell's own spelling of a real repository is
+    blocking the wrong thing.
+    """
+    if os.name != "nt":
+        return raw
+    m = _MSYS_DRIVE.match(raw.replace("\\", "/"))
+    if not m:
+        return raw
+    drive, rest = m.group(1).upper(), m.group(2) or ""
+    return drive + ":\\" + rest.replace("/", "\\")
 
 
 def _cd_targets(cmd):
@@ -1013,7 +1039,7 @@ def _gate_repo(payload):
             if raw == "-" or _UNEXPANDABLE.search(raw):
                 unknown = True  # cannot follow THIS hop -- but see below
                 continue
-            t = os.path.expanduser(raw)
+            t = _native_path(os.path.expanduser(raw))
             if os.path.isabs(t):
                 # An absolute hop re-anchors and clears an earlier unknown: it
                 # fully determines where we are regardless of what came before,

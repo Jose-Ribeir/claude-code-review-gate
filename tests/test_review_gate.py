@@ -1844,6 +1844,45 @@ def test_a_relative_hop_after_an_unresolvable_one_stays_ambiguous(tmp_path, monk
     assert _gate_repo(_payload('cd "$T" && cd sub && git push', tmp_path)) == ("", True)
 
 
+# --- Git Bash spells Windows drives as /j/..., and this hook is not Git Bash --
+# Claude's Bash tool on Windows is Git Bash, so `pwd` says /j/codigo/repo and
+# Claude pushes as `cd /j/codigo/repo && git push`. The hook runs under native
+# Python, where that path is `j/codigo/repo` off the root of the CURRENT drive: isabs()
+# is True, isdir() is False, and a real repository was denied as ambiguous.
+
+import pytest  # noqa: E402
+
+
+def test_an_msys_drive_path_is_translated_to_the_native_spelling(monkeypatch):
+    monkeypatch.setattr(review_gate.os, "name", "nt")
+    native = review_gate._native_path
+    assert native("/j/codigo/thyra-ai") == r"J:\codigo\thyra-ai"
+    assert native("/cygdrive/c/Users/me/repo") == r"C:\Users\me\repo"
+    assert native("/j") == "J:\\"
+    # Not a drive spelling: left alone for the resolver to judge as before.
+    assert native("/usr/local/repo") == "/usr/local/repo"
+    assert native("C:/codigo/repo") == "C:/codigo/repo"
+    assert native("repo") == "repo"
+
+
+def test_an_msys_drive_path_is_left_alone_off_windows(monkeypatch):
+    # POSIX has no drives; /j/repo is simply a directory named j.
+    monkeypatch.setattr(review_gate.os, "name", "posix")
+    assert review_gate._native_path("/j/codigo/repo") == "/j/codigo/repo"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="needs a real drive letter to spell")
+def test_a_cd_into_a_git_bash_drive_path_resolves_the_repo(tmp_path, monkeypatch):
+    real = tmp_path / "pushed"
+    real.mkdir()
+    _repo_at(monkeypatch, real)
+    drive, rest = os.path.splitdrive(str(real))
+    msys = "/" + drive[0].lower() + rest.replace("\\", "/")
+    root, ambiguous = _gate_repo(_payload("cd " + msys + " && git push", tmp_path))
+    assert ambiguous is False
+    assert os.path.normcase(root) == os.path.normcase(str(real))
+
+
 # --- heredoc bodies are data, and that one distinction earned its way back ---
 # The simplification removed all command parsing, and within minutes a
 # `git commit` whose MESSAGE discussed a cd chain and a push was denied as an
