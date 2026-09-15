@@ -6,6 +6,32 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-09-15
+
+### Fixed
+- **On Windows, `cd /j/codigo/repo && git push` was denied as an unresolvable
+  push.** Claude's Bash tool on Windows is Git Bash, whose `pwd` spells drive
+  `J:` as `/j/`, so that is how Claude writes the `cd`. The hook runs under
+  native Python, where a drive-less rooted path is a directory off the root
+  of the *current* drive — one that does not exist — so the resolver saw a
+  `cd` into nowhere and blocked with "could not determine which repository
+  this push targets". The resolver now reads the `/<letter>/` and
+  `/cygdrive/<letter>/` spellings as the drive they name. Everything it could
+  not resolve before, it still refuses.
+- **A reviewer killed mid-review left no trace, so the push was silently
+  re-reviewed from scratch.** The reviewed-marker was only written after the
+  review returned. An in-progress marker is now written before the reviewer
+  starts and removed when it finishes, so a review that was killed outright
+  is reported as such through the same findings channel the gate already
+  uses.
+- **The headless reviewer inherited the parent session's environment
+  unmodified**, including its live IPC channel and token and its own session
+  identity — state an independent reviewer must not hold. That bundle is now
+  scrubbed by default; `OCR_UNSET_ENV` overrides it (`none` to disable, or an
+  explicit list to replace). On Windows the reviewer is also spawned in its
+  own process group with no window and no shared stdin. `OCR_DEBUG=1` adds a
+  values-safe forensic breadcrumb of what was spawned and what was scrubbed.
+
 ## [0.5.4] - 2026-09-02
 
 ### Fixed
