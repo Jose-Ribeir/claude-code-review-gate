@@ -2401,3 +2401,11 @@ def test_guard_judges_tokens_not_quoted_text():
     g = review_gate._guard_reviewer_command
     assert g('git log --grep="needs --output flag" --oneline') == ""
     assert g("git log -1 --format='%s' --output x") != ""
+
+
+def test_guard_falls_back_to_the_raw_text_when_the_command_cannot_be_tokenised():
+    g = review_gate._guard_reviewer_command
+    # An unterminated quote defeats shlex; the guard must still refuse the
+    # write rather than wave it through -- the fallback is the raw match.
+    assert g("git log --format='unterminated --output=x") != ""
+    assert g("git log --format='unterminated --oneline") == ""
