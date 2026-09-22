@@ -6,6 +6,73 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-22
+
+### Fixed
+- **A review longer than ~16 minutes killed the Claude Code session under the
+  gate.** The desktop app terminates a session's CLI process after ~975 s
+  without an output frame while a turn is pending, and a PreToolUse hook emits
+  nothing for as long as it runs. Four of five pushes on 2026-09-21 died this
+  way (the survivor's hook took 973 s): the push never ran, the reviewer kept
+  burning tokens as an orphan, its verdict went to a dead pipe, and the next
+  resume synthesised `[Request interrupted by user for tool use]` -- so the
+  model reported a user interruption that never happened. 0.5.5 had guessed at
+  inherited environment as the cause; the app's own session record names the
+  watchdog. The review now runs under a **detached supervisor** (`--mode
+  supervise`) that outlives the hook; the hook joins it for at most
+  `OCR_INLINE_BUDGET` (600 s) and otherwise **denies** with "still running,
+  re-run the push". The retry joins the same review. Nothing is ever allowed
+  unreviewed. `hooks/hooks.json`'s PreToolUse timeout drops from 1920 to 900 so
+  it stays under the app's wall; `OCR_TIMEOUT` moves to the supervisor.
+- **Hook mode reviewed the checked-out `HEAD`, not the branch being pushed.**
+  `git push -u origin feat/b` with `feat/a` checked out reviewed `feat/a`
+  (observed, record in hand). The push command is now parsed: the named branch
+  is reviewed against its remote-tracking ref (merge-base), `@{push}` resolves
+  a bare `git push`, `--tags` is checked for commits the remote lacks, deletions
+  and dry runs are allowed, and everything the parser cannot read literally
+  is refused (`OCR_LEGACY_RANGE=1` restores the old range). `git -C <dir>
+  push` is now routed to the gate at all -- it never contained the substring
+  the adapters triggered on.
+- **Blocked verdicts were never persisted**, so every retry after a block paid
+  the full review again. Every verdict is now recorded per pushed tip for an
+  hour and replayed on retry. `OCR_FORCE_REVIEW=1` re-reviews.
+- **The reviewer could write files.** `git diff/log/show --output=<path>`
+  passes the reviewer's `Bash(git diff *)` allowlist (verified against the
+  host: the file appears), and a redirection into the working tree is admitted
+  too. A prompt-injected reviewer could therefore forge the gate's own pass
+  marker. Inside the review session the plugin's hook now refuses `--output`
+  and any redirection that leaves the reviewer's directory or reaches `.git`,
+  `..`, an absolute path or `~`.
+- **The reviewer read the live working tree.** With the review now running
+  while the session goes on editing, it reads a detached worktree at the
+  pushed commit instead, and its scratch files stay out of the user's tree.
+- **A ref-moving command before the push retargeted it** (`git switch x &&
+  git push`, `git commit && git push`): the hook reviewed one tip and git sent
+  another. Only read-only git subcommands may precede a push in one command;
+  more than one `git push` per command and `--no-verify` are refused.
+- **0.5.5's in-progress marker was deleted by the orphan it was meant to
+  report.** An orphaned run's `finally` unlinked the marker the next run had
+  just written for the same tip. The state file's heartbeat and run-id fencing
+  replace it; the prefix stays in the sweep for one release.
+
+### Added
+- `--mode resume`: SessionStart context naming a review that was running or
+  finished when the session's previous process ended, so a host restart is
+  not narrated as a user interruption.
+- `--mode post` announces the verdict of a review that outlived its push
+  (and reminds about one still running at most every five minutes).
+- `OCR_INLINE_BUDGET`, `OCR_INLINE_BUDGET_GIT`, `OCR_FORCE_REVIEW`,
+  `OCR_LEGACY_RANGE`; the git pre-push adapter uses the same state machine
+  with a 300 s budget under Claude's Bash tool (full `OCR_TIMEOUT` at a TTY).
+- End-to-end tests (`tests/test_async_gate.py`) that run the real hook, a
+  real detached supervisor and a stub reviewer against a temporary repository.
+  The stub is wired through `OCR_REVIEWER_CMD`, honoured only for a script
+  under the plugin's own `tests/` directory.
+
+### Changed
+- The Python probe in every adapter requires 3.7+ (the detach relies on
+  CPython passing only the redirected std handles to a child).
+
 ## [0.5.5] - 2026-09-15
 
 ### Fixed

@@ -56,9 +56,28 @@ if a command fails — a failure *is* a result.
 - Check all four adapter scripts exist and are readable:
   `${CLAUDE_PLUGIN_ROOT}/scripts/gate-hook.sh`, `gate-hook.ps1`,
   `post-hook.sh`, and `post-hook.ps1`.
-- Confirm each hook `timeout` is **greater than** `OCR_TIMEOUT` (default 1800).
-  If not, say so loudly: Claude Code kills the hook at its own deadline
-  regardless, and a killed hook is non-blocking — i.e. a silent fail-open.
+- Check the timeout ordering, which since 0.6.0 is the reverse of what it
+  used to be: `OCR_INLINE_BUDGET` (default 600, clamped to at most 840) **<**
+  the `PreToolUse` entry's `timeout` (900) **<** ~975 (the desktop app's
+  session watchdog: a CLI silent that long is killed) **<** `OCR_TIMEOUT`
+  (default 1800, enforced by the detached supervisor, not by the hook). A
+  `PreToolUse` timeout **above 900** is wrong, not safe: it lets the app kill
+  the whole session before the hook's own deadline ever fires. A budget at or
+  above the hook timeout would let Claude Code kill the hook (non-blocking,
+  i.e. fail-open) before the "still running" deny fires; the clamp prevents
+  it, but report the configured value.
+- Confirm the `SessionStart` entry exists (both scripts). Besides the Python
+  probe it emits the "a review was running when this session's previous
+  process ended" context, which is what keeps a host-killed process from
+  being narrated as a user interruption.
+- In the current repository, list `.git/review-gate-async/*.json` (in the
+  common git dir) and report each state: `running` with a `heartbeat_ts`
+  older than ~45 s is a dead supervisor (the next push restarts it);
+  `failed` with `attempts >= 2` will not be retried for an hour unless
+  `OCR_FORCE_REVIEW=1`; `done` is a recorded verdict a retry replays. Offer to
+  delete a stuck file only when asked. Also list `worktrees/` under the plugin
+  data dir; anything older than an hour there is a leak (`git worktree prune`
+  in the repo cleans git's side).
 
 **3. Global git hook (the optional "everywhere" adapter)**
 
@@ -100,7 +119,16 @@ if a command fails — a failure *is* a result.
 
 Report any of these that are set, since each changes the verdict: `OCR_MODEL`,
 `OCR_TIMEOUT`, `OCR_ADVISORY`, `OCR_FAIL_OPEN`, `OCR_BLOCK_SEVERITY`,
-`OCR_BLOCK_CONFIDENCE`, `OCR_CLAUDE_ARGS`, `OCR_CLAUDE_EXTRA_ARGS`.
+`OCR_BLOCK_CONFIDENCE`, `OCR_CLAUDE_ARGS`, `OCR_CLAUDE_EXTRA_ARGS`,
+`OCR_INLINE_BUDGET`, `OCR_INLINE_BUDGET_GIT`, `OCR_FORCE_REVIEW`,
+`OCR_LEGACY_RANGE`, `OCR_UNSET_ENV`.
+
+Also read the current repository's `.claude/settings.json` (and
+`settings.local.json`) and flag any `env` entry that sets an `OCR_*` variable:
+project settings are applied to the CLI process and inherited by hooks, so a
+repository can weaken its own gate (`OCR_FAIL_OPEN`, `OCR_ADVISORY`) without
+anyone launching Claude Code differently. That is a finding, not a
+configuration.
 
 Call out `OCR_FAIL_OPEN` and `OCR_ADVISORY` specifically — they mean the gate is
 **not currently blocking**, which is exactly the thing a user running the doctor

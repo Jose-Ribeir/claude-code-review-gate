@@ -44,14 +44,43 @@ foreach ($name in @('python3', 'python', 'py')) {
         $p = $cmd.Source
         if (-not $p -or $p -match 'WindowsApps') { continue }
         try {
-            & $p -c 'import sys' 2>$null | Out-Null
+            & $p -c 'import sys; sys.exit(0 if sys.version_info >= (3, 7) else 1)' 2>$null | Out-Null
             if ($LASTEXITCODE -eq 0) { $py = $p; break }
         } catch { continue }
     }
     if ($py) { break }
 }
 
-if ($py) { exit 0 }
+if ($py) {
+    # Python is fine. Same resume context as session-start-check.sh: if this
+    # session's previous process died mid-review, say so (see --mode resume).
+    # Best effort; nothing but one JSON object may reach stdout.
+    try {
+        $core = Join-Path $PSScriptRoot 'review-gate.py'
+        if (Test-Path $core) {
+            $stdinBytes = New-Object System.IO.MemoryStream
+            [Console]::OpenStandardInput().CopyTo($stdinBytes)
+            $bytes = $stdinBytes.ToArray()
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = $py
+            $psi.Arguments = '"' + $core + '" --mode resume'
+            $psi.UseShellExecute = $false
+            $psi.RedirectStandardInput = $true
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            $proc = [System.Diagnostics.Process]::Start($psi)
+            $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+            $stderrTask = $proc.StandardError.ReadToEndAsync()
+            $proc.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length)
+            $proc.StandardInput.Close()
+            $proc.WaitForExit()
+            $null = $stderrTask.Result
+            $out = $stdoutTask.Result
+            if ($out.Trim()) { [Console]::Out.Write($out) }
+        }
+    } catch { }
+    exit 0
+}
 
 Write-Output 'review-gate: no working Python 3 interpreter found. The push gate FAILS CLOSED and will block `git push` until this is fixed.'
 Write-Output '  - Install Python 3, then restart Claude Code so it picks up the new PATH.'

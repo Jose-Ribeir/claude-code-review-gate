@@ -703,10 +703,20 @@ def _stub_gate(monkeypatch, tmp_path, result=_WARN_RESULT, calls=None):
     monkeypatch.setattr(review_gate, "_drop_breadcrumb", lambda session_id, repo: None)
     _isolate_gate_data(monkeypatch, tmp_path)
     monkeypatch.setattr(review_gate, "_git_dir", lambda repo_root=None: str(tmp_path))
+    monkeypatch.setattr(review_gate, "_git_common_dir", lambda repo_root=None: str(tmp_path))
     monkeypatch.setattr(review_gate, "_head_sha", lambda repo_root=None: "a" * 40)
     monkeypatch.setattr(review_gate, "_branch", lambda repo_root=None: "feat/x")
     monkeypatch.setattr(review_gate, "_has_unpushed_commits", lambda repo_root=None, push_range=None: True)
+    # What the push sends: resolved from the command by _hook_target for real;
+    # here pinned so the stub gate needs no repository.
+    monkeypatch.setattr(review_gate, "_hook_target", lambda repo_root, cmd: (
+        "review", {"tip": "a" * 40, "branch": "feat/x", "base": "b" * 40,
+                   "range": "b" * 40 + ".." + "a" * 40, "remote": "origin", "dst": "feat/x"}))
+    # The stubbed reviewer reads nothing, so "the worktree" is the repo itself.
+    monkeypatch.setattr(review_gate, "_make_worktree", lambda repo_root, tip, run_id: repo_root)
     monkeypatch.delenv("OCR_IN_REVIEW", raising=False)
+    monkeypatch.delenv("OCR_FORCE_REVIEW", raising=False)
+    _inline_supervisor(monkeypatch)
 
     def _fake_review(repo_root, mode, git_dir=None, head_sha="", push_range=""):
         if calls is not None:
@@ -715,6 +725,21 @@ def _stub_gate(monkeypatch, tmp_path, result=_WARN_RESULT, calls=None):
         return result, True, raw_name
 
     monkeypatch.setattr(review_gate, "_run_review", _fake_review)
+
+
+def _inline_supervisor(monkeypatch):
+    """Run the detached supervisor synchronously, in this process.
+
+    Production spawns `--mode supervise` as a detached child so the hook can
+    return inside the host's wall (see ASYNC_DIR). In-process it sees the same
+    monkeypatched _run_review the test installed, and the hook's join finds
+    the terminal state on its first poll.
+    """
+    def _spawn(state_path, run_id, repo_root):
+        review_gate._supervise(state_path, run_id)
+        return os.getpid()
+
+    monkeypatch.setattr(review_gate, "_spawn_supervisor", _spawn)
 
 
 def _run_post(monkeypatch, tmp_path, command="git push", session_id="s1", shadowed=False,
@@ -782,59 +807,179 @@ def test_the_paired_adapters_short_circuit_replays_instead_of_silencing(tmp_path
     assert "unchecked index" in payload["permissionDecisionReason"]
 
 
-# --- in-progress marker: interrupted-review reporting -------------------------
-# A review's process can be killed outright (the crash this was built for) with
-# no chance to run _write_marker, leaving the paired adapter no way to tell
-# "never reviewed" from "reviewed, but the reviewer got killed" -- it silently
-# redid the whole review with no indication anything had already been tried.
+# --- the review runs elsewhere: state file, supervisor, inline join -----------
+# The desktop app kills a CLI that is silent for ~16 min, and a PreToolUse
+# hook is silent for as long as it runs. So the review runs under a detached
+# supervisor and the hook only JOINS it, up to a budget; past the budget it
+# denies with "still running" and a retry joins the same review. These tests
+# drive that state machine with the supervisor run in-process.
 
-def test_an_interrupted_review_is_reported_and_still_rerun(tmp_path, monkeypatch, capsys):
+def _state_of(tmp_path, tip="a" * 40):
+    return review_gate._read_state(review_gate._state_path(str(tmp_path), tip)) or {}
+
+
+def _budget_exhausted(monkeypatch):
+    """Make the inline budget already spent, so a running review is not
+    waited for. Measured from process start, so the clock is moved back."""
+    monkeypatch.setattr(review_gate, "_HOOK_T0", time.time() - 10_000)
+
+
+def test_the_verdict_is_recorded_in_the_state_file(tmp_path, monkeypatch, capsys):
+    _stub_gate(monkeypatch, tmp_path)
+    _run_hook(monkeypatch)
+    st = _state_of(tmp_path)
+    assert st["state"] == "done" and st["verdict"] == "warn" and st["blocked"] is False
+    assert "unchecked index" in st["reasons"]
+    assert st["run_id"] and st["supervisor_pid"] == os.getpid()
+
+
+def test_a_blocked_verdict_is_replayed_without_a_second_review(tmp_path, monkeypatch, capsys):
     calls = []
-    _stub_gate(monkeypatch, tmp_path, calls=calls)
-    inprogress = review_gate._inprogress_path(str(tmp_path), "a" * 40)
-    inprogress.write_text(
-        json.dumps({"ts": time.time() - 120, "mode": "git"}), encoding="utf-8"
-    )
-
+    blocked = {"findings": [dict(_FINDING, severity="high", confidence=0.95, content="sql injection")]}
+    _stub_gate(monkeypatch, tmp_path, result=blocked, calls=calls)
     _run_hook(monkeypatch)
+    first = json.loads(capsys.readouterr().out)["hookSpecificOutput"]
+    assert first["permissionDecision"] == "deny" and "sql injection" in first["permissionDecisionReason"]
+    # No pass marker for a block: an older git hook reads that marker as pass.
+    assert not review_gate._marker_path(str(tmp_path), "a" * 40).exists()
 
-    # Never skipped -- an in-progress marker only ever changes the message,
-    # never whether the review actually runs (see _main_inner).
+    # Retry within the TTL, same tip: answered from the state file, no review.
+    st = _state_of(tmp_path)
+    st["done_ts"] = time.time() - 120  # long enough ago to read as a replay
+    review_gate._write_state(review_gate._state_path(str(tmp_path), "a" * 40), st)
+    _run_hook(monkeypatch)
+    second = json.loads(capsys.readouterr().out)["hookSpecificOutput"]
     assert calls == ["a" * 40]
-    assert not inprogress.exists()
-    findings = _read_history(str(tmp_path))[0]["findings"]
-    assert any("did not record a result" in f["content"] for f in findings)
-    assert any("git adapter" in f["content"] for f in findings)
+    assert second["permissionDecision"] == "deny"
+    assert "review recorded" in second["permissionDecisionReason"]
+    assert "sql injection" in second["permissionDecisionReason"]
 
 
-def test_a_successful_review_cleans_up_its_inprogress_marker(tmp_path, monkeypatch):
-    _stub_gate(monkeypatch, tmp_path)
-    _run_hook(monkeypatch)
-    assert not review_gate._inprogress_path(str(tmp_path), "a" * 40).exists()
-
-
-def test_a_blocked_review_still_cleans_up_its_inprogress_marker(tmp_path, monkeypatch, capsys):
-    _stub_gate(monkeypatch, tmp_path)
-
-    def _raise(*a, **kw):
-        raise review_gate.ReviewGateError("boom")
-
-    monkeypatch.setattr(review_gate, "_run_review", _raise)
-    _run_hook(monkeypatch)  # _fail_closed still exits 0 in hook mode (deny is in the payload)
-    assert not review_gate._inprogress_path(str(tmp_path), "a" * 40).exists()
-
-
-def test_fresh_done_marker_skip_never_touches_the_inprogress_marker(tmp_path, monkeypatch, capsys):
+def test_force_review_ignores_a_recorded_verdict(tmp_path, monkeypatch, capsys):
     calls = []
     _stub_gate(monkeypatch, tmp_path, calls=calls)
     _run_hook(monkeypatch)
     capsys.readouterr()
-
-    # Second adapter, same HEAD, done-marker still fresh: the short-circuit at
-    # the top of _main_inner returns before the in-progress check ever runs.
+    monkeypatch.setenv("OCR_FORCE_REVIEW", "1")
     _run_hook(monkeypatch)
+    assert calls == ["a" * 40, "a" * 40]
+
+
+def test_a_running_review_past_the_budget_is_denied_not_allowed(tmp_path, monkeypatch, capsys):
+    calls = []
+    _stub_gate(monkeypatch, tmp_path, calls=calls)
+    _budget_exhausted(monkeypatch)
+    # Another process's review, alive: fresh heartbeat.
+    path = review_gate._state_path(str(tmp_path), "a" * 40)
+    review_gate._write_state(path, {
+        "state": "running", "run_id": "other", "tip": "a" * 40, "branch": "feat/x",
+        "started_ts": time.time() - 700, "heartbeat_ts": time.time(), "supervisor_pid": 0,
+    })
+    _run_hook(monkeypatch)
+    payload = json.loads(capsys.readouterr().out)["hookSpecificOutput"]
+    assert payload["permissionDecision"] == "deny"
+    assert "still running" in payload["permissionDecisionReason"]
+    assert "re-run this exact `git push`" in payload["permissionDecisionReason"]
+    assert calls == []  # joined, never restarted
+    assert _state_of(tmp_path)["run_id"] == "other"
+    # ...and a note is parked so --mode post can announce the verdict later.
+    notes = [json.loads((tmp_path / "gate-data" / n).read_text()) for n in _pending_files(tmp_path)]
+    assert [n["kind"] for n in notes] == ["async"]
+
+
+def test_a_review_whose_supervisor_went_silent_is_restarted(tmp_path, monkeypatch, capsys):
+    calls = []
+    _stub_gate(monkeypatch, tmp_path, calls=calls)
+    path = review_gate._state_path(str(tmp_path), "a" * 40)
+    review_gate._write_state(path, {
+        "state": "running", "run_id": "dead", "tip": "a" * 40, "branch": "feat/x",
+        "started_ts": time.time() - 900, "heartbeat_ts": time.time() - 600, "supervisor_pid": 0,
+    })
+    _run_hook(monkeypatch)
+    payload = json.loads(capsys.readouterr().out)["hookSpecificOutput"]
+    assert payload["permissionDecision"] == "allow"
     assert calls == ["a" * 40]
-    assert not review_gate._inprogress_path(str(tmp_path), "a" * 40).exists()
+    st = _state_of(tmp_path)
+    assert st["state"] == "done" and st["run_id"] != "dead"
+
+
+def test_a_failed_review_is_retried_once_then_denied_with_its_reason(tmp_path, monkeypatch, capsys):
+    calls = []
+    _stub_gate(monkeypatch, tmp_path, calls=calls)
+
+    def _raise(*a, **kw):
+        raise review_gate.ReviewGateError("claude exited 1 without running the review")
+
+    monkeypatch.setattr(review_gate, "_run_review", _raise)
+    _run_hook(monkeypatch)
+    first = json.loads(capsys.readouterr().out)["hookSpecificOutput"]
+    assert first["permissionDecision"] == "deny"
+    assert "could not complete" in first["permissionDecisionReason"]
+    assert _state_of(tmp_path)["attempts"] == 1
+
+    _run_hook(monkeypatch)  # automatic retry, fails again
+    assert _state_of(tmp_path)["attempts"] == 2
+    second = json.loads(capsys.readouterr().out)["hookSpecificOutput"]
+    assert "will not be retried automatically" in second["permissionDecisionReason"]
+
+    monkeypatch.setattr(review_gate, "_run_review",
+                        lambda *a, **kw: (_WARN_RESULT, True, ""))
+    _run_hook(monkeypatch)  # at the cap: no third attempt inside the TTL
+    third = json.loads(capsys.readouterr().out)["hookSpecificOutput"]
+    assert third["permissionDecision"] == "deny"
+
+
+def test_a_stale_run_id_fences_the_old_supervisor(tmp_path, monkeypatch):
+    # The supervisor re-reads its state file; if a newer run has claimed the
+    # tip, it must not write a verdict over the newer run's state.
+    _stub_gate(monkeypatch, tmp_path)
+    path = review_gate._state_path(str(tmp_path), "a" * 40)
+    review_gate._write_state(path, {"state": "claimed", "run_id": "old", "tip": "a" * 40,
+                                    "repo_root": str(tmp_path), "git_dir": str(tmp_path)})
+    orig = review_gate._run_review
+
+    def _supersede(*a, **kw):
+        st = review_gate._read_state(path)
+        st["run_id"] = "new"
+        review_gate._write_state(path, st)
+        return orig(*a, **kw)
+
+    monkeypatch.setattr(review_gate, "_run_review", _supersede)
+    assert review_gate._supervise(str(path), "old") == 0
+    assert _state_of(tmp_path)["run_id"] == "new"
+    assert _state_of(tmp_path).get("state") != "done"
+
+
+def test_post_announces_an_async_verdict_once(tmp_path, monkeypatch, capsys):
+    _stub_gate(monkeypatch, tmp_path)
+    _seed_record(tmp_path)
+    path = review_gate._state_path(str(tmp_path), "a" * 40)
+    review_gate._write_state(path, {"state": "done", "run_id": "r", "tip": "a" * 40,
+                                    "branch": "feat/x", "verdict": "warn", "blocked": False,
+                                    "done_ts": time.time()})
+    review_gate._park_pending("s1", str(tmp_path), "a" * 40, kind="async",
+                              extra={"state": str(path)})
+    _run_post(monkeypatch, tmp_path, command="ls")
+    ctx = _post_context(capsys)
+    assert "has finished (verdict: warn)" in ctx and "unchecked index" in ctx
+    assert _pending_files(tmp_path) == []
+    _run_post(monkeypatch, tmp_path, command="ls")
+    assert _post_context(capsys) == ""
+
+
+def test_post_reminds_about_a_running_review_at_most_every_five_minutes(tmp_path, monkeypatch, capsys):
+    _stub_gate(monkeypatch, tmp_path)
+    path = review_gate._state_path(str(tmp_path), "a" * 40)
+    review_gate._write_state(path, {"state": "running", "run_id": "r", "tip": "a" * 40,
+                                    "branch": "feat/x", "started_ts": time.time() - 200,
+                                    "heartbeat_ts": time.time()})
+    review_gate._park_pending("s1", str(tmp_path), "a" * 40, kind="async",
+                              extra={"state": str(path)})
+    _run_post(monkeypatch, tmp_path, command="ls")
+    assert "still running" in _post_context(capsys)
+    _run_post(monkeypatch, tmp_path, command="ls")
+    assert _post_context(capsys) == ""  # rate-limited
+    assert len(_pending_files(tmp_path)) == 1  # kept until the verdict lands
 
 
 def test_a_clean_run_records_a_pass_and_says_nothing(tmp_path, monkeypatch, capsys):

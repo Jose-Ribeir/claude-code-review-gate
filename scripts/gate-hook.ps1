@@ -26,11 +26,6 @@ function Write-Decision {
 
 function Test-Truthy { param([string]$v) return @('1', 'true', 'yes') -contains $v.Trim().ToLower() }
 
-# --- Re-entry guard -----------------------------------------------------------
-# review-gate.py runs the headless review with --plugin-dir, so this plugin --
-# including this hook -- is registered inside the review session too.
-if ($env:OCR_IN_REVIEW -eq '1') { Write-Decision 'allow'; exit 0 }
-
 # --- Read the payload once, up front -------------------------------------------
 # Stdin carries the PreToolUse payload. Read raw BYTES: piping to a native
 # child in Windows PowerShell 5.1 re-encodes via $OutputEncoding (ASCII/OEM by
@@ -47,7 +42,23 @@ $bytes = $stdinBytes.ToArray()
 # with no working Python gets denied, not just a real push. Same substring
 # rule review-gate.py itself applies once it's running.
 $payloadText = [System.Text.Encoding]::UTF8.GetString($bytes)
-if ($payloadText -notlike '*git push*') { Write-Decision 'allow'; exit 0 }
+
+# --- Inside the review session -------------------------------------------------
+# review-gate.py runs the headless review with --plugin-dir, so this plugin --
+# including this hook -- is registered there too. Since 0.6.0 a file-writing
+# command shape (`--output`, a `>` redirection) is vetted by review-gate.py's
+# --mode guard rather than blanket-allowed; see gate-hook.sh for why.
+if ($env:OCR_IN_REVIEW -eq '1') {
+    if ($payloadText -like '*--output*' -or $payloadText -like '*>*') {
+        $script:GuardMode = $true
+    } else {
+        Write-Decision 'allow'; exit 0
+    }
+}
+
+# Loose on purpose: `git -C <dir> push` is a push too. review-gate.py applies
+# the strict command-position test once it is running.
+if (-not $script:GuardMode -and $payloadText -notlike '*git*push*') { Write-Decision 'allow'; exit 0 }
 
 # --- Should this adapter run at all? ------------------------------------------
 # Deliberately biased toward RUNNING. Deferring when gate-hook.sh cannot
@@ -96,7 +107,7 @@ foreach ($name in @('python3', 'python', 'py')) {
         $p = $cmd.Source
         if (-not $p -or $p -match 'WindowsApps') { continue }
         try {
-            & $p -c 'import sys' 2>$null | Out-Null
+            & $p -c 'import sys; sys.exit(0 if sys.version_info >= (3, 7) else 1)' 2>$null | Out-Null
             if ($LASTEXITCODE -eq 0) { $py = $p; break }
         } catch { continue }
     }
@@ -133,7 +144,7 @@ if (-not $py -or -not (Test-Path $core)) {
 # $bytes was already read above, before the git-push check.
 $psi = New-Object System.Diagnostics.ProcessStartInfo
 $psi.FileName               = $py
-$psi.Arguments              = '"' + $core + '" --mode hook'
+$psi.Arguments              = '"' + $core + '" --mode ' + $(if ($script:GuardMode) { 'guard' } else { 'hook' })
 $psi.UseShellExecute         = $false
 $psi.RedirectStandardInput   = $true
 $psi.RedirectStandardOutput  = $true

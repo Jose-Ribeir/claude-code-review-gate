@@ -20,16 +20,25 @@
 # output — and, as of 0.3.0, on a missing Python 3 or a reviewer the git hook
 # cannot locate (both used to fail open, contradicting this very paragraph).
 #
+# Since 0.6.0 the review does not run INSIDE the hook. It runs under a
+# detached supervisor (--mode supervise) that the hook only joins, for at most
+# OCR_INLINE_BUDGET seconds; past that the hook DENIES with "still running,
+# re-run the push" and the retry joins the same review. See ASYNC_DIR for
+# why: the desktop app kills a CLI that stays silent for ~16 minutes, and a
+# hook is silent for as long as it runs.
+#
 # What still fails OPEN, in full:
 #   1. "claude not found" — deliberate; there is no sensible gate without it.
-#   2. The hook failing to LAUNCH, timing out, or dying abnormally. Claude Code
-#      treats a hook it could not start or had to kill as non-blocking, and no
-#      code in here can override that. It is why hooks/hooks.json's timeout must
-#      stay above OCR_TIMEOUT, and why /review-gate:doctor exists.
+#   2. The hook failing to LAUNCH, or the join loop itself outliving
+#      hooks/hooks.json's timeout (900 s; the budget is clamped to 840 so it
+#      cannot). Claude Code treats a hook it could not start or had to kill
+#      as non-blocking, and no code in here can override that. It is why
+#      /review-gate:doctor exists.
 #   3. OCR_FAIL_OPEN=1 (one-shot bypass) / OCR_ADVISORY=1 (permanent warn-only).
 #
-# Raise OCR_TIMEOUT (default 1800 s) if legitimate reviews routinely time out,
-# and raise hooks/hooks.json's timeout to stay above it.
+# Raise OCR_TIMEOUT (default 1800 s) if legitimate reviews routinely time out.
+# It is enforced by the supervisor, outside the hook, so hooks/hooks.json's
+# timeout must NOT follow it up: that one has to stay under the host's wall.
 #
 # The orchestrated review methodology this drives is adapted from open-code-review
 # (ocr): https://github.com/alibaba/open-code-review (Apache-2.0). See NOTICE.
@@ -144,14 +153,88 @@ except ValueError:
 MARKER_TTL = 3600  # seconds
 MARKER_PREFIX = "scr-push-reviewed-"
 
-# Written just before _run_review starts, removed in its `finally` (see
-# _main_inner). Left behind on disk if and only if the reviewing process was
-# killed outright -- a `finally` block cannot run across TerminateProcess/
-# SIGKILL -- which is exactly the "a review was attempted here and never
-# finished" signal _marker_fresh alone cannot provide: a killed run never
-# reaches _write_marker, so the paired adapter used to see "never reviewed"
-# and silently redo the full review with no indication anything had already
-# been tried.
+# --- asynchronous review state (0.6.0) ---------------------------------------
+# Why this exists. The Claude desktop app kills a session's CLI process after
+# roughly 16 minutes (measured: 976 s) without a stream-json frame while a turn
+# is pending, and a PreToolUse hook produces no frames for as long as it runs.
+# So every review longer than that killed the CLI -- not the hook: the push
+# never ran, the reviewer kept burning tokens as an orphan, its verdict went
+# to a dead pipe, and the next resume synthesised "[Request interrupted by
+# user for tool use]". Four of five pushes on 2026-09-21 died this way; the
+# survivor's hook took 973 s. No timeout in here could engage, because the
+# process that would have enforced it was the one being killed.
+#
+# So the hook must RETURN well inside that wall regardless of how long the
+# review takes. The review runs under a detached supervisor (--mode supervise)
+# that outlives the hook; the hook waits inline only up to _inline_budget()
+# and otherwise DENIES with "still running, re-run the push" -- never allows,
+# an unreviewed push is the one thing this gate exists to stop -- and the
+# retry joins the same review. State is keyed by the TIP being pushed and
+# lives in the repository's common git dir, so two worktrees, two adapters
+# or two sessions pushing the same commits share one review.
+ASYNC_DIR = "review-gate-async"
+_INLINE_BUDGET_DEFAULT = 600
+# hooks/hooks.json's PreToolUse timeout is 900 s and the app wall is ~975 s;
+# a budget at or above the hooks timeout would let Claude Code kill the hook
+# (treated as non-blocking, i.e. fail-open) before the budget deny fires.
+_INLINE_BUDGET_MAX = 840
+_INLINE_BUDGET_MIN = 30
+# Under the Bash tool's 600 s ceiling, for a terminal push made through Claude.
+_INLINE_BUDGET_GIT_DEFAULT = 300
+POLL_S = 1.0
+HEARTBEAT_S = 10
+STALE_S = 45          # a supervisor silent this long is presumed dead
+LOCK_STALE_S = 60
+ATTEMPT_CAP = 2       # automatic restarts of a failed review, per tip, per TTL
+_EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+# git exports these to its own hooks (pre-push runs with GIT_DIR set, among
+# others). Inherited into a reviewer whose cwd is a detached worktree, they
+# would point every git call back at the main tree. Scrubbed from the
+# supervisor and the reviewer alike.
+_GIT_ENV_SCRUB = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_PREFIX",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+)
+# Wall-clock at process start. The inline budget is measured from here, not
+# from the moment the join begins: the git calls before it already spent
+# seconds of the same hook timeout.
+_HOOK_T0 = time.time()
+
+
+def _inline_budget(mode):
+    """Seconds this hook may wait for the review before denying with 'retry'.
+
+    Hook mode: OCR_INLINE_BUDGET (default 600, clamped so it can never reach
+    hooks.json's timeout). Git mode: OCR_INLINE_BUDGET_GIT (default 300) when
+    stderr is not a terminal -- i.e. the push is running inside Claude's Bash
+    tool, whose hard ceiling is 600 s -- and the full reviewer timeout when it
+    is, because a human at a terminal can simply wait.
+    """
+    if mode == "git":
+        try:
+            if sys.stderr is not None and sys.stderr.isatty():
+                return TIMEOUT
+        except Exception:
+            pass
+        name, default = "OCR_INLINE_BUDGET_GIT", _INLINE_BUDGET_GIT_DEFAULT
+    else:
+        name, default = "OCR_INLINE_BUDGET", _INLINE_BUDGET_DEFAULT
+    try:
+        val = int(os.environ.get(name, "") or default)
+    except ValueError:
+        val = default
+    return max(_INLINE_BUDGET_MIN, min(_INLINE_BUDGET_MAX, val))
+
+# 0.5.5's in-progress marker. Superseded by the async state file (see
+# ASYNC_DIR), which carries a heartbeat instead of a bare timestamp and so can
+# tell "still running" from "killed". Kept in _MARKER_PREFIXES for one release
+# so the sweep collects the ones 0.5.5 left behind; nothing writes it.
 INPROGRESS_PREFIX = "scr-push-inprogress-"
 
 # Markers written by --mode post (see _mode_post). Both follow MARKER_PREFIX's
@@ -290,6 +373,25 @@ def _git_dir(repo_root=None):
     """
     out, rc = _git(["rev-parse", "--absolute-git-dir"], cwd=repo_root)
     return out if rc == 0 and out else ""
+
+
+def _git_common_dir(repo_root=None):
+    """Absolute path of the repository's COMMON git dir, or "".
+
+    `--absolute-git-dir` answers the per-worktree private dir, so two worktrees
+    of one repository pushing the same commits would each run their own review.
+    The async state is keyed by tip and belongs to the repository, so it lives
+    in the directory all worktrees share. `--path-format=absolute` needs git
+    2.31; older gits answer a path relative to cwd, which is resolved here.
+    """
+    out, rc = _git(["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=repo_root)
+    if rc != 0 or not out:
+        out, rc = _git(["rev-parse", "--git-common-dir"], cwd=repo_root)
+        if rc != 0 or not out:
+            return ""
+        if not os.path.isabs(out):
+            out = os.path.normpath(os.path.join(repo_root or os.getcwd(), out))
+    return out
 
 
 def _head_sha(repo_root=None):
@@ -772,37 +874,6 @@ def _prior_findings_note(prior):
     )
 
 
-def _inprogress_path(git_dir, head_sha):
-    """Path of the "a review of this commit is (or was) being attempted" marker.
-
-    Same head-sha keying as _marker_path. Deliberately has no freshness/TTL
-    check anywhere it is read -- see the comment in _main_inner where it is
-    consumed for why age is not used to decide anything.
-    """
-    return Path(git_dir) / f"{INPROGRESS_PREFIX}{head_sha}"
-
-
-def _interrupted_note(prior):
-    """Describe an in-progress marker found still on disk.
-
-    Deliberately non-committal about whether the earlier attempt is still
-    running elsewhere or was interrupted: there is no liveness check here (see
-    _main_inner) to tell those apart, and guessing wrong in either direction
-    is worse than saying so plainly.
-    """
-    try:
-        age_s = time.time() - float(prior.get("ts"))
-    except (TypeError, ValueError):
-        age_s = None
-    age = f"~{max(0, int(age_s // 60))}m ago" if age_s is not None else "at an unknown time"
-    started_mode = _sanitize(str(prior.get("mode") or "?"), 20)
-    return (
-        f"a review of this commit was already started ({started_mode} adapter, {age}) "
-        "and did not record a result - it may still be running elsewhere, or it was "
-        "interrupted. Re-running now."
-    )
-
-
 def _reap_markers(git_dir, keep=None):
     """Delete markers too old to short-circuit anything.
 
@@ -1034,7 +1105,15 @@ def _gate_repo(payload):
         cmd = (payload.get("tool_input") or {}).get("command", "") or ""
         cwd = str(payload.get("cwd") or "")
     cur, unknown = (cwd or os.getcwd()), False
-    for raw in _cd_targets(cmd):
+    # `git -C <dir> push` changes directory for that one command: a final cd,
+    # applied after every explicit one. Without it `git -C /repo push` was
+    # resolved against the session directory -- and, containing no "git push"
+    # substring, was not even routed to this hook until 0.6.0.
+    hops = _cd_targets(cmd)
+    c_dir = _push_c_dir(cmd)
+    if c_dir:
+        hops = hops + [c_dir]
+    for raw in hops:
         try:
             if raw == "-" or _UNEXPANDABLE.search(raw):
                 unknown = True  # cannot follow THIS hop -- but see below
@@ -1075,14 +1154,364 @@ _REAL_PUSH = re.compile(
     "(?:^|[;&|\\n\\r\"']|&&|\\|\\|)\\s*"
     "(?:[A-Za-z_][A-Za-z0-9_]*=\\S*\\s+)*"   # env prefixes: FOO=bar git push
     "git\\s+"
-    "(?:(?:-\\S+|\\S+=\\S+)\\s+)*"           # git flags and their values
+    # git's own options, including the two that take a separate value:
+    # `-C <dir>` (which _gate_repo honours as a final cd) and `-c k=v`.
+    "(?:(?:-[Cc]\\s+(?:\"[^\"]*\"|'[^']*'|\\S+)|-\\S+|\\S+=\\S+)\\s+)*"
     "push\\b"
 )
+# Same shape, capturing git's global options and the subcommand, for every
+# `git <sub>` at a command position -- used to vet what runs BEFORE the push.
+_GIT_CMD = re.compile(
+    "(?:^|[;&|\\n\\r\"']|&&|\\|\\|)\\s*"
+    "(?:[A-Za-z_][A-Za-z0-9_]*=\\S*\\s+)*"
+    "git\\s+"
+    "((?:(?:-[Cc]\\s+(?:\"[^\"]*\"|'[^']*'|\\S+)|-\\S+|\\S+=\\S+)\\s+)*)"
+    "([A-Za-z][A-Za-z0-9-]*)"
+)
+_GIT_C_DIR = re.compile(r"(?:^|\s)-C\s+(?:\"([^\"]*)\"|'([^']*)'|(\S+))")
 
 
 def _looks_like_real_push(cmd):
     """True when the command actually invokes `git push`, not merely mentions it."""
     return bool(_REAL_PUSH.search(_strip_heredocs(cmd or "")))
+
+
+# --- what does this command push? -------------------------------------------
+# Hook mode used to review `@{u}..HEAD` of the CHECKED-OUT branch whatever the
+# command said: `git push -u origin feat/instagram` while feat/p3 was checked
+# out reviewed p3 (observed, record in hand). The command names the ref; read
+# it. Everything the parser cannot read literally is refused, not guessed.
+
+# git subcommands that may precede the push in the same command. Read-only
+# by construction: anything that can move a ref or change what `<src>`
+# resolves to (switch, checkout, commit, rebase, stash, pull, reset,
+# update-ref, ...) would let the hook review one tip and git push another.
+_PRE_PUSH_ALLOWED = frozenset({
+    "status", "log", "diff", "rev-parse", "remote", "fetch", "ls-files",
+    "show", "ls-remote", "describe", "rev-list", "merge-base", "cat-file",
+    "for-each-ref", "show-ref", "shortlog", "blame", "name-rev", "var",
+    "version", "help",
+})
+# `git branch` is allowed only in its listing forms.
+_BRANCH_LIST_FLAGS = ("--show-current", "--list", "-a", "-r", "-v", "-vv", "--all", "--remotes")
+
+# push options that take a separate value (or `=value`), and bare flags.
+_PUSH_VALUE_OPTS = frozenset({
+    "--repo", "-o", "--push-option", "--receive-pack", "--exec",
+    "--force-with-lease", "--signed", "--recurse-submodules",
+})
+# Of those, the ones whose value is OPTIONAL (bare form is legal).
+_PUSH_OPTIONAL_VALUE = frozenset({"--force-with-lease", "--signed", "--recurse-submodules"})
+_PUSH_FLAGS = frozenset({
+    "-u", "--set-upstream", "-f", "--force", "--force-if-includes",
+    "--no-force-if-includes", "--no-force-with-lease", "-n", "--dry-run",
+    "--tags", "--follow-tags", "--no-follow-tags", "--all", "--branches",
+    "--mirror", "-d", "--delete", "--no-verify", "--verify", "-q", "--quiet",
+    "-v", "--verbose", "--progress", "--no-progress", "--porcelain",
+    "--prune", "--thin", "--no-thin", "--atomic", "--no-atomic", "-4",
+    "--ipv4", "-6", "--ipv6", "--no-recurse-submodules", "--no-signed",
+    "--no-tags",
+})
+
+
+def _push_segment(cmd):
+    """The text of the push command itself: from `push` to the next separator.
+
+    Quotes are respected so a quoted argument may contain `;` or `&&`.
+    Returns (segment, count) where count is how many `git push` commands the
+    string contains -- more than one is refused by the caller: the parser
+    describes ONE push, and reviewing the first would leave the rest unreviewed.
+    """
+    code = _strip_heredocs(cmd or "")
+    matches = list(_REAL_PUSH.finditer(code))
+    if not matches:
+        return "", 0
+    start = matches[0].end()
+    i, n, q = start, len(code), ""
+    while i < n:
+        ch = code[i]
+        if q:
+            if ch == "\\" and q == '"':
+                i += 2
+                continue
+            if ch == q:
+                q = ""
+        elif ch in "\"'":
+            q = ch
+        elif ch in ";&|\n\r":
+            break
+        i += 1
+    return code[start:i], len(matches)
+
+
+def _pre_push_git_commands(cmd):
+    """git subcommands at a command position BEFORE the push. [] when none."""
+    code = _strip_heredocs(cmd or "")
+    stop = _REAL_PUSH.search(code)
+    head = code[: stop.start()] if stop else code
+    found = []
+    for m in _GIT_CMD.finditer(head):
+        sub = m.group(2)
+        tail = head[m.end():m.end() + 80]
+        if sub == "branch":
+            first = tail.split()[0] if tail.split() else ""
+            if first in _BRANCH_LIST_FLAGS:
+                continue
+        if sub in _PRE_PUSH_ALLOWED:
+            continue
+        found.append(sub)
+    return found
+
+
+def _push_c_dir(cmd):
+    """The `-C <dir>` of the push command itself, or "". A final cd, in effect."""
+    code = _strip_heredocs(cmd or "")
+    m = _REAL_PUSH.search(code)
+    if not m:
+        return ""
+    c = _GIT_C_DIR.search(code[m.start():m.end()])
+    if not c:
+        return ""
+    return next((g for g in c.groups() if g), "")
+
+
+def _parse_push(cmd):
+    """Describe the ONE push a command performs.
+
+    Returns a dict with `kind` in:
+      branch      one branch refspec (src, dst, remote, tags flag)
+      delete      only deletions -> nothing to review
+      dry_run     --dry-run -> nothing reaches the remote
+      tags        --tags / tag refspecs only (checked by _hook_target)
+      multi       --all / --mirror / --branches / several refspecs
+      multi_push  more than one `git push` in the command
+      no_verify   --no-verify (refused: git mode is the backstop)
+      unparseable an option or shape this parser does not know
+    Unknown `--opt=value` is skipped; an unknown bare option is `unparseable`
+    rather than consumed as a remote name -- the safe direction.
+    """
+    seg, count = _push_segment(cmd)
+    if count == 0:
+        return {"kind": "unparseable", "reason": "no push command found"}
+    if count > 1:
+        return {"kind": "multi_push", "reason": f"{count} push commands in one call"}
+    try:
+        toks = shlex.split(seg, posix=True)
+    except ValueError as exc:
+        return {"kind": "unparseable", "reason": f"cannot tokenise: {exc}"}
+    out = {
+        "kind": "branch", "remote": "", "refspecs": [], "src": "", "dst": "",
+        "tags": False, "follow_tags": False, "dry_run": False, "delete": False,
+        "set_upstream": False, "reason": "",
+    }
+    positional, i, opts_done = [], 0, False
+    while i < len(toks):
+        t = toks[i]
+        i += 1
+        if opts_done or not t.startswith("-") or t == "-":
+            positional.append(t)
+            continue
+        if t == "--":
+            opts_done = True
+            continue
+        if _UNEXPANDABLE.search(t):
+            return {"kind": "unparseable", "reason": f"unexpandable option {t!r}"}
+        name, has_eq = (t.split("=", 1)[0], "=" in t)
+        if name in _PUSH_VALUE_OPTS:
+            if not has_eq and name not in _PUSH_OPTIONAL_VALUE:
+                if i >= len(toks):
+                    return {"kind": "unparseable", "reason": f"{name} needs a value"}
+                val = toks[i]
+                i += 1
+                if name == "--repo":
+                    out["remote"] = val
+            elif has_eq and name == "--repo":
+                out["remote"] = t.split("=", 1)[1]
+            continue
+        if name in _PUSH_FLAGS:
+            if name in ("-n", "--dry-run"):
+                out["dry_run"] = True
+            elif name == "--tags":
+                out["tags"] = True
+            elif name == "--follow-tags":
+                out["follow_tags"] = True
+            elif name in ("--all", "--branches", "--mirror"):
+                out["kind"] = "multi"
+                out["reason"] = f"{name} pushes more than one ref"
+            elif name in ("-d", "--delete"):
+                out["delete"] = True
+            elif name == "--no-verify":
+                return {"kind": "no_verify", "reason": "--no-verify"}
+            elif name in ("-u", "--set-upstream"):
+                out["set_upstream"] = True
+            continue
+        if has_eq:
+            continue  # unknown --opt=value: self-contained, skip it
+        return {"kind": "unparseable", "reason": f"unknown option {t!r}"}
+    if any(_UNEXPANDABLE.search(p) for p in positional):
+        return {"kind": "unparseable", "reason": "unexpandable argument"}
+    if out["dry_run"]:
+        out["kind"] = "dry_run"
+        return out
+    if out["kind"] == "multi":
+        return out
+    if positional:
+        if not out["remote"]:
+            out["remote"] = positional[0]
+            positional = positional[1:]
+        out["refspecs"] = positional
+    if out["delete"]:
+        out["kind"] = "delete"
+        return out
+    specs = []
+    for spec in out["refspecs"]:
+        spec = spec.lstrip("+")
+        src, _, dst = spec.partition(":")
+        if not src:
+            continue  # `:dst` deletes; nothing to review
+        specs.append((src, dst))
+    if len(specs) > 1:
+        out["kind"] = "multi"
+        out["reason"] = f"{len(specs)} refspecs"
+        return out
+    if len(specs) == 1:
+        out["src"], out["dst"] = specs[0]
+    elif out["refspecs"]:
+        out["kind"] = "delete"  # every refspec was a deletion
+        return out
+    if out["tags"] and not specs:
+        out["kind"] = "tags"
+    return out
+
+
+def _hook_target(repo_root, cmd):
+    """Resolve what a push command sends: the tip to review and its range.
+
+    Returns (decision, info). decision is one of:
+      "review"  info = {tip, branch, base, range, remote, dst}
+      "allow"   info = {"why": ...}    nothing gains commits
+      "deny"    info = {"why": ...}    refused, fail closed
+    OCR_LEGACY_RANGE=1 restores the 0.5.x behaviour (checked-out HEAD against
+    its upstream) for a shape this parser cannot read.
+    """
+    tgt = _parse_push(cmd)
+    kind = tgt.get("kind")
+    legacy = os.environ.get("OCR_LEGACY_RANGE", "").strip().lower() in ("1", "true", "yes")
+    if kind in ("dry_run", "delete"):
+        return "allow", {"why": kind}
+    if kind == "multi_push":
+        return "deny", {"why": (
+            "review-gate: this command runs more than one `git push`. A review covers one "
+            "push; reviewing the first would leave the rest unreviewed. Run them as "
+            "separate commands."
+        )}
+    if kind == "no_verify":
+        return "deny", {"why": (
+            "review-gate: `--no-verify` disables the git pre-push adapter, which is the "
+            "backstop for this gate. Push without it."
+        )}
+    if kind == "multi":
+        return "deny", {"why": (
+            "review-gate: this push updates more than one branch at once "
+            f"({_sanitize(tgt.get('reason') or '', 80)}), and a review covers a single "
+            "revision range. Push the branches separately, or set OCR_FAIL_OPEN=1 for a "
+            "one-shot bypass."
+        )}
+    if kind == "unparseable":
+        if legacy:
+            return _legacy_target(repo_root)
+        return "deny", {"why": (
+            "review-gate: could not read what this push sends "
+            f"({_sanitize(tgt.get('reason') or '', 120)}), so it was not reviewed. "
+            "Blocking, because a gate that cannot see the commits must not wave them "
+            "through.\n\nUse the plain form: git push [-u] <remote> <branch>\n"
+            "  - OCR_LEGACY_RANGE=1 (in the environment Claude Code was launched from) "
+            "reviews the checked-out branch against its upstream instead."
+        )}
+    remote = tgt.get("remote") or ""
+    # --tags / --follow-tags: a tag may point at commits the remote has never
+    # seen. `git push --tags` used to be allowed as "no branch"; that uploads
+    # every commit those tags reach.
+    if kind == "tags" or tgt.get("follow_tags"):
+        out, rc = _git(["rev-list", "--tags", "--not", "--remotes=" + (remote or "origin"),
+                        "--max-count=1"], cwd=repo_root)
+        if rc != 0:
+            return "deny", {"why": "review-gate: could not evaluate which tagged commits the "
+                                   "remote lacks; push the branch first, or without tags."}
+        if out.strip() and kind == "tags":
+            return "deny", {"why": (
+                "review-gate: `--tags` would upload commits the remote does not have yet "
+                "(reachable only from local tags). Push the branch that contains them "
+                "first, so it is reviewed, then push the tags."
+            )}
+        if kind == "tags":
+            return "allow", {"why": "tags already on remote"}
+    src, dst = tgt.get("src") or "", tgt.get("dst") or ""
+    if not src:
+        # `git push` / `git push origin`: what git itself would send.
+        full, rc = _git(["rev-parse", "--symbolic-full-name", "@{push}"], cwd=repo_root)
+        if rc == 0 and full.startswith("refs/remotes/"):
+            rest = full[len("refs/remotes/"):]
+            rem, _, dst = rest.partition("/")
+            remote = remote or rem
+            src = _branch(repo_root) or "HEAD"
+        elif tgt.get("set_upstream") or remote:
+            src = _branch(repo_root)
+            dst = src
+        else:
+            if legacy:
+                return _legacy_target(repo_root)
+            return "deny", {"why": (
+                "review-gate: this branch has no push destination configured, so what "
+                "`git push` would send is undefined. Name it: git push -u <remote> <branch>"
+            )}
+    if not remote:
+        remote = "origin"
+    if src == "HEAD":
+        src_branch = _branch(repo_root) or ""
+    else:
+        src_branch = src
+    if not dst:
+        dst = src_branch or src
+    dst = dst[len("refs/heads/"):] if dst.startswith("refs/heads/") else dst
+    if dst.startswith("refs/tags/"):
+        return "deny", {"why": "review-gate: pushing to a tag ref is not reviewable as a "
+                               "branch push; push the branch, then the tag."}
+    tip, rc = _git(["rev-parse", "--verify", "--quiet", src + "^{commit}"], cwd=repo_root)
+    if rc != 0 or not tip:
+        return "deny", {"why": f"review-gate: `{_sanitize(src, 80)}` does not name a commit "
+                               "in this repository, so nothing could be reviewed."}
+    base = ""
+    for cand in (f"refs/remotes/{remote}/{dst}", "origin/HEAD", "origin/main", "origin/master"):
+        ref, rc = _git(["rev-parse", "--verify", "--quiet", cand + "^{commit}"], cwd=repo_root)
+        if rc != 0 or not ref:
+            continue
+        mb, rc = _git(["merge-base", ref, tip], cwd=repo_root)
+        if rc == 0 and mb:
+            base = mb
+            break
+    if not base:
+        base = _EMPTY_TREE  # brand-new repository: everything is new
+    rng = base + ".." + tip
+    if base != _EMPTY_TREE:
+        out, rc = _git(["log", rng, "--oneline", "--max-count=1"], cwd=repo_root)
+        if rc == 0 and not out.strip():
+            return "allow", {"why": "remote already has these commits"}
+    return "review", {
+        "tip": tip, "branch": src_branch or src, "base": base, "range": rng,
+        "remote": remote, "dst": dst,
+    }
+
+
+def _legacy_target(repo_root):
+    """0.5.x semantics: the checked-out HEAD against whatever it is ahead of."""
+    tip = _head_sha(repo_root)
+    if not tip:
+        return "deny", {"why": "review-gate: no HEAD to review."}
+    if not _has_unpushed_commits(repo_root, ""):
+        return "allow", {"why": "nothing unpushed"}
+    return "review", {"tip": tip, "branch": _branch(repo_root), "base": "", "range": "",
+                      "remote": "", "dst": ""}
 
 
 def _hookspath_shadowed(repo_root):
@@ -1195,18 +1624,6 @@ def _find_claude():
         cands.sort(key=lambda f: os.path.getmtime(f), reverse=True)
         return cands[0]
     return None
-
-
-def _hook_timeout_budget():
-    """Return hooks/hooks.json's PreToolUse 'timeout' (int seconds), or None if
-    it can't be read/parsed. Never raises -- this is advisory message text, not
-    gate logic, so a missing/malformed file must not crash the review."""
-    try:
-        path = Path(os.path.dirname(os.path.abspath(__file__))) / ".." / "hooks" / "hooks.json"
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return int(data["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"])
-    except Exception:
-        return None
 
 
 # Substrings that identify a credentials problem rather than a review problem.
@@ -1375,6 +1792,39 @@ _DEBUG_SAFE_VALUES = (
 )
 
 
+def _test_reviewer_cmd():
+    """argv to run INSTEAD of `claude -p ...`, for the end-to-end tests only.
+
+    OCR_REVIEWER_CMD is honoured solely when its first element is a file under
+    this plugin's own tests/ directory. Environment variables reach hooks from
+    the target repository's settings (`env` in .claude/settings.json is applied
+    to the CLI and inherited), so an unconditional seam would hand a hostile
+    repo arbitrary command execution as the "reviewer". Installed copies ship
+    no tests/, which makes the seam inert there.
+    """
+    raw = os.environ.get("OCR_REVIEWER_CMD", "").strip()
+    if not raw:
+        return None
+    try:
+        # Non-POSIX splitting keeps backslashes intact (Windows paths) but
+        # also keeps the surrounding quotes on each token; strip those.
+        argv = [t[1:-1] if len(t) > 1 and t[0] == t[-1] and t[0] in "\"'" else t
+                for t in shlex.split(raw, posix=False)]
+    except ValueError:
+        return None
+    if not argv:
+        return None
+    tests_dir = os.path.realpath(os.path.join(_PLUGIN_ROOT, "tests"))
+    try:
+        is_py = os.path.basename(argv[0]).lower().startswith("python")
+        script = os.path.realpath(argv[1] if (is_py and len(argv) > 1) else argv[0])
+    except Exception:
+        return None
+    if not (script.startswith(tests_dir + os.sep) and os.path.isfile(script)):
+        return None
+    return argv
+
+
 def _run_review(repo_root, mode, git_dir=None, head_sha="", push_range=""):
     """Return (result_dict, True, raw_archive_name) on success.
 
@@ -1433,6 +1883,9 @@ def _run_review(repo_root, mode, git_dir=None, head_sha="", push_range=""):
     debug = _debug_enabled()
     creationflags = _WIN_FLAGS if sys.platform == "win32" else 0
     cmd = [claude, "-p", PROMPT_RANGE.format(rng=push_range) if push_range else PROMPT] + args
+    stub = _test_reviewer_cmd()
+    if stub:
+        cmd = stub + [push_range]
     # Wall-clock for the log line (so it lines up with Event Viewer/Task
     # Manager timestamps when correlating with a crash); monotonic for the
     # duration math below, which a wall-clock adjustment mid-review must not
@@ -1488,16 +1941,16 @@ def _run_review(repo_root, mode, git_dir=None, head_sha="", push_range=""):
             # any other reason, including KeyboardInterrupt (hence
             # BaseException, not Exception, below).
             #
-            # NOTE (not fixed here): proc.kill() is TerminateProcess on the
-            # immediate child only, not a tree kill. If _find_claude() ever
-            # resolves to a .cmd shim, the real node.exe it launches would
-            # survive a timeout kill. A scoped `taskkill /T /F /PID <pid>` is
-            # the fix, once needed -- not the kill-by-name pattern already
-            # ruled out elsewhere, since it targets one known pid.
+            # _kill_child is a TREE kill (taskkill /T on Windows, the process
+            # group elsewhere) scoped to this one known pid: the claude.exe on
+            # PATH may be a launcher whose real node child would otherwise
+            # survive. Never a kill-by-name.
+            global _ACTIVE_CHILD
+            _ACTIVE_CHILD = proc
             try:
                 out_text, err_text = proc.communicate(timeout=TIMEOUT)
             except subprocess.TimeoutExpired:
-                proc.kill()
+                _kill_child(proc)
                 proc.communicate()
                 if debug:
                     _debug_log(
@@ -1506,7 +1959,7 @@ def _run_review(repo_root, mode, git_dir=None, head_sha="", push_range=""):
                     )
                 raise
             except BaseException:
-                proc.kill()
+                _kill_child(proc)
                 if debug:
                     _debug_log(
                         f"end child_pid={proc.pid} outcome=exception "
@@ -1518,26 +1971,25 @@ def _run_review(repo_root, mode, git_dir=None, head_sha="", push_range=""):
                     f"end child_pid={proc.pid} outcome=rc{proc.returncode} "
                     f"duration_s={time.monotonic()-started_mono:.1f}"
                 )
+            _ACTIVE_CHILD = None
     except subprocess.TimeoutExpired:
         if mode == "hook":
-            # gate-hook.sh execs this script with no argv/stdin parsing of OCR_TIMEOUT
-            # (see gate-hook.sh) -- it only ever sees whatever environment Claude Code's
-            # own PreToolUse hook launcher was started with, NOT the shell env of the
-            # `git commit` Bash tool call. An inline `OCR_TIMEOUT=<n> git commit ...`
-            # prefix therefore never reaches this process in hook mode.
-            budget = _hook_timeout_budget()
-            budget_str = f"currently {budget}s" if budget is not None else "see hooks/hooks.json"
+            # This process is the detached supervisor, which inherits Claude
+            # Code's own launch environment, NOT the shell env of the `git
+            # push` Bash tool call -- an inline `OCR_TIMEOUT=<n> git push`
+            # prefix never reaches it. Since 0.6.0 the timeout is enforced
+            # here, outside the hook, so raising it no longer needs (and must
+            # not get) a matching rise in hooks/hooks.json: that timeout has
+            # to stay under the desktop app's ~16 min session wall.
             escalation = (
                 f"  Give Claude more time : export OCR_TIMEOUT={TIMEOUT * 2} in the environment\n"
-                f"    Claude Code itself is launched from (a shell prefix on `git commit` will\n"
-                f"    NOT work in hook mode -- this process inherits Claude Code's env, not the\n"
-                f"    Bash tool call's). Also raise hooks/hooks.json's PreToolUse 'timeout'\n"
-                f"    ({budget_str}) to stay above the new OCR_TIMEOUT -- Claude Code kills\n"
-                f"    this hook at that fixed harness deadline regardless of OCR_TIMEOUT, which\n"
-                f"    silently reopens the fail-open path this gate exists to close."
+                f"    Claude Code itself is launched from (a shell prefix on `git push` will\n"
+                f"    NOT work in hook mode). Leave hooks/hooks.json's PreToolUse timeout\n"
+                f"    alone: the review runs detached from the hook, and that timeout must\n"
+                f"    stay below the host's session watchdog."
             )
         else:
-            escalation = f"  Give Claude more time : OCR_TIMEOUT={TIMEOUT * 2} git commit ..."
+            escalation = f"  Give Claude more time : OCR_TIMEOUT={TIMEOUT * 2} git push ..."
         raise ReviewGateError(
             f"review timed out after {TIMEOUT}s - blocking commit to preserve gate integrity.\n"
             f"{escalation}\n"
@@ -1578,6 +2030,503 @@ def _run_review(repo_root, mode, git_dir=None, head_sha="", push_range=""):
             f"{bypass}"
         )
     return result, True, raw_name
+
+
+# --- the review runs elsewhere: state file, supervisor, inline join ----------
+# The reviewer child currently being waited on by _run_review, so the
+# supervisor's heartbeat thread can kill it on a fence break or deadline.
+_ACTIVE_CHILD = None
+# The genuine class, captured at import: tests substitute subprocess.Popen
+# with stand-ins carrying made-up pids, and those must never reach taskkill.
+_REAL_POPEN = subprocess.Popen
+
+
+def _kill_child(proc):
+    """Kill a reviewer and everything it spawned. Scoped to one known pid.
+
+    Only a real Popen gets the tree kill: tests hand _run_review a stand-in
+    with a made-up pid, and `taskkill /PID 4242 /T /F` on a developer's box
+    would hit whatever process happens to own that number.
+    """
+    try:
+        proc.kill()
+    except Exception:
+        pass
+    if type(proc) is _REAL_POPEN:
+        _tree_kill(proc.pid)
+
+
+def _tree_kill(pid):
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return
+    if pid <= 0:
+        return
+    try:
+        if sys.platform == "win32":
+            subprocess.run(
+                ["taskkill", "/T", "/F", "/PID", str(pid)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        else:
+            import signal
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                os.kill(pid, signal.SIGKILL)
+    except Exception:
+        pass
+
+
+def _async_dir(common_dir):
+    return Path(common_dir) / ASYNC_DIR
+
+
+def _state_path(common_dir, tip):
+    return _async_dir(common_dir) / f"{tip}.json"
+
+
+def _read_state(path):
+    """The state file as a dict, {} when missing, None when half-written."""
+    try:
+        raw = Path(path).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except OSError:
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else {}
+
+
+def _write_state(path, data):
+    """Atomic replace. Retried: on Windows the rename is refused while another
+    process (a 1 s poller, --mode post, a second hook) has the file open."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + f".tmp-{os.getpid()}")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, default=str), encoding="utf-8")
+    last = None
+    for _ in range(40):
+        try:
+            os.replace(str(tmp), str(path))
+            return True
+        except PermissionError as exc:
+            last = exc
+            time.sleep(0.05)
+    _unlink(tmp)
+    raise last if last else OSError("could not write state")
+
+
+class _StateLock:
+    """O_EXCL lock file guarding every state transition for one tip.
+
+    Held for milliseconds. A lock older than LOCK_STALE_S belongs to a process
+    that died between claim and release and is broken by the next taker.
+    """
+
+    def __init__(self, state_path):
+        self.path = Path(str(state_path) + ".lock")
+        self.fd = None
+
+    def __enter__(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        deadline = time.monotonic() + LOCK_STALE_S + 5
+        while True:
+            try:
+                self.fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
+                os.write(self.fd, str(os.getpid()).encode())
+                return self
+            except FileExistsError:
+                try:
+                    if time.time() - self.path.stat().st_mtime > LOCK_STALE_S:
+                        _unlink(self.path)
+                        continue
+                except OSError:
+                    continue
+                if time.monotonic() > deadline:
+                    raise ReviewGateError("could not acquire the review state lock")
+                time.sleep(0.1)
+
+    def __exit__(self, *exc):
+        try:
+            if self.fd is not None:
+                os.close(self.fd)
+        finally:
+            _unlink(self.path)
+        return False
+
+
+def _new_run_id():
+    import secrets
+    return secrets.token_hex(8)
+
+
+def _supervisor_env():
+    """Environment for the supervisor: the parent's, minus the session bridge
+    (see _SESSION_BRIDGE_ENV), minus git's hook exports, and NOT in-review --
+    the supervisor is the gate, only the reviewer it spawns is the review."""
+    env = dict(os.environ)
+    for name in _SESSION_BRIDGE_ENV + _GIT_ENV_SCRUB + ("OCR_IN_REVIEW",):
+        key = name.upper() if os.name == "nt" else name
+        env.pop(key, None)
+    return env
+
+
+def _spawn_supervisor(state_path, run_id, repo_root):
+    """Start `--mode supervise` fully detached from this hook.
+
+    Detached means: own process group, no console, none of this process's
+    stdio (the hook's stdout is Claude Code's pipe -- an inherited handle
+    there would keep the hook "running" until the review ended, which is
+    precisely the hang this replaces; with all three std handles redirected
+    and close_fds=True, CPython >= 3.7 passes ONLY those three to the child).
+    On Windows the supervisor also breaks out of any job object, so a host
+    that kills its job on close cannot take the review down with the CLI.
+    Verified 2026-09-22 through both the bash and the PowerShell adapters:
+    the hook's stdout reaches EOF in < 0.3 s while the child runs on.
+    """
+    log = Path(str(state_path)[:-5] + ".supervisor.log")
+    cmd = [sys.executable, os.path.abspath(__file__), "--mode", "supervise",
+           "--state", str(state_path), "--run-id", run_id]
+    kw = dict(cwd=repo_root or None, stdin=subprocess.DEVNULL, close_fds=True,
+              env=_supervisor_env())
+    with log.open("ab") as fh:
+        kw["stdout"] = fh
+        kw["stderr"] = fh
+        if sys.platform == "win32":
+            base = (subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
+            try:
+                return subprocess.Popen(cmd, creationflags=base | subprocess.CREATE_BREAKAWAY_FROM_JOB, **kw).pid
+            except OSError:
+                return subprocess.Popen(cmd, creationflags=base, **kw).pid
+        return subprocess.Popen(cmd, start_new_session=True, **kw).pid
+
+
+def _drive_review(common_dir, repo_root, meta, mode, budget):
+    """Get a verdict for meta["tip"], starting a review if none is under way.
+
+    Returns the terminal state dict (state "done" or "failed"), or None when
+    the inline budget ran out with the review still running. Never raises for
+    a review problem -- those become "failed" states with a reason.
+    """
+    tip = meta["tip"]
+    state_path = _state_path(common_dir, tip)
+    force = os.environ.get("OCR_FORCE_REVIEW", "").strip().lower() in ("1", "true", "yes")
+    deadline = _HOOK_T0 + budget
+    forced_once = False
+    while True:
+        st = _read_state(state_path)
+        if st is None:  # mid-write by someone else; look again
+            time.sleep(0.1)
+            continue
+        s = st.get("state")
+        now = time.time()
+        if s == "done":
+            if now - float(st.get("done_ts") or 0) < MARKER_TTL and not (force and not forced_once):
+                return st
+        elif s in ("running", "claimed"):
+            beat = float(st.get("heartbeat_ts") or st.get("claimed_ts") or 0)
+            if now - beat < STALE_S:
+                if time.time() >= deadline:
+                    return None
+                time.sleep(POLL_S)
+                continue
+            # silent too long: the supervisor is dead. Fall through to restart.
+        elif s == "failed":
+            fresh = now - float(st.get("failed_ts") or 0) < MARKER_TTL
+            if fresh and int(st.get("attempts") or 0) >= ATTEMPT_CAP and not (force and not forced_once):
+                return st
+            if forced_once:
+                return st  # the run THIS call started failed; retry on the next push, not now
+        # (Re)start, under the lock, re-checking that nobody beat us to it.
+        with _StateLock(state_path):
+            st2 = _read_state(state_path) or {}
+            if st2 != st and st2.get("state") in ("running", "claimed", "done"):
+                if not (force and not forced_once):
+                    continue  # someone else moved it; re-evaluate
+            if st2.get("state") in ("running", "claimed"):
+                _tree_kill(st2.get("reviewer_pid"))
+                _tree_kill(st2.get("supervisor_pid"))
+            attempts = int(st2.get("attempts") or 0) if st2.get("state") == "failed" else 0
+            if force:
+                attempts = 0
+            run_id = _new_run_id()
+            new = dict(meta)
+            new.update({
+                "state": "claimed", "run_id": run_id, "claimed_ts": time.time(),
+                "mode": mode, "attempts": attempts,
+            })
+            _write_state(state_path, new)
+            forced_once = True
+            try:
+                # Nothing is written here after the spawn: the supervisor
+                # records its own pid, and a write from this side could land
+                # on top of its `running` transition.
+                _spawn_supervisor(state_path, run_id, repo_root)
+            except Exception as exc:
+                new.update({"state": "failed", "failed_ts": time.time(),
+                            "attempts": attempts + 1, "reason": "spawn",
+                            "detail": f"could not start the review supervisor ({exc})"})
+                _write_state(state_path, new)
+                return new
+
+
+def _supervise(state_path, run_id):
+    """The detached worker: run ONE review for the tip named in state_path.
+
+    Writes `running` with a heartbeat every HEARTBEAT_S; a hook that sees no
+    heartbeat for STALE_S presumes this process dead and restarts under a new
+    run_id -- and this process, seeing a run_id that is no longer its own,
+    kills its reviewer and leaves (fencing). Ends by writing `done` (with the
+    verdict and the sanitised findings text a retry replays) or `failed`
+    (with why). Never touches inherited stdio; never raises out.
+    """
+    import threading
+
+    state_path = Path(state_path)
+    st = _read_state(state_path) or {}
+    if st.get("run_id") != run_id:
+        return 0  # superseded before we even started
+    repo_root = st.get("repo_root") or os.getcwd()
+    tip, branch, push_range = st.get("tip") or "", st.get("branch") or "", st.get("range") or ""
+    git_dir = st.get("git_dir") or _git_dir(repo_root)
+    mode = st.get("mode") or "hook"
+    now = time.time()
+    st.update({"state": "running", "supervisor_pid": os.getpid(), "started_ts": now,
+               "heartbeat_ts": now, "deadline_ts": now + TIMEOUT})
+    try:
+        _write_state(state_path, st)
+    except Exception:
+        return 1
+
+    stop = threading.Event()
+    fenced = {"hit": False}
+
+    def _beat():
+        while not stop.wait(HEARTBEAT_S):
+            cur = _read_state(state_path)
+            if cur is None:
+                continue
+            if cur.get("run_id") != run_id:
+                fenced["hit"] = True
+                child = _ACTIVE_CHILD
+                if child is not None:
+                    _kill_child(child)
+                return
+            cur["heartbeat_ts"] = time.time()
+            if _ACTIVE_CHILD is not None:
+                cur["reviewer_pid"] = _ACTIVE_CHILD.pid
+            try:
+                _write_state(state_path, cur)
+            except Exception:
+                pass
+
+    t = threading.Thread(target=_beat, daemon=True)
+    t.start()
+
+    worktree, cwd_note = "", ""
+    failure = None
+    try:
+        worktree = _make_worktree(repo_root, tip, run_id)
+        if worktree:
+            review_root = worktree
+        else:
+            review_root = repo_root
+            cwd_note = (
+                "review-gate could not create a detached worktree for this tip, so the "
+                "reviewer read the LIVE working tree; findings may describe files as they "
+                "were during the review rather than at the pushed commit."
+            )
+        result, ran, raw_name = _run_review(review_root, mode, git_dir, tip, push_range)
+    except ReviewGateError as exc:
+        failure = ("review", str(exc))
+        result, ran, raw_name = None, False, ""
+    except BaseException as exc:  # noqa: BLE001 -- the file must always say why
+        failure = ("crash", f"{type(exc).__name__}: {exc}")
+        result, ran, raw_name = None, False, ""
+    finally:
+        stop.set()
+        if worktree:
+            _remove_worktree(repo_root, worktree)
+
+    st = _read_state(state_path) or st
+    if st.get("run_id") != run_id or fenced["hit"]:
+        return 0  # a newer run owns this tip now; say nothing
+    if failure is not None:
+        st.update({"state": "failed", "failed_ts": time.time(),
+                   "attempts": int(st.get("attempts") or 0) + 1,
+                   "reason": failure[0], "detail": _sanitize(failure[1], 1500)})
+        try:
+            _write_state(state_path, st)
+        except Exception:
+            pass
+        return 1
+    if not ran:
+        # claude not installed: the one deliberately fail-open case.
+        st.update({"state": "done", "done_ts": time.time(), "verdict": "skipped",
+                   "blocked": False, "reasons": "", "finding_count": 0,
+                   "note": "`claude` CLI not found - review skipped (fail-open)."})
+        _write_state(state_path, st)
+        return 0
+    if cwd_note and isinstance(result, dict):
+        result = dict(result)
+        result["findings"] = [{
+            "severity": "info", "path": "review-gate", "start_line": "-",
+            "end_line": "-", "content": cwd_note,
+        }] + list(result.get("findings") or [])
+    verdict = compute_verdict(result)
+    reasons = _format_reasons(result)
+    advisory = _is_advisory(repo_root)
+    blocked = verdict == "block" and not advisory
+    record = _record_review(git_dir, tip, branch, mode, verdict, advisory, blocked, result, raw_name)
+    if not blocked:
+        # The pass-only legacy marker, unchanged: an older global git hook
+        # reads its presence as "reviewed and passed", so a block must never
+        # be written under it. Blocks replay from this state file instead.
+        marker = _marker_path(git_dir, tip) if git_dir else None
+        if marker:
+            try:
+                _write_marker(marker, tip, verdict, advisory, reasons)
+                _reap_markers(git_dir, keep=marker)
+            except Exception:
+                pass
+    st.update({
+        "state": "done", "done_ts": time.time(), "verdict": verdict,
+        "blocked": bool(blocked), "reasons": reasons,
+        "finding_count": len(result.get("findings") or []) if isinstance(result, dict) else 0,
+        "record": str(record) if record else "", "raw": raw_name,
+    })
+    _write_state(state_path, st)
+    _reap_async(common_dir_of(state_path))
+    return 0
+
+
+def common_dir_of(state_path):
+    return str(Path(state_path).parent.parent)
+
+
+def _make_worktree(repo_root, tip, run_id):
+    """A detached worktree at `tip` for the reviewer to read, or "".
+
+    The review now runs while the session goes on editing, switching and
+    stashing in the live tree, and the skill reads files with Read/Grep -- so
+    without this a 20-minute review describes a tree that no longer matches
+    the commits being pushed. Also keeps the reviewer's scratch files out of
+    the user's tree. Under the plugin data dir, never inside .git.
+    """
+    try:
+        base = _gate_data_dir() / "worktrees"
+        base.mkdir(parents=True, exist_ok=True)
+        path = base / f"{tip[:12]}-{run_id}"
+        out, rc = _git(["worktree", "add", "--detach", str(path), tip], cwd=repo_root)
+        if rc == 0 and path.is_dir():
+            return str(path)
+    except Exception:
+        pass
+    return ""
+
+
+def _remove_worktree(repo_root, path):
+    """Tear down a worktree _make_worktree created. Refuses anything else:
+    the only directory this gate ever deletes is one under its own
+    worktrees/ dir, never a path handed to it by mistake."""
+    try:
+        base = os.path.realpath(str(_gate_data_dir() / "worktrees"))
+        real = os.path.realpath(str(path))
+        if not real.startswith(base + os.sep):
+            return
+        _git(["worktree", "remove", "--force", path], cwd=repo_root)
+        if os.path.isdir(real):
+            shutil.rmtree(real, ignore_errors=True)
+        _git(["worktree", "prune"], cwd=repo_root)
+    except Exception:
+        pass
+
+
+def _reap_async(common_dir):
+    """Drop async state and logs older than MARKER_TTL, and stray worktrees."""
+    try:
+        cutoff = time.time() - MARKER_TTL
+        for p in _async_dir(common_dir).glob("*"):
+            try:
+                if p.stat().st_mtime < cutoff:
+                    p.unlink()
+            except OSError:
+                continue
+        wts = _gate_data_dir() / "worktrees"
+        if wts.is_dir():
+            for p in wts.iterdir():
+                try:
+                    if p.is_dir() and p.stat().st_mtime < cutoff:
+                        shutil.rmtree(p, ignore_errors=True)
+                except OSError:
+                    continue
+    except Exception:
+        pass
+
+
+def _mode_supervise(argv):
+    try:
+        i = argv.index("--state")
+        state_path = argv[i + 1]
+        j = argv.index("--run-id")
+        run_id = argv[j + 1]
+    except (ValueError, IndexError):
+        return 2
+    return _supervise(state_path, run_id)
+
+
+def _still_running_reason(st, budget, mode):
+    tip = _sanitize(str(st.get("tip") or ""), 40)[:7]
+    branch = _sanitize(str(st.get("branch") or "?"), 80)
+    started = float(st.get("started_ts") or st.get("claimed_ts") or time.time())
+    elapsed = max(0, int((time.time() - started) // 60))
+    stamp = time.strftime("%H:%MZ", time.gmtime(started))
+    n = st.get("commit_count")
+    count = f", {n} commit(s)" if n else ""
+    retry = "re-run this exact `git push` command" if mode == "hook" else "run the push again"
+    return (
+        f"review-gate: the review of {branch} ({tip}{count}) is still running "
+        f"(started {stamp}, {elapsed} min ago). The push was NOT executed.\n"
+        f"To get the verdict, {retry}: the gate waits up to {int(budget // 60)} more minutes "
+        "and answers as soon as the review finishes. Do not commit, amend or rebase this "
+        "branch meanwhile - a new tip discards the review. Unrelated work is fine; the "
+        "result is also reported after your next executed Bash call once it is ready."
+    )
+
+
+def _failed_reason(st, mode):
+    why = _sanitize(str(st.get("reason") or "error"), 40)
+    detail = str(st.get("detail") or "")
+    attempts = int(st.get("attempts") or 0)
+    head = f"review-gate: the review could not complete ({why}) - blocking to preserve gate integrity.\n"
+    if attempts >= ATTEMPT_CAP:
+        head += (
+            f"  This tip failed {attempts} times; it will not be retried automatically for "
+            f"{MARKER_TTL // 60} min. OCR_FORCE_REVIEW=1 (in the environment Claude Code was "
+            "launched from) retries now.\n"
+        )
+    body = "\n".join("  " + line for line in detail.splitlines()[:12]) if detail else ""
+    return head + body + ("\n" if body else "") + _bypass_hint(mode)
+
+
+def _replay_note(st):
+    """What a retry says when the verdict was recorded earlier."""
+    age = max(0, int((time.time() - float(st.get("done_ts") or time.time())) // 60))
+    verdict = _sanitize(str(st.get("verdict") or "?"), 20)
+    lines = ["  " + _sanitize(line, 600) for line in str(st.get("reasons") or "").splitlines()
+             if line.strip()]
+    head = f"review recorded {age} min ago for these exact commits (verdict: {verdict})"
+    if not lines:
+        return head
+    return head + " - findings from that run:\n" + "\n".join(lines)
 
 
 def _format_reasons(result, limit=20):
@@ -1728,20 +2677,26 @@ def _unlink(path):
         pass
 
 
-def _park_pending(session_id, repo_root, head):
+def _park_pending(session_id, repo_root, head, kind="review", extra=None):
     """Note that a review is recorded and has not been reported yet.
 
     Written for every verdict the gate lets through, cleared the moment it is
     delivered. See PENDING_PREFIX for why this lives outside .git.
+
+    kind="async" is the other note: a push was DENIED because its review was
+    still running when the inline budget ran out. --mode post watches that
+    note's state file and announces the verdict on a later tool call, so
+    "do other work meanwhile" is actionable rather than a guess.
     """
     try:
         data = _gate_data_dir()
         data.mkdir(parents=True, exist_ok=True)
-        name = PENDING_PREFIX + _marker_digest(session_id, repo_root, head)
-        (data / name).write_text(
-            json.dumps({"session": session_id or "", "repo": repo_root or "", "head": head or ""}),
-            encoding="utf-8",
-        )
+        name = PENDING_PREFIX + _marker_digest(session_id, repo_root, head, kind)
+        body = {"session": session_id or "", "repo": repo_root or "", "head": head or "",
+                "kind": kind}
+        if extra:
+            body.update(extra)
+        (data / name).write_text(json.dumps(body), encoding="utf-8")
     except Exception:
         pass  # a lost note costs a report, never a push
 
@@ -1811,6 +2766,10 @@ def _clear_pending(repo_root, session_id):
         if (info.get("repo") or "") != (repo_root or ""):
             continue
         owner = str(info.get("session") or "")
+        if info.get("kind") == "async":
+            st = _read_state(str(info.get("state") or "")) or {}
+            if st.get("state") in ("running", "claimed"):
+                continue  # still worth announcing later
         # A sessionless note is one this session could have flushed itself, and
         # the review it points at has just been delivered here.
         if not owner or owner == session_id:
@@ -1865,14 +2824,16 @@ def _emit_post_context(text):
     )
 
 
-def _deliver(repo_root, session_id):
-    """Report body for whatever review is recorded at repo_root's HEAD, or "".
+def _deliver(repo_root, session_id, head=""):
+    """Report body for the review recorded at `head` (default: repo_root's HEAD).
 
     Shared by both delivery paths -- the push that just ran, and a later flush
-    of one that never got reported -- so the two cannot drift apart.
+    of one that never got reported -- so the two cannot drift apart. `head` is
+    the pushed TIP when the note carries one: since 0.6.0 a push may send a
+    branch other than the checked-out one.
     """
     git_dir = _git_dir(repo_root)
-    head = _head_sha(repo_root)
+    head = head or _head_sha(repo_root)
     if not git_dir or not head:
         return ""  # not a repo, or a detached/unborn HEAD -- nothing to replay
 
@@ -1931,8 +2892,13 @@ def _flush_pending(session_id):
         if not _pending_is_ours(info, session_id):
             continue
         repo_root = info.get("repo") or ""
+        if info.get("kind") == "async":
+            text = _async_note(path, info, session_id)
+            if text:
+                out.append(text)
+            continue
         if repo_root and os.path.isdir(repo_root):
-            text = _deliver(repo_root, session_id)
+            text = _deliver(repo_root, session_id, str(info.get("head") or ""))
             if text:
                 # Say WHICH repository, always. A deferred report arrives
                 # detached from the push that earned it, and one session
@@ -1952,6 +2918,120 @@ def _flush_pending(session_id):
         _unlink(path)
     if out:
         _emit_post_context("\n\n".join(out)[:POST_MAX_CONTEXT])
+    return 0
+
+
+def _async_note(path, info, session_id):
+    """Announce a review that was still running when its push was denied.
+
+    done/failed -> report once and drop the note. Still running -> a short
+    reminder at most every five minutes, and the note stays. A note whose
+    state file has vanished is spent.
+    """
+    state_path = str(info.get("state") or "")
+    repo_root = str(info.get("repo") or "")
+    tip = str(info.get("head") or "")
+    label = f"{_sanitize(repo_root, 200)} {_sanitize(tip, 40)[:7]}"
+    st = _read_state(state_path) if state_path else {}
+    if st is None:
+        return ""  # mid-write; next call
+    s = st.get("state")
+    if not st or s not in ("running", "claimed", "done", "failed"):
+        _unlink(path)
+        return ""
+    if s == "done":
+        _unlink(path)
+        body = ""
+        if repo_root and os.path.isdir(repo_root):
+            body = _deliver(repo_root, session_id, tip)
+        verdict = _sanitize(str(st.get("verdict") or "?"), 20)
+        head = (
+            f"review-gate: the review of {label} that was still running when the push was "
+            f"denied has finished (verdict: {verdict}"
+            + (", BLOCKED" if st.get("blocked") else "") + "). "
+            + ("Fix the findings, then push again." if st.get("blocked")
+               else "Re-run the same `git push` to have it go through.")
+        )
+        return head + ("\n" + body if body else "")
+    if s == "failed":
+        _unlink(path)
+        return (
+            f"review-gate: the review of {label} that was still running when the push was "
+            f"denied could not complete ({_sanitize(str(st.get('reason') or 'error'), 40)}). "
+            "Re-run the `git push` to see the reason and retry."
+        )
+    try:
+        last = float(info.get("notified_ts") or 0)
+    except (TypeError, ValueError):
+        last = 0
+    if time.time() - last < 300:
+        return ""
+    try:
+        info["notified_ts"] = time.time()
+        Path(path).write_text(json.dumps(info), encoding="utf-8")
+    except Exception:
+        pass
+    started = float(st.get("started_ts") or st.get("claimed_ts") or time.time())
+    mins = max(0, int((time.time() - started) // 60))
+    return (
+        f"review-gate: the review of {label} is still running ({mins} min). Re-run the same "
+        "`git push` when you want to wait for its verdict."
+    )
+
+
+def _mode_resume(argv):
+    """`--mode resume`: SessionStart context about a review this session left.
+
+    A host that kills the CLI mid-hook leaves the next process a dangling tool
+    call, which Claude Code reports as "[Request interrupted by user]". If a
+    review of this session's last pushed repo is running or finished, say so,
+    so the model does not narrate a user interruption that never happened.
+    Silent when there is nothing to say.
+    """
+    try:
+        payload = json.load(sys.stdin)
+    except Exception:
+        payload = {}
+    session_id = str(payload.get("session_id") or "") if isinstance(payload, dict) else ""
+    repo_root = _read_breadcrumb(session_id) if session_id else ""
+    if not repo_root:
+        return 0
+    common = _git_common_dir(repo_root)
+    if not common:
+        return 0
+    lines = []
+    cutoff = time.time() - MARKER_TTL
+    for p in sorted(_async_dir(common).glob("*.json")):
+        st = _read_state(p) or {}
+        s = st.get("state")
+        ts = float(st.get("done_ts") or st.get("failed_ts") or st.get("heartbeat_ts")
+                   or st.get("claimed_ts") or 0)
+        if s not in ("running", "claimed", "done", "failed") or ts < cutoff:
+            continue
+        tip = _sanitize(str(st.get("tip") or ""), 40)[:7]
+        branch = _sanitize(str(st.get("branch") or "?"), 80)
+        if s in ("running", "claimed"):
+            alive = time.time() - float(st.get("heartbeat_ts") or st.get("claimed_ts") or 0) < STALE_S
+            what = "is still running" if alive else "was interrupted"
+        elif s == "done":
+            what = "finished: " + ("BLOCKED" if st.get("blocked") else
+                                   _sanitize(str(st.get("verdict") or "?"), 20))
+        else:
+            what = "failed (" + _sanitize(str(st.get("reason") or "error"), 40) + ")"
+        lines.append(f"  - {branch} @ {tip}: {what}")
+    if not lines:
+        return 0
+    text = (
+        f"review-gate: a push review in {_sanitize(repo_root, 200)} was under way when this "
+        "session's previous process ended:\n" + "\n".join(lines) + "\n"
+        "If you did not intend to cancel it, re-run the same `git push`; the gate answers "
+        "from the recorded verdict or keeps waiting on the running review. A dangling "
+        "\"[Request interrupted by user]\" on that push is the host restarting the process, "
+        "not necessarily a user action."
+    )
+    sys.stdout.write(json.dumps({
+        "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}
+    }))
     return 0
 
 
@@ -1993,13 +3073,86 @@ def _mode_post(argv):
     repo_root = _read_breadcrumb(session_id) or _repo_root()
     if not repo_root:
         return 0
-    text = _deliver(repo_root, session_id)
+    # The pushed tip is in this session's parked note for the repo; a push may
+    # send a branch other than the checked-out one. No note: fall back to HEAD.
+    heads = []
+    for _p, info in _pending_entries():
+        if info.get("kind", "review") != "review" or (info.get("repo") or "") != repo_root:
+            continue
+        if _pending_is_ours(info, session_id) and info.get("head"):
+            heads.append(str(info["head"]))
+    texts = []
+    for h in heads or [""]:
+        t = _deliver(repo_root, session_id, h)
+        if t:
+            texts.append(t)
     # Reported, or deliberately silent about -- either way this push's note has
     # served its purpose and must not be flushed again by the next tool call.
     _clear_pending(repo_root, session_id)
-    if text:
-        _emit_post_context(text)
+    if texts:
+        _emit_post_context("\n\n".join(texts)[:POST_MAX_CONTEXT])
     return 0
+
+
+# --- inside the review: what the reviewer's Bash may write ------------------
+# The reviewer's allowlist is read-only in intent (`Bash(git diff *)`, `git
+# log`, ...) but not in effect: git's diff/log/show accept `--output=<file>`,
+# and `git log -1 --format='<any text>' --output=<path>` writes arbitrary
+# content anywhere -- verified 2026-09-22, Claude Code's matcher lets it
+# through and the file appears. A shell redirection into the working tree is
+# admitted too (only paths OUTSIDE the tree are refused by the host). Since
+# the reviewer's input is an untrusted diff, a prompt-injected reviewer could
+# forge this gate's own markers and state files -- the one thing that turns
+# "the review can be fooled" into "the review can be skipped". So the plugin's
+# hook, which is registered inside the review session too, vets every Bash
+# call there instead of blanket-allowing it.
+_OUTPUT_OPT = re.compile(r"(?:^|\s)--output(?:=|\s|$)")
+_REDIRECT = re.compile(
+    r"(?<![<>&])(?:\d*>>?|&>>?|>\|)\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s;&|)]+))"
+)
+_FORBIDDEN_COMPONENTS = frozenset({"..", ".git", ".claude", ".ocr", ".config"})
+
+
+def _guard_reviewer_command(cmd):
+    """Reason to refuse a Bash command inside the review session, or "".
+
+    Scratch files in the reviewer's own cwd (a detached worktree) are fine;
+    writes anywhere else are not. Only file-writing shapes are judged here --
+    the host's own allowlist already refuses non-git commands.
+    """
+    code = _strip_heredocs(cmd or "")
+    if _OUTPUT_OPT.search(code):
+        return "review-gate: `--output` writes a file; the reviewer is read-only. Print to stdout instead."
+    for m in _REDIRECT.finditer(code):
+        target = next((g for g in m.groups() if g is not None), "")
+        if not target or target.startswith("&"):
+            continue  # `>&2`, `2>&1`
+        norm = target.replace("\\", "/")
+        if norm in ("/dev/null", "NUL", "nul"):
+            continue
+        if _UNEXPANDABLE.search(target):
+            return f"review-gate: redirection target {target!r} is not a literal path; the reviewer may only write scratch files under its own directory."
+        if norm.startswith(("/", "~")) or re.match(r"^[A-Za-z]:", norm):
+            return f"review-gate: redirection to {target!r} leaves the reviewer's directory; the reviewer is read-only outside it."
+        parts = [c for c in norm.split("/") if c not in ("", ".")]
+        if any(c.lower() in _FORBIDDEN_COMPONENTS for c in parts):
+            return f"review-gate: redirection to {target!r} reaches a directory the reviewer must not write to."
+    return ""
+
+
+def _mode_guard(argv):
+    """`--mode guard`: PreToolUse decision for a Bash call INSIDE the review."""
+    try:
+        payload = json.load(sys.stdin) or {}
+    except Exception:
+        payload = {}
+    cmd = ""
+    if isinstance(payload, dict) and (payload.get("tool_name") in (None, "", "Bash")):
+        cmd = (payload.get("tool_input") or {}).get("command", "") or ""
+    why = _guard_reviewer_command(cmd) if cmd else ""
+    if why:
+        _emit_hook("deny", why)
+    _emit_hook("allow")
 
 
 def _emit_hook(decision, reason=""):
@@ -2038,6 +3191,32 @@ def main(argv):
     # it never spawns a review, touches a marker, or needs a hook payload.
     if "--history" in argv:
         sys.exit(_print_history(argv))
+
+    _mode_arg0 = ""
+    if "--mode" in argv:
+        _i0 = argv.index("--mode")
+        _mode_arg0 = argv[_i0 + 1] if _i0 + 1 < len(argv) else ""
+    # The detached worker. Dispatched before anything that reads stdin or
+    # writes the gate pointer: it is not a hook and has no payload.
+    if _mode_arg0 == "supervise":
+        sys.exit(_mode_supervise(argv))
+    # SessionStart context and the in-review Bash guard. Both are best-effort
+    # reporters: a crash must go quiet (resume) or fail closed for that ONE
+    # reviewer command (guard), never surface as a hook error.
+    if _mode_arg0 == "resume":
+        try:
+            sys.exit(_mode_resume(argv))
+        except SystemExit:
+            raise
+        except Exception:
+            sys.exit(0)
+    if _mode_arg0 == "guard":
+        try:
+            _mode_guard(argv)
+        except SystemExit:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            _emit_hook("deny", f"review-gate: guard error ({type(exc).__name__}) - refusing this command.")
 
     # --mode post REPORTS; it does not decide. Handled here, ahead of the
     # fail-closed safety net below, because that net answers an unhandled
@@ -2084,7 +3263,7 @@ def _main_inner(argv, mode):
     # lookup on the hot path.
     if _in_review():
         if mode == "hook":
-            _emit_hook("allow")
+            _mode_guard(argv)  # exits
         sys.exit(0)
 
     # Keep the global git hook's pointer current. Done on every run so an
@@ -2098,7 +3277,10 @@ def _main_inner(argv, mode):
         try:
             payload = json.load(sys.stdin) or {}
             cmd = (payload.get("tool_input") or {}).get("command", "")
-            if "git push" not in cmd:
+            # Command-position test, not a substring: `git -C <dir> push` is
+            # a push (the adapters route it here since 0.6.0), and a command
+            # that merely mentions one is not.
+            if not _looks_like_real_push(cmd):
                 _emit_hook("allow")
         except Exception:
             payload = {}  # if we can't read it, fall through and review anyway
@@ -2111,15 +3293,13 @@ def _main_inner(argv, mode):
     # nothing unpushed, so the gate allowed a push it had never reviewed. That
     # is a silent fail-open, and it is total in any repo where the global git
     # hook is absent or shadowed by a repo-local core.hooksPath.
+    cmd = ""
     if mode == "hook":
-        # Both conditions, and the second is what keeps this safe: the review
-        # trigger is a loose "git push" substring, so without it any command
-        # merely CONTAINING those words behind an unresolvable cd would be
-        # denied -- a grep pattern, a heredoc, a Python string. Over-reviewing
-        # is cheap; over-blocking is not.
-        _cmd = (payload.get("tool_input") or {}).get("command", "") if isinstance(payload, dict) else ""
+        cmd = (payload.get("tool_input") or {}).get("command", "") if isinstance(payload, dict) else ""
+        if not _looks_like_real_push(cmd):
+            _emit_hook("allow")  # mentions a push; does not perform one
         _resolved, _ambiguous = _gate_repo(payload)
-        if _ambiguous and _looks_like_real_push(_cmd):
+        if _ambiguous:
             # There is a `cd` we cannot follow, so we do not know what these
             # commits are. Blocking is the same rule the rest of this file
             # applies to every other "cannot run" case: a gate that does not
@@ -2142,16 +3322,19 @@ def _main_inner(argv, mode):
         repo_root = _resolved or _repo_root()
         _drop_breadcrumb(str(payload.get("session_id") or "") if isinstance(payload, dict) else "",
                          repo_root)
+        # Anything before the push that can move a ref -- `git switch x &&
+        # git push`, `git commit && git push` -- would have the hook review one
+        # tip and git send another. Only read-only git may precede a push.
+        bad = _pre_push_git_commands(cmd)
+        if bad and not _fail_open_requested():
+            _fail_closed(
+                mode,
+                f"review-gate: `git {_sanitize(bad[0], 40)}` runs before the push in the same "
+                "command, so the commits git would send are not the commits this hook can "
+                "see. Run the push as its own command, after the others have completed.",
+            )
     else:
         repo_root = _repo_root()
-
-    # Git mode only: the pre-push refs on stdin say exactly what is being sent
-    # and where. Hook mode runs BEFORE git, so no refs exist yet and the older
-    # upstream heuristic is all there is -- which is why this adapter is the
-    # one that closes the branch:main bypass.
-    push_range = ""
-    if mode == "git":
-        push_range = _range_for_refs(_read_push_refs(), repo_root)
 
     # allow() takes an optional reason, and it is worth being precise about
     # where that reason ends up, because this comment used to claim the
@@ -2175,151 +3358,137 @@ def _main_inner(argv, mode):
         else (lambda reason="": sys.exit(0))
     )
 
-    if push_range == _MULTI_REF:
-        if _fail_open_requested():
+    # WHAT is being pushed. Git mode: the refs git feeds a pre-push hook on
+    # stdin are authoritative. Hook mode runs BEFORE git, so the command line
+    # is all there is -- and since 0.6.0 it is read rather than ignored.
+    push_range, tip, branch, base = "", "", "", ""
+    if mode == "git":
+        refs = _read_push_refs()
+        push_range = _range_for_refs(refs, repo_root)
+        if push_range == _MULTI_REF:
+            if _fail_open_requested():
+                allow()
+            _fail_closed(
+                mode,
+                "review-gate: this push updates more than one branch at once, and a review "
+                "covers a single revision range. Reviewing one of them would leave the rest "
+                "unreviewed, so it is refused instead.\n\nPush the branches separately, or "
+                "set OCR_FAIL_OPEN=1 for a one-shot bypass.",
+            )
+        if not _has_unpushed_commits(repo_root, push_range):
             allow()
-        _fail_closed(
-            mode,
-            "review-gate: this push updates more than one branch at once, and a review "
-            "covers a single revision range. Reviewing one of them would leave the rest "
-            "unreviewed, so it is refused instead.\n\nPush the branches separately, or "
-            "set OCR_FAIL_OPEN=1 for a one-shot bypass.",
-        )
-
-    if not _has_unpushed_commits(repo_root, push_range):
-        allow()
+        if push_range and ".." in push_range:
+            base, tip = push_range.split("..", 1)
+            if not re.fullmatch(r"[0-9a-f]{40}", tip or ""):
+                tip = _head_sha(repo_root)
+        else:
+            tip = _head_sha(repo_root)
+        branch = _branch(repo_root)
+    else:
+        decision, info = _hook_target(repo_root, cmd)
+        if decision == "allow":
+            allow()
+        if decision == "deny":
+            if _fail_open_requested():
+                allow()
+            _fail_closed(mode, str(info.get("why") or "review-gate: refused."))
+        tip, branch = info["tip"], info.get("branch") or ""
+        base, push_range = info.get("base") or "", info.get("range") or ""
+        if not push_range and not _has_unpushed_commits(repo_root, ""):
+            allow()
 
     # Anchored on repo_root, which is now genuinely the repo being pushed
-    # rather than whatever directory this process happens to sit in (see the
-    # resolution above -- this comment described the intent long before the
-    # code achieved it). It may still be "" outside a repo, so every consumer
-    # below guards for that rather than inventing a path.
+    # rather than whatever directory this process happens to sit in. It may
+    # still be "" outside a repo, so every consumer below guards for that.
     git_dir = _git_dir(repo_root)
-    head_sha = _head_sha(repo_root)
-    marker = _marker_path(git_dir, head_sha) if (git_dir and head_sha) else None
+    if not tip or not git_dir:
+        if _fail_open_requested():
+            allow()
+        _fail_closed(mode, "review-gate: could not resolve the commit to review - blocking.")
+    common_dir = _git_common_dir(repo_root) or git_dir
+    marker = _marker_path(git_dir, tip)
 
-    # The other adapter already reviewed this exact staged tree and passed it.
-    # Replay what it found instead of allowing silently: the duplicate review
-    # is what we are skipping, not the report.
-    if marker and _marker_fresh(marker):
+    # The legacy pass marker: the other adapter, or an older gate, already
+    # reviewed these exact commits and passed them within the TTL. Replay what
+    # it found instead of allowing silently.
+    force = os.environ.get("OCR_FORCE_REVIEW", "").strip().lower() in ("1", "true", "yes")
+    if _marker_fresh(marker) and not force:
         note = _prior_findings_note(_read_marker(marker))
         if note:
-            _warn(note + _output_hints(git_dir, _findings_log_path(git_dir) if git_dir else None))
+            _warn(note + _output_hints(git_dir, _findings_log_path(git_dir)))
         allow(note)
 
-    # A review of this exact HEAD may already have been attempted and never
-    # finished -- e.g. the process running it was killed outright. There is no
-    # liveness check here (see _interrupted_note): an in-progress marker of
-    # ANY age only ever changes the message below, never whether the review
-    # below actually runs. Skipping a review because a marker file -- as
-    # forgeable as _marker_path's own done-marker -- claims one is already
-    # running would trade a wasted duplicate review for a silent bypass, and
-    # waiting inside this hook would spend its own external timeout budget on
-    # someone else's review. This check must stay AFTER the fresh-done-marker
-    # skip above (a skip has nothing to report) and _reap_markers must stay
-    # where it is below -- after a successful review, not before this check --
-    # so a marker is never swept out from under an in-flight warning.
-    inprogress = _inprogress_path(git_dir, head_sha) if (git_dir and head_sha) else None
-    interrupted_note = ""
-    if inprogress is not None and inprogress.exists():
-        interrupted_note = _interrupted_note(_read_marker(inprogress))
-        _warn(interrupted_note)
-    if inprogress is not None:
-        try:
-            inprogress.write_text(
-                json.dumps({"ts": time.time(), "mode": mode}, ensure_ascii=False),
-                encoding="utf-8",
-            )
-        except Exception:
-            pass  # degrade to "no marker" -- must never block the gate
-
+    session_id = str(payload.get("session_id") or "") if isinstance(payload, dict) else ""
+    count = ""
+    if push_range and base != _EMPTY_TREE:
+        out, rc = _git(["rev-list", "--count", push_range], cwd=repo_root)
+        count = out.strip() if rc == 0 else ""
+    meta = {
+        "tip": tip, "branch": branch, "base": base, "range": push_range,
+        "repo_root": repo_root, "git_dir": git_dir, "commit_count": count,
+    }
+    budget = _inline_budget(mode)
     try:
-        result, ran, raw_name = _run_review(repo_root, mode, git_dir, head_sha, push_range)
+        st = _drive_review(common_dir, repo_root, meta, mode, budget)
     except ReviewGateError as exc:
-        # Fail closed: block the commit unless OCR_FAIL_OPEN=1 is set.
-        if os.environ.get("OCR_FAIL_OPEN", "").strip().lower() in ("1", "true", "yes"):
+        if _fail_open_requested():
+            allow()
+        _fail_closed(mode, f"review-gate: {exc} - blocking commit to preserve gate integrity.")
+        return  # unreachable
+
+    if st is None:
+        # Budget spent, review still running. Deny -- an allow would push
+        # unreviewed commits -- and say exactly how to collect the verdict.
+        # The parked note lets --mode post announce it when it lands.
+        cur = _read_state(_state_path(common_dir, tip)) or meta
+        _park_pending(session_id, repo_root, tip, kind="async",
+                      extra={"state": str(_state_path(common_dir, tip))})
+        if _fail_open_requested():
+            allow()
+        _fail_closed(mode, _still_running_reason(cur, budget, mode))
+        return  # unreachable
+
+    if st.get("state") == "failed":
+        if _fail_open_requested():
             _warn(
-                f"OCR_FAIL_OPEN=1 set - bypassing fail-closed gate. Reason:\n  {exc}\n"
+                "OCR_FAIL_OPEN=1 set - bypassing fail-closed gate. Reason:\n  "
+                f"{_sanitize(str(st.get('detail') or st.get('reason') or ''), 400)}\n"
                 "[!] This bypass should be used sparingly and intentionally."
             )
             allow()
-            return  # unreachable; allow() calls sys.exit / _emit_hook
-        _fail_closed(mode, str(exc))
+        _fail_closed(mode, _failed_reason(st, mode))
         return  # unreachable
-    finally:
-        # Reached on every path EXCEPT the process itself being killed outright
-        # -- which is exactly the case that should leave the marker behind for
-        # the next run to report on.
-        if inprogress is not None:
-            _unlink(inprogress)
 
-    if not ran:
+    # done
+    if st.get("verdict") == "skipped":
+        _warn(str(st.get("note") or "review skipped"))
         allow()  # fail-open: only reaches here when claude is not installed
 
-    if interrupted_note and isinstance(result, dict):
-        # Folded in as a synthetic FINDING, not appended to `reasons` below --
-        # `reasons` is a throwaway string _format_reasons rebuilds from
-        # result["findings"] on every call (nothing persists it as text), and
-        # _record_review only stores the findings list. The severity "info" is
-        # not one compute_verdict ranks (see ocr_verdict._SEVERITY_RANK), so it
-        # can never itself cause a block. Storing it this way is what lets it
-        # reach the model in --mode hook: only _record_review's findings
-        # survive to the --mode post pipeline, which is the one channel a
-        # non-blocking message actually reaches the model through (see the
-        # VERIFIED comment above on `allow`).
-        existing = result.get("findings")
-        result = dict(result)
-        result["findings"] = [{
-            "severity": "info",
-            "path": "review-gate",
-            "start_line": "-",
-            "end_line": "-",
-            "content": interrupted_note,
-        }] + (existing if isinstance(existing, list) else [])
-
-    verdict = compute_verdict(result)
-    advisory = _is_advisory(repo_root)
-    reasons = _format_reasons(result)
-    blocked = verdict == "block" and not advisory
-
-    # Persist BEFORE deciding, and for every verdict. A non-blocking review is
-    # the one that needs this: it lets the push through, so nothing forces
-    # anyone to read it, and its raw output is overwritten by the next run.
-    record = _record_review(
-        git_dir, head_sha, _branch(repo_root), mode, verdict, advisory, blocked, result, raw_name
-    )
-    hints = _output_hints(git_dir, record)
-
-    if blocked:
+    reasons = str(st.get("reasons") or "")
+    hints = _output_hints(git_dir, st.get("record") or None)
+    replayed = time.time() - float(st.get("done_ts") or time.time()) > 5
+    if st.get("blocked") and not _is_advisory(repo_root):
         reason = "review-gate blocked this commit (high-severity issues):\n" + (
             reasons or "  (see review output)"
         ) + f"{hints}\n\nFix the issues above, then commit again.\n{_downgrade_hint(mode)}"
+        if replayed:
+            reason = "review-gate: " + _replay_note(st) + "\n" + reason
         _fail_closed(mode, reason)
         return  # unreachable
 
-    # Passed (or advisory): record the marker -- with the findings in it, so the
-    # paired adapter's short-circuit can replay them -- report, and allow.
-    if marker:
-        try:
-            _write_marker(marker, head_sha, verdict, advisory, reasons)
-        except Exception:
-            pass
-        _reap_markers(git_dir, keep=marker)
-
-    # Park the report before letting the push run. Delivery normally happens on
-    # the push's own PostToolUse hook and clears this note in passing; the note
-    # is what covers the case where that hook never fires because the push
-    # failed. Not done on the blocked path above: a block reaches the model as
-    # the tool_result of a deny, so it was never the channel that lost things.
-    _park_pending(
-        str(payload.get("session_id") or "") if isinstance(payload, dict) else "",
-        repo_root,
-        head_sha,
-    )
+    # Passed (or advisory): park the report before letting the push run.
+    # Delivery normally happens on the push's own PostToolUse hook and clears
+    # this note in passing; the note is what covers the case where that hook
+    # never fires because the push failed.
+    _park_pending(session_id, repo_root, tip)
     note = ""
     if reasons:
+        verdict = _sanitize(str(st.get("verdict") or "?"), 20)
+        advisory = _is_advisory(repo_root)
         label = "advisory (blocking disabled)" if advisory else f"verdict: {verdict}"
         note = f"{label} - findings:\n{reasons}"
+        if replayed:
+            note = _replay_note(st) + "\n" + note
         _warn(note + hints)
     allow(note)
 

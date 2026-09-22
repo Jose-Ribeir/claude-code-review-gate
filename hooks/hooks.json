@@ -9,7 +9,7 @@
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/gate-hook.sh\"",
             "shell": "bash",
             "if": "Bash(git *)",
-            "timeout": 1920,
+            "timeout": 900,
             "statusMessage": "Reviewing unpushed commits (review-gate)..."
           },
           {
@@ -23,7 +23,7 @@
               "${CLAUDE_PLUGIN_ROOT}/scripts/gate-hook.ps1"
             ],
             "if": "Bash(git *)",
-            "timeout": 1920,
+            "timeout": 900,
             "statusMessage": "Reviewing unpushed commits (review-gate)..."
           }
         ]

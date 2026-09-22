@@ -21,10 +21,19 @@ if [ "${OCR_IN_REVIEW:-}" = "1" ]; then
 fi
 
 # Same interpreter search as gate-hook.sh: skip Windows Store alias stubs.
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+payload="$(cat 2>/dev/null || true)"
 for _c in python3 python py; do
   _p="$(command -v "$_c" 2>/dev/null)" || continue
   case "$_p" in *[Ww]indows[Aa]pps*) continue ;; esac
-  if "$_p" -c "import sys" >/dev/null 2>&1; then
+  if "$_p" -c "import sys; sys.exit(0 if sys.version_info >= (3, 7) else 1)" >/dev/null 2>&1; then
+    # Python is fine. If this session's previous process died mid-review (the
+    # desktop app does that to a CLI silent for ~16 min), say so -- otherwise
+    # the model reads the dangling tool call as a user interruption. Best
+    # effort; the only acceptable outputs are one JSON object or nothing.
+    if [ -f "$DIR/review-gate.py" ]; then
+      printf '%s' "$payload" | "$_p" "$DIR/review-gate.py" --mode resume 2>/dev/null || true
+    fi
     exit 0
   fi
 done

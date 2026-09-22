@@ -136,16 +136,51 @@ git push --no-verify
 | Gate scope | Claude Code commits | run `scripts/install-git-hook.sh` (→ everywhere) / `uninstall-git-hook.sh` | which commits are reviewed |
 | Mode | **block** | `OCR_ADVISORY=1`, or `.ocr/config.json` `{"blocking": false}` | block vs warn-only |
 | Block threshold | `high` & `confidence ≥ 0.7` | `OCR_BLOCK_SEVERITY`, `OCR_BLOCK_CONFIDENCE` | what is severe/sure enough to block |
-| Reviewer timeout | `1800`s | `OCR_TIMEOUT` | fail-**closed** deadline for `claude -p` (blocks the push; keep `hooks/hooks.json`'s `timeout` above it) |
+| Reviewer timeout | `1800`s | `OCR_TIMEOUT` | fail-**closed** deadline for `claude -p`, enforced by the detached supervisor (blocks the push). Do **not** raise `hooks/hooks.json`'s `timeout` with it -- see [Long reviews](#long-reviews-and-the-desktop-app) |
+| Inline wait | `600`s (clamped 30..840) | `OCR_INLINE_BUDGET` | how long a `git push` through Claude Code waits for the review before answering "still running, re-run the push" |
+| Inline wait, git hook | `300`s (full `OCR_TIMEOUT` at a terminal) | `OCR_INLINE_BUDGET_GIT` | same, for the pre-push adapter under Claude's Bash tool (whose ceiling is 600 s) |
+| Re-review a recorded tip | -- | `OCR_FORCE_REVIEW=1` | ignore a verdict recorded for these exact commits within the last hour |
+| Legacy range | -- | `OCR_LEGACY_RANGE=1` | review the checked-out branch against its upstream when the push command cannot be parsed (0.5.x behaviour) |
 | Per-file rules | built-in rubric + per-language rules | `.ocr/rule.json` (project), `~/.ocr/rule.json` (global), `--rule <path>` | the review checklist per file |
 | Review model | `sonnet` | `OCR_MODEL` (`haiku` / `sonnet` / `opus`) | **cost lever.** The review runs in its own headless session; without a pin it would inherit the parent session's model and pay its cache-read rate on a workload that re-reads context every tool call |
 | Extra `claude` flags | — | `OCR_CLAUDE_EXTRA_ARGS` | appended to the defaults |
 | All `claude` flags | see `DEFAULT_CLAUDE_ARGS` | `OCR_CLAUDE_ARGS` | replaces the defaults **wholesale** — discards the cost controls too |
-| Bypass once | — | `git push --no-verify` | skip the gate for one push |
+| Bypass once | — | `OCR_FAIL_OPEN=1` in Claude Code's launch environment | skip the gate for one push (`--no-verify` is refused through Claude Code: it would disable the git-hook backstop) |
 | Findings log | `.git/review-gate-findings.jsonl` | — | one JSON line per completed review, **append-only and never pruned** |
 | Raw-output snapshots | newest `50`, in `.git/review-gate-history/` | `OCR_HISTORY_LIMIT` (`0` = keep all) | full reviewer stdout per run |
 
 Rule precedence (highest first): `--rule` → project `.ocr/rule.json` → global `~/.ocr/rule.json` → built-in `skills/review/rubric.md`, then the matching `skills/review/rules/<lang>.md` and `rules/llm-authored-code.md` appended. See `examples/.ocr/rule.json`.
+
+### Long reviews and the desktop app
+
+The Claude desktop app kills a session's CLI process after roughly **16 minutes** with
+no output while a turn is pending, and a PreToolUse hook produces no output for as
+long as it runs. Before 0.6.0 that meant every review longer than ~16 min killed the
+session underneath the gate: the push never ran, the reviewer kept going as an orphan,
+and the next message opened with a synthesised `[Request interrupted by user]`.
+
+Since 0.6.0 the review runs under a **detached supervisor** that outlives the hook.
+The `git push` waits for it inline for up to `OCR_INLINE_BUDGET` (600 s) and then:
+
+- **finished** -> the verdict is delivered exactly as before (deny with findings, or
+  allow);
+- **still running** -> the push is **denied** (never allowed unreviewed) with
+  *"review still running, re-run this exact `git push`"*. The retry joins the same
+  review and answers as soon as it finishes; nothing is reviewed twice. A
+  PostToolUse note also announces the verdict on the next executed Bash call.
+
+Every verdict, blocking or not, is recorded per pushed **tip** for an hour in
+`.git/review-gate-async/<tip>.json`, so a retry after a block answers instantly instead
+of paying the full review again. `OCR_FORCE_REVIEW=1` re-reviews anyway.
+
+The reviewer reads a **detached worktree** at the pushed commit, so the session can
+keep editing, switching and stashing while the review runs, and the reviewer's scratch
+files never land in your tree. What is reviewed is what the command **sends**: the
+branch named in `git push [-u] <remote> <branch>` against the remote-tracking ref (or
+`@{push}` for a bare `git push`), not the checked-out `HEAD`. Compound commands that can
+move a ref before the push (`git switch x && git push`, `git commit && git push`), more
+than one push per command, `--no-verify`, and option shapes the parser does not know are
+refused with an explanation.
 
 ### Where findings go
 
@@ -244,6 +279,7 @@ The gate runs the review in a **separate headless `claude -p` session**. That se
 ## Safety & limitations
 
 - **Fails closed** by design — a timeout, crash, unparseable review, missing Python 3, or an unlocatable reviewer **blocks** the push. Bypass with `OCR_FAIL_OPEN=1`, or downgrade permanently with `OCR_ADVISORY=1`.
+- **Never allows an unreviewed push while its review is still running** — past the inline budget it denies and tells the caller to re-run the push; see [Long reviews](#long-reviews-and-the-desktop-app).
 - **It still fails open in these cases**, and it is worth knowing which:
   - **`claude` is not installed** — deliberate; there is no gate without the tool.
   - **The hook fails to launch, times out, or dies abnormally.** Claude Code treats a hook it could not start or had to kill as *non-blocking*, and no code inside the hook can change that. On Windows this is why both a Git Bash and a PowerShell adapter are registered — if neither can start, the gate is silently absent. Run `/review-gate:doctor` to check.
