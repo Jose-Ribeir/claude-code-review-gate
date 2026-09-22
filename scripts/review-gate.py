@@ -1238,10 +1238,32 @@ def _push_segment(cmd):
                 q = ""
         elif ch in "\"'":
             q = ch
+        elif ch == "&" and i > start and code[i - 1] == ">":
+            pass  # `2>&1`: the & belongs to the redirection, not a separator
         elif ch in ";&|\n\r":
             break
         i += 1
-    return code[start:i], len(matches)
+    return _drop_redirections(code[start:i]), len(matches)
+
+
+# `2>&1`, `>out`, `2> /dev/null`, `<in`: shell plumbing around the push, not
+# arguments to it. Claude's habitual form is `git push origin main 2>&1`.
+_REDIR_TOKEN = re.compile(r"^\d*(?:>>?|<)(?:&\d+|\S*)$")
+
+
+def _drop_redirections(segment):
+    out, skip = [], False
+    for tok in segment.split():
+        if skip:
+            skip = False
+            continue
+        if _REDIR_TOKEN.match(tok):
+            # A bare operator (`>`/`2>`/`<`) takes the NEXT token as its target.
+            if re.fullmatch(r"\d*(?:>>?|<)", tok):
+                skip = True
+            continue
+        out.append(tok)
+    return " ".join(out)
 
 
 def _pre_push_git_commands(cmd):

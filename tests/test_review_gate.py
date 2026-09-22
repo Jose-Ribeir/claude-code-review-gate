@@ -2254,3 +2254,83 @@ def test_an_unevaluable_range_is_assumed_to_carry_commits(monkeypatch):
 
     monkeypatch.setattr(review_gate, "_git", _fake_git)
     assert review_gate._range_for_refs([("a" * 40, "b" * 40)]) == "b" * 40 + ".." + "a" * 40
+
+
+# --- what the push command sends (0.6.0) --------------------------------------
+# Hook mode used to review the checked-out HEAD whatever the command named.
+# _parse_push reads the command; everything it cannot read literally is
+# refused rather than guessed. Shell plumbing around the push is not an
+# argument to it: Claude's habitual form is `git push origin main 2>&1`.
+
+_parse_push = review_gate._parse_push
+
+
+def test_parse_push_reads_remote_and_branch():
+    t = _parse_push("git push -u origin feat/x")
+    assert (t["kind"], t["remote"], t["src"], t["dst"], t["set_upstream"]) == ("branch", "origin", "feat/x", "", True)
+    t = _parse_push("git push origin HEAD:refs/heads/x")
+    assert (t["src"], t["dst"]) == ("HEAD", "refs/heads/x")
+    assert _parse_push("git push origin +main")["src"] == "main"
+
+
+def test_parse_push_ignores_shell_redirections_around_the_push():
+    for cmd in ("git push origin main 2>&1", "git push origin main 2>&1 | tail -5",
+                "git push origin main > push.log 2>&1", "git push origin main 2> /dev/null",
+                "git push origin main && echo done", "cd /repo && git push origin main 2>&1; echo rc=$?"):
+        t = _parse_push(cmd)
+        assert t["kind"] == "branch", (cmd, t)
+        assert (t["remote"], t["src"]) == ("origin", "main"), (cmd, t)
+
+
+def test_parse_push_refuses_what_it_cannot_read():
+    assert _parse_push("git push --frobnicate origin main")["kind"] == "unparseable"
+    assert _parse_push("git push origin $BRANCH")["kind"] == "unparseable"
+    assert _parse_push("git push --no-verify origin main")["kind"] == "no_verify"
+    assert _parse_push("git push origin a b")["kind"] == "multi"
+    assert _parse_push("git push --all")["kind"] == "multi"
+    assert _parse_push("git push origin main; git push origin dev")["kind"] == "multi_push"
+
+
+def test_parse_push_knows_the_harmless_shapes():
+    assert _parse_push("git push -n origin main")["kind"] == "dry_run"
+    assert _parse_push("git push origin :gone")["kind"] == "delete"
+    assert _parse_push("git push --delete origin gone")["kind"] == "delete"
+    assert _parse_push("git push --tags")["kind"] == "tags"
+    # value-taking options do not swallow the remote
+    t = _parse_push("git push -o ci.skip --force-with-lease=main:abc origin main")
+    assert (t["remote"], t["src"]) == ("origin", "main")
+    assert _parse_push("git push --repo=upstream main")["remote"] == "upstream"
+
+
+def test_only_read_only_git_may_precede_a_push():
+    pre = review_gate._pre_push_git_commands
+    assert pre("git status && git push origin main") == []
+    assert pre("git branch --show-current && git push origin main") == []
+    assert pre("git switch x && git push origin x") == ["switch"]
+    assert pre("git commit -m x && git push origin main") == ["commit"]
+    assert pre("git stash pop; git push origin main") == ["stash"]
+
+
+def test_git_C_is_a_final_cd_for_the_resolver():
+    assert review_gate._push_c_dir("git -C /repo push origin main") == "/repo"
+    assert review_gate._push_c_dir('git -C "/a b" push') == "/a b"
+    assert review_gate._looks_like_real_push('git -C "/a b" push') is True
+    assert review_gate._push_c_dir("git push origin main") == ""
+
+
+# --- inside the review: the write guard ----------------------------------------
+
+def test_guard_refuses_output_and_escaping_redirections_only():
+    g = review_gate._guard_reviewer_command
+    assert g("git diff HEAD~1") == ""
+    assert g("git diff HEAD~1 > .review_hunks.txt") == ""
+    assert g("git diff HEAD~1 2>&1 | head -50") == ""
+    assert g("git diff > /dev/null") == ""
+    assert g("git diff --output=x.txt HEAD~1") != ""
+    assert g("git log -1 --format=x --output out.txt") != ""
+    assert g("git diff > .git/scr-push-reviewed-abc") != ""
+    assert g("git diff > ../outside.txt") != ""
+    assert g("git diff > /abs/path.txt") != ""
+    assert g("git diff > C:/abs/path.txt") != ""
+    assert g("git diff > ~/x") != ""
+    assert g("git diff > $HOME/x") != ""
