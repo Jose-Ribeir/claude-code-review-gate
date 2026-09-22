@@ -31,8 +31,14 @@ for _c in python3 python py; do
     # desktop app does that to a CLI silent for ~16 min), say so -- otherwise
     # the model reads the dangling tool call as a user interruption. Best
     # effort; the only acceptable outputs are one JSON object or nothing.
+    # Bounded, like the ps1 sibling: a reporter that stalls must go quiet,
+    # never hold up session start (hooks.json gives this hook 15 s in all).
     if [ -f "$DIR/review-gate.py" ]; then
-      printf '%s' "$payload" | "$_p" "$DIR/review-gate.py" --mode resume 2>/dev/null || true
+      if command -v timeout >/dev/null 2>&1; then
+        printf '%s' "$payload" | timeout 8 "$_p" "$DIR/review-gate.py" --mode resume 2>/dev/null || true
+      else
+        printf '%s' "$payload" | "$_p" "$DIR/review-gate.py" --mode resume 2>/dev/null || true
+      fi
     fi
     exit 0
   fi

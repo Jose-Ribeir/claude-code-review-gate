@@ -2395,3 +2395,9 @@ def test_the_retry_that_delivers_a_verdict_drops_its_async_note(tmp_path, monkey
         pass
     notes = [json.loads((tmp_path / "gate-data" / n).read_text()) for n in _pending_files(tmp_path)]
     assert [n["kind"] for n in notes] == ["review"]  # the async note is gone
+
+
+def test_guard_judges_tokens_not_quoted_text():
+    g = review_gate._guard_reviewer_command
+    assert g('git log --grep="needs --output flag" --oneline') == ""
+    assert g("git log -1 --format='%s' --output x") != ""

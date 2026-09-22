@@ -3160,7 +3160,18 @@ def _guard_reviewer_command(cmd):
     the host's own allowlist already refuses non-git commands.
     """
     code = _strip_heredocs(cmd or "")
-    if _OUTPUT_OPT.search(code):
+    # Judge TOKENS, not the raw text: `git log --grep="--output"` mentions the
+    # option inside a quoted string and writes nothing. Fall back to the raw
+    # match only when the command cannot be tokenised at all.
+    try:
+        toks = shlex.split(code, posix=True)
+    except ValueError:
+        toks = None
+    if toks is None:
+        hit = bool(_OUTPUT_OPT.search(code))
+    else:
+        hit = any(_OUTPUT_OPT.match(" " + t) for t in toks)
+    if hit:
         return "review-gate: `--output` writes a file; the reviewer is read-only. Print to stdout instead."
     for m in _REDIRECT.finditer(code):
         target = next((g for g in m.groups() if g is not None), "")
