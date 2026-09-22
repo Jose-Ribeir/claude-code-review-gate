@@ -73,7 +73,12 @@ if ($py) {
             $stderrTask = $proc.StandardError.ReadToEndAsync()
             $proc.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length)
             $proc.StandardInput.Close()
-            $proc.WaitForExit()
+            # Bounded: a reporter that stalls must go quiet, never hold up
+            # session start. hooks.json gives this hook 15 s in total.
+            if (-not $proc.WaitForExit(8000)) {
+                try { $proc.Kill() } catch { }
+                exit 0
+            }
             $null = $stderrTask.Result
             $out = $stdoutTask.Result
             if ($out.Trim()) { [Console]::Out.Write($out) }

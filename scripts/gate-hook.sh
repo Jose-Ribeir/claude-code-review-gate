@@ -40,7 +40,7 @@ _find_python() {
 # rest are allowed here, as before.
 if [ "${OCR_IN_REVIEW:-}" = "1" ]; then
   case "$payload" in
-    *--output*|*'>'*)
+    *--o*|*'>'*)
       if PY="$(_find_python)" && [ -f "$DIR/review-gate.py" ]; then
         printf '%s' "$payload" | "$PY" "$DIR/review-gate.py" --mode guard
       else

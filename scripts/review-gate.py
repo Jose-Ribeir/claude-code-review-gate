@@ -1454,13 +1454,15 @@ def _hook_target(repo_root, cmd):
     # --tags / --follow-tags: a tag may point at commits the remote has never
     # seen. `git push --tags` used to be allowed as "no branch"; that uploads
     # every commit those tags reach.
-    if kind == "tags" or tgt.get("follow_tags"):
+    # Checked whenever tags ride along, not only when they are all that is
+    # pushed: `git push origin main --tags` carries them too.
+    if kind == "tags" or tgt.get("tags") or tgt.get("follow_tags"):
         out, rc = _git(["rev-list", "--tags", "--not", "--remotes=" + (remote or "origin"),
                         "--max-count=1"], cwd=repo_root)
         if rc != 0:
             return "deny", {"why": "review-gate: could not evaluate which tagged commits the "
                                    "remote lacks; push the branch first, or without tags."}
-        if out.strip() and kind == "tags":
+        if out.strip() and (kind == "tags" or tgt.get("tags")):
             return "deny", {"why": (
                 "review-gate: `--tags` would upload commits the remote does not have yet "
                 "(reachable only from local tags). Push the branch that contains them "
@@ -2089,7 +2091,7 @@ def _tree_kill(pid):
         if sys.platform == "win32":
             subprocess.run(
                 ["taskkill", "/T", "/F", "/PID", str(pid)],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         else:
@@ -2156,6 +2158,7 @@ class _StateLock:
     def __init__(self, state_path):
         self.path = Path(str(state_path) + ".lock")
         self.fd = None
+        self.token = f"{os.getpid()}:{_new_run_id()}"
 
     def __enter__(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -2163,7 +2166,9 @@ class _StateLock:
         while True:
             try:
                 self.fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
-                os.write(self.fd, str(os.getpid()).encode())
+                os.write(self.fd, self.token.encode())
+                os.close(self.fd)
+                self.fd = None
                 return self
             except FileExistsError:
                 try:
@@ -2177,11 +2182,13 @@ class _StateLock:
                 time.sleep(0.1)
 
     def __exit__(self, *exc):
+        # Release only a lock that is still OURS. If a waiter judged us stale
+        # and took the lock, unlinking here would free it from under them.
         try:
-            if self.fd is not None:
-                os.close(self.fd)
-        finally:
-            _unlink(self.path)
+            if self.path.read_text(encoding="utf-8") == self.token:
+                _unlink(self.path)
+        except OSError:
+            pass
         return False
 
 
@@ -2273,9 +2280,9 @@ def _drive_review(common_dir, repo_root, meta, mode, budget):
             if st2 != st and st2.get("state") in ("running", "claimed", "done"):
                 if not (force and not forced_once):
                     continue  # someone else moved it; re-evaluate
+            stale_pids = ()
             if st2.get("state") in ("running", "claimed"):
-                _tree_kill(st2.get("reviewer_pid"))
-                _tree_kill(st2.get("supervisor_pid"))
+                stale_pids = (st2.get("reviewer_pid"), st2.get("supervisor_pid"))
             attempts = int(st2.get("attempts") or 0) if st2.get("state") == "failed" else 0
             if force:
                 attempts = 0
@@ -2287,17 +2294,23 @@ def _drive_review(common_dir, repo_root, meta, mode, budget):
             })
             _write_state(state_path, new)
             forced_once = True
-            try:
-                # Nothing is written here after the spawn: the supervisor
-                # records its own pid, and a write from this side could land
-                # on top of its `running` transition.
-                _spawn_supervisor(state_path, run_id, repo_root)
-            except Exception as exc:
-                new.update({"state": "failed", "failed_ts": time.time(),
-                            "attempts": attempts + 1, "reason": "spawn",
-                            "detail": f"could not start the review supervisor ({exc})"})
-                _write_state(state_path, new)
-                return new
+            # The old run is fenced by the new run_id already (its next
+            # heartbeat sees it and exits); the kill is belt and braces and
+            # happens outside the lock so a slow taskkill cannot make a
+            # legitimate hold look stale to a waiter.
+        for pid in stale_pids:
+            _tree_kill(pid)
+        try:
+            # Nothing is written here after the spawn: the supervisor
+            # records its own pid, and a write from this side could land
+            # on top of its `running` transition.
+            _spawn_supervisor(state_path, run_id, repo_root)
+        except Exception as exc:
+            new.update({"state": "failed", "failed_ts": time.time(),
+                        "attempts": attempts + 1, "reason": "spawn",
+                        "detail": f"could not start the review supervisor ({exc})"})
+            _write_state(state_path, new)
+            return new
 
 
 def _supervise(state_path, run_id):
@@ -3085,8 +3098,9 @@ def _mode_post(argv):
         session_id = str(payload.get("session_id") or "")
         cmd = (payload.get("tool_input") or {}).get("command", "")
 
-    # Same substring rule the PreToolUse adapter applies.
-    if cmd and "git push" not in cmd:
+    # Same command-position test the PreToolUse adapter applies (0.6.0: a
+    # `git -C <dir> push` is a push; a command that mentions one is not).
+    if cmd and not _looks_like_real_push(cmd):
         return _flush_pending(session_id)
 
     # The repo the GATE resolved, not one re-derived here. Delivery does no
@@ -3128,7 +3142,10 @@ def _mode_post(argv):
 # "the review can be fooled" into "the review can be skipped". So the plugin's
 # hook, which is registered inside the review session too, vets every Bash
 # call there instead of blanket-allowing it.
-_OUTPUT_OPT = re.compile(r"(?:^|\s)--output(?:=|\s|$)")
+# `--output` and every abbreviation git's option parser would accept for it
+# (`--o`, `--ou`, ... are ambiguous with --output-indicator-* today, but that
+# is git's business, not a property this guard should lean on).
+_OUTPUT_OPT = re.compile(r"(?:^|\s)--o(?:u(?:t(?:p(?:u(?:t)?)?)?)?)?(?:=|\s|$)")
 _REDIRECT = re.compile(
     r"(?<![<>&])(?:\d*>>?|&>>?|>\|)\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s;&|)]+))"
 )
@@ -3469,6 +3486,10 @@ def _main_inner(argv, mode):
             allow()
         _fail_closed(mode, _still_running_reason(cur, budget, mode))
         return  # unreachable
+
+    # This call delivers the verdict itself; a note parked by an earlier
+    # budget deny for the same tip must not announce it a second time.
+    _unlink(_gate_data_dir() / (PENDING_PREFIX + _marker_digest(session_id, repo_root, tip, "async")))
 
     if st.get("state") == "failed":
         if _fail_open_requested():

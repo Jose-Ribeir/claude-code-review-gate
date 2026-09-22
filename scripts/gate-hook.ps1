@@ -49,7 +49,7 @@ $payloadText = [System.Text.Encoding]::UTF8.GetString($bytes)
 # command shape (`--output`, a `>` redirection) is vetted by review-gate.py's
 # --mode guard rather than blanket-allowed; see gate-hook.sh for why.
 if ($env:OCR_IN_REVIEW -eq '1') {
-    if ($payloadText -like '*--output*' -or $payloadText -like '*>*') {
+    if ($payloadText -like '*--o*' -or $payloadText -like '*>*') {
         $script:GuardMode = $true
     } else {
         Write-Decision 'allow'; exit 0

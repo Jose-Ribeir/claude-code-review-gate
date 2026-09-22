@@ -2334,3 +2334,64 @@ def test_guard_refuses_output_and_escaping_redirections_only():
     assert g("git diff > C:/abs/path.txt") != ""
     assert g("git diff > ~/x") != ""
     assert g("git diff > $HOME/x") != ""
+
+
+# --- findings from the gate reviewing its own 0.6.0 push ----------------------
+
+def test_guard_catches_abbreviated_output_options():
+    g = review_gate._guard_reviewer_command
+    for cmd in ("git diff --outp=x.txt HEAD~1", "git diff --out x.txt HEAD~1", "git log --o=x"):
+        assert g(cmd) != "", cmd
+    assert g("git log --oneline -5") == ""  # a different option, allowed
+
+
+def test_tags_alongside_a_refspec_are_still_checked(monkeypatch):
+    calls = []
+
+    def _fake_git(args, cwd=None):
+        calls.append(args)
+        if args[:2] == ["rev-list", "--tags"]:
+            return "deadbeef", 0  # a tagged commit the remote lacks
+        return "", 1
+
+    monkeypatch.setattr(review_gate, "_git", _fake_git)
+    decision, info = review_gate._hook_target("/repo", "git push origin main --tags")
+    assert decision == "deny" and "--tags" in info["why"]
+
+
+def test_post_routes_a_dash_C_push_to_delivery(monkeypatch, tmp_path):
+    seen = {}
+    monkeypatch.setattr(review_gate, "_flush_pending", lambda sid: seen.setdefault("flushed", True) and 0)
+    monkeypatch.setattr(review_gate, "_read_breadcrumb", lambda sid: "")
+    monkeypatch.setattr(review_gate, "_repo_root", lambda: "")
+    monkeypatch.setattr(sys, "stdin", _io.StringIO(json.dumps(
+        {"session_id": "s1", "tool_input": {"command": "git -C /repo push origin main"}})))
+    assert review_gate._mode_post(["x", "--mode", "post"]) == 0
+    assert "flushed" not in seen  # taken as a push, not as "some other command"
+
+
+def test_state_lock_releases_only_its_own_lock(tmp_path):
+    state = tmp_path / "tip.json"
+    lock = review_gate._StateLock(state)
+    with lock:
+        # A waiter that judged us stale took the lock over.
+        (tmp_path / "tip.json.lock").write_text("someone-else", encoding="utf-8")
+    assert (tmp_path / "tip.json.lock").read_text(encoding="utf-8") == "someone-else"
+    (tmp_path / "tip.json.lock").unlink()
+    with review_gate._StateLock(state):
+        pass
+    assert not (tmp_path / "tip.json.lock").exists()
+
+
+def test_the_retry_that_delivers_a_verdict_drops_its_async_note(tmp_path, monkeypatch, capsys):
+    _stub_gate(monkeypatch, tmp_path)
+    review_gate._park_pending("s1", str(tmp_path), "a" * 40, kind="async", extra={"state": "x"})
+    assert _pending_files(tmp_path) != []
+    monkeypatch.setattr(sys, "stdin", _io.StringIO(json.dumps(
+        {"session_id": "s1", "tool_input": {"command": "git push"}})))
+    try:
+        review_gate._main_inner(["review-gate.py", "--mode", "hook"], "hook")
+    except SystemExit:
+        pass
+    notes = [json.loads((tmp_path / "gate-data" / n).read_text()) for n in _pending_files(tmp_path)]
+    assert [n["kind"] for n in notes] == ["review"]  # the async note is gone
