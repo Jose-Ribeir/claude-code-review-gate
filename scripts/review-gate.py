@@ -2555,6 +2555,7 @@ def _supervise(state_path, run_id):
     limit_info = None   # (resets_at, chunks_done, chunks_total) for limit failures
     result, ran, raw_name = None, False, ""
     chunks_new = 0   # chunks newly reviewed in this run (not from cache)
+    progress = {"new": 0}
     try:
         worktree = _make_worktree(repo_root, tip, run_id)
         if worktree:
@@ -2578,7 +2579,7 @@ def _supervise(state_path, run_id):
             # Multi-chunk path: _run_chunked handles caching, fencing, budget.
             result, ran, raw_name, chunks_new = _run_chunked(
                 state_path, run_id, common_dir, review_root, mode, git_dir,
-                tip, push_range, chunks, planner_warnings, fenced,
+                tip, push_range, chunks, planner_warnings, fenced, progress,
             )
             if planner_warnings and isinstance(result, dict):
                 result = dict(result)
@@ -2612,13 +2613,13 @@ def _supervise(state_path, run_id):
     except ReviewBudgetError as exc:
         # Budget exhaustion: not an attempt; next push resumes from checkpoint.
         failure = ("budget", str(exc))
-        result, ran, raw_name, chunks_new = None, False, "", chunks_new
+        result, ran, raw_name, chunks_new = None, False, "", progress["new"]
     except ReviewGateError as exc:
         failure = ("review", str(exc))
-        result, ran, raw_name, chunks_new = None, False, "", chunks_new
+        result, ran, raw_name, chunks_new = None, False, "", progress["new"]
     except BaseException as exc:  # noqa: BLE001 -- the file must always say why
         failure = ("crash", f"{type(exc).__name__}: {exc}")
-        result, ran, raw_name, chunks_new = None, False, "", chunks_new
+        result, ran, raw_name, chunks_new = None, False, "", progress["new"]
     finally:
         stop.set()
         if worktree:
@@ -3206,13 +3207,14 @@ def _merge_chunk_results(chunk_results, planner_warnings=None):
 
 
 def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
-                 tip, push_range, chunks, planner_warnings, fenced):
+                 tip, push_range, chunks, planner_warnings, fenced, progress=None):
     """Run per-chunk reviews with caching, fencing, budget and retry.
 
     Returns (merged_result, True, "chunked", chunks_new) on success, where
     chunks_new is the count of chunks actually reviewed in THIS run (cached
     chunks do not count).  The caller uses chunks_new to decide whether to
-    increment the attempt counter.
+    increment the attempt counter.  `progress["new"]` mirrors chunks_new as
+    it grows, so the caller still has it when this raises part-way.
     Raises ReviewLimitError, ReviewBudgetError, ReviewGateError,
     or _Fenced when the supervisor has been superseded.
     """
@@ -3343,6 +3345,8 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
         chunk_results.append(result)
         chunks_done += 1
         chunks_new += 1
+        if progress is not None:
+            progress["new"] = chunks_new
 
     return _merge_chunk_results(chunk_results, planner_warnings), True, "chunked", chunks_new
 

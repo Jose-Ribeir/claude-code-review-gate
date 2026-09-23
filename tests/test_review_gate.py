@@ -2834,30 +2834,33 @@ def test_attempts_increments_when_no_new_chunks_reviewed(monkeypatch, tmp_path):
                                            "attempts": 0})
     fenced = {"hit": False}
 
-    try:
+    # Only cached chunks, then an error: no new progress.
+    progress = {"new": 0}
+    with pytest.raises(review_gate.ReviewGateError):
         review_gate._run_chunked(
             state_path, run_id, common, ".", "hook", "",
-            "tip", "base..tip", chunks, [], fenced,
+            "tip", "base..tip", chunks, [], fenced, progress,
         )
-    except review_gate.ReviewGateError:
-        pass  # expected
+    assert progress["new"] == 0
+    assert review_gate._read_state(state_path)["chunks_done"] == 2
 
-    # chunks_new should be 0 (only cached chunks were used; chunk 2 errored).
-    # The caller uses chunks_new to decide whether to increment attempts;
-    # we verify it directly from the return value when chunk 2 doesn't error
-    # by examining what _run_chunked raised vs. what it would return.
-    # The key regression: if chunks_new were computed as len(cached), the
-    # attempt would not increment.  Here chunk 2 raises before chunks_new
-    # can become 1, so chunks_new == 0 → attempts should increment.
+    # Chunk 2 is reviewed fresh, chunk 3 errors: the new chunk must survive the raise.
+    calls = {"n": 0}
 
-    # Simulate what _supervise does: read state and apply the attempt logic.
-    st = review_gate._read_state(state_path) or {}
-    # chunks_new == 0 (no new chunk completed) → increment
-    chunks_new_after_error = 0
-    new_attempts = int(st.get("attempts") or 0) + (1 if chunks_new_after_error == 0 else 0)
-    assert new_attempts == 1, (
-        "attempts must increment when chunks_new == 0, even if cached chunks exist"
-    )
+    def _second_errors(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return cached_result, True, ""
+        raise review_gate.ReviewGateError("stub error for chunk")
+
+    monkeypatch.setattr(review_gate, "_run_review", _second_errors)
+    progress = {"new": 0}
+    with pytest.raises(review_gate.ReviewGateError):
+        review_gate._run_chunked(
+            state_path, run_id, common, ".", "hook", "",
+            "tip", "base..tip", chunks, [], fenced, progress,
+        )
+    assert progress["new"] == 1
 
 
 def test_reap_async_skips_live_worktree(monkeypatch, tmp_path):
