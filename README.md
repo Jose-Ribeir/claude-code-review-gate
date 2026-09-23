@@ -235,7 +235,7 @@ The gate runs the review in a **separate headless `claude -p` session**. That se
 | Isolation | Flag | Why |
 |---|---|---|
 | **Pinned model** | `--model` (`OCR_MODEL`, default `sonnet`) | Without a pin the review inherits the **parent session's** model. On Opus that is `$0.50/M` cache reads vs Sonnet `$0.30/M` vs Haiku `$0.10/M` — on a read-dominated workload, a straight multiple of your bill. |
-| **No user settings** | `--setting-sources project` | Global hooks live in `~/.claude/settings.json` and would fire on **every tool call** of the review. Auth is unaffected — OAuth/keychain is not a settings source. |
+| **No user settings** | `--setting-sources ""` | Global hooks live in `~/.claude/settings.json` and would fire on **every tool call** of the review. Auth is unaffected — OAuth/keychain is not a settings source. |
 | **Plugin loaded from disk** | `--plugin-dir` | Required, because skipping user settings also skips the plugin registry. |
 | **No MCP servers** | `--mcp-config` (empty) + `--strict-mcp-config` | Each connected server's tool schemas cost context in a session that only needs Bash/Read/Grep/Glob. |
 | **Stable cache prefix** | `--exclude-dynamic-system-prompt-sections` | Keeps per-machine sections out of the cached prefix. |

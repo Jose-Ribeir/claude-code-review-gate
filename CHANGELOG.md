@@ -6,6 +6,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-09-23
+
+### Fixed
+- **AGENTS.md injection gap.** Claude Code ≥ 2.1.277 reads `AGENTS.md` from a
+  session's cwd when no `CLAUDE.md` is present, and that reading is not
+  governed by `--setting-sources`. A hostile branch could place instructions in
+  `AGENTS.md` at the worktree root and have them silently inserted into the
+  reviewer's system prompt. The fix sets `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` in
+  the reviewer's environment; a live opt-in canary test (`OCR_LIVE_TESTS=1`)
+  verifies suppression.
+- **README cost table** showed `--setting-sources project`; corrected to `""`.
+
 ## [0.6.0] - 2026-09-22
 
 ### Fixed

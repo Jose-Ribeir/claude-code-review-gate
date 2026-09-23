@@ -1879,6 +1879,11 @@ def _run_review(repo_root, mode, git_dir=None, head_sha="", push_range=""):
     # second review. Both adapters short-circuit on this (see _in_review).
     child_env = dict(os.environ)
     child_env["OCR_IN_REVIEW"] = "1"
+    # Block AGENTS.md injection: Claude Code ≥2.1.277 reads AGENTS.md from the
+    # reviewer's cwd (the untrusted worktree) when no CLAUDE.md is present there,
+    # and AGENTS.md is not governed by --setting-sources. A hostile branch could
+    # put instructions there. This env var disables that loading.
+    child_env["CLAUDE_CODE_DISABLE_CLAUDE_MDS"] = "1"
     # unset/empty -> scrub _SESSION_BRIDGE_ENV (the default, see its comment);
     # "none" (case-insensitive) -> scrub nothing, the pre-0.6 behaviour, for a
     # repo whose reviewer genuinely needs the desktop host's auth relay;
