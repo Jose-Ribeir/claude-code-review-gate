@@ -186,6 +186,45 @@ HEARTBEAT_S = 10
 STALE_S = 45          # a supervisor silent this long is presumed dead
 LOCK_STALE_S = 60
 ATTEMPT_CAP = 2       # automatic restarts of a failed review, per tip, per TTL
+
+# --- chunking / checkpoint (0.7.0) -------------------------------------------
+try:
+    _CHUNK_THRESHOLD = int(os.environ.get("OCR_CHUNK_THRESHOLD", "15"))
+    _CHUNK_THRESHOLD = max(1, _CHUNK_THRESHOLD)
+except ValueError:
+    _CHUNK_THRESHOLD = 15
+try:
+    _CHUNK_LINES = int(os.environ.get("OCR_CHUNK_LINES", "1200"))
+    _CHUNK_LINES = max(100, _CHUNK_LINES)
+except ValueError:
+    _CHUNK_LINES = 1200
+try:
+    _CHUNK_FILES = int(os.environ.get("OCR_CHUNK_FILES", "8"))
+    _CHUNK_FILES = max(1, _CHUNK_FILES)
+except ValueError:
+    _CHUNK_FILES = 8
+try:
+    _CHUNK_TIMEOUT = int(os.environ.get("OCR_CHUNK_TIMEOUT", "1200"))
+    _CHUNK_TIMEOUT = max(60, _CHUNK_TIMEOUT)
+except ValueError:
+    _CHUNK_TIMEOUT = 1200
+try:
+    _RUN_BUDGET = int(os.environ.get("OCR_RUN_BUDGET", "3600"))
+    _RUN_BUDGET = max(60, _RUN_BUDGET)
+except ValueError:
+    _RUN_BUDGET = 3600
+try:
+    _MAX_FILES = int(os.environ.get("OCR_MAX_FILES", "40"))
+    _MAX_FILES = max(1, _MAX_FILES)
+except ValueError:
+    _MAX_FILES = 40
+try:
+    _CHECKPOINT_TTL = int(os.environ.get("OCR_CHECKPOINT_TTL", str(24 * 3600)))
+    _CHECKPOINT_TTL = max(3600, _CHECKPOINT_TTL)
+except ValueError:
+    _CHECKPOINT_TTL = 24 * 3600
+# -----------------------------------------------------------------------------
+
 _EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 # git exports these to its own hooks (pre-push runs with GIT_DIR set, among
 # others). Inherited into a reviewer whose cwd is a detached worktree, they
@@ -327,6 +366,28 @@ class ReviewGateError(Exception):
     remain fail-open. The adapters add their own (see the module header) and
     Claude Code adds one more that no code here can reach: a hook that fails to
     launch or gets killed is treated as non-blocking.
+    """
+    def __init__(self, msg="", is_timeout=False):
+        super().__init__(msg)
+        self.is_timeout = is_timeout
+
+
+class ReviewLimitError(ReviewGateError):
+    """Raised when the reviewer hits a session/usage/rate limit.
+
+    Carries an optional resets_at epoch (float) parsed from the output;
+    None means unknown, so the gate applies a 15-minute default hold.
+    """
+    def __init__(self, msg="", resets_at=None):
+        super().__init__(msg)
+        self.resets_at = resets_at
+
+
+class _Fenced(Exception):
+    """Raised when _update_state_owned detects the run_id changed.
+
+    A supervisor that catches this exits without writing anything -- a newer
+    run owns the tip and must not be overwritten.
     """
 
 
@@ -1666,6 +1727,63 @@ _AUTH_MARKERS = (
     "expired credentials",
 )
 
+# Patterns that identify a session/usage/rate limit in the reviewer output.
+# Anchored to avoid false matches on "limit" as a generic word.
+_LIMIT_PATTERNS = [
+    re.compile(r"hit your (?:\w+ )?limit", re.IGNORECASE),
+    re.compile(r"usage limit reached", re.IGNORECASE),
+    re.compile(r"\brate limit\b", re.IGNORECASE),
+    re.compile(r"session limit", re.IGNORECASE),
+]
+_RESETS_AT_RE = re.compile(
+    r"resets\s+(\d{1,2}(?::\d{2})?(?:\s*[aApP][mM])?)\s*\(([^)]+)\)",
+    re.IGNORECASE,
+)
+
+
+def _parse_resets_at(text):
+    """Parse 'resets 3:20pm (Europe/Lisbon)' from text, return epoch or None."""
+    m = _RESETS_AT_RE.search(text or "")
+    if not m:
+        return None
+    time_str, tz_str = m.group(1).strip(), m.group(2).strip()
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(tz_str)
+    except Exception:
+        return None
+    try:
+        import datetime
+        ts = time_str.lower().replace(" ", "")
+        is_pm = ts.endswith("pm")
+        is_am = ts.endswith("am")
+        if is_pm or is_am:
+            ts = ts[:-2]
+        if ":" in ts:
+            h, m_val = int(ts.split(":")[0]), int(ts.split(":")[1])
+        else:
+            h, m_val = int(ts), 0
+        if is_pm and h != 12:
+            h += 12
+        elif is_am and h == 12:
+            h = 0
+        now = datetime.datetime.now(tz)
+        reset = now.replace(hour=h, minute=m_val, second=0, microsecond=0)
+        if reset <= now:
+            reset += datetime.timedelta(days=1)
+        return reset.timestamp()
+    except Exception:
+        return None
+
+
+def _check_limit(out_text, err_text=""):
+    """Check if output signals a usage limit. Returns (bool, resets_at_or_None)."""
+    combined = (out_text or "") + " " + (err_text or "")
+    for pat in _LIMIT_PATTERNS:
+        if pat.search(combined):
+            return True, _parse_resets_at(combined)
+    return False, None
+
 
 def _auth_hint(output):
     """Extra guidance when claude's output looks like a login/credentials failure.
@@ -1849,14 +1967,19 @@ def _test_reviewer_cmd():
     return argv
 
 
-def _run_review(repo_root, mode, git_dir=None, head_sha="", push_range=""):
+def _run_review(repo_root, mode, git_dir=None, head_sha="", push_range="",
+                paths_file=None, timeout=None, raw_tag=""):
     """Return (result_dict, True, raw_archive_name) on success.
 
-    Raises ReviewGateError on timeout, subprocess error, a non-zero claude exit
-    (the review never ran, so the output is an error string rather than
-    malformed JSON), or unparseable output, so that main() can fail the gate
-    closed.  Only 'claude not found' still returns (None, False) to allow the
-    commit — there is no gate without the tool.
+    paths_file: path to a chunk manifest JSON; if given, --paths-file is added
+      to the skill prompt so the reviewer processes only that chunk's files.
+    timeout: override the global TIMEOUT for this call (used by _run_chunked).
+    raw_tag: suffix appended to head_sha in the history filename so each
+      chunk's raw output gets a distinct file.
+
+    Raises ReviewGateError (with .is_timeout=True for timeouts),
+    ReviewLimitError when the reviewer reports a usage/session limit, or
+    returns (None, False, "") when claude is not installed (fail-open).
     """
     claude = _find_claude()
     if not claude:
@@ -1911,10 +2034,21 @@ def _run_review(repo_root, mode, git_dir=None, head_sha="", push_range=""):
 
     debug = _debug_enabled()
     creationflags = _WIN_FLAGS if sys.platform == "win32" else 0
-    cmd = [claude, "-p", PROMPT_RANGE.format(rng=push_range) if push_range else PROMPT] + args
+    if paths_file:
+        prompt = (PROMPT_RANGE.format(rng=push_range) if push_range else PROMPT)
+        prompt = prompt.rstrip(" --json")
+        prompt += f" --paths-file {paths_file} --json"
+    else:
+        prompt = PROMPT_RANGE.format(rng=push_range) if push_range else PROMPT
+    cmd = [claude, "-p", prompt] + args
     stub = _test_reviewer_cmd()
     if stub:
-        cmd = stub + [push_range]
+        # Range is always last so stub's sys.argv[-1] still gives the range.
+        if paths_file:
+            cmd = stub + ["--paths-file", paths_file, push_range]
+        else:
+            cmd = stub + [push_range]
+    _run_timeout = timeout if timeout is not None else TIMEOUT
     # Wall-clock for the log line (so it lines up with Event Viewer/Task
     # Manager timestamps when correlating with a crash); monotonic for the
     # duration math below, which a wall-clock adjustment mid-review must not
@@ -1977,7 +2111,7 @@ def _run_review(repo_root, mode, git_dir=None, head_sha="", push_range=""):
             global _ACTIVE_CHILD
             _ACTIVE_CHILD = proc
             try:
-                out_text, err_text = proc.communicate(timeout=TIMEOUT)
+                out_text, err_text = proc.communicate(timeout=_run_timeout)
             except subprocess.TimeoutExpired:
                 _kill_child(proc)
                 proc.communicate()
@@ -2019,23 +2153,32 @@ def _run_review(repo_root, mode, git_dir=None, head_sha="", push_range=""):
             )
         else:
             escalation = f"  Give Claude more time : OCR_TIMEOUT={TIMEOUT * 2} git push ..."
+        used = _run_timeout
         raise ReviewGateError(
-            f"review timed out after {TIMEOUT}s - blocking commit to preserve gate integrity.\n"
+            f"review timed out after {used}s - blocking commit to preserve gate integrity.\n"
             f"{escalation}\n"
-            f"{bypass}"
+            f"{bypass}",
+            is_timeout=True,
         )
     except Exception as exc:
         raise ReviewGateError(
             f"review process error ({exc}) - blocking commit to preserve gate integrity.\n"
             f"{bypass}"
         )
-    raw_name = _save_raw_output(git_dir, out_text, head_sha)
+    raw_name = _save_raw_output(git_dir, out_text, head_sha + raw_tag)
     # A non-zero exit means claude never got as far as producing a review, so the
     # output is an error string, not malformed JSON. Diagnose that separately:
     # reporting "could not parse review output" for a login failure sends people
     # looking at the review skill when the real fault is the CLI's credentials.
     # Note claude writes these errors to STDOUT, so stderr is often empty.
     if proc.returncode != 0:
+        # Check for usage/session limit before treating as a generic error.
+        is_limit, resets_at = _check_limit(out_text, err_text)
+        if is_limit:
+            raise ReviewLimitError(
+                f"usage limit (exit {proc.returncode}): the reviewer could not run.\n{bypass}",
+                resets_at=resets_at,
+            )
         # Strip BEFORE falling through: a whitespace-only stdout is truthy, so
         # `stdout or stderr` would select it and discard a real stderr message,
         # leaving detail empty and hiding why the review failed.
@@ -2050,7 +2193,14 @@ def _run_review(repo_root, mode, git_dir=None, head_sha="", push_range=""):
         )
     result = _extract_json(out_text)
     if result is None:
-        # Exit 0 but no JSON. Auth failures have been seen to exit 0 too
+        # Exit 0 but no JSON. Check for limit before auth hint.
+        is_limit, resets_at = _check_limit(out_text)
+        if is_limit:
+            raise ReviewLimitError(
+                f"usage limit (exit 0): the reviewer could not run.\n{bypass}",
+                resets_at=resets_at,
+            )
+        # Auth failures have been seen to exit 0 too
         # (the Desktop-bundled claude.exe does exactly this), so still check.
         raise ReviewGateError(
             "could not parse review output - blocking commit to preserve gate integrity.\n"
@@ -2275,6 +2425,18 @@ def _drive_review(common_dir, repo_root, meta, mode, budget):
             # silent too long: the supervisor is dead. Fall through to restart.
         elif s == "failed":
             fresh = now - float(st.get("failed_ts") or 0) < MARKER_TTL
+            # Immediate deny for a usage-limit failure: do not restart until
+            # resets_at has passed (or the 15-min default hold expires), unless
+            # OCR_FORCE_REVIEW=1 overrides.
+            if fresh and st.get("reason") == "limit" and not (force and not forced_once):
+                resets_at = st.get("resets_at")
+                if resets_at is not None:
+                    if now < float(resets_at):
+                        return st
+                else:
+                    # Unknown reset time: 15-minute default hold.
+                    if now - float(st.get("failed_ts") or 0) < 900:
+                        return st
             if fresh and int(st.get("attempts") or 0) >= ATTEMPT_CAP and not (force and not forced_once):
                 return st
             if forced_once:
@@ -2335,9 +2497,13 @@ def _supervise(state_path, run_id):
     if st.get("run_id") != run_id:
         return 0  # superseded before we even started
     repo_root = st.get("repo_root") or os.getcwd()
-    tip, branch, push_range = st.get("tip") or "", st.get("branch") or "", st.get("range") or ""
+    tip = st.get("tip") or ""
+    branch = st.get("branch") or ""
+    push_range = st.get("range") or ""
+    base = st.get("base") or ""
     git_dir = st.get("git_dir") or _git_dir(repo_root)
     mode = st.get("mode") or "hook"
+    common_dir = common_dir_of(state_path)
     now = time.time()
     st.update({"state": "running", "supervisor_pid": os.getpid(), "started_ts": now,
                "heartbeat_ts": now, "deadline_ts": now + TIMEOUT})
@@ -2372,11 +2538,20 @@ def _supervise(state_path, run_id):
     t.start()
 
     worktree, cwd_note = "", ""
+    # failure is (reason_str, detail_str) or (reason_str, detail_str, resets_at)
     failure = None
+    limit_info = None   # (resets_at, chunks_done, chunks_total) for limit failures
+    result, ran, raw_name = None, False, ""
     try:
         worktree = _make_worktree(repo_root, tip, run_id)
         if worktree:
             review_root = worktree
+            # Record worktree path in state so the reaper can protect it.
+            try:
+                _update_state_owned(state_path, run_id, worktree=worktree)
+            except _Fenced:
+                _remove_worktree(repo_root, worktree)
+                return 0
         else:
             review_root = repo_root
             cwd_note = (
@@ -2384,7 +2559,42 @@ def _supervise(state_path, run_id):
                 "reviewer read the LIVE working tree; findings may describe files as they "
                 "were during the review rather than at the pushed commit."
             )
-        result, ran, raw_name = _run_review(review_root, mode, git_dir, tip, push_range)
+
+        chunks, planner_warnings = _plan_chunks(review_root, base, tip)
+        if chunks is not None:
+            # Multi-chunk path: _run_chunked handles caching, fencing, budget.
+            result, ran, raw_name = _run_chunked(
+                state_path, run_id, common_dir, review_root, mode, git_dir,
+                tip, push_range, chunks, planner_warnings, fenced,
+            )
+            if planner_warnings and isinstance(result, dict):
+                result = dict(result)
+                result.setdefault("warnings", [])
+                result["warnings"] = list(planner_warnings) + list(result["warnings"])
+        else:
+            # Single-chunk path: exactly today's behaviour, same argv.
+            result, ran, raw_name = _run_review(
+                review_root, mode, git_dir, tip, push_range
+            )
+            if planner_warnings and isinstance(result, dict):
+                result = dict(result)
+                result.setdefault("warnings", [])
+                result["warnings"] = list(planner_warnings) + list(result["warnings"])
+    except _Fenced:
+        stop.set()
+        if worktree:
+            _remove_worktree(repo_root, worktree)
+        return 0  # a newer run owns this tip now; say nothing
+    except ReviewLimitError as exc:
+        # Usage limit: record without incrementing attempts.
+        cur_st = _read_state(state_path) or {}
+        limit_info = (
+            exc.resets_at,
+            int(cur_st.get("chunks_done") or 0),
+            int(cur_st.get("chunks_total") or 0),
+        )
+        failure = ("limit", str(exc))
+        result, ran, raw_name = None, False, ""
     except ReviewGateError as exc:
         failure = ("review", str(exc))
         result, ran, raw_name = None, False, ""
@@ -2400,9 +2610,35 @@ def _supervise(state_path, run_id):
     if st.get("run_id") != run_id or fenced["hit"]:
         return 0  # a newer run owns this tip now; say nothing
     if failure is not None:
-        st.update({"state": "failed", "failed_ts": time.time(),
-                   "attempts": int(st.get("attempts") or 0) + 1,
-                   "reason": failure[0], "detail": _sanitize(failure[1], 1500)})
+        cur_chunks_done = int(st.get("chunks_done") or 0)
+        if failure[0] == "limit":
+            resets_at, cd, ct = limit_info
+            st.update({
+                "state": "failed", "failed_ts": time.time(),
+                "reason": "limit", "detail": _sanitize(failure[1], 1500),
+                "resets_at": resets_at,
+                "chunks_done": cd, "chunks_total": ct,
+                # attempts unchanged: a limit is not an attempt
+            })
+        elif failure[0] == "review" and "budget" in failure[1]:
+            # Budget exhaustion: progress was made; reset attempts counter.
+            st.update({
+                "state": "failed", "failed_ts": time.time(),
+                "reason": "budget", "detail": _sanitize(failure[1], 1500),
+                "attempts": 0,
+                "chunks_done": cur_chunks_done,
+                "chunks_total": int(st.get("chunks_total") or 0),
+            })
+        else:
+            # Increment attempts only when no new chunks were completed.
+            new_attempts = int(st.get("attempts") or 0) + (
+                1 if cur_chunks_done == 0 else 0
+            )
+            st.update({
+                "state": "failed", "failed_ts": time.time(),
+                "attempts": new_attempts,
+                "reason": failure[0], "detail": _sanitize(failure[1], 1500),
+            })
         try:
             _write_state(state_path, st)
         except Exception:
@@ -2437,13 +2673,19 @@ def _supervise(state_path, run_id):
                 _reap_markers(git_dir, keep=marker)
             except Exception:
                 pass
-    st.update({
-        "state": "done", "done_ts": time.time(), "verdict": verdict,
-        "blocked": bool(blocked), "reasons": reasons,
-        "finding_count": len(result.get("findings") or []) if isinstance(result, dict) else 0,
-        "record": str(record) if record else "", "raw": raw_name,
-    })
-    _write_state(state_path, st)
+    try:
+        _update_state_owned(state_path, run_id, **{
+            "state": "done", "done_ts": time.time(), "verdict": verdict,
+            "blocked": bool(blocked), "reasons": reasons,
+            "finding_count": (
+                len(result.get("findings") or []) if isinstance(result, dict) else 0
+            ),
+            "record": str(record) if record else "", "raw": raw_name,
+        })
+    except _Fenced:
+        return 0  # superseded just before the final write; say nothing
+    except Exception:
+        pass
     _reap_async(common_dir_of(state_path))
     return 0
 
@@ -2491,25 +2733,560 @@ def _remove_worktree(repo_root, path):
 
 
 def _reap_async(common_dir):
-    """Drop async state and logs older than MARKER_TTL, and stray worktrees."""
+    """Drop async state/logs older than MARKER_TTL; chunks use CHECKPOINT_TTL.
+
+    The worktree sweep skips any worktree owned by a running state whose
+    heartbeat is younger than STALE_S.  Chunk cache files live in chunks/ and
+    are swept on their own longer TTL.
+    """
     try:
-        cutoff = time.time() - MARKER_TTL
+        now = time.time()
+        cutoff = now - MARKER_TTL
+        chunk_cutoff = now - _CHECKPOINT_TTL
+
+        # Collect live-run worktree paths so the sweep below can skip them.
+        live_worktrees = set()
+        for p in _async_dir(common_dir).glob("*.json"):
+            try:
+                st = _read_state(p) or {}
+                if st.get("state") in ("running", "claimed"):
+                    hb = float(st.get("heartbeat_ts") or st.get("claimed_ts") or 0)
+                    if now - hb < STALE_S:
+                        wt = st.get("worktree")
+                        if wt:
+                            live_worktrees.add(os.path.realpath(str(wt)))
+            except Exception:
+                continue
+
         for p in _async_dir(common_dir).glob("*"):
             try:
-                if p.stat().st_mtime < cutoff:
+                if p.is_dir() and p.name == "chunks":
+                    # Chunk cache: separate, longer TTL; skip each file individually.
+                    for cp in p.iterdir():
+                        try:
+                            if cp.is_file() and cp.stat().st_mtime < chunk_cutoff:
+                                cp.unlink()
+                        except OSError:
+                            continue
+                    continue
+                if p.is_file() and p.stat().st_mtime < cutoff:
                     p.unlink()
             except OSError:
                 continue
+
         wts = _gate_data_dir() / "worktrees"
         if wts.is_dir():
             for p in wts.iterdir():
                 try:
-                    if p.is_dir() and p.stat().st_mtime < cutoff:
-                        shutil.rmtree(p, ignore_errors=True)
+                    if p.is_dir():
+                        if os.path.realpath(str(p)) in live_worktrees:
+                            continue  # protected: belongs to a live run
+                        if p.stat().st_mtime < cutoff:
+                            shutil.rmtree(p, ignore_errors=True)
                 except OSError:
                     continue
     except Exception:
         pass
+
+
+# --- chunking helpers (0.7.0) -------------------------------------------------
+
+# Allowed source extensions — must stay in sync with skills/review/allowlist.md.
+# A parity test in tests/test_review_gate.py verifies this.
+_ALLOWED_EXTS = frozenset({
+    ".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".hh", ".cs", ".go", ".rs",
+    ".java", ".kt", ".kts", ".scala", ".swift", ".py", ".pyi", ".rb",
+    ".rake", ".gemspec", ".php", ".pl", ".pm", ".lua", ".r", ".jl", ".dart",
+    ".groovy", ".ex", ".exs", ".erl", ".hrl", ".ets", ".clj", ".cljs", ".vb",
+    ".fs", ".m", ".mm", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".vue",
+    ".svelte", ".astro", ".sql", ".sh", ".bash", ".zsh", ".fish", ".ps1",
+    ".psm1", ".html", ".htm", ".css", ".scss", ".sass", ".less", ".tf",
+    ".hcl", ".proto", ".graphql", ".gql", ".ftl", ".ftlh", ".ftlx",
+    ".po", ".pot",
+})
+
+# Directory names that are always excluded from review.
+_EXCLUDED_DIRS = frozenset({
+    "vendor", "node_modules", "dist", "build", "out", "target",
+    ".next", "__generated__", ".git", ".idea", ".vscode",
+    "tests", "__tests__", "testdata",
+})
+
+# Exact filenames that are always excluded (lockfiles).
+_EXCLUDED_FILES = frozenset({
+    "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "go.sum",
+    "cargo.lock", "poetry.lock", "composer.lock",
+})
+
+_EXCLUDED_SUFFIX_RE = re.compile(
+    r'(\.min\.js|\.pb\.go|\.generated\.[^/\\]+)$', re.IGNORECASE
+)
+_EXCLUDED_TEST_RE = re.compile(
+    r'(_test\.go|\.test\.(js|jsx|ts|tsx)|\.spec\.(js|jsx|ts|tsx)'
+    r'|/test_[^/]+\.py|/_?[^/]*_test\.py)$', re.IGNORECASE
+)
+_CTRL_CHAR_RE = re.compile(r'[\x00-\x1f\x7f]')
+
+
+def _is_allowed_path(path):
+    """True if this path should be reviewed per allowlist.md."""
+    name = os.path.basename(path)
+    if name.lower() in _EXCLUDED_FILES:
+        return False
+    ext = os.path.splitext(name)[1].lower()
+    if ext not in _ALLOWED_EXTS:
+        return False
+    if _EXCLUDED_SUFFIX_RE.search(name):
+        return False
+    norm = path.replace("\\", "/")
+    parts = norm.split("/")
+    if any(p.lower() in _EXCLUDED_DIRS for p in parts[:-1]):
+        return False
+    if _EXCLUDED_TEST_RE.search(norm):
+        return False
+    return True
+
+
+def _blob_oids_at(root, tip, paths):
+    """Return {path: oid} for the given paths at tip. Missing paths map to ''."""
+    if not paths or not tip:
+        return {p: "" for p in paths}
+    out, rc = _git(
+        ["ls-tree", "-r", "--full-tree", tip, "--"] + list(paths), cwd=root
+    )
+    result = {}
+    if rc == 0:
+        for line in out.splitlines():
+            tab = line.find("\t")
+            if tab == -1:
+                continue
+            meta, fpath = line[:tab].split(), line[tab + 1:]
+            if len(meta) >= 3:
+                result[fpath] = meta[2]
+    for p in paths:
+        if p not in result:
+            result[p] = ""
+    return result
+
+
+def _ocr_tree_oid(root, tip):
+    """SHA1 of the .ocr/ tree at tip, or "" if not present."""
+    out, rc = _git(["ls-tree", "--full-tree", tip, "--", ".ocr"], cwd=root)
+    if rc != 0 or not out:
+        return ""
+    parts = out.split()
+    return parts[2] if len(parts) >= 3 else ""
+
+
+def _plugin_version():
+    """Version from .claude-plugin/plugin.json, or "" on error."""
+    try:
+        pj = Path(_PLUGIN_ROOT) / ".claude-plugin" / "plugin.json"
+        return json.loads(pj.read_text(encoding="utf-8")).get("version", "")
+    except Exception:
+        return ""
+
+
+def _chunk_id(entries, ocr_tree_oid=""):
+    """Content-addressed SHA-256 key for a chunk (base/tip not included)."""
+    key_entries = sorted([
+        (e["path"], e.get("old_path") or "", e["old_oid"], e["new_oid"])
+        for e in entries
+    ])
+    key = json.dumps(
+        {"entries": key_entries, "model": _MODEL,
+         "version": _plugin_version(), "ocr": ocr_tree_oid},
+        sort_keys=True, ensure_ascii=False,
+    )
+    return hashlib.sha256(key.encode()).hexdigest()
+
+
+def _chunk_cache_dir(common_dir):
+    return _async_dir(common_dir) / "chunks"
+
+
+def _chunk_cache_path(common_dir, chunk_id):
+    return _chunk_cache_dir(common_dir) / f"{chunk_id[:24]}.json"
+
+
+def _read_chunk_cache(common_dir, chunk_id):
+    """Return the cached chunk dict, or None if missing/unreadable."""
+    try:
+        data = json.loads(
+            _chunk_cache_path(common_dir, chunk_id).read_text(encoding="utf-8")
+        )
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _write_chunk_cache(common_dir, chunk_id, entries, result, tip):
+    """Atomically write a chunk result to the content-addressed cache."""
+    path = _chunk_cache_path(common_dir, chunk_id)
+    data = {
+        "chunk_id": chunk_id, "entries": entries, "result": result,
+        "computed_at_tip": tip, "completed_ts": time.time(),
+    }
+    _write_state(path, data)
+
+
+def _validate_chunk_cache(cache, root, tip):
+    """Return True if the cached chunk is still usable at tip.
+
+    Checks: result has findings key; every finding's path has the same blob
+    at the current tip as at computed_at_tip (a changed file makes the finding
+    potentially stale).
+    """
+    result = cache.get("result")
+    if not isinstance(result, dict) or "findings" not in result:
+        return False
+    computed_at_tip = cache.get("computed_at_tip")
+    if not computed_at_tip or computed_at_tip == tip:
+        return True  # same tip or unknown: no staleness check needed
+    findings = result.get("findings") or []
+    finding_paths = list({f.get("path") for f in findings if f.get("path")})
+    if not finding_paths:
+        return True
+    oids_now = _blob_oids_at(root, tip, finding_paths)
+    oids_then = _blob_oids_at(root, computed_at_tip, finding_paths)
+    return all(oids_now.get(p) == oids_then.get(p) for p in finding_paths)
+
+
+def _collect_diff_entries(root, base, tip):
+    """Return (entries, warnings) for the range base..tip.
+
+    Each entry: {path, old_path, status, old_oid, new_oid, lines}.
+    Returns (None, warnings) on a git error.
+    """
+    raw_out, rc = _git(
+        ["diff", "--raw", "-M", "--full-index", f"{base}..{tip}"], cwd=root
+    )
+    if rc != 0:
+        return None, ["could not run git diff --raw; skipping chunking"]
+
+    stat_out, _ = _git(["diff", "-M", "--numstat", f"{base}..{tip}"], cwd=root)
+
+    entries = {}
+    warnings = []
+    for line in raw_out.splitlines():
+        if not line.startswith(":"):
+            continue
+        parts = line[1:].split("\t", 2)
+        if not parts:
+            continue
+        meta = parts[0].split()
+        if len(meta) < 5:
+            continue
+        old_oid, new_oid, status_score = meta[2], meta[3], meta[4]
+        status = status_score[0]
+        if status == "D" or new_oid.strip("0") == "":
+            continue  # pure deletion
+        if status in ("R", "C") and len(parts) >= 3:
+            old_path, new_path = parts[1], parts[2]
+        elif len(parts) >= 2:
+            old_path = new_path = parts[1]
+        else:
+            continue
+        for p in (old_path, new_path):
+            if _CTRL_CHAR_RE.search(p):
+                warnings.append(f"skipped {p!r}: path contains control characters")
+                break
+        else:
+            entries[new_path] = {
+                "path": new_path,
+                "old_path": old_path if old_path != new_path else "",
+                "status": status_score,
+                "old_oid": old_oid,
+                "new_oid": new_oid,
+                "lines": 0,
+            }
+
+    # Fill in line counts from numstat.
+    _RENAME_RE = re.compile(r'\{([^}]*) => ([^}]*)\}')
+    for line in (stat_out or "").splitlines():
+        parts = line.split("\t", 2)
+        if len(parts) < 3:
+            continue
+        added_s, deleted_s, path_s = parts
+        if added_s == "-" or deleted_s == "-":
+            continue  # binary
+        try:
+            lines = int(added_s) + int(deleted_s)
+        except ValueError:
+            continue
+        m = _RENAME_RE.search(path_s)
+        if m:
+            prefix, suffix = path_s[:m.start()], path_s[m.end():]
+            new_path = (prefix + m.group(2) + suffix).replace("//", "/")
+        else:
+            new_path = path_s
+        if new_path in entries:
+            entries[new_path]["lines"] = lines
+
+    return list(entries.values()), warnings
+
+
+def _group_into_chunks(entries):
+    """Group by top-level directory, splitting at CHUNK_LINES / CHUNK_FILES."""
+    by_dir = {}
+    for e in entries:
+        top = e["path"].split("/")[0] if "/" in e["path"] else ""
+        by_dir.setdefault(top, []).append(e)
+
+    chunks, current, current_lines = [], [], 0
+    for dir_entries in by_dir.values():
+        for e in dir_entries:
+            if e["lines"] > _CHUNK_LINES:
+                # Oversized file: flush, then give it its own chunk.
+                if current:
+                    chunks.append(current)
+                current, current_lines = [], 0
+                chunks.append([e])
+                continue
+            if current and (current_lines + e["lines"] > _CHUNK_LINES
+                            or len(current) >= _CHUNK_FILES):
+                chunks.append(current)
+                current, current_lines = [], 0
+            current.append(e)
+            current_lines += e["lines"]
+    if current:
+        chunks.append(current)
+    return chunks if chunks else [[]]
+
+
+def _plan_chunks(root, base, tip):
+    """Return (None, warnings) for single-chunk mode, or (chunks, warnings).
+
+    Returns None when the reviewable file count is <= _CHUNK_THRESHOLD so the
+    caller uses exactly today's single-context path.  Above the threshold
+    returns a list of lists of entry dicts.
+    """
+    if not base:
+        base = _EMPTY_TREE
+    entries, warnings = _collect_diff_entries(root, base, tip)
+    if entries is None:
+        return None, warnings
+
+    allowed = [e for e in entries if _is_allowed_path(e["path"])]
+    if not allowed:
+        return None, warnings
+
+    if len(allowed) > _MAX_FILES:
+        allowed.sort(key=lambda e: e["lines"], reverse=True)
+        skipped = len(allowed) - _MAX_FILES
+        warnings.append(
+            f"file ceiling: {skipped} file(s) skipped (only the {_MAX_FILES} with "
+            "the largest diffs are reviewed; set OCR_MAX_FILES to raise the cap)"
+        )
+        allowed = allowed[:_MAX_FILES]
+
+    if len(allowed) <= _CHUNK_THRESHOLD:
+        return None, warnings  # below threshold: single-context mode
+
+    return _group_into_chunks(allowed), warnings
+
+
+def _update_state_owned(state_path, run_id, **fields):
+    """Fence-checked state update under _StateLock.
+
+    Raises _Fenced when another run has taken over (run_id mismatch).
+    """
+    with _StateLock(state_path):
+        st = _read_state(state_path) or {}
+        if st.get("run_id") != run_id:
+            raise _Fenced()
+        st.update(fields)
+        _write_state(state_path, st)
+    return st
+
+
+def _findings_overlap(f1, f2):
+    """True when two findings' line ranges overlap."""
+    try:
+        s1, e1 = int(f1.get("start_line") or 0), int(f1.get("end_line") or 0)
+        s2, e2 = int(f2.get("start_line") or 0), int(f2.get("end_line") or 0)
+        e1 = e1 or s1
+        e2 = e2 or s2
+        return s1 <= e2 and s2 <= e1 and (s1 or s2) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _findings_similar(f1, f2):
+    """True when two findings have the same path, severity, and overlapping title."""
+    if f1.get("path") != f2.get("path"):
+        return False
+    if f1.get("severity") != f2.get("severity"):
+        return False
+    if not _findings_overlap(f1, f2):
+        return False
+    def _norm(f):
+        c = re.sub(r'\s+', ' ', str(f.get("content") or "").lower().strip())
+        return c[:60]
+    return _norm(f1) == _norm(f2)
+
+
+def _merge_near_dup_findings(findings):
+    """Remove near-duplicates; keep the one with higher confidence."""
+    kept = []
+    for f in findings:
+        merged = False
+        for i, k in enumerate(kept):
+            if _findings_similar(k, f):
+                if float(f.get("confidence") or 0) > float(k.get("confidence") or 0):
+                    kept[i] = f
+                merged = True
+                break
+        if not merged:
+            kept.append(f)
+    return kept
+
+
+def _merge_chunk_results(chunk_results, planner_warnings=None):
+    """Merge chunk review results into one combined result dict."""
+    all_findings = []
+    all_warnings = list(planner_warnings or [])
+    worst = "pass"
+    for r in chunk_results:
+        if not isinstance(r, dict):
+            continue
+        all_findings.extend(r.get("findings") or [])
+        all_warnings.extend(r.get("warnings") or [])
+        s = r.get("status") or r.get("verdict") or "pass"
+        if s == "block" or worst == "block":
+            worst = "block"
+        elif s in ("warn", "block") or worst == "warn":
+            worst = "warn"
+    merged = _merge_near_dup_findings(all_findings)
+    return {
+        "status": worst, "verdict": worst,
+        "findings": merged, "warnings": all_warnings,
+        "summary": f"merged {len(chunk_results)} chunk(s): {len(merged)} finding(s)",
+    }
+
+
+def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
+                 tip, push_range, chunks, planner_warnings, fenced):
+    """Run per-chunk reviews with caching, fencing, budget and retry.
+
+    Returns (merged_result, True, "chunked") on success.
+    Raises ReviewLimitError, ReviewGateError (including budget exhaustion),
+    or _Fenced when the supervisor has been superseded.
+    """
+    total = len(chunks)
+    ocr_oid = _ocr_tree_oid(review_root, tip)
+    budget_end = time.monotonic() + _RUN_BUDGET
+    chunk_results = []
+    chunks_done = 0
+
+    for k, chunk_entries in enumerate(chunks):
+        if fenced["hit"]:
+            raise _Fenced()
+
+        cid = _chunk_id(chunk_entries, ocr_oid)
+
+        # Progress update (fence-checked).
+        try:
+            _update_state_owned(
+                state_path, run_id,
+                chunk_index=k, chunks_total=total, chunks_done=chunks_done,
+            )
+        except _Fenced:
+            raise
+
+        # Reuse cached result if still valid.
+        cached = _read_chunk_cache(common_dir, cid)
+        if cached is not None and _validate_chunk_cache(cached, review_root, tip):
+            try:
+                _chunk_cache_path(common_dir, cid).touch(exist_ok=True)
+            except Exception:
+                pass
+            chunk_results.append(cached["result"])
+            chunks_done += 1
+            continue
+
+        # Check run budget before starting a new chunk.
+        if time.monotonic() > budget_end:
+            try:
+                _update_state_owned(
+                    state_path, run_id,
+                    chunks_done=chunks_done, chunks_total=total,
+                )
+            except _Fenced:
+                raise
+            raise ReviewGateError(
+                f"run budget ({_RUN_BUDGET}s) exhausted after "
+                f"{chunks_done}/{total} chunks; re-push to resume"
+            )
+
+        # Write manifest for this chunk.
+        manifest_path = str(
+            _async_dir(common_dir) / f"manifest-{run_id}-{k}.json"
+        )
+        other_changed = [
+            e["path"] for i, ch in enumerate(chunks)
+            for e in ch if i != k
+        ]
+        manifest = {
+            "chunk_index": k, "chunks_total": total,
+            "paths": [e["path"] for e in chunk_entries],
+            "renames": [
+                [e["old_path"], e["path"]]
+                for e in chunk_entries if e.get("old_path")
+            ],
+            "other_changed": other_changed,
+        }
+        try:
+            Path(manifest_path).write_text(
+                json.dumps(manifest, ensure_ascii=False), encoding="utf-8"
+            )
+        except Exception:
+            pass
+
+        # Clean worktree so one chunk can't leave state for the next.
+        _git(["clean", "-fdxq"], cwd=review_root)
+        _git(["checkout", "-q", "--", "."], cwd=review_root)
+
+        # Run the review (retry once on non-timeout errors).
+        result = None
+        last_exc = None
+        for attempt in range(2):
+            if fenced["hit"]:
+                raise _Fenced()
+            try:
+                result, _, _ = _run_review(
+                    review_root, mode, git_dir, tip, push_range,
+                    paths_file=manifest_path,
+                    timeout=_CHUNK_TIMEOUT,
+                    raw_tag=f"-c{k}",
+                )
+                last_exc = None
+                break
+            except ReviewLimitError:
+                raise  # propagate immediately; do not retry limits
+            except ReviewGateError as exc:
+                last_exc = exc
+                if exc.is_timeout or attempt > 0:
+                    raise
+                # Non-timeout error: retry once.
+                continue
+        if last_exc is not None:
+            raise last_exc
+
+        # Persist and record.
+        _write_chunk_cache(common_dir, cid, chunk_entries, result, tip)
+        chunk_results.append(result)
+        chunks_done += 1
+
+        try:
+            _update_state_owned(
+                state_path, run_id,
+                chunks_done=chunks_done, chunk_index=k, chunks_total=total,
+            )
+        except _Fenced:
+            raise
+
+    return _merge_chunk_results(chunk_results, planner_warnings), True, "chunked"
 
 
 def _mode_supervise(argv):
@@ -2531,6 +3308,10 @@ def _still_running_reason(st, budget, mode):
     stamp = time.strftime("%H:%MZ", time.gmtime(started))
     n = st.get("commit_count")
     count = f", {n} commit(s)" if n else ""
+    # Show chunk progress when the chunked reviewer is running.
+    cd, ct = st.get("chunks_done"), st.get("chunks_total")
+    if cd is not None and ct:
+        count += f", chunk {int(cd) + 1}/{int(ct)}"
     retry = "re-run this exact `git push` command" if mode == "hook" else "run the push again"
     return (
         f"review-gate: the review of {branch} ({tip}{count}) is still running "
@@ -2546,6 +3327,25 @@ def _failed_reason(st, mode):
     why = _sanitize(str(st.get("reason") or "error"), 40)
     detail = str(st.get("detail") or "")
     attempts = int(st.get("attempts") or 0)
+    if why == "limit":
+        # Usage-limit failure: show chunk progress and reset time.
+        cd = int(st.get("chunks_done") or 0)
+        ct = int(st.get("chunks_total") or 0)
+        progress = f" — {cd}/{ct} chunks saved" if ct else ""
+        resets_at = st.get("resets_at")
+        if resets_at:
+            try:
+                import datetime
+                when = datetime.datetime.fromtimestamp(float(resets_at)).strftime("%H:%M")
+                after = f"after {when}"
+            except Exception:
+                after = "after ~15 min"
+        else:
+            after = "after ~15 min"
+        return (
+            f"review-gate: usage limit{progress}; re-push {after}; "
+            f"OCR_FORCE_REVIEW=1 retries now\n{_bypass_hint(mode)}"
+        )
     head = f"review-gate: the review could not complete ({why}) - blocking to preserve gate integrity.\n"
     if attempts >= ATTEMPT_CAP:
         head += (
@@ -3052,12 +3852,17 @@ def _mode_resume(argv):
         branch = _sanitize(str(st.get("branch") or "?"), 80)
         if s in ("running", "claimed"):
             alive = time.time() - float(st.get("heartbeat_ts") or st.get("claimed_ts") or 0) < STALE_S
-            what = "is still running" if alive else "was interrupted"
+            cd, ct = st.get("chunks_done"), st.get("chunks_total")
+            chunk_note = f", chunk {int(cd) + 1}/{int(ct)}" if cd is not None and ct else ""
+            what = ("is still running" + chunk_note) if alive else "was interrupted"
         elif s == "done":
             what = "finished: " + ("BLOCKED" if st.get("blocked") else
                                    _sanitize(str(st.get("verdict") or "?"), 20))
         else:
-            what = "failed (" + _sanitize(str(st.get("reason") or "error"), 40) + ")"
+            why = _sanitize(str(st.get("reason") or "error"), 40)
+            cd, ct = st.get("chunks_done"), st.get("chunks_total")
+            chunk_note = f", {cd}/{ct} chunks saved" if cd is not None and ct else ""
+            what = f"failed ({why}{chunk_note})"
         lines.append(f"  - {branch} @ {tip}: {what}")
     if not lines:
         return 0

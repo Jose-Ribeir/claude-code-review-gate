@@ -148,6 +148,13 @@ git push --no-verify
 | Bypass once | — | `OCR_FAIL_OPEN=1` in Claude Code's launch environment | skip the gate for one push (`--no-verify` is refused through Claude Code: it would disable the git-hook backstop) |
 | Findings log | `.git/review-gate-findings.jsonl` | — | one JSON line per completed review, **append-only and never pruned** |
 | Raw-output snapshots | newest `50`, in `.git/review-gate-history/` | `OCR_HISTORY_LIMIT` (`0` = keep all) | full reviewer stdout per run |
+| Chunk threshold | `15` files | `OCR_CHUNK_THRESHOLD` | pushes with more than this many reviewable files are split into per-directory chunks reviewed one at a time; below the threshold the whole diff is reviewed in a single context (today's behaviour) |
+| Files per chunk | `8` | `OCR_CHUNK_FILES` | maximum number of files in one chunk; a directory group that exceeds this is split further |
+| Lines per chunk | `1200` | `OCR_CHUNK_LINES` | maximum added+deleted lines per chunk; an individual file over this limit gets its own chunk |
+| Per-chunk timeout | `1200`s | `OCR_CHUNK_TIMEOUT` | `claude -p` deadline per chunk; a timeout fails closed and is not retried |
+| Per-run budget | `3600`s | `OCR_RUN_BUDGET` | wall-clock budget for the whole chunked run; when the next chunk can't start within it the supervisor writes `failed(budget)` and the next push resumes from the checkpoint |
+| File ceiling | `40` | `OCR_MAX_FILES` | maximum reviewable files across all chunks; the largest-diff files are kept when the ceiling fires |
+| Chunk cache TTL | `86400`s (24 h) | `OCR_CHECKPOINT_TTL` | how long a completed chunk's result is kept in `.git/review-gate-async/chunks/`; re-pushing the same tip before expiry reuses cached chunks without re-reviewing them |
 
 Rule precedence (highest first): `--rule` → project `.ocr/rule.json` → global `~/.ocr/rule.json` → built-in `skills/review/rubric.md`, then the matching `skills/review/rules/<lang>.md` and `rules/llm-authored-code.md` appended. See `examples/.ocr/rule.json`.
 

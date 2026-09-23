@@ -39,9 +39,22 @@ You are orchestrating an AI code review. Follow these steps exactly.
   push gate relies on this. Without it, print a human-readable report.
 - `--rule <path>` — explicit rule file (highest precedence).
 - `--summary` — also produce a project summary (implied by `--scan`).
+- `--paths-file <json>` — path to a JSON manifest written by the push gate for
+  chunked reviews. When present, the file list is taken **exclusively** from the
+  manifest's `paths` array instead of being derived from git; the `range` field
+  in the manifest (if present) overrides `--range` for per-file diff commands.
+  File selection (allowlist filtering, safety ceiling) is still applied, but the
+  initial enumeration step is skipped.
 - Any non-flag arguments are treated as path filters (files or directories).
 
 ## 1. Select files and collect diffs
+
+**`--paths-file` fast path:** if `--paths-file <json>` was given, parse the
+manifest. Take the file list from `manifest.paths`. Use `manifest.range` as the
+revision range for per-file diff commands (fall back to the `--range` argument if
+the manifest lacks it). Skip the "Determine the revision range" block and the file
+enumeration commands below — go straight to allowlist filtering and diff
+collection using the manifest's paths and range.
 
 **Determine the revision range** for `--unpushed`:
 0. If `--range <A>..<B>` was given, use it verbatim as `<range>` and skip the

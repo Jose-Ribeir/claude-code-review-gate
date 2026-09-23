@@ -6,6 +6,42 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-23
+
+### Added
+- **Checkpointed, serialised push reviews.** Large pushes (> `OCR_CHUNK_THRESHOLD`,
+  default 15 reviewable files) are now split into per-directory file-group *chunks*
+  and reviewed one at a time. Each completed chunk is written to a content-addressed
+  cache (`.git/review-gate-async/chunks/`) before the next one starts. An
+  interruption (kill, reboot, session limit, run-budget exhaustion) costs at most one
+  chunk; the next push resumes automatically from where it stopped. A follow-up push
+  that amends one file reuses every cached chunk whose files' blobs did not change.
+- **Usage-limit detection.** When the reviewer outputs a session-limit message (e.g.
+  `You've hit your session limit · resets 3:20pm (Europe/Lisbon)`), the gate raises
+  `ReviewLimitError`, records `failed(reason=limit, chunks_done, resets_at)` and
+  immediately denies the push with `"usage limit — N/M chunks saved; re-push after
+  <time>"`. The attempt counter is not incremented (it only counts runs that made
+  no progress). After the reset, a normal re-push resumes from the checkpoint.
+- **Per-run budget** (`OCR_RUN_BUDGET`, default 3600 s). When the next chunk cannot
+  start within the budget, the supervisor writes `failed(reason contains "budget")`
+  and the next push resumes. Budget exhaustion never increments attempts; it just
+  pauses progress without losing what was done.
+- **`--paths-file`** in `skills/review/SKILL.md`. The push gate passes a per-chunk
+  JSON manifest so the skill reviewer reads only the chunk's files, with the correct
+  range and rename context.
+- **Chunk progress** shown in "still running" and "resume" messages:
+  `chunk 4/12, 3 saved`.
+- New env vars: `OCR_CHUNK_THRESHOLD`, `OCR_CHUNK_FILES`, `OCR_CHUNK_LINES`,
+  `OCR_CHUNK_TIMEOUT`, `OCR_RUN_BUDGET`, `OCR_MAX_FILES`, `OCR_CHECKPOINT_TTL`.
+
+### Fixed
+- **Reaper now protects live-run worktrees.** The hourly sweep previously deleted
+  any worktree older than 1 h regardless of whether its supervisor was still
+  running. It now reads every `running` state file, collects live-heartbeat
+  worktrees, and skips them.
+- **Chunk-cache files use a separate 24-hour TTL** (`OCR_CHECKPOINT_TTL`), so they
+  survive the 1-hour marker sweep that would have evicted them on every run.
+
 ## [0.6.1] - 2026-09-23
 
 ### Fixed

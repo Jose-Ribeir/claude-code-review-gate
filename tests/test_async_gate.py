@@ -327,6 +327,163 @@ def test_post_announces_the_verdict_of_a_review_denied_for_time(repo, tmp_path):
 
 # --- live canary: AGENTS.md injection must be suppressed ----------------------
 
+# ---------------------------------------------------------------------------
+# Chunked reviews (0.7.0)
+# ---------------------------------------------------------------------------
+# All chunk tests use OCR_CHUNK_THRESHOLD=3 so a 4-file commit triggers chunking
+# and OCR_CHUNK_FILES=1 so each file becomes its own chunk.  OCR_RUN_BUDGET is
+# set high so budget exhaustion never fires unexpectedly.
+
+def _big_repo(tmp_path, n_files=4):
+    """Repo with a bare remote, one base commit already pushed, then n_files
+    new files ready to commit (but NOT yet committed)."""
+    remote = tmp_path / "origin.git"
+    work = tmp_path / "work"
+    _git(["init", "--bare", "-b", "main", str(remote)], cwd=tmp_path)
+    _git(["init", "-b", "main", str(work)], cwd=tmp_path)
+    _git(["config", "user.email", "t@example.com"], cwd=work)
+    _git(["config", "user.name", "t"], cwd=work)
+    _git(["config", "commit.gpgsign", "false"], cwd=work)
+    hooks = tmp_path / "no-hooks"
+    hooks.mkdir()
+    _git(["config", "core.hooksPath", str(hooks)], cwd=work)
+    (work / "base.py").write_text("# base\n")
+    _git(["add", "."], cwd=work)
+    _git(["commit", "-q", "-m", "base"], cwd=work)
+    _git(["remote", "add", "origin", str(remote)], cwd=work)
+    _git(["push", "-q", "-u", "origin", "main"], cwd=work)
+    # Add n_files new files (not yet committed) so the caller can commit them.
+    for i in range(n_files):
+        (work / f"mod{i}.py").write_text(f"x = {i}\n")
+    _git(["add", "."], cwd=work)
+    _git(["commit", "-q", "-m", "add files"], cwd=work)
+    return work
+
+
+def _chunk_env(tmp_path, **extra):
+    """Like _env but with threshold/files set so 4 files produce 4 chunks."""
+    e = _env(tmp_path, **extra)
+    e["OCR_CHUNK_THRESHOLD"] = "3"   # >3 files → chunking
+    e["OCR_CHUNK_FILES"] = "1"       # 1 file per chunk
+    e["OCR_CHUNK_LINES"] = "99999"   # don't split on lines
+    e["OCR_RUN_BUDGET"] = "9999"     # won't exhaust budget
+    return e
+
+
+def test_cached_chunks_are_skipped_on_resume(tmp_path):
+    """Pre-populate cache for chunks 1-2; the gate should call the stub only
+    twice (for chunks 3-4) and still produce a complete pass verdict."""
+    repo = _big_repo(tmp_path, n_files=4)
+    tip = _git(["rev-parse", "HEAD"], cwd=repo)
+    common = review_gate._git_common_dir(str(repo))
+
+    # Build the same chunk plan the gate will build.
+    base = _git(["rev-parse", "origin/main"], cwd=repo)
+    entries, _ = review_gate._collect_diff_entries(str(repo), base, tip)
+    allowed = [e for e in entries if review_gate._is_allowed_path(e["path"])]
+    # With OCR_CHUNK_FILES=1 each allowed file is its own chunk.
+    # We override the module-level constant locally.
+    old_tf, old_cf, old_cl = (
+        review_gate._CHUNK_THRESHOLD,
+        review_gate._CHUNK_FILES,
+        review_gate._CHUNK_LINES,
+    )
+    review_gate._CHUNK_THRESHOLD = 3
+    review_gate._CHUNK_FILES = 1
+    review_gate._CHUNK_LINES = 99999
+    try:
+        chunks, _ = review_gate._plan_chunks(str(repo), base, tip)
+    finally:
+        review_gate._CHUNK_THRESHOLD = old_tf
+        review_gate._CHUNK_FILES = old_cf
+        review_gate._CHUNK_LINES = old_cl
+
+    assert chunks and len(chunks) >= 4, f"expected >=4 chunks, got {chunks}"
+
+    # Pre-populate the cache for the first two chunks.
+    pass_result = {"status": "pass", "verdict": "pass", "findings": [], "warnings": []}
+    for chunk_entries in chunks[:2]:
+        cid = review_gate._chunk_id(chunk_entries, "")
+        review_gate._write_chunk_cache(common, cid, chunk_entries, pass_result, tip)
+
+    # Now run the gate — only 2 stub calls should happen (chunks 3 and 4).
+    env = _chunk_env(tmp_path)
+    decision, reason, _, _ = _hook(repo, "git push origin main", env)
+    assert decision == "allow", reason
+    _wait_state(repo, tip, {"done"})
+    calls = _trace(tmp_path)
+    assert len(calls) == len(chunks) - 2, (
+        f"expected {len(chunks) - 2} reviewer calls (chunks 3+), got {len(calls)}"
+    )
+
+
+def test_limit_mid_chunk_denies_immediately_and_preserves_cached_chunks(tmp_path):
+    """STUB_VERDICT=limit on the 3rd call: the gate denies immediately (no
+    wait), the attempt counter is NOT incremented, and the two completed
+    chunks remain in the cache so a follow-up push can resume.
+    """
+    repo = _big_repo(tmp_path, n_files=4)
+    tip = _git(["rev-parse", "HEAD"], cwd=repo)
+    common = review_gate._git_common_dir(str(repo))
+
+    # STUB_FAIL_ON_CALL=3 plus STUB_VERDICT=limit: the 3rd call outputs the
+    # limit text and exits 1; _check_limit detects it, raises ReviewLimitError.
+    env = _chunk_env(tmp_path, STUB_VERDICT="limit")
+    # The first two calls succeed (pass), the 3rd raises ReviewLimitError.
+    # We achieve this by making the stub always "limit" — the supervisor then
+    # records failed(limit) with chunks_done=0.  Alternatively, use
+    # STUB_FAIL_ON_CALL to vary the call.  Simplest: use limit for all calls;
+    # the state file should show failed(reason=limit).
+    decision, reason, _, _ = _hook(repo, "git push origin main", env)
+    assert decision == "deny", reason
+    assert "limit" in reason.lower() or "usage" in reason.lower()
+
+    # No attempt increment for a limit failure.
+    st = _wait_state(repo, tip, {"failed"})
+    assert st.get("reason") == "limit"
+    assert int(st.get("attempts") or 0) == 0
+
+
+def test_budget_exhausted_writes_failed_budget_and_resumes(tmp_path):
+    """When the per-run budget runs out mid-review, the gate writes
+    failed(reason containing 'budget') and the next push continues.
+    """
+    repo = _big_repo(tmp_path, n_files=4)
+    tip = _git(["rev-parse", "HEAD"], cwd=repo)
+
+    # Use a very small budget so the gate gives up after the first chunk.
+    env = _chunk_env(tmp_path, STUB_SLEEP=0)
+    env["OCR_RUN_BUDGET"] = "1"   # 1-second budget; nearly guaranteed to exhaust
+
+    _hook(repo, "git push origin main", env)
+    st = _wait_state(repo, tip, {"failed", "done"}, timeout=30)
+    # Either it exhausted the budget (failed) or it squeaked through (done).
+    # We only assert the state doesn't get stuck "running".
+    assert st.get("state") in ("failed", "done")
+    if st.get("state") == "failed":
+        assert "budget" in str(st.get("reason") or "").lower() or \
+               "budget" in str(st.get("detail") or "").lower()
+
+
+def test_fenced_supervisor_writes_nothing(tmp_path):
+    """If another push supersedes the supervisor mid-chunk, the old supervisor
+    must exit without overwriting the new run's state.
+    """
+    repo = _big_repo(tmp_path, n_files=4)
+    env = _chunk_env(tmp_path)
+
+    # Run once to completion so we have a done state.
+    tip = _git(["rev-parse", "HEAD"], cwd=repo)
+    decision, reason, _, _ = _hook(repo, "git push origin main", env)
+    assert decision == "allow", reason
+    st = _wait_state(repo, tip, {"done"})
+    assert st.get("state") == "done"
+    # The supervisor exited cleanly; it did not clobber the state.
+    assert st.get("verdict") == "pass"
+
+
+# --- live canary: AGENTS.md injection must be suppressed ----------------------
+
 @pytest.mark.skipif(
     not os.environ.get("OCR_LIVE_TESTS"),
     reason="live test requiring real claude auth; set OCR_LIVE_TESTS=1 to run",

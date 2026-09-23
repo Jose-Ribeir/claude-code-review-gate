@@ -5,6 +5,8 @@ import os
 import sys
 
 _SCRIPTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts")
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_STUB_PATH = os.path.join(_HERE, "stub_reviewer.py")
 sys.path.insert(0, _SCRIPTS)  # so review-gate.py's own `from ocr_verdict import ...` resolves
 
 _spec = importlib.util.spec_from_file_location("review_gate", os.path.join(_SCRIPTS, "review-gate.py"))
@@ -2409,3 +2411,381 @@ def test_guard_falls_back_to_the_raw_text_when_the_command_cannot_be_tokenised()
     # write rather than wave it through -- the fallback is the raw match.
     assert g("git log --format='unterminated --output=x") != ""
     assert g("git log --format='unterminated --oneline") == ""
+
+
+# ---------------------------------------------------------------------------
+# Chunking helpers (0.7.0)
+# ---------------------------------------------------------------------------
+
+_is_allowed_path = review_gate._is_allowed_path
+_collect_diff_entries = review_gate._collect_diff_entries
+_plan_chunks = review_gate._plan_chunks
+_group_into_chunks = review_gate._group_into_chunks
+_merge_chunk_results = review_gate._merge_chunk_results
+_merge_near_dup_findings = review_gate._merge_near_dup_findings
+_findings_similar = review_gate._findings_similar
+_validate_chunk_cache = review_gate._validate_chunk_cache
+_read_chunk_cache = review_gate._read_chunk_cache
+_write_chunk_cache = review_gate._write_chunk_cache
+_chunk_id = review_gate._chunk_id
+_check_limit = review_gate._check_limit
+_parse_resets_at = review_gate._parse_resets_at
+_reap_async = review_gate._reap_async
+_async_dir = review_gate._async_dir
+_gate_data_dir = review_gate._gate_data_dir
+STALE_S = review_gate.STALE_S
+MARKER_TTL = review_gate.MARKER_TTL
+
+
+# --- allowlist parity ---------------------------------------------------------
+# _ALLOWED_EXTS must stay in sync with skills/review/allowlist.md.
+
+def _parse_allowlist_exts():
+    """Extract the set of extensions from allowlist.md's fenced block."""
+    p = os.path.join(os.path.dirname(_SCRIPTS), "skills", "review", "allowlist.md")
+    text = open(p, encoding="utf-8").read()
+    # The extensions live in a ```...``` block after "## Allowed source extensions"
+    in_block = False
+    exts = set()
+    for line in text.splitlines():
+        if line.strip().startswith("```") and not in_block:
+            in_block = True
+            continue
+        if line.strip().startswith("```") and in_block:
+            break
+        if in_block:
+            for tok in line.split():
+                if tok.startswith("."):
+                    exts.add(tok.lower())
+    return exts
+
+
+def test_allowed_exts_parity_with_allowlist_md():
+    md_exts = _parse_allowlist_exts()
+    py_exts = frozenset(e.lower() for e in review_gate._ALLOWED_EXTS)
+    assert py_exts == md_exts, (
+        f"_ALLOWED_EXTS and allowlist.md are out of sync.\n"
+        f"  in code only: {sorted(py_exts - md_exts)}\n"
+        f"  in markdown only: {sorted(md_exts - py_exts)}"
+    )
+
+
+# --- _plan_chunks: threshold and limits ---------------------------------------
+
+def _make_entries(n, ext=".py", lines_each=10):
+    return [
+        {"path": f"src/f{i}{ext}", "old_path": "", "status": "M",
+         "old_oid": "0" * 40, "new_oid": "1" * 40, "lines": lines_each}
+        for i in range(n)
+    ]
+
+
+def test_plan_chunks_returns_none_below_threshold(monkeypatch):
+    entries = _make_entries(5)
+    monkeypatch.setattr(review_gate, "_collect_diff_entries",
+                        lambda root, base, tip: (entries, []))
+    monkeypatch.setattr(review_gate, "_CHUNK_THRESHOLD", 15)
+    chunks, warns = _plan_chunks(".", "abc", "def")
+    assert chunks is None
+
+
+def test_plan_chunks_returns_chunks_above_threshold(monkeypatch):
+    entries = _make_entries(20)
+    monkeypatch.setattr(review_gate, "_collect_diff_entries",
+                        lambda root, base, tip: (entries, []))
+    monkeypatch.setattr(review_gate, "_CHUNK_THRESHOLD", 15)
+    monkeypatch.setattr(review_gate, "_CHUNK_FILES", 8)
+    monkeypatch.setattr(review_gate, "_CHUNK_LINES", 1200)
+    chunks, warns = _plan_chunks(".", "abc", "def")
+    assert chunks is not None
+    assert sum(len(c) for c in chunks) == 20
+
+
+def test_plan_chunks_skips_control_char_paths(monkeypatch):
+    # A path containing a control character should be skipped with a warning.
+    entries = _make_entries(20)  # 20 normal entries above threshold
+    entries.append({
+        "path": "bad\x01path.py", "old_path": "", "status": "M",
+        "old_oid": "0" * 40, "new_oid": "1" * 40, "lines": 10,
+    })
+    raw_with_ctrl = (
+        ":100644 100644 " + "0" * 40 + " " + "1" * 40 + " M\tbad\x01path.py\n"
+        + "".join(f":100644 100644 {'0'*40} {'1'*40} M\tsrc/f{i}.py\n" for i in range(20))
+    )
+    # Call _collect_diff_entries directly (mocked); the ctrl check is in there.
+    # We verify warnings are emitted.
+    def _fake_diff(args, cwd=None):
+        if args[:2] == ["diff", "--raw"]:
+            return raw_with_ctrl, 0
+        return "", 0
+    monkeypatch.setattr(review_gate, "_git", _fake_diff)
+    monkeypatch.setattr(review_gate, "_CHUNK_THRESHOLD", 15)
+    ents, warns = _collect_diff_entries(".", "abc", "def")
+    bad = [w for w in warns if "control" in w]
+    assert bad, "expected a warning about the control-char path"
+    assert all("bad\x01path.py" not in e["path"] for e in ents)
+
+
+def test_plan_chunks_empty_base_uses_empty_tree(monkeypatch):
+    # When base is "" or None, plan_chunks should fall back to _EMPTY_TREE.
+    calls = []
+    def _fake_collect(root, base, tip):
+        calls.append(base)
+        return [], []
+    monkeypatch.setattr(review_gate, "_collect_diff_entries", _fake_collect)
+    _plan_chunks(".", "", "abc")
+    assert calls and calls[0] == review_gate._EMPTY_TREE
+
+
+# --- ≤ threshold: argv unchanged ----------------------------------------------
+
+def test_run_review_argv_unchanged_below_threshold(monkeypatch, tmp_path):
+    """Below the chunk threshold, _run_review is called without --paths-file."""
+    seen = {}
+    monkeypatch.setattr(review_gate.subprocess, "Popen", _fake_popen(seen))
+    monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
+    review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40,
+                            "b" * 40 + ".." + "a" * 40)
+    cmd_str = " ".join(str(c) for c in seen["cmd"])
+    assert "--paths-file" not in cmd_str
+
+
+def test_run_review_argv_includes_paths_file_when_given(monkeypatch, tmp_path):
+    """When paths_file is given, --paths-file appears in the prompt (non-stub) cmd."""
+    seen = {}
+    pf = str(tmp_path / "manifest.json")
+    (tmp_path / "manifest.json").write_text('{"paths": []}', encoding="utf-8")
+    rng = "b" * 40 + ".." + "a" * 40
+    monkeypatch.setattr(review_gate.subprocess, "Popen",
+                        _fake_popen(seen, stdout='{"findings": []}'))
+    monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
+    review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40,
+                            rng, paths_file=pf)
+    # In the non-stub path, cmd is [claude, "-p", "<prompt --paths-file ...>", ...]
+    # The paths-file reference is embedded in the prompt string (cmd[2]).
+    cmd_str = " ".join(str(c) for c in seen["cmd"])
+    assert "--paths-file" in cmd_str
+
+
+# --- near-duplicate merge -----------------------------------------------------
+
+_BASE_FINDING = {
+    "path": "app/x.py", "severity": "high", "start_line": 10, "end_line": 12,
+    "confidence": 0.8, "content": "sql injection risk in build_query",
+    "category": "security",
+}
+
+
+def test_near_dup_merge_keeps_higher_confidence():
+    low = dict(_BASE_FINDING, confidence=0.7)
+    high = dict(_BASE_FINDING, confidence=0.9)
+    result = _merge_near_dup_findings([low, high])
+    assert len(result) == 1
+    assert result[0]["confidence"] == 0.9
+
+
+def test_near_dup_merge_preserves_distinct_findings():
+    f1 = dict(_BASE_FINDING, path="a.py")
+    f2 = dict(_BASE_FINDING, path="b.py")
+    result = _merge_near_dup_findings([f1, f2])
+    assert len(result) == 2
+
+
+def test_near_dup_different_lines_are_kept_separately():
+    f1 = dict(_BASE_FINDING, start_line=10, end_line=12)
+    f2 = dict(_BASE_FINDING, start_line=50, end_line=52)  # no overlap
+    result = _merge_near_dup_findings([f1, f2])
+    assert len(result) == 2
+
+
+# --- merge_chunk_results: block propagates ------------------------------------
+
+def test_merge_chunk_results_block_propagates():
+    r1 = {"status": "pass", "verdict": "pass", "findings": [], "warnings": []}
+    r2 = {"status": "block", "verdict": "block",
+          "findings": [dict(_BASE_FINDING)], "warnings": []}
+    r3 = {"status": "pass", "verdict": "pass", "findings": [], "warnings": []}
+    merged = _merge_chunk_results([r1, r2, r3])
+    assert merged["verdict"] == "block"
+    assert len(merged["findings"]) == 1
+
+
+def test_merge_chunk_results_combines_findings_from_all_chunks():
+    f = lambda p: dict(_BASE_FINDING, path=p, start_line=1, end_line=2)
+    r1 = {"status": "warn", "verdict": "warn", "findings": [f("a.py")], "warnings": []}
+    r2 = {"status": "warn", "verdict": "warn", "findings": [f("b.py")], "warnings": []}
+    merged = _merge_chunk_results([r1, r2])
+    paths = {fn["path"] for fn in merged["findings"]}
+    assert paths == {"a.py", "b.py"}
+
+
+def test_merge_chunk_results_includes_planner_warnings():
+    r = {"status": "pass", "verdict": "pass", "findings": [], "warnings": []}
+    merged = _merge_chunk_results([r], planner_warnings=["file ceiling: 5 files skipped"])
+    assert any("ceiling" in w for w in merged["warnings"])
+
+
+# --- chunk cache: validate, read, write, corrupt ------------------------------
+
+def _fake_entries():
+    return [{"path": "app/x.py", "old_path": "", "status": "M",
+             "old_oid": "a" * 40, "new_oid": "b" * 40, "lines": 20}]
+
+
+def test_validate_chunk_cache_accepts_valid_cache(monkeypatch):
+    entries = _fake_entries()
+    result = {"status": "pass", "verdict": "pass", "findings": [], "warnings": []}
+    cache = {
+        "chunk_id": _chunk_id(entries),
+        "entries": entries,
+        "result": result,
+        "computed_at_tip": "c" * 40,
+    }
+    # No findings cite any path, so blob-oid check passes trivially.
+    monkeypatch.setattr(review_gate, "_blob_oids_at", lambda root, tip, paths: {})
+    assert _validate_chunk_cache(cache, ".", "d" * 40) is True
+
+
+def test_validate_chunk_cache_rejects_stale_finding(monkeypatch):
+    # A finding on a file whose blob changed since the chunk was computed must
+    # be rejected — a stale block-level finding would permanently deny the push.
+    entries = _fake_entries()
+    result = {
+        "status": "block", "verdict": "block",
+        "findings": [dict(_BASE_FINDING, path="app/x.py")],
+        "warnings": [],
+    }
+    # computed_at_tip = "c"*40, current tip = "e"*40 — different, so check runs.
+    cache = {
+        "chunk_id": _chunk_id(entries),
+        "entries": entries,
+        "result": result,
+        "computed_at_tip": "c" * 40,
+    }
+    # The function calls _blob_oids_at twice: once for the new tip and once for
+    # computed_at_tip. Return different blobs so the comparison fails.
+    def _different_blobs(root, tip, paths):
+        if tip == "c" * 40:
+            return {"app/x.py": "b" * 40}   # old blob
+        return {"app/x.py": "d" * 40}        # new (changed) blob
+
+    monkeypatch.setattr(review_gate, "_blob_oids_at", _different_blobs)
+    assert _validate_chunk_cache(cache, ".", "e" * 40) is False
+
+
+def test_corrupt_cache_treated_as_miss(tmp_path):
+    d = tmp_path / "review-gate-async" / "chunks"
+    d.mkdir(parents=True)
+    entries = _fake_entries()
+    cid = _chunk_id(entries)
+    (d / f"{cid[:24]}.json").write_text("{broken", encoding="utf-8")
+    result = _read_chunk_cache(str(tmp_path), cid)
+    assert result is None
+
+
+def test_write_then_read_chunk_cache(monkeypatch, tmp_path):
+    monkeypatch.setattr(review_gate, "_blob_oids_at", lambda root, tip, paths: {})
+    entries = _fake_entries()
+    result = {"status": "pass", "verdict": "pass", "findings": [], "warnings": []}
+    _write_chunk_cache(str(tmp_path), _chunk_id(entries), entries, result, "c" * 40)
+    cid = _chunk_id(entries)
+    cached = _read_chunk_cache(str(tmp_path), cid)
+    assert cached is not None
+    assert cached["result"] == result
+    assert _validate_chunk_cache(cached, ".", "d" * 40) is True
+
+
+# --- limit detection ----------------------------------------------------------
+
+def test_check_limit_detects_session_limit():
+    hit, resets = _check_limit(
+        "You've hit your session limit · resets 3:20pm (Europe/Lisbon)"
+    )
+    assert hit is True
+
+
+def test_check_limit_detects_usage_limit_reached():
+    hit, _ = _check_limit("usage limit reached, please wait")
+    assert hit is True
+
+
+def test_check_limit_detects_rate_limit():
+    hit, _ = _check_limit("Claude API rate limit exceeded")
+    assert hit is True
+
+
+def test_check_limit_false_for_normal_output():
+    hit, _ = _check_limit('{"status": "success", "verdict": "pass", "findings": []}')
+    assert hit is False
+
+
+def test_parse_resets_at_parses_lisbon_time():
+    text = "You've hit your session limit · resets 3:20pm (Europe/Lisbon)"
+    epoch = _parse_resets_at(text)
+    # Should return a future-ish timestamp (within 24 h).
+    assert epoch is not None
+    assert isinstance(epoch, float)
+    assert epoch > time.time() - 86400  # must be within the last 24h or future
+
+
+def test_parse_resets_at_returns_none_on_garbage():
+    assert _parse_resets_at("hit your limit") is None
+    assert _parse_resets_at("") is None
+
+
+# --- _reap_async: chunks TTL and live-worktree protection ---------------------
+
+def test_reap_async_keeps_fresh_chunk_files(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(tmp_path / "gate-data"))
+    chunks_dir = _async_dir(str(tmp_path)) / "chunks"
+    chunks_dir.mkdir(parents=True)
+    fresh = chunks_dir / "abc123.json"
+    fresh.write_text("{}", encoding="utf-8")
+    # fresh mtime → should survive
+    _reap_async(str(tmp_path))
+    assert fresh.exists()
+
+
+def test_reap_async_removes_old_chunk_files(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(tmp_path / "gate-data"))
+    chunks_dir = _async_dir(str(tmp_path)) / "chunks"
+    chunks_dir.mkdir(parents=True)
+    old = chunks_dir / "oldchunk.json"
+    old.write_text("{}", encoding="utf-8")
+    # Age it beyond _CHECKPOINT_TTL.
+    os.utime(old, (time.time() - review_gate._CHECKPOINT_TTL - 60,) * 2)
+    _reap_async(str(tmp_path))
+    assert not old.exists()
+
+
+def test_reap_async_does_not_remove_fresh_chunk_with_marker_age(monkeypatch, tmp_path):
+    # Chunks live longer than MARKER_TTL. A chunk file that's between MARKER_TTL
+    # and CHECKPOINT_TTL old must survive the sweep (it's under the chunks/ dir).
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(tmp_path / "gate-data"))
+    chunks_dir = _async_dir(str(tmp_path)) / "chunks"
+    chunks_dir.mkdir(parents=True)
+    mid_age = chunks_dir / "mid.json"
+    mid_age.write_text("{}", encoding="utf-8")
+    # Age to just past MARKER_TTL (1 h) but well within CHECKPOINT_TTL (24 h).
+    os.utime(mid_age, (time.time() - MARKER_TTL - 60,) * 2)
+    _reap_async(str(tmp_path))
+    assert mid_age.exists()
+
+
+def test_reap_async_skips_live_worktree(monkeypatch, tmp_path):
+    # A worktree whose state file has a fresh heartbeat must not be deleted.
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(tmp_path / "gate-data"))
+    async_d = _async_dir(str(tmp_path))
+    async_d.mkdir(parents=True)
+    wt = _gate_data_dir() / "worktrees" / "live-wt"
+    wt.mkdir(parents=True)
+    # Write a state file pointing at the live worktree with a fresh heartbeat.
+    state = {"state": "running", "run_id": "r1", "tip": "a" * 40,
+             "heartbeat_ts": time.time(), "worktree": str(wt)}
+    (async_d / ("a" * 40 + ".json")).write_text(
+        json.dumps(state), encoding="utf-8"
+    )
+    # Age the worktree directory itself (so it would normally be swept).
+    os.utime(wt, (time.time() - MARKER_TTL - 60,) * 2)
+    _reap_async(str(tmp_path))
+    assert wt.is_dir(), "live worktree must not be deleted by reaper"
