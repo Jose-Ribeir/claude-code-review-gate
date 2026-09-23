@@ -2626,7 +2626,7 @@ def test_merge_chunk_results_combines_findings_from_all_chunks():
 def test_merge_chunk_results_includes_planner_warnings():
     r = {"status": "pass", "verdict": "pass", "findings": [], "warnings": []}
     merged = _merge_chunk_results([r], planner_warnings=["file ceiling: 5 files skipped"])
-    assert any("ceiling" in w for w in merged["warnings"])
+    assert merged["warnings"] == [{"file": None, "message": "file ceiling: 5 files skipped"}]
 
 
 # --- chunk cache: validate, read, write, corrupt ------------------------------

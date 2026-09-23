@@ -16,6 +16,7 @@ import os
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
@@ -411,6 +412,27 @@ def test_cached_chunks_are_skipped_on_resume(tmp_path):
     assert len(calls) == 2, (
         f"expected 2 reviewer calls (chunks 2 and 3 only), got {len(calls)}"
     )
+
+
+def test_chunked_run_records_a_real_merged_raw_snapshot(tmp_path):
+    repo = _big_repo(tmp_path, n_files=4)
+    tip = _git(["rev-parse", "HEAD"], cwd=repo)
+    git_dir = Path(review_gate._git_dir(str(repo)))
+
+    env = _chunk_env(tmp_path, STUB_VERDICT="warn")
+    _hook(repo, "git push origin main", env)
+    st = _wait_state(repo, tip, {"done"})
+
+    raw = st.get("raw")
+    assert raw and raw != "chunked" and "-merged" in raw, raw
+    snapshot = git_dir / review_gate.HISTORY_DIR / raw
+    merged = json.loads(snapshot.read_text(encoding="utf-8"))
+    assert merged["findings"] and merged["summary"]["findings"] == len(merged["findings"])
+    last = json.loads(review_gate._raw_output_path(str(git_dir)).read_text(encoding="utf-8"))
+    assert last == merged
+    names = [p.name for p in (git_dir / review_gate.HISTORY_DIR).iterdir()]
+    for k in range(4):
+        assert any(f"-c{k}" in n for n in names), (k, names)
 
 
 def test_limit_mid_chunk_denies_immediately_no_attempt_increment(tmp_path):

@@ -693,7 +693,7 @@ def _history_dir(git_dir):
     return Path(git_dir) / HISTORY_DIR
 
 
-def _save_raw_output(git_dir, text, head_sha=""):
+def _save_raw_output(git_dir, text, head_sha="", tag=""):
     """Best-effort dump of claude's raw stdout. Returns the archived filename.
 
     A finding can be syntactically valid JSON yet still be missing fields the
@@ -715,10 +715,10 @@ def _save_raw_output(git_dir, text, head_sha=""):
         _raw_output_path(git_dir).write_text(text or "", encoding="utf-8")
     except Exception:
         pass
-    return _archive_raw_output(git_dir, text, head_sha)
+    return _archive_raw_output(git_dir, text, head_sha, tag)
 
 
-def _archive_raw_output(git_dir, text, head_sha=""):
+def _archive_raw_output(git_dir, text, head_sha="", tag=""):
     """Write one timestamped snapshot of the raw output. Returns its filename.
 
     Named <UTC stamp>-<sha7>.json so the file sorts chronologically and can be
@@ -731,7 +731,7 @@ def _archive_raw_output(git_dir, text, head_sha=""):
         d = _history_dir(git_dir)
         d.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-        sha = (head_sha or "nohead")[:7]
+        sha = (head_sha or "nohead")[:7] + re.sub(r"[^A-Za-z0-9-]", "", tag or "")
         data = (text or "").encode("utf-8")
         # Claim the name and commit to it in ONE step. The obvious spelling --
         # while (d / name).exists(): name = next_one -- is check-then-act: the
@@ -2178,7 +2178,7 @@ def _run_review(repo_root, mode, git_dir=None, head_sha="", push_range="",
             f"review process error ({exc}) - blocking commit to preserve gate integrity.\n"
             f"{bypass}"
         )
-    raw_name = _save_raw_output(git_dir, out_text, head_sha + raw_tag)
+    raw_name = _save_raw_output(git_dir, out_text, head_sha, raw_tag)
     # A non-zero exit means claude never got as far as producing a review, so the
     # output is an error string, not malformed JSON. Diagnose that separately:
     # reporting "could not parse review output" for a login failure sends people
@@ -2579,10 +2579,6 @@ def _supervise(state_path, run_id):
                 state_path, run_id, common_dir, review_root, mode, git_dir,
                 tip, push_range, chunks, planner_warnings, fenced, progress,
             )
-            if planner_warnings and isinstance(result, dict):
-                result = dict(result)
-                result.setdefault("warnings", [])
-                result["warnings"] = list(planner_warnings) + list(result["warnings"])
         else:
             # Single-chunk path: exactly today's behaviour, same argv.
             result, ran, raw_name = _run_review(
@@ -2591,8 +2587,8 @@ def _supervise(state_path, run_id):
             chunks_new = 1 if ran else 0
             if planner_warnings and isinstance(result, dict):
                 result = dict(result)
-                result.setdefault("warnings", [])
-                result["warnings"] = list(planner_warnings) + list(result["warnings"])
+                result["warnings"] = (_planner_warning_objs(planner_warnings)
+                                      + list(result.get("warnings") or []))
     except _Fenced:
         stop.set()
         if worktree:
@@ -3157,6 +3153,12 @@ def _merge_near_dup_findings(findings):
     return kept
 
 
+def _planner_warning_objs(warnings):
+    """Planner warnings in the skill's {file, message} shape."""
+    return [w if isinstance(w, dict) else {"file": None, "message": str(w)}
+            for w in warnings]
+
+
 def _merge_chunk_results(chunk_results, planner_warnings=None):
     """Merge chunk review results into one combined result dict.
 
@@ -3167,7 +3169,7 @@ def _merge_chunk_results(chunk_results, planner_warnings=None):
     findings, high, medium, low} object the skill emits.
     """
     all_findings = []
-    all_warnings = list(planner_warnings or [])
+    all_warnings = _planner_warning_objs(planner_warnings or [])
     # Skill-vocabulary status ordering.
     _STATUS_RANK = {
         "success": 0,
@@ -3346,7 +3348,13 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
         if progress is not None:
             progress["new"] = chunks_new
 
-    return _merge_chunk_results(chunk_results, planner_warnings), True, "chunked", chunks_new
+    merged = _merge_chunk_results(chunk_results, planner_warnings)
+    # The per-chunk snapshots each hold one chunk; the run's record and the
+    # stable last-output path must show all of them.
+    raw_name = _save_raw_output(
+        git_dir, json.dumps(merged, ensure_ascii=False, indent=2), tip, "-merged"
+    )
+    return merged, True, raw_name, chunks_new
 
 
 def _mode_supervise(argv):
