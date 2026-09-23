@@ -3210,7 +3210,8 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
                  tip, push_range, chunks, planner_warnings, fenced, progress=None):
     """Run per-chunk reviews with caching, fencing, budget and retry.
 
-    Returns (merged_result, True, "chunked", chunks_new) on success, where
+    Returns (merged_result, True, raw_name, chunks_new) on success, where
+    raw_name is the archived snapshot of the merged result, and
     chunks_new is the count of chunks actually reviewed in THIS run (cached
     chunks do not count).  The caller uses chunks_new to decide whether to
     increment the attempt counter.  `progress["new"]` mirrors chunks_new as
