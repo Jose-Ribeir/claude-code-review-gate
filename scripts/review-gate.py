@@ -210,7 +210,7 @@ except ValueError:
     _CHUNK_TIMEOUT = 1200
 try:
     _RUN_BUDGET = int(os.environ.get("OCR_RUN_BUDGET", "3600"))
-    _RUN_BUDGET = max(60, _RUN_BUDGET)
+    _RUN_BUDGET = max(1, _RUN_BUDGET)
 except ValueError:
     _RUN_BUDGET = 3600
 try:
@@ -381,6 +381,14 @@ class ReviewLimitError(ReviewGateError):
     def __init__(self, msg="", resets_at=None):
         super().__init__(msg)
         self.resets_at = resets_at
+
+
+class ReviewBudgetError(ReviewGateError):
+    """Raised when the per-run wall-clock budget is exhausted mid-chunked-review.
+
+    Budget exhaustion is not an attempt: the next push resumes from the
+    checkpoint and the attempt counter is left unchanged.
+    """
 
 
 class _Fenced(Exception):
@@ -2035,9 +2043,16 @@ def _run_review(repo_root, mode, git_dir=None, head_sha="", push_range="",
     debug = _debug_enabled()
     creationflags = _WIN_FLAGS if sys.platform == "win32" else 0
     if paths_file:
-        prompt = (PROMPT_RANGE.format(rng=push_range) if push_range else PROMPT)
-        prompt = prompt.rstrip(" --json")
-        prompt += f" --paths-file {paths_file} --json"
+        base_prompt = PROMPT_RANGE.format(rng=push_range) if push_range else PROMPT
+        # Strip exactly the trailing " --json" suffix (both PROMPT constants end
+        # with it).  Do NOT use rstrip(" --json") — that strips a character SET.
+        _SUFFIX = " --json"
+        if base_prompt.endswith(_SUFFIX):
+            base_prompt = base_prompt[: -len(_SUFFIX)]
+        # Forward slashes + double quotes so a path with spaces and backslashes
+        # (e.g. C:\Users\John Doe\...) survives the slash-command arg parser.
+        pf_fwd = paths_file.replace("\\", "/")
+        prompt = f'{base_prompt} --paths-file "{pf_fwd}" --json'
     else:
         prompt = PROMPT_RANGE.format(rng=push_range) if push_range else PROMPT
     cmd = [claude, "-p", prompt] + args
@@ -2517,20 +2532,17 @@ def _supervise(state_path, run_id):
 
     def _beat():
         while not stop.wait(HEARTBEAT_S):
-            cur = _read_state(state_path)
-            if cur is None:
-                continue
-            if cur.get("run_id") != run_id:
+            fields = {"heartbeat_ts": time.time()}
+            child = _ACTIVE_CHILD
+            if child is not None:
+                fields["reviewer_pid"] = child.pid
+            try:
+                _update_state_owned(state_path, run_id, **fields)
+            except _Fenced:
                 fenced["hit"] = True
-                child = _ACTIVE_CHILD
                 if child is not None:
                     _kill_child(child)
                 return
-            cur["heartbeat_ts"] = time.time()
-            if _ACTIVE_CHILD is not None:
-                cur["reviewer_pid"] = _ACTIVE_CHILD.pid
-            try:
-                _write_state(state_path, cur)
             except Exception:
                 pass
 
@@ -2538,10 +2550,11 @@ def _supervise(state_path, run_id):
     t.start()
 
     worktree, cwd_note = "", ""
-    # failure is (reason_str, detail_str) or (reason_str, detail_str, resets_at)
+    # failure is (reason_str, detail_str)
     failure = None
     limit_info = None   # (resets_at, chunks_done, chunks_total) for limit failures
     result, ran, raw_name = None, False, ""
+    chunks_new = 0   # chunks newly reviewed in this run (not from cache)
     try:
         worktree = _make_worktree(repo_root, tip, run_id)
         if worktree:
@@ -2563,7 +2576,7 @@ def _supervise(state_path, run_id):
         chunks, planner_warnings = _plan_chunks(review_root, base, tip)
         if chunks is not None:
             # Multi-chunk path: _run_chunked handles caching, fencing, budget.
-            result, ran, raw_name = _run_chunked(
+            result, ran, raw_name, chunks_new = _run_chunked(
                 state_path, run_id, common_dir, review_root, mode, git_dir,
                 tip, push_range, chunks, planner_warnings, fenced,
             )
@@ -2576,6 +2589,7 @@ def _supervise(state_path, run_id):
             result, ran, raw_name = _run_review(
                 review_root, mode, git_dir, tip, push_range
             )
+            chunks_new = 1 if ran else 0
             if planner_warnings and isinstance(result, dict):
                 result = dict(result)
                 result.setdefault("warnings", [])
@@ -2594,13 +2608,17 @@ def _supervise(state_path, run_id):
             int(cur_st.get("chunks_total") or 0),
         )
         failure = ("limit", str(exc))
-        result, ran, raw_name = None, False, ""
+        result, ran, raw_name, chunks_new = None, False, "", 0
+    except ReviewBudgetError as exc:
+        # Budget exhaustion: not an attempt; next push resumes from checkpoint.
+        failure = ("budget", str(exc))
+        result, ran, raw_name, chunks_new = None, False, "", chunks_new
     except ReviewGateError as exc:
         failure = ("review", str(exc))
-        result, ran, raw_name = None, False, ""
+        result, ran, raw_name, chunks_new = None, False, "", chunks_new
     except BaseException as exc:  # noqa: BLE001 -- the file must always say why
         failure = ("crash", f"{type(exc).__name__}: {exc}")
-        result, ran, raw_name = None, False, ""
+        result, ran, raw_name, chunks_new = None, False, "", chunks_new
     finally:
         stop.set()
         if worktree:
@@ -2610,7 +2628,6 @@ def _supervise(state_path, run_id):
     if st.get("run_id") != run_id or fenced["hit"]:
         return 0  # a newer run owns this tip now; say nothing
     if failure is not None:
-        cur_chunks_done = int(st.get("chunks_done") or 0)
         if failure[0] == "limit":
             resets_at, cd, ct = limit_info
             st.update({
@@ -2620,19 +2637,18 @@ def _supervise(state_path, run_id):
                 "chunks_done": cd, "chunks_total": ct,
                 # attempts unchanged: a limit is not an attempt
             })
-        elif failure[0] == "review" and "budget" in failure[1]:
-            # Budget exhaustion: progress was made; reset attempts counter.
+        elif failure[0] == "budget":
+            # Budget exhaustion: not an attempt; resume on next push.
+            # Preserve the chunks_done written by _run_chunked.
             st.update({
                 "state": "failed", "failed_ts": time.time(),
                 "reason": "budget", "detail": _sanitize(failure[1], 1500),
-                "attempts": 0,
-                "chunks_done": cur_chunks_done,
-                "chunks_total": int(st.get("chunks_total") or 0),
+                # attempts unchanged; chunks_done already in state from _run_chunked
             })
         else:
-            # Increment attempts only when no new chunks were completed.
+            # Increment attempts only when no new chunks were reviewed.
             new_attempts = int(st.get("attempts") or 0) + (
-                1 if cur_chunks_done == 0 else 0
+                1 if chunks_new == 0 else 0
             )
             st.update({
                 "state": "failed", "failed_ts": time.time(),
@@ -3143,25 +3159,49 @@ def _merge_near_dup_findings(findings):
 
 
 def _merge_chunk_results(chunk_results, planner_warnings=None):
-    """Merge chunk review results into one combined result dict."""
+    """Merge chunk review results into one combined result dict.
+
+    `status` follows the skill's vocabulary:
+      success < completed_with_warnings < completed_with_errors
+    `verdict` stays in block/warn/pass and is recomputed later by
+    compute_verdict(findings).  `summary` is the {files_reviewed,
+    findings, high, medium, low} object the skill emits.
+    """
     all_findings = []
     all_warnings = list(planner_warnings or [])
-    worst = "pass"
+    # Skill-vocabulary status ordering.
+    _STATUS_RANK = {
+        "success": 0,
+        "completed_with_warnings": 1,
+        "completed_with_errors": 2,
+    }
+    worst_status_rank = 0
     for r in chunk_results:
         if not isinstance(r, dict):
             continue
         all_findings.extend(r.get("findings") or [])
         all_warnings.extend(r.get("warnings") or [])
-        s = r.get("status") or r.get("verdict") or "pass"
-        if s == "block" or worst == "block":
-            worst = "block"
-        elif s in ("warn", "block") or worst == "warn":
-            worst = "warn"
+        s = r.get("status") or ""
+        rank = _STATUS_RANK.get(s, 0)
+        if rank > worst_status_rank:
+            worst_status_rank = rank
     merged = _merge_near_dup_findings(all_findings)
+    worst_status = ["success", "completed_with_warnings", "completed_with_errors"][
+        worst_status_rank
+    ]
+    high = sum(1 for f in merged if f.get("severity") == "high")
+    medium = sum(1 for f in merged if f.get("severity") == "medium")
+    low = sum(1 for f in merged if f.get("severity") == "low")
+    files_reviewed = len({f.get("path") for f in merged if f.get("path")})
     return {
-        "status": worst, "verdict": worst,
-        "findings": merged, "warnings": all_warnings,
-        "summary": f"merged {len(chunk_results)} chunk(s): {len(merged)} finding(s)",
+        "status": worst_status,
+        "findings": merged,
+        "warnings": all_warnings,
+        "summary": {
+            "files_reviewed": files_reviewed,
+            "findings": len(merged),
+            "high": high, "medium": medium, "low": low,
+        },
     }
 
 
@@ -3169,15 +3209,19 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
                  tip, push_range, chunks, planner_warnings, fenced):
     """Run per-chunk reviews with caching, fencing, budget and retry.
 
-    Returns (merged_result, True, "chunked") on success.
-    Raises ReviewLimitError, ReviewGateError (including budget exhaustion),
+    Returns (merged_result, True, "chunked", chunks_new) on success, where
+    chunks_new is the count of chunks actually reviewed in THIS run (cached
+    chunks do not count).  The caller uses chunks_new to decide whether to
+    increment the attempt counter.
+    Raises ReviewLimitError, ReviewBudgetError, ReviewGateError,
     or _Fenced when the supervisor has been superseded.
     """
     total = len(chunks)
     ocr_oid = _ocr_tree_oid(review_root, tip)
     budget_end = time.monotonic() + _RUN_BUDGET
     chunk_results = []
-    chunks_done = 0
+    chunks_done = 0   # cumulative (cached + newly reviewed)
+    chunks_new = 0    # newly reviewed in THIS run (not from cache)
 
     for k, chunk_entries in enumerate(chunks):
         if fenced["hit"]:
@@ -3214,12 +3258,12 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
                 )
             except _Fenced:
                 raise
-            raise ReviewGateError(
+            raise ReviewBudgetError(
                 f"run budget ({_RUN_BUDGET}s) exhausted after "
                 f"{chunks_done}/{total} chunks; re-push to resume"
             )
 
-        # Write manifest for this chunk.
+        # Write manifest for this chunk atomically; fail closed on error.
         manifest_path = str(
             _async_dir(common_dir) / f"manifest-{run_id}-{k}.json"
         )
@@ -3237,11 +3281,15 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
             "other_changed": other_changed,
         }
         try:
-            Path(manifest_path).write_text(
+            tmp = manifest_path + ".tmp"
+            Path(tmp).write_text(
                 json.dumps(manifest, ensure_ascii=False), encoding="utf-8"
             )
-        except Exception:
-            pass
+            os.replace(tmp, manifest_path)
+        except Exception as exc:
+            raise ReviewGateError(
+                f"could not write chunk manifest for chunk {k}: {exc}"
+            )
 
         # Clean worktree so one chunk can't leave state for the next.
         _git(["clean", "-fdxq"], cwd=review_root)
@@ -3250,43 +3298,53 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
         # Run the review (retry once on non-timeout errors).
         result = None
         last_exc = None
-        for attempt in range(2):
-            if fenced["hit"]:
-                raise _Fenced()
+        try:
+            for attempt in range(2):
+                if fenced["hit"]:
+                    raise _Fenced()
+                try:
+                    result, _, _ = _run_review(
+                        review_root, mode, git_dir, tip, push_range,
+                        paths_file=manifest_path,
+                        timeout=_CHUNK_TIMEOUT,
+                        raw_tag=f"-c{k}",
+                    )
+                    last_exc = None
+                    break
+                except ReviewLimitError:
+                    raise  # propagate immediately; do not retry limits
+                except ReviewGateError as exc:
+                    last_exc = exc
+                    if exc.is_timeout or attempt > 0:
+                        raise
+                    # Non-timeout error: retry once.
+                    continue
+            if last_exc is not None:
+                raise last_exc
+        finally:
+            # Always clean up the manifest (success or failure).
             try:
-                result, _, _ = _run_review(
-                    review_root, mode, git_dir, tip, push_range,
-                    paths_file=manifest_path,
-                    timeout=_CHUNK_TIMEOUT,
-                    raw_tag=f"-c{k}",
-                )
-                last_exc = None
-                break
-            except ReviewLimitError:
-                raise  # propagate immediately; do not retry limits
-            except ReviewGateError as exc:
-                last_exc = exc
-                if exc.is_timeout or attempt > 0:
-                    raise
-                # Non-timeout error: retry once.
-                continue
-        if last_exc is not None:
-            raise last_exc
+                Path(manifest_path).unlink(missing_ok=True)
+            except Exception:
+                pass
 
-        # Persist and record.
-        _write_chunk_cache(common_dir, cid, chunk_entries, result, tip)
-        chunk_results.append(result)
-        chunks_done += 1
-
+        # Fence-check before persisting: if another run claimed the state while
+        # the stub was running, do not write the cache and let _Fenced propagate.
         try:
             _update_state_owned(
                 state_path, run_id,
-                chunks_done=chunks_done, chunk_index=k, chunks_total=total,
+                chunks_done=chunks_done + 1, chunk_index=k, chunks_total=total,
             )
         except _Fenced:
             raise
 
-    return _merge_chunk_results(chunk_results, planner_warnings), True, "chunked"
+        # Persist and record (only reached if not fenced).
+        _write_chunk_cache(common_dir, cid, chunk_entries, result, tip)
+        chunk_results.append(result)
+        chunks_done += 1
+        chunks_new += 1
+
+    return _merge_chunk_results(chunk_results, planner_warnings), True, "chunked", chunks_new
 
 
 def _mode_supervise(argv):

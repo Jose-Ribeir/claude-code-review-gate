@@ -370,116 +370,346 @@ def _chunk_env(tmp_path, **extra):
     return e
 
 
-def test_cached_chunks_are_skipped_on_resume(tmp_path):
-    """Pre-populate cache for chunks 1-2; the gate should call the stub only
-    twice (for chunks 3-4) and still produce a complete pass verdict."""
-    repo = _big_repo(tmp_path, n_files=4)
-    tip = _git(["rev-parse", "HEAD"], cwd=repo)
-    common = review_gate._git_common_dir(str(repo))
-
-    # Build the same chunk plan the gate will build.
-    base = _git(["rev-parse", "origin/main"], cwd=repo)
-    entries, _ = review_gate._collect_diff_entries(str(repo), base, tip)
-    allowed = [e for e in entries if review_gate._is_allowed_path(e["path"])]
-    # With OCR_CHUNK_FILES=1 each allowed file is its own chunk.
-    # We override the module-level constant locally.
-    old_tf, old_cf, old_cl = (
-        review_gate._CHUNK_THRESHOLD,
-        review_gate._CHUNK_FILES,
-        review_gate._CHUNK_LINES,
-    )
-    review_gate._CHUNK_THRESHOLD = 3
-    review_gate._CHUNK_FILES = 1
-    review_gate._CHUNK_LINES = 99999
+def _plan_chunks_for(repo, base, tip, threshold=3, chunk_files=1, chunk_lines=99999):
+    """Compute the chunk plan for a repo with the given constants overridden."""
+    old_tf = review_gate._CHUNK_THRESHOLD
+    old_cf = review_gate._CHUNK_FILES
+    old_cl = review_gate._CHUNK_LINES
+    review_gate._CHUNK_THRESHOLD = threshold
+    review_gate._CHUNK_FILES = chunk_files
+    review_gate._CHUNK_LINES = chunk_lines
     try:
-        chunks, _ = review_gate._plan_chunks(str(repo), base, tip)
+        return review_gate._plan_chunks(str(repo), base, tip)
     finally:
         review_gate._CHUNK_THRESHOLD = old_tf
         review_gate._CHUNK_FILES = old_cf
         review_gate._CHUNK_LINES = old_cl
 
-    assert chunks and len(chunks) >= 4, f"expected >=4 chunks, got {chunks}"
 
-    # Pre-populate the cache for the first two chunks.
-    pass_result = {"status": "pass", "verdict": "pass", "findings": [], "warnings": []}
+def test_cached_chunks_are_skipped_on_resume(tmp_path):
+    """Pre-populate cache for chunks 0-1; the gate should call the stub only
+    twice (for chunks 2-3) and still produce a complete pass verdict."""
+    repo = _big_repo(tmp_path, n_files=4)
+    tip = _git(["rev-parse", "HEAD"], cwd=repo)
+    base = _git(["rev-parse", "origin/main"], cwd=repo)
+    common = review_gate._git_common_dir(str(repo))
+
+    chunks, _ = _plan_chunks_for(repo, base, tip)
+    assert chunks and len(chunks) == 4, f"expected 4 chunks, got {chunks}"
+
+    # Pre-populate the cache for chunks 0 and 1.
+    pass_result = {"status": "success", "findings": [], "warnings": []}
     for chunk_entries in chunks[:2]:
         cid = review_gate._chunk_id(chunk_entries, "")
         review_gate._write_chunk_cache(common, cid, chunk_entries, pass_result, tip)
 
-    # Now run the gate — only 2 stub calls should happen (chunks 3 and 4).
     env = _chunk_env(tmp_path)
     decision, reason, _, _ = _hook(repo, "git push origin main", env)
     assert decision == "allow", reason
     _wait_state(repo, tip, {"done"})
     calls = _trace(tmp_path)
-    assert len(calls) == len(chunks) - 2, (
-        f"expected {len(chunks) - 2} reviewer calls (chunks 3+), got {len(calls)}"
+    assert len(calls) == 2, (
+        f"expected 2 reviewer calls (chunks 2 and 3 only), got {len(calls)}"
     )
 
 
-def test_limit_mid_chunk_denies_immediately_and_preserves_cached_chunks(tmp_path):
-    """STUB_VERDICT=limit on the 3rd call: the gate denies immediately (no
-    wait), the attempt counter is NOT incremented, and the two completed
-    chunks remain in the cache so a follow-up push can resume.
+def test_limit_mid_chunk_denies_immediately_no_attempt_increment(tmp_path):
+    """STUB_VERDICT=limit: the gate denies immediately (no wait), the attempt
+    counter is NOT incremented, and the state shows reason=limit.
     """
     repo = _big_repo(tmp_path, n_files=4)
     tip = _git(["rev-parse", "HEAD"], cwd=repo)
-    common = review_gate._git_common_dir(str(repo))
 
-    # STUB_FAIL_ON_CALL=3 plus STUB_VERDICT=limit: the 3rd call outputs the
-    # limit text and exits 1; _check_limit detects it, raises ReviewLimitError.
     env = _chunk_env(tmp_path, STUB_VERDICT="limit")
-    # The first two calls succeed (pass), the 3rd raises ReviewLimitError.
-    # We achieve this by making the stub always "limit" — the supervisor then
-    # records failed(limit) with chunks_done=0.  Alternatively, use
-    # STUB_FAIL_ON_CALL to vary the call.  Simplest: use limit for all calls;
-    # the state file should show failed(reason=limit).
     decision, reason, _, _ = _hook(repo, "git push origin main", env)
     assert decision == "deny", reason
     assert "limit" in reason.lower() or "usage" in reason.lower()
 
-    # No attempt increment for a limit failure.
     st = _wait_state(repo, tip, {"failed"})
     assert st.get("reason") == "limit"
     assert int(st.get("attempts") or 0) == 0
 
 
-def test_budget_exhausted_writes_failed_budget_and_resumes(tmp_path):
-    """When the per-run budget runs out mid-review, the gate writes
-    failed(reason containing 'budget') and the next push continues.
+def test_budget_exhausted_deterministic(tmp_path):
+    """OCR_RUN_BUDGET=5, STUB_SLEEP=6: chunk 0 completes (budget check passes
+    before it starts), then the budget check before chunk 1 fires.
+    State = failed(budget), chunks_done=1, attempts unchanged=0.
+    Second push resumes from cache: only chunks 1-3 are reviewed (3 calls).
     """
     repo = _big_repo(tmp_path, n_files=4)
     tip = _git(["rev-parse", "HEAD"], cwd=repo)
 
-    # Use a very small budget so the gate gives up after the first chunk.
-    env = _chunk_env(tmp_path, STUB_SLEEP=0)
-    env["OCR_RUN_BUDGET"] = "1"   # 1-second budget; nearly guaranteed to exhaust
+    env = _chunk_env(tmp_path, STUB_SLEEP=6)
+    env["OCR_RUN_BUDGET"] = "5"   # chunk 0 takes 6s > budget → fails after chunk 0
 
-    _hook(repo, "git push origin main", env)
-    st = _wait_state(repo, tip, {"failed", "done"}, timeout=30)
-    # Either it exhausted the budget (failed) or it squeaked through (done).
-    # We only assert the state doesn't get stuck "running".
-    assert st.get("state") in ("failed", "done")
-    if st.get("state") == "failed":
-        assert "budget" in str(st.get("reason") or "").lower() or \
-               "budget" in str(st.get("detail") or "").lower()
+    decision, reason, elapsed, _ = _hook(repo, "git push origin main", env, timeout=120)
+    assert decision == "deny", reason
+    st = _wait_state(repo, tip, {"failed"}, timeout=30)
+    assert st.get("reason") == "budget", f"expected budget failure, got {st}"
+    assert int(st.get("chunks_done") or 0) == 1, f"expected 1 chunk done, got {st}"
+    assert int(st.get("attempts") or 0) == 0, "budget must not increment attempts"
+
+    # Second push: chunk 0 is cached, only chunks 1-3 need reviewing (3 stub calls).
+    env2 = _chunk_env(tmp_path, STUB_SLEEP=0)
+    env2["OCR_RUN_BUDGET"] = "9999"  # plenty of budget for the resume
+    # Use a fresh trace file so we don't count the first run's single call.
+    env2["STUB_TRACE"] = str(tmp_path / "stub2.trace")
+    decision2, reason2, _, _ = _hook(repo, "git push origin main", env2, timeout=60)
+    assert decision2 == "allow", reason2
+    _wait_state(repo, tip, {"done"})
+    calls2 = [json.loads(line) for line in
+              (tmp_path / "stub2.trace").read_text().splitlines() if line.strip()]
+    assert len(calls2) == 3, (
+        f"expected 3 reviewer calls on resume (chunks 1-3), got {len(calls2)}"
+    )
 
 
-def test_fenced_supervisor_writes_nothing(tmp_path):
-    """If another push supersedes the supervisor mid-chunk, the old supervisor
-    must exit without overwriting the new run's state.
+def test_fenced_supervisor_writes_no_cache(tmp_path):
+    """When a newer run claims the tip while a chunk is running (the stub
+    sleeps), the old supervisor must write no chunk cache file and must leave
+    the state unchanged once the run_id has been swapped.
     """
     repo = _big_repo(tmp_path, n_files=4)
+    tip = _git(["rev-parse", "HEAD"], cwd=repo)
+    base = _git(["rev-parse", "origin/main"], cwd=repo)
+    common = review_gate._git_common_dir(str(repo))
+    chunks, _ = _plan_chunks_for(repo, base, tip)
+    assert chunks and len(chunks) == 4
+
+    # STUB_SLEEP=8 gives us time to swap the run_id while chunk 0 is running.
+    env = _chunk_env(tmp_path, STUB_SLEEP=8)
+
+    # Launch the hook asynchronously so we can race with it.
+    payload = json.dumps({"session_id": "s1", "tool_name": "Bash",
+                          "cwd": str(repo),
+                          "tool_input": {"command": "git push origin main"}})
+    proc = subprocess.Popen(
+        [sys.executable, _GATE, "--mode", "hook"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, cwd=str(repo), env=env,
+    )
+    proc.stdin.write(payload)
+    proc.stdin.close()
+
+    # Wait until the supervisor transitions to "running".
+    state_path = review_gate._state_path(common, tip)
+    deadline = time.monotonic() + 30
+    st = {}
+    while time.monotonic() < deadline:
+        st = review_gate._read_state(state_path) or {}
+        if st.get("state") == "running" and st.get("chunk_index") is not None:
+            break
+        time.sleep(0.2)
+    else:
+        proc.kill()
+        proc.stdout.read()
+        proc.stderr.read()
+        pytest.fail("state never reached 'running' with a chunk_index")
+
+    original_run_id = st["run_id"]
+
+    # Swap the run_id to simulate a newer run taking over.
+    new_run_id = "fenced-new-run"
+    st2 = dict(st)
+    st2["run_id"] = new_run_id
+    review_gate._write_state(state_path, st2)
+
+    # Wait for the hook to finish (the old supervisor should detect the fence).
+    proc.stdout.read()
+    proc.stderr.read()
+    proc.wait(timeout=60)
+
+    # The old supervisor must have written no chunk cache file.
+    chunks_dir = review_gate._chunk_cache_dir(common)
+    cache_files = list(chunks_dir.iterdir()) if chunks_dir.exists() else []
+    assert not cache_files, (
+        f"fenced supervisor must not write cache files, found: {cache_files}"
+    )
+
+    # State still shows the new run_id (not overwritten by the fenced run).
+    final = review_gate._read_state(state_path) or {}
+    assert final.get("run_id") == new_run_id, (
+        f"fenced supervisor must not overwrite state, run_id={final.get('run_id')}"
+    )
+
+
+def test_kill_and_resume(tmp_path):
+    """Kill the supervisor after 2 chunks complete; re-push resumes from cache.
+    Chunks 0-1 must NOT be re-invoked on the second push.
+    """
+    repo = _big_repo(tmp_path, n_files=4)
+    tip = _git(["rev-parse", "HEAD"], cwd=repo)
+    common = review_gate._git_common_dir(str(repo))
+    state_path = review_gate._state_path(common, tip)
+
+    # STUB_SLEEP=5 per chunk: chunks 0+1 take 10s; we kill during chunk 2.
+    # Inline budget = 30s so the hook returns "still running" while chunk 2
+    # is mid-execution, rather than completing all 4 chunks.
+    env = _chunk_env(tmp_path, STUB_SLEEP=5)
+
+    # Launch the hook asynchronously.
+    payload = json.dumps({"session_id": "s1", "tool_name": "Bash",
+                          "cwd": str(repo),
+                          "tool_input": {"command": "git push origin main"}})
+    proc = subprocess.Popen(
+        [sys.executable, _GATE, "--mode", "hook"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, cwd=str(repo), env=env,
+    )
+    proc.stdin.write(payload)
+    proc.stdin.close()
+
+    # Wait until chunks_done >= 2 in the state file, then kill IMMEDIATELY
+    # (before any more chunks complete).
+    deadline = time.monotonic() + 60
+    sup_pid = None
+    while time.monotonic() < deadline:
+        st = review_gate._read_state(state_path) or {}
+        if int(st.get("chunks_done") or 0) >= 2:
+            sup_pid = st.get("supervisor_pid")
+            break
+        time.sleep(0.3)
+
+    assert sup_pid is not None, "supervisor never completed 2 chunks"
+
+    # Tree-kill: supervisor + any child stub it spawned.
+    review_gate._tree_kill(int(sup_pid))
+    time.sleep(0.5)  # let processes die
+
+    # Wait for the hook process to exit (it times out or detects supervisor gone).
+    proc.stdout.read()
+    proc.stderr.read()
+    proc.wait(timeout=60)
+
+    # Fake a stale heartbeat so the next hook immediately restarts.
+    st = review_gate._read_state(state_path) or {}
+    if st.get("state") == "running":
+        st["heartbeat_ts"] = 0
+        review_gate._write_state(state_path, st)
+
+    # Second push: chunks 0-1 cached, only 2 and 3 reviewed.
+    env2 = _chunk_env(tmp_path, STUB_SLEEP=0)
+    env2["STUB_TRACE"] = str(tmp_path / "stub2.trace")  # fresh trace
+    decision, reason, _, _ = _hook(repo, "git push origin main", env2, timeout=60)
+    assert decision == "allow", reason
+    _wait_state(repo, tip, {"done"})
+    calls2 = [json.loads(line) for line in
+              (tmp_path / "stub2.trace").read_text().splitlines() if line.strip()]
+    assert len(calls2) == 2, (
+        f"expected 2 reviewer calls on resume (chunks 2 and 3), got {len(calls2)}"
+    )
+
+
+def test_cross_tip_reuse_and_invalidation(tmp_path):
+    """After a complete run on tip1, amend one file (chunk 0's file) to get tip2.
+    Only chunk 0 should be re-reviewed.  A cached chunk with a finding citing
+    the changed file must also be invalidated.
+    """
+    repo = _big_repo(tmp_path, n_files=4)
+
+    # First push: complete 4-chunk review at tip1.
+    tip1 = _git(["rev-parse", "HEAD"], cwd=repo)
     env = _chunk_env(tmp_path)
-
-    # Run once to completion so we have a done state.
-    tip = _git(["rev-parse", "HEAD"], cwd=repo)
     decision, reason, _, _ = _hook(repo, "git push origin main", env)
     assert decision == "allow", reason
-    st = _wait_state(repo, tip, {"done"})
-    assert st.get("state") == "done"
-    # The supervisor exited cleanly; it did not clobber the state.
-    assert st.get("verdict") == "pass"
+    _wait_state(repo, tip1, {"done"})
+    calls1 = _trace(tmp_path)
+    assert len(calls1) == 4, f"expected 4 calls at tip1, got {len(calls1)}"
+
+    # Identify which file is in chunk 0.
+    # origin/main was NOT updated by the hook (the hook only decides; the push
+    # itself was not executed), so origin/main still points at the pre-push base.
+    base = _git(["rev-parse", "origin/main"], cwd=repo)
+    chunks, _ = _plan_chunks_for(repo, base, tip1)
+    assert chunks and len(chunks) == 4
+    chunk0_path = chunks[0][0]["path"]
+
+    # Second push: amend the chunk-0 file to get tip2 (do NOT push directly —
+    # let the hook push so it can compute the range correctly).
+    (repo / chunk0_path).write_text("# amended\n")
+    _git(["add", chunk0_path], cwd=repo)
+    _git(["commit", "-q", "--amend", "--no-edit"], cwd=repo)
+    tip2 = _git(["rev-parse", "HEAD"], cwd=repo)
+    assert tip2 != tip1
+
+    env2 = _chunk_env(tmp_path)
+    env2["STUB_TRACE"] = str(tmp_path / "stub2.trace")
+    # Force push because the amended tip2 has diverged from origin/main (=tip1).
+    decision2, reason2, _, _ = _hook(repo, "git push -f origin main", env2)
+    assert decision2 == "allow", reason2
+    _wait_state(repo, tip2, {"done"})
+    calls2 = [json.loads(line) for line in
+              (tmp_path / "stub2.trace").read_text().splitlines() if line.strip()]
+    # Only chunk 0 changed → 1 re-review; chunks 1-3 reused from cache.
+    assert len(calls2) == 1, (
+        f"expected 1 reviewer call at tip2 (only chunk 0 changed), got {len(calls2)}"
+    )
+
+    # Also verify that a cached chunk whose finding cites chunk0_path is
+    # invalidated at tip2 (blob changed).
+    common = review_gate._git_common_dir(str(repo))
+    # Write a fake cache entry for chunk 1 that has a finding on chunk0_path.
+    stale_result = {
+        "status": "completed_with_errors",
+        "findings": [{"path": chunk0_path, "severity": "high",
+                      "start_line": 1, "end_line": 1,
+                      "content": "stale finding", "confidence": 0.9}],
+        "warnings": [],
+    }
+    chunk1_entries = chunks[1]
+    cid = review_gate._chunk_id(chunk1_entries, "")
+    review_gate._write_chunk_cache(common, cid, chunk1_entries, stale_result, tip1)
+    # At tip2, chunk0_path's blob changed → validate returns False.
+    cached = review_gate._read_chunk_cache(common, cid)
+    assert cached is not None
+    assert review_gate._validate_chunk_cache(cached, str(repo), tip2) is False, (
+        "cache with stale finding citing a changed file must be invalidated"
+    )
+
+
+def test_rename_appears_in_chunk_manifest(tmp_path):
+    """A renamed file must appear in manifest.renames so the skill reviewer
+    can diff correctly (both old and new paths in the pathspec).
+    """
+    remote = tmp_path / "origin.git"
+    work = tmp_path / "work"
+    _git(["init", "--bare", "-b", "main", str(remote)], cwd=tmp_path)
+    _git(["init", "-b", "main", str(work)], cwd=tmp_path)
+    _git(["config", "user.email", "t@example.com"], cwd=work)
+    _git(["config", "user.name", "t"], cwd=work)
+    _git(["config", "commit.gpgsign", "false"], cwd=work)
+    hooks = tmp_path / "no-hooks"
+    hooks.mkdir()
+    _git(["config", "core.hooksPath", str(hooks)], cwd=work)
+    # Base: original.py + 3 other .py files to reach the chunk threshold.
+    for name in ("original.py", "a.py", "b.py", "c.py"):
+        (work / name).write_text(f"# {name}\n")
+    _git(["add", "."], cwd=work)
+    _git(["commit", "-q", "-m", "base"], cwd=work)
+    _git(["remote", "add", "origin", str(remote)], cwd=work)
+    _git(["push", "-q", "-u", "origin", "main"], cwd=work)
+
+    # New commit: rename original.py → renamed.py + edit 3 other files so the
+    # total reaches the threshold and chunking is triggered.
+    _git(["mv", "original.py", "renamed.py"], cwd=work)
+    (work / "a.py").write_text("a = 1\n")
+    (work / "b.py").write_text("b = 2\n")
+    (work / "c.py").write_text("c = 3\n")
+    _git(["add", "."], cwd=work)
+    _git(["commit", "-q", "-m", "rename"], cwd=work)
+
+    env = _chunk_env(tmp_path)
+    tip = _git(["rev-parse", "HEAD"], cwd=work)
+    _hook(work, "git push origin main", env)
+    _wait_state(work, tip, {"done"}, timeout=30)
+
+    # The manifest that was passed to one of the stub calls must include the rename.
+    manifests = [c["manifest"] for c in _trace(tmp_path) if c.get("manifest")]
+    renames_seen = [r for m in manifests if m for r in (m.get("renames") or [])]
+    assert any(r[0] == "original.py" and r[1] == "renamed.py"
+               for r in renames_seen), (
+        f"rename not found in any chunk manifest; renames_seen={renames_seen}"
+    )
 
 
 # --- live canary: AGENTS.md injection must be suppressed ----------------------

@@ -40,21 +40,56 @@ You are orchestrating an AI code review. Follow these steps exactly.
 - `--rule <path>` — explicit rule file (highest precedence).
 - `--summary` — also produce a project summary (implied by `--scan`).
 - `--paths-file <json>` — path to a JSON manifest written by the push gate for
-  chunked reviews. When present, the file list is taken **exclusively** from the
-  manifest's `paths` array instead of being derived from git; the `range` field
-  in the manifest (if present) overrides `--range` for per-file diff commands.
-  File selection (allowlist filtering, safety ceiling) is still applied, but the
-  initial enumeration step is skipped.
+  chunked reviews. When present the file list is taken **exclusively** from
+  `manifest.paths`; do **not** re-apply the allowlist or the 40-file ceiling —
+  Python is the single source of truth for what this chunk reviews. See §1 for
+  the full `--paths-file` fast path.
 - Any non-flag arguments are treated as path filters (files or directories).
 
 ## 1. Select files and collect diffs
 
 **`--paths-file` fast path:** if `--paths-file <json>` was given, parse the
-manifest. Take the file list from `manifest.paths`. Use `manifest.range` as the
-revision range for per-file diff commands (fall back to the `--range` argument if
-the manifest lacks it). Skip the "Determine the revision range" block and the file
-enumeration commands below — go straight to allowlist filtering and diff
-collection using the manifest's paths and range.
+manifest JSON. The manifest fields are:
+- `paths` — exact list of paths for this chunk (use as the file list verbatim;
+  do **not** re-apply the allowlist or the 40-file ceiling).
+- `renames` — list of `[old_path, new_path]` pairs for renamed files in this
+  chunk.
+- `other_changed` — paths that changed in this same push but are reviewed in
+  other chunks.
+
+Use `--range` (from the command line) as the revision range.
+
+**File list:** use `manifest.paths` verbatim. Do not run any `git diff --name-status`
+or `git ls-files` enumeration.
+
+**Renames:** for each `[old_path, new_path]` in `manifest.renames`, the
+per-file diff command **must include both paths**:
+```
+git diff -M <range> -- "<old_path>" "<new_path>"
+```
+and numstat likewise:
+```
+git diff -M --numstat <range> -- "<old_path>" "<new_path>"
+```
+This is required so git can detect the rename and show the diff correctly rather
+than treating the file as a whole-file addition.  In §2b, symbol extraction
+uses the **old path** for a renamed file.
+
+**`other_changed`:** include `manifest.other_changed` in every code-reviewer
+subagent prompt under the key `other_changed_in_push`, with the note: *"These
+files also changed in this push and are reviewed in other chunks; inspect their
+diff if your file interacts with them."*
+
+**§2b:** when `--paths-file` is active, "outside the change set" in §2b means
+"outside `manifest.paths`". References in files listed in `other_changed` **are**
+reported as external references (they may contain callers of a removed symbol).
+
+**Path quoting:** always quote paths with double quotes in any git or Grep call,
+e.g. `git diff -M <range> -- "src/my file.py"`.
+
+Skip the "Determine the revision range" block and the file enumeration commands
+below — proceed directly to diff collection using the manifest's paths and
+the `--range` argument.
 
 **Determine the revision range** for `--unpushed`:
 0. If `--range <A>..<B>` was given, use it verbatim as `<range>` and skip the
