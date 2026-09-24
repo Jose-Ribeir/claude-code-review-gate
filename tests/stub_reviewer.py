@@ -9,6 +9,10 @@ environment variables so one command line serves every scenario:
   STUB_TRACE         a file to append one line per invocation to (optional)
   STUB_FAIL_ON_CALL  N — exit1 on the Nth call (1-based, counted via STUB_TRACE)
   STUB_VERDICT_FOR   path — the chunk containing this path returns block
+  STUB_FINDINGS_FOR  JSON mapping path → {severity, content} for path-scripted verdicts
+  STUB_RESOLVE       JSON mapping finding_id → {status, evidence_path, evidence_quote}
+                     Used when --resolve <file> is in argv; return resolver output.
+  STUB_RESOLVE_VERDICT pass|fail|garbage  Controls resolver exit for all ids (default pass).
 
 The last non-flag argument is the range the gate asked to review; it is echoed
 into the trace so a test can assert what was reviewed.
@@ -18,13 +22,17 @@ import os
 import sys
 import time
 
-# Parse arguments: range is the last non-flag arg; --paths-file is optional.
+# Parse arguments: range is the last non-flag arg; --paths-file and --resolve are optional.
 paths_file = None
+resolve_file = None
 args = sys.argv[1:]
 i = 0
 while i < len(args):
     if args[i] == "--paths-file" and i + 1 < len(args):
         paths_file = args[i + 1]
+        i += 2
+    elif args[i] == "--resolve" and i + 1 < len(args):
+        resolve_file = args[i + 1]
         i += 2
     else:
         i += 1
@@ -37,13 +45,32 @@ if paths_file:
     except Exception:
         pass
 
+resolve_input = None
+if resolve_file:
+    try:
+        resolve_input = json.loads(open(resolve_file, encoding="utf-8").read())
+    except Exception:
+        pass
+
+# Determine per-file mode from manifest.
+def _get_file_modes(m):
+    """Return {path: mode} from manifest.files if present."""
+    if not m:
+        return {}
+    files = m.get("files") or []
+    return {f["path"]: f.get("mode", "full") for f in files if isinstance(f, dict)}
+
+file_modes = _get_file_modes(manifest)
+
 trace = os.environ.get("STUB_TRACE")
 if trace:
     with open(trace, "a", encoding="utf-8") as fh:
         fh.write(json.dumps({
             "pid": os.getpid(), "cwd": os.getcwd(), "range": rng,
             "ts": time.time(), "paths_file": paths_file,
+            "resolve_file": resolve_file,
             "manifest": manifest,
+            "file_modes": file_modes,
         }) + "\n")
 
 # Check STUB_FAIL_ON_CALL: fail on the Nth invocation.
@@ -61,7 +88,35 @@ if fail_on and trace:
 
 time.sleep(float(os.environ.get("STUB_SLEEP", "0") or 0))
 
-# STUB_VERDICT_FOR: if this chunk contains the named path, return block.
+# --- resolve mode -------------------------------------------------------
+if resolve_file is not None:
+    rv = os.environ.get("STUB_RESOLVE_VERDICT", "pass").strip().lower()
+    if rv == "fail":
+        sys.stdout.write("resolver stub: exit1\n")
+        sys.exit(1)
+    if rv == "garbage":
+        sys.stdout.write("I could not resolve this.\n")
+        sys.exit(0)
+    # Build resolutions from STUB_RESOLVE env var or mark all still_present.
+    scripted = {}
+    raw_resolve = os.environ.get("STUB_RESOLVE", "")
+    if raw_resolve:
+        try:
+            scripted = json.loads(raw_resolve)
+        except Exception:
+            pass
+    priors = (resolve_input or {}).get("resolve") or []
+    resolutions = {}
+    for p in priors:
+        fid = p.get("id") or ""
+        if fid in scripted:
+            resolutions[fid] = scripted[fid]
+        else:
+            resolutions[fid] = {"status": "still_present", "evidence_path": "", "evidence_quote": ""}
+    sys.stdout.write(json.dumps({"resolutions": resolutions}))
+    sys.exit(0)
+
+# --- review mode --------------------------------------------------------
 verdict_for = os.environ.get("STUB_VERDICT_FOR", "")
 verdict = os.environ.get("STUB_VERDICT", "pass")
 if verdict_for and manifest:
@@ -89,4 +144,26 @@ if verdict == "warn":
     findings = [dict(finding, severity="medium", content="stub medium finding")]
 elif verdict == "block":
     findings = [dict(finding, severity="high", content="stub high finding")]
+
+# STUB_FINDINGS_FOR: per-path scripted findings (path → {severity, content}).
+findings_for_raw = os.environ.get("STUB_FINDINGS_FOR", "")
+if findings_for_raw:
+    try:
+        findings_map = json.loads(findings_for_raw)
+        # With a manifest use its paths; without (golden argv), apply to all configured paths.
+        chunk_paths = (manifest.get("paths") or []) if manifest else list(findings_map.keys())
+        for path in chunk_paths:
+            if path in findings_map:
+                spec = findings_map[path]
+                findings.append({
+                    "path": path,
+                    "start_line": 1, "end_line": 2, "confidence": 0.95,
+                    "category": "correctness", "evidence": "stub",
+                    "severity": spec.get("severity", "high"),
+                    "content": spec.get("content", "stub scripted finding"),
+                    "existing_code": spec.get("existing_code", "stub code"),
+                })
+    except Exception:
+        pass
+
 sys.stdout.write(json.dumps({"status": "success", "verdict": verdict, "findings": findings}))

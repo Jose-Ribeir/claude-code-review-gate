@@ -56,11 +56,27 @@ manifest JSON. The manifest fields are:
   chunk.
 - `other_changed` — paths that changed in this same push but are reviewed in
   other chunks.
+- `files` — (0.8.0, optional) per-file mode information:
+  - `mode` — `"full"` (normal review of `B..T -- path`) or `"delta"` (review only
+    the new change since the last review: `from_oid..to_oid`).
+  - `from_oid`, `to_oid` — blob OIDs; only meaningful when `mode = "delta"`.
+- `carried` — (0.8.0, optional) paths already reviewed in a prior run and not
+  re-reviewed in this chunk; include in reviewer context as "previously reviewed".
 
 Use `--range` (from the command line) as the revision range.
 
 **File list:** use `manifest.paths` verbatim. Do not run any `git diff --name-status`
 or `git ls-files` enumeration.
+
+**Delta mode:** for any file where `manifest.files[i].mode == "delta"`, collect the
+diff as:
+```
+git diff <from_oid> <to_oid>
+```
+instead of `git diff -M <range> -- "<path>"`. Tell the code-reviewer subagent that
+the earlier change to this file was already reviewed and to review only this new
+change while reading the full file for context. The reviewer should **report
+everything it sees** — suppression of already-known findings happens in Python.
 
 **Renames:** for each `[old_path, new_path]` in `manifest.renames`, the
 per-file diff command **must include both paths**:
@@ -79,6 +95,10 @@ uses the **old path** for a renamed file.
 subagent prompt under the key `other_changed_in_push`, with the note: *"These
 files also changed in this push and are reviewed in other chunks; inspect their
 diff if your file interacts with them."*
+
+**`carried`:** include `manifest.carried` as background context in the reviewer
+prompt: *"These files were reviewed in a prior run and had no significant findings;
+they are not re-reviewed here but may be relevant as callers or callees."*
 
 **§2b:** when `--paths-file` is active, "outside the change set" in §2b means
 "outside `manifest.paths`". References in files listed in `other_changed` **are**

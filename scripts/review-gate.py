@@ -1997,7 +1997,7 @@ def _test_reviewer_cmd():
 
 
 def _run_review(repo_root, mode, git_dir=None, head_sha="", push_range="",
-                paths_file=None, timeout=None, raw_tag=""):
+                paths_file=None, timeout=None, raw_tag="", resolve_file=None):
     """Return (result_dict, True, raw_archive_name) on success.
 
     paths_file: path to a chunk manifest JSON; if given, --paths-file is added
@@ -2061,11 +2061,17 @@ def _run_review(repo_root, mode, git_dir=None, head_sha="", push_range="",
 
     debug = _debug_enabled()
     creationflags = _WIN_FLAGS if sys.platform == "win32" else 0
-    if paths_file:
+    _SUFFIX = " --json"
+    if resolve_file:
+        base_prompt = PROMPT_RANGE.format(rng=push_range) if push_range else PROMPT
+        if base_prompt.endswith(_SUFFIX):
+            base_prompt = base_prompt[: -len(_SUFFIX)]
+        rf_fwd = resolve_file.replace("\\", "/")
+        prompt = f'{base_prompt} --resolve "{rf_fwd}" --json'
+    elif paths_file:
         base_prompt = PROMPT_RANGE.format(rng=push_range) if push_range else PROMPT
         # Strip exactly the trailing " --json" suffix (both PROMPT constants end
         # with it).  Do NOT use rstrip(" --json") — that strips a character SET.
-        _SUFFIX = " --json"
         if base_prompt.endswith(_SUFFIX):
             base_prompt = base_prompt[: -len(_SUFFIX)]
         # Forward slashes + double quotes so a path with spaces and backslashes
@@ -2078,7 +2084,9 @@ def _run_review(repo_root, mode, git_dir=None, head_sha="", push_range="",
     stub = _test_reviewer_cmd()
     if stub:
         # Range is always last so stub's sys.argv[-1] still gives the range.
-        if paths_file:
+        if resolve_file:
+            cmd = stub + ["--resolve", resolve_file, push_range]
+        elif paths_file:
             cmd = stub + ["--paths-file", paths_file, push_range]
         else:
             cmd = stub + [push_range]
@@ -2713,23 +2721,19 @@ def _supervise(state_path, run_id):
                     to_resolve, active_items, common_dir, fp, run_id,
                 )
 
-            # Process resolver output: guard, write resolutions, build still_present.
+            # Process resolver output: guard check, defer writing resolutions until
+            # after the reviewer dedup check (scenario: reviewer overrides resolver).
+            provisional_resolved = []  # (p, res, ev_path, ev_blob)
             still_present = []
             for p in to_resolve:
                 fid = p["id"]
                 res = resolver_results.get(fid) or {"status": "still_present"}
+                ev_path = res.get("evidence_path") or ""
+                ev_blob = (_blob_oids_at(review_root, tip, [ev_path]).get(ev_path, "")
+                           if ev_path else "")
                 if (res.get("status") == "resolved"
                         and _guard_resolution(res, active_items, push_range, review_root)):
-                    _write_resolution(
-                        common_dir, fp, fid,
-                        p["record"].get("head_oid") or "",
-                        res.get("evidence_path") or "",
-                        _blob_oids_at(review_root, tip,
-                                      [res.get("evidence_path") or ""]).get(
-                            res.get("evidence_path") or "", ""),
-                        res.get("evidence_quote") or "",
-                        run_id,
-                    )
+                    provisional_resolved.append((p, res, ev_path, ev_blob))
                 else:
                     f = dict(p["finding"])
                     f, _ = _reanchor_finding(f, review_root, tip)
@@ -2748,11 +2752,28 @@ def _supervise(state_path, run_id):
                 for nf in new_findings:
                     nf.setdefault("provenance", "new")
                 # Python dedup: drop new findings that nearly duplicate a still_present.
+                # Detect if the reviewer re-confirms a provisionally-resolved finding.
+                reviewer_override = set()
                 deduped_new = []
                 for nf in new_findings:
                     if any(_findings_similar(nf, sp) for sp in still_present):
                         continue
                     deduped_new.append(nf)
+                    for prov_p, _, _, _ in provisional_resolved:
+                        if _findings_similar(nf, prov_p["finding"]):
+                            reviewer_override.add(prov_p["id"])
+
+                # Write resolutions only for findings NOT overridden by the reviewer.
+                for p, res, ev_path, ev_blob in provisional_resolved:
+                    if p["id"] not in reviewer_override:
+                        _write_resolution(
+                            common_dir, fp, p["id"],
+                            p["record"].get("head_oid") or "",
+                            ev_path, ev_blob,
+                            res.get("evidence_quote") or "",
+                            run_id,
+                        )
+
                 all_findings = deduped_new + prior_findings
                 result = dict(result, findings=all_findings)
                 if plan_summary:
@@ -3371,6 +3392,36 @@ def _read_resolution(common_dir, fp, res_id, target_oid, evidence_path, evidence
     return data
 
 
+def _find_valid_resolution(common_dir, fp, fid, target_oid, review_root, tip):
+    """Return the first valid resolution for finding `fid`, or None.
+
+    A resolution is valid when target_oid matches AND the evidence_path blob
+    at the current tip equals the recorded evidence_blob_oid (fix not reverted).
+    """
+    res_dir = _fp_dir(common_dir, fp) / "resolutions"
+    if not res_dir.is_dir():
+        return None
+    prefix = fid[:16] + "-"
+    for p in res_dir.glob(f"{prefix}*.json"):
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        if data.get("target_oid") != target_oid:
+            continue
+        ev_path = data.get("evidence_path") or ""
+        ev_blob = data.get("evidence_blob_oid") or ""
+        if not ev_path or not ev_blob:
+            continue
+        current = _blob_oids_at(review_root, tip, [ev_path]).get(ev_path, "")
+        if current != ev_blob:
+            continue
+        return data
+    return None
+
+
 def _write_resolution(common_dir, fp, res_id, target_oid, evidence_path,
                       evidence_blob_oid, evidence_quote, run_id):
     """Persist a finding resolution. Best-effort."""
@@ -3467,10 +3518,11 @@ def _classify_priors(plan_items, tip, review_root, common_dir, fp, run_id):
                 auto_resolved.append(f)
                 continue
             fid = f.get("id") or _finding_id(f)
-            # Check if already resolved from a previous run
-            evidence_blob = record.get("head_oid") or ""
-            # We don't have evidence_path/blob yet; that comes from the resolver output.
-            # For now, add to resolver if criteria met; guard validates on return.
+            # Check if already resolved from a previous run (resolution reuse).
+            if _find_valid_resolution(
+                    common_dir, fp, fid, record.get("head_oid") or "",
+                    review_root, tip) is not None:
+                continue  # suppressed by existing resolution
             if sev in ("high", "medium", "critical") and has_active:
                 to_resolve.append({"id": fid, "finding": f, "record": record})
             elif sev in ("low", "info", ""):
@@ -3516,7 +3568,7 @@ def _run_resolver(repo_root, mode, git_dir, tip, push_range, to_resolve,
     try:
         result, _, _ = _run_review(
             repo_root, mode, git_dir, tip, push_range,
-            paths_file=manifest_path,
+            resolve_file=manifest_path,
             timeout=_CHUNK_TIMEOUT,
             raw_tag="-resolve",
         )
