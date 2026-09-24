@@ -1075,6 +1075,157 @@ def test_scenario_4_reviewer_overrides_resolver_no_resolution_written(monkeypatc
 
 
 # ---------------------------------------------------------------------------
+# Regressions: a finding that still blocks must never fall out of the ledger
+# ---------------------------------------------------------------------------
+
+def test_still_present_prior_survives_a_later_push_that_carries_its_file(tmp_path):
+    work = _tiny_repo(tmp_path, {"x.py": "x = 0\n", "stable.py": "# stable\n"})
+    (work / "x.py").write_text("x = 1\ndef bad(): pass\n")
+    (work / "stable.py").write_text("# stable v2\n")
+    _git(["add", "."], cwd=work)
+    _git(["commit", "-q", "-m", "t1"], cwd=work)
+    tip1 = _git(["rev-parse", "HEAD"], cwd=work)
+    findings_map = json.dumps({"x.py": {"severity": "high", "content": "bad function in x",
+                                        "existing_code": "def bad(): pass"}})
+    decision, reason, _ = _hook(work, "git push origin main",
+                                _env(tmp_path, STUB_FINDINGS_FOR=findings_map))
+    assert decision == "deny", reason
+    _wait_state(work, tip1, {"done"})
+
+    # T2 touches x.py without fixing it: delta review finds nothing new, the
+    # resolver keeps the prior.
+    (work / "x.py").write_text("x = 2\ndef bad(): pass\n")
+    _git(["add", "."], cwd=work)
+    _git(["commit", "-q", "--amend", "--no-edit"], cwd=work)
+    tip2 = _git(["rev-parse", "HEAD"], cwd=work)
+    decision, reason, _ = _hook(work, "git push -f origin main", _env(tmp_path))
+    assert decision == "deny" and "bad function in x" in reason, reason
+    _wait_state(work, tip2, {"done"})
+
+    # T3 changes only stable.py, so x.py is carried from its T2 record. The
+    # finding was never fixed and must still block.
+    (work / "stable.py").write_text("# stable v3\n")
+    _git(["add", "."], cwd=work)
+    _git(["commit", "-q", "--amend", "--no-edit"], cwd=work)
+    tip3 = _git(["rev-parse", "HEAD"], cwd=work)
+    decision, reason, _ = _hook(work, "git push -f origin main", _env(tmp_path))
+    assert decision == "deny" and "bad function in x" in reason, reason
+    _wait_state(work, tip3, {"done"})
+
+
+def test_finding_about_a_file_outside_the_review_is_kept(tmp_path):
+    work = _tiny_repo(tmp_path, {"a.py": "a = 0\n", "other.py": "def api(x): pass\n"})
+    tip1 = _commit(work, "a.py", "a = 1\napi()\n")
+    findings_map = json.dumps({"other.py": {"severity": "high", "content": "api caller broken",
+                                            "existing_code": "def api(x): pass"}})
+    decision, reason, _ = _hook(work, "git push origin main",
+                                _env(tmp_path, STUB_FINDINGS_FOR=findings_map))
+    assert decision == "deny", reason
+    _wait_state(work, tip1, {"done"})
+
+    (work / "a.py").write_text("a = 2\napi()\n")
+    _git(["add", "."], cwd=work)
+    _git(["commit", "-q", "--amend", "--no-edit"], cwd=work)
+    tip2 = _git(["rev-parse", "HEAD"], cwd=work)
+    decision, reason, _ = _hook(work, "git push -f origin main", _env(tmp_path))
+    assert decision == "deny" and "api caller broken" in reason, reason
+    _wait_state(work, tip2, {"done"})
+
+
+def test_truncated_file_gets_no_record_but_its_neighbour_does(tmp_path):
+    common = str(tmp_path)
+    fp = "f" * 64
+
+    def _item(path):
+        return {"mode": "full", "record": None, "from_oid": "",
+                "entry": {"path": path, "old_path": "", "status": "M",
+                          "old_oid": "1" * 40, "new_oid": ("2" if path == "a.py" else "3") * 40}}
+
+    items = [_item("a.py"), _item("b.py")]
+    result = {"status": "completed_with_warnings", "findings": [], "warnings": [
+        {"file": "a.py", "message": "diff truncated; reviewer saw stat + hunk headers only"}]}
+    review_gate._write_run_records(result, items, common, fp, "r1")
+
+    def _rec(item):
+        e = item["entry"]
+        key = review_gate._record_key(e["path"], "", e["status"], e["old_oid"])
+        return review_gate._read_ledger_record(
+            review_gate._record_path(common, fp, key, e["new_oid"]), fp, key, e["new_oid"])
+
+    assert _rec(items[0]) is None
+    assert _rec(items[1]) is not None
+
+    # A §2b context truncation (no file) is not a diff truncation and blocks nothing.
+    fp2 = "e" * 64
+    ctx = {"status": "success", "findings": [], "warnings": [
+        {"file": None, "message": "cross-file symbol analysis truncated; some external usages may be unverified"}]}
+    review_gate._write_run_records(ctx, items, common, fp2, "r2")
+    e = items[1]["entry"]
+    key = review_gate._record_key(e["path"], "", e["status"], e["old_oid"])
+    assert review_gate._read_ledger_record(
+        review_gate._record_path(common, fp2, key, e["new_oid"]), fp2, key, e["new_oid"]) is not None
+
+
+def test_the_skill_has_the_resolve_mode_the_gate_calls():
+    # The stub answers --resolve on its own, so without this nothing notices a
+    # skill that would run an ordinary review instead.
+    skill = (Path(_GATE).parent.parent / "skills" / "review" / "SKILL.md").read_text(encoding="utf-8")
+    assert "`--resolve <json>`" in skill and "## R. Resolve mode" in skill
+    assert "code-resolver" in skill and '{"resolutions"' in skill
+
+
+def test_resolver_manifest_carries_per_file_diff_specs(monkeypatch, tmp_path):
+    seen = {}
+
+    def _fake_review(*a, **kw):
+        seen.update(json.loads(Path(kw["resolve_file"]).read_text(encoding="utf-8")))
+        return {"resolutions": {}}, True, ""
+
+    monkeypatch.setattr(review_gate, "_run_review", _fake_review)
+    items = [{"mode": "delta", "from_oid": "a" * 40,
+              "entry": {"path": "x.py", "new_oid": "b" * 40}}]
+    prior = {"id": "f1", "finding": dict(_base_finding(), content="x" * 5000), "record": {}}
+    (tmp_path / review_gate.ASYNC_DIR).mkdir()
+    review_gate._run_resolver(".", "hook", "", "tip", "b..t", [prior], items,
+                              str(tmp_path), "fp", "run1")
+    assert seen["files"] == [{"path": "x.py", "mode": "delta",
+                              "from_oid": "a" * 40, "to_oid": "b" * 40}]
+    assert len(seen["resolve"][0]["content"]) == 2000
+
+
+def test_resolver_guard_ignores_lines_that_predate_the_delta(tmp_path):
+    work = tmp_path / "g"
+    work.mkdir()
+    _git(["init", "-b", "main", str(work)], cwd=tmp_path)
+    _git(["config", "user.email", "t@t.com"], cwd=work)
+    _git(["config", "user.name", "t"], cwd=work)
+    _git(["config", "commit.gpgsign", "false"], cwd=work)
+    (work / "readme.txt").write_text("r\n")
+    _git(["add", "."], cwd=work)
+    _git(["commit", "-q", "-m", "base"], cwd=work)
+    base = _git(["rev-parse", "HEAD"], cwd=work)
+    (work / "x.py").write_text("guard_already_there()\n")
+    _git(["add", "."], cwd=work)
+    _git(["commit", "-q", "-m", "reviewed"], cwd=work)
+    from_oid = _git(["rev-parse", "HEAD:x.py"], cwd=work)
+    (work / "x.py").write_text("guard_already_there()\nreal_fix()\n")
+    _git(["add", "."], cwd=work)
+    _git(["commit", "-q", "-m", "fix"], cwd=work)
+    tip = _git(["rev-parse", "HEAD"], cwd=work)
+    to_oid = _git(["rev-parse", "HEAD:x.py"], cwd=work)
+    items = [{"mode": "delta", "from_oid": from_oid, "record": {},
+              "entry": {"path": "x.py", "old_path": "", "status": "A",
+                        "old_oid": "0" * 40, "new_oid": to_oid}}]
+    rng = f"{base}..{tip}"
+
+    def _res(quote):
+        return {"status": "resolved", "evidence_path": "x.py", "evidence_quote": quote}
+
+    assert not review_gate._guard_resolution(_res("guard_already_there()"), items, rng, str(work))
+    assert review_gate._guard_resolution(_res("real_fix()"), items, rng, str(work))
+
+
+# ---------------------------------------------------------------------------
 # Scenario 21: real-run calibration (live, skip unless OCR_LIVE_TESTS=1)
 # ---------------------------------------------------------------------------
 

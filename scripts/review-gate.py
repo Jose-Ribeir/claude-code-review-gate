@@ -2697,7 +2697,8 @@ def _supervise(state_path, run_id):
                             pass
                     chunks_new = 1 if ran else 0
                 if ran and _ledger_enabled():
-                    _write_run_records(result, active_items, common_dir, fp, run_id)
+                    _write_run_records(result, active_items, common_dir, fp, run_id,
+                                       review_root, tip)
                 n_delta = sum(1 for p in active_items if p["mode"] == "delta")
                 n_full = len(active_items) - n_delta
                 plan_summary = (
@@ -2764,15 +2765,21 @@ def _supervise(state_path, run_id):
                             reviewer_override.add(prov_p["id"])
 
                 # Write resolutions only for findings NOT overridden by the reviewer.
+                self_resolved = {}
                 for p, res, ev_path, ev_blob in provisional_resolved:
-                    if p["id"] not in reviewer_override:
-                        _write_resolution(
-                            common_dir, fp, p["id"],
-                            p["record"].get("head_oid") or "",
-                            ev_path, ev_blob,
-                            res.get("evidence_quote") or "",
-                            run_id,
-                        )
+                    if p["id"] in reviewer_override:
+                        continue
+                    _write_resolution(
+                        common_dir, fp, p["id"],
+                        p.get("target_oid") or p["record"].get("head_oid") or "",
+                        ev_path, ev_blob,
+                        res.get("evidence_quote") or "",
+                        run_id,
+                    )
+                    if ev_path and ev_path == (p["finding"].get("path") or ""):
+                        self_resolved.setdefault(ev_path, set()).add(p["id"])
+                if self_resolved and _ledger_enabled():
+                    _drop_self_resolved(active_items, self_resolved, common_dir, fp, run_id)
 
                 all_findings = deduped_new + prior_findings
                 result = dict(result, findings=all_findings)
@@ -3505,37 +3512,41 @@ def _classify_priors(plan_items, tip, review_root, common_dir, fp, run_id):
     """
     has_active = any(item["mode"] in ("delta", "full") for item in plan_items)
     to_resolve, auto_resolved, carried_findings = [], [], []
+    seen = set()
 
     for item in plan_items:
         record = item.get("record")
         if record is None or item["mode"] == "full":
             continue
         for f in record.get("findings") or []:
+            fid = f.get("id") or _finding_id(f)
+            if fid in seen:
+                continue  # the same finding can sit on several records of one context
+            seen.add(fid)
             fpath = f.get("path") or item["entry"]["path"]
             sev = (f.get("severity") or "").lower()
             blob = _blob_oids_at(review_root, tip, [fpath]).get(fpath, "")
             if not blob:
                 auto_resolved.append(f)
                 continue
-            fid = f.get("id") or _finding_id(f)
-            # Check if already resolved from a previous run (resolution reuse).
-            if _find_valid_resolution(
-                    common_dir, fp, fid, record.get("head_oid") or "",
-                    review_root, tip) is not None:
+            target_oid = f.get("target_oid") or record.get("head_oid") or ""
+            if _find_valid_resolution(common_dir, fp, fid, target_oid,
+                                      review_root, tip) is not None:
                 continue  # suppressed by existing resolution
             if sev in ("high", "medium", "critical") and has_active:
-                to_resolve.append({"id": fid, "finding": f, "record": record})
+                to_resolve.append({"id": fid, "finding": f, "record": record,
+                                   "target_oid": target_oid})
             elif sev in ("low", "info", ""):
-                # Only route to resolver if the blob changed
-                recorded_blob = record.get("head_oid") or ""
-                if blob != recorded_blob:
-                    to_resolve.append({"id": fid, "finding": f, "record": record})
+                if blob != target_oid:
+                    to_resolve.append({"id": fid, "finding": f, "record": record,
+                                       "target_oid": target_oid})
                 else:
                     carried_findings.append(dict(f, provenance="carried"))
             else:
-                # Unknown severity: treat as medium (route to resolver)
+                # Unknown severity, or high/medium with nothing reviewed this run.
                 if has_active:
-                    to_resolve.append({"id": fid, "finding": f, "record": record})
+                    to_resolve.append({"id": fid, "finding": f, "record": record,
+                                       "target_oid": target_oid})
                 else:
                     carried_findings.append(dict(f, provenance="carried"))
 
@@ -3550,7 +3561,12 @@ def _run_resolver(repo_root, mode, git_dir, tip, push_range, to_resolve,
     """
     if not to_resolve:
         return {}
-    prior_data = [{"id": p["id"], **p["finding"]} for p in to_resolve]
+    # Priors are reviewer output about an untrusted diff; cap what goes back into a prompt.
+    prior_data = [
+        {**{k: (v[:2000] if isinstance(v, str) else v) for k, v in p["finding"].items()},
+         "id": p["id"]}
+        for p in to_resolve
+    ]
     manifest_path = str(_async_dir(common_dir) / f"resolver-{run_id}.json")
     try:
         _tmp = manifest_path + ".tmp"
@@ -3558,6 +3574,12 @@ def _run_resolver(repo_root, mode, git_dir, tip, push_range, to_resolve,
             json.dumps({
                 "resolve": prior_data,
                 "active_paths": [item["entry"]["path"] for item in active_plan_items],
+                "files": [
+                    {"path": item["entry"]["path"], "mode": item["mode"],
+                     "from_oid": item.get("from_oid") or "",
+                     "to_oid": item["entry"].get("new_oid") or ""}
+                    for item in active_plan_items
+                ],
             }, ensure_ascii=False),
             encoding="utf-8",
         )
@@ -3601,14 +3623,18 @@ def _guard_resolution(resolution, active_plan_items, push_range, review_root):
     evidence_quote = (resolution.get("evidence_quote") or "").strip()
     if not evidence_path or not evidence_quote:
         return False
-    active_paths = {item["entry"]["path"] for item in active_plan_items}
-    if evidence_path not in active_paths:
+    item = next((i for i in active_plan_items if i["entry"]["path"] == evidence_path), None)
+    if item is None:
         return False
-    if not push_range:
+    # A delta file's earlier lines predate the finding; only the fix's own
+    # additions can count as evidence that it was fixed.
+    if item["mode"] == "delta" and item.get("from_oid") and item["entry"].get("new_oid"):
+        diff_args = ["diff", item["from_oid"], item["entry"]["new_oid"]]
+    elif push_range:
+        diff_args = ["diff", push_range, "--", evidence_path]
+    else:
         return False
-    diff_out, rc = _git(
-        ["diff", push_range, "--", evidence_path], cwd=review_root
-    )
+    diff_out, rc = _git(diff_args, cwd=review_root)
     if rc != 0:
         return False
     added = "\n".join(
@@ -3694,41 +3720,112 @@ def _plan_to_chunks(active_items):
     ]
 
 
-def _write_run_records(result, active_items, common_dir, fp, run_id):
-    """Write per-file ledger records after a successful single-context review.
+def _truncated_paths(result):
+    """Paths the reviewer saw only partially (skill warning or finding flag).
+    Contains "*" when a diff truncation names no file: which one is unknown."""
+    out = set()
+    for w in (result.get("warnings") or []):
+        if isinstance(w, dict):
+            msg = str(w.get("message") or "").lower()
+            diff_trunc = w.get("type") == "diff_truncated" or "diff truncated" in msg
+            if w.get("file") and (diff_trunc or "truncat" in msg):
+                out.add(w["file"])
+            elif diff_trunc:
+                out.add("*")
+    for f in (result.get("findings") or []):
+        if isinstance(f, dict) and f.get("diff_truncated") and f.get("path"):
+            out.add(f["path"])
+    return out
 
-    Only writes records when status is success/completed_with_warnings and no
-    global diff_truncated warning is present. Best-effort.
+
+def _dedup_by_id(findings):
+    seen, out = set(), []
+    for f in findings:
+        fid = f.get("id") or _finding_id(f)
+        if fid not in seen:
+            seen.add(fid)
+            out.append(f)
+    return out
+
+
+def _record_findings_for(item, new_by_path, orphans, active_paths):
+    """A record keeps what is still owed on this file state: its new findings,
+    findings about files outside this context, and the unjudged-away priors of
+    the state it was delta-reviewed from."""
+    path = item["entry"]["path"]
+    own = list(new_by_path.get(path) or [])
+    carried = []
+    prev = item.get("record")
+    if item["mode"] == "delta" and prev:
+        for f in prev.get("findings") or []:
+            if any(_findings_similar(f, n) for n in own):
+                continue
+            carried.append(f)
+    return _dedup_by_id(own + list(orphans) + carried)
+
+
+def _write_run_records(result, active_items, common_dir, fp, run_id, review_root="", tip=""):
+    """Write per-file ledger records after a completed review of `active_items`.
+
+    No record for a file whose diff the reviewer saw truncated, and none at all
+    unless the review finished cleanly. Best-effort.
     """
     if not isinstance(result, dict):
         return
-    status = result.get("status", "")
-    if status not in ("success", "completed_with_warnings"):
+    if result.get("status", "") not in ("success", "completed_with_warnings"):
         return
-    warnings = result.get("warnings") or []
-    for w in warnings:
-        wtype = w.get("type") if isinstance(w, dict) else ""
-        wtext = str(w) if not isinstance(w, dict) else ""
-        if wtype == "diff_truncated" or "diff_truncated" in wtext:
-            return
-    findings = result.get("findings") or []
-    by_path = {}
-    for f in findings:
+    truncated = _truncated_paths(result)
+    if "*" in truncated:
+        return
+    active_paths = {item["entry"]["path"] for item in active_items}
+    findings = [f for f in (result.get("findings") or []) if isinstance(f, dict)]
+    oids = _blob_oids_at(review_root, tip, sorted({f.get("path") for f in findings if f.get("path")})) \
+        if (review_root and tip) else {}
+    stamped = [dict(f, target_oid=f.get("target_oid") or oids.get(f.get("path") or "", ""))
+               for f in findings]
+    new_by_path, orphans = {}, []
+    for f in stamped:
         p = f.get("path") or ""
-        by_path.setdefault(p, []).append(f)
+        if p in active_paths:
+            new_by_path.setdefault(p, []).append(f)
+        else:
+            orphans.append(f)
     for item in active_items:
         e = item["entry"]
         path = e["path"]
+        if path in truncated:
+            continue
         old_path = e.get("old_path") or ""
         prev = item.get("record")
         chain_depth = (int(prev.get("chain_depth") or 0) + 1) if (prev and item["mode"] == "delta") else 0
         key = _record_key(path, old_path, e["status"], e["old_oid"])
-        head_oid = e["new_oid"]
-        file_findings = by_path.get(path) or []
         _write_ledger_record(
-            common_dir, fp, key, head_oid, path, old_path,
-            e["status"], e["old_oid"], file_findings, chain_depth, run_id,
+            common_dir, fp, key, e["new_oid"], path, old_path, e["status"], e["old_oid"],
+            _record_findings_for(item, new_by_path, orphans, active_paths),
+            chain_depth, run_id,
         )
+
+
+def _drop_self_resolved(active_items, resolved_ids_by_path, common_dir, fp, run_id):
+    """Rewrite an active file's record without priors whose fix lies in that
+    same file: a property of this content, so it holds for any tip carrying it.
+    Fixes evidenced in another file stay in the record; the resolution entry,
+    which is keyed on that other file's blob, suppresses them instead."""
+    for item in active_items:
+        e = item["entry"]
+        ids = resolved_ids_by_path.get(e["path"])
+        if not ids:
+            continue
+        key = _record_key(e["path"], e.get("old_path") or "", e["status"], e["old_oid"])
+        rec = _read_ledger_record(_record_path(common_dir, fp, key, e["new_oid"]),
+                                  fp, key, e["new_oid"])
+        if rec is None:
+            continue
+        kept = [f for f in rec.get("findings") or [] if (f.get("id") or _finding_id(f)) not in ids]
+        if len(kept) != len(rec.get("findings") or []):
+            _write_ledger_record(common_dir, fp, key, e["new_oid"], e["path"],
+                                 e.get("old_path") or "", e["status"], e["old_oid"],
+                                 kept, rec.get("chain_depth") or 0, run_id)
 
 
 def _update_state_owned(state_path, run_id, **fields):
@@ -3976,7 +4073,7 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
 
         # Write ledger records for this chunk (only reached if not fenced).
         if fp and _ledger_enabled():
-            _write_run_records(result, chunk_items, common_dir, fp, run_id)
+            _write_run_records(result, chunk_items, common_dir, fp, run_id, review_root, tip)
 
         chunk_results.append(result)
         chunks_done += 1
