@@ -79,6 +79,36 @@ if a command fails — a failure *is* a result.
   data dir; anything older than an hour there is a leak (`git worktree prune`
   in the repo cleans git's side).
 
+**2b. Review ledger** (new in 0.8.0)
+
+- Check for the ledger directory at `.git/review-gate-ledger/` (or
+  `<common-dir>/review-gate-ledger/` for worktrees). Its presence means the
+  incremental reviewer is in use.
+- Count the total number of record files (`.json`) across all fingerprint
+  subdirectories. Report it as `N records` and name the cap
+  (`OCR_LEDGER_MAX_RECORDS`, default 5000).
+- Report the active **fingerprint** hash (first 16 hex chars of the sha256 of
+  the current model + `PROTOCOL_VERSION` + prompt-file contents + `.ocr/`
+  tree OID + relevant env vars). The fingerprint is printed by the gate at
+  the start of each run; it is also stored as the first path component of
+  every record. If the fingerprint changed since the last run (different
+  subdirectory from the most recently modified record) report the miss reason
+  as `fp_mismatch` and note that all files will be reviewed in full until a
+  new record is written.
+- Report the **hit rate of the last run**, if the snapshot
+  (`.git/review-gate-history/<latest>-*.json`) includes the
+  `ledger_stats` field: `{full, delta, carry, total}`. A first push will
+  show all full; subsequent pushes with unchanged files should show mostly
+  carry.
+- Note the configured TTL (`OCR_LEDGER_TTL`, default 7 days) and whether any
+  records appear older than it.
+- If `OCR_LEDGER=0` is set in the environment or in a project settings file,
+  report it as **warn**: the incremental review is disabled and every push is
+  reviewed in full. This is intentional (kill-switch) but worth surfacing.
+- If `OCR_FORCE_REVIEW=1` is set, report it as **warn**: ledger reads are
+  bypassed for the next push, which reviews every file in full and resets the
+  attempt counter. Records are still written after that run.
+
 **3. Global git hook (the optional "everywhere" adapter)**
 
 - `git config --global --get core.hooksPath` — empty means this adapter is not
@@ -121,7 +151,8 @@ Report any of these that are set, since each changes the verdict: `OCR_MODEL`,
 `OCR_TIMEOUT`, `OCR_ADVISORY`, `OCR_FAIL_OPEN`, `OCR_BLOCK_SEVERITY`,
 `OCR_BLOCK_CONFIDENCE`, `OCR_CLAUDE_ARGS`, `OCR_CLAUDE_EXTRA_ARGS`,
 `OCR_INLINE_BUDGET`, `OCR_INLINE_BUDGET_GIT`, `OCR_FORCE_REVIEW`,
-`OCR_LEGACY_RANGE`, `OCR_UNSET_ENV`.
+`OCR_LEGACY_RANGE`, `OCR_UNSET_ENV`, `OCR_LEDGER`, `OCR_LEDGER_TTL`,
+`OCR_LEDGER_MAX_RECORDS`.
 
 Also read the current repository's `.claude/settings.json` (and
 `settings.local.json`) and flag any `env` entry that sets an `OCR_*` variable:

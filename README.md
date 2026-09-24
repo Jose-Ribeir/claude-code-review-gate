@@ -155,6 +155,9 @@ git push --no-verify
 | Per-run budget | `3600`s | `OCR_RUN_BUDGET` | wall-clock budget for the whole chunked run; when the next chunk can't start within it the supervisor writes `failed(budget)` and the next push resumes from the checkpoint |
 | File ceiling | `40` | `OCR_MAX_FILES` | maximum reviewable files across all chunks; the largest-diff files are kept when the ceiling fires |
 | Chunk cache TTL | `86400`s (24 h) | `OCR_CHECKPOINT_TTL` | how long a completed chunk's result is kept in `.git/review-gate-async/chunks/`; re-pushing the same tip before expiry reuses cached chunks without re-reviewing them |
+| Review ledger | on | `OCR_LEDGER=0` to disable | per-file content-addressed cache that powers incremental re-review; `0` reviews every file in full, matching 0.7.0 behaviour without the chunk cache |
+| Ledger TTL | `604800`s (7 days) | `OCR_LEDGER_TTL` | a ledger record older than this is treated as a miss; the mtime is touched on each reuse, so actively-changing files keep their records alive |
+| Ledger record cap | `5000` | `OCR_LEDGER_MAX_RECORDS` | maximum number of records kept across all fingerprint dirs; oldest are pruned first, once per run at start |
 
 Rule precedence (highest first): `--rule` → project `.ocr/rule.json` → global `~/.ocr/rule.json` → built-in `skills/review/rubric.md`, then the matching `skills/review/rules/<lang>.md` and `rules/llm-authored-code.md` appended. See `examples/.ocr/rule.json`.
 
@@ -218,6 +221,34 @@ and the "already reviewed this HEAD" short-circuit replays the other adapter's f
 instead of allowing silently.
 
 All of this lives in `.git/`, so it is per-clone, never committed, and never pushed.
+
+### Incremental re-review (0.8.0)
+
+After a block, the typical cycle is: fix the flagged file, re-push, wait for a full review again. 0.8.0 cuts that wait by keeping a **review ledger** — a content-addressed per-file record of findings stored at `.git/review-gate-ledger/`.
+
+On each push the planner classifies every file in the diff:
+
+| Class | Condition | What happens |
+|---|---|---|
+| **carry** | Same before/after blob OIDs as in a prior record | Findings replayed from the record; no reviewer call |
+| **delta** | Same base blob, different head blob, chain depth < 5, delta diff is smaller than full diff | Reviewer sees only the `old → new` diff for that file |
+| **full** | No prior record, or record is expired/corrupt | Reviewed exactly as before |
+
+Only delta and full files are sent to the reviewer. A no-change re-push (same blobs) returns a verdict with zero `claude -p` calls.
+
+**Resolver pass.** After the reviewer finishes, one targeted `--resolve` call re-judges every high/medium prior finding from carried/delta records. A finding the resolver clears is suppressed from the verdict; if the reviewer independently re-reports the same finding, the resolution is discarded and the reviewer wins. A later push where the resolving evidence has been reverted brings the finding back.
+
+**Summary line.** Each verdict now includes a line such as:
+```
+reviewed 3 files (2 delta, 1 full), re-checked 2 prior findings (1 resolved), carried 41 files
+```
+
+**Kill switch.** `OCR_LEDGER=0` disables all ledger reads and writes; every file is reviewed in full on every push. `OCR_FORCE_REVIEW=1` bypasses ledger *reads* (all full for one run) but still writes records afterwards.
+
+**Limits.**
+- A behavioural interaction between a fix and a *carried* file (no code change in the carried file) is not re-examined. This is the same gap as 0.7.0 chunking and as incremental human review; use `OCR_FORCE_REVIEW=1` when you need a ground-truth sweep.
+- Delta records chain: a file reviewed as `B → X` in full then `X → head` as a delta is a weaker guarantee than a fresh full review of `B → head`. Chains are capped at 5; the sixth re-push is a full review.
+- A carry survives an upstream rebase only for files whose base blob is unchanged.
 
 
 ### Optional: Serena MCP (enhanced cross-file analysis for interactive sessions)
@@ -292,6 +323,7 @@ The gate runs the review in a **separate headless `claude -p` session**. That se
   - **The hook fails to launch, times out, or dies abnormally.** Claude Code treats a hook it could not start or had to kill as *non-blocking*, and no code inside the hook can change that. On Windows this is why both a Git Bash and a PowerShell adapter are registered — if neither can start, the gate is silently absent. Run `/review-gate:doctor` to check.
   - **`OCR_FAIL_OPEN=1` or `OCR_ADVISORY=1`** — the intended escape hatches.
 - **Two structural limits**: `git push --no-verify` skips the git-hook wiring entirely, and pushing from a terminal skips the plugin wiring unless you installed the global hook.
+- **Carried files are not re-reviewed** — a behavioural interaction between a fix and a carried file (no blob change in the carried file) is outside the scope of the incremental check. Use `OCR_FORCE_REVIEW=1` for a ground-truth sweep after a large refactor.
 - AI review is **advisory assistance, not a guarantee** — it complements, not replaces, tests and human review.
 - **Full-file scans can be token-heavy** on large repos; a 40-file ceiling keeps per-push cost bounded. See [Cost](#cost) for the per-session controls.
 - The **global git hook affects all push paths** — read the install warning.

@@ -6,6 +6,59 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-24
+
+### Added
+- **Incremental re-review after a block.** The gate now maintains a
+  **review ledger** — a content-addressed per-file cache of findings
+  (keyed by file blob OIDs and a prompt fingerprint) stored at
+  `<git-common-dir>/review-gate-ledger/`. On a fix-and-re-push the
+  planner classifies each file as **carry** (same contents, findings
+  replayed), **delta** (contents changed, review the diff between the
+  old and new blobs), or **full** (no prior record). Only delta and
+  full files go to the reviewer; clean files are never re-reviewed.
+- **Resolver pass** (`agents/code-resolver.md`). After the reviewer
+  finishes, one targeted `--resolve` call re-judges every high/medium
+  prior finding from carried and delta records. A finding cleared by
+  the resolver is written as a resolution and suppressed from the
+  verdict; the reviewer can override the resolver by re-reporting the
+  same finding (in which case no resolution is written).
+- **Resolution reuse.** A prior finding already resolved in an earlier
+  run is suppressed immediately, without a resolver call, as long as
+  the resolving evidence is still present at the current tip.
+- **Per-file provenance** (`new` / `carried` / `still_present`) is
+  recorded in findings, surfaced in the verdict message as a
+  `(carried)` or `(still present)` prefix, and written into the state
+  snapshot together with per-file class and miss-reason counts.
+- **`OCR_LEDGER=0`** disables the ledger entirely (reads and writes);
+  every file is reviewed in full, matching 0.7.0 behaviour without
+  the chunk cache.
+- **`OCR_FORCE_REVIEW=1`** now also bypasses ledger reads (not only
+  the old per-tip cache), forces every file full, and resets the
+  attempt counter. Records are still written.
+- **No reviewer call on a no-change re-push.** When every file in the
+  push already has a valid ledger record (same-tip or same-blob carry)
+  the verdict is replayed from the records and resolutions, with zero
+  `claude -p` calls.
+- **Stable chunk boundaries (change 1).** Chunking now covers only the
+  delta and full files for this push, so adding one file never
+  re-reviews already-recorded files.
+- New env vars: `OCR_LEDGER` (`0` = off, default on), `OCR_LEDGER_TTL`
+  (7 days), `OCR_LEDGER_MAX_RECORDS` (5000).
+- New stub test harness: `STUB_RESOLVE`, `STUB_RESOLVE_VERDICT`,
+  `STUB_FINDINGS_FOR` without a manifest, `--resolve` mode.
+- 32 new scenario tests (`tests/test_ledger_scenarios.py`) covering
+  all major ledger, resolver, provenance and migration paths.
+
+### Changed
+- **Protocol version bump to 1.** State files written by 0.7.0 (or
+  any unknown protocol) are treated as stale, and a fresh run starts
+  automatically. The `chunks/` checkpoint directory is removed on the
+  first 0.8.0 run.
+- **`_run_review` / `_run_resolver`:** the resolver call now passes
+  `--resolve <manifest>` (not `--paths-file`), so the stub and skill
+  correctly enter resolver mode.
+
 ## [0.7.0] - 2026-09-23
 
 ### Added
