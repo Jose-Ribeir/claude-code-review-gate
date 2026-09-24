@@ -223,7 +223,28 @@ try:
     _CHECKPOINT_TTL = max(3600, _CHECKPOINT_TTL)
 except ValueError:
     _CHECKPOINT_TTL = 24 * 3600
+# --- review ledger (0.8.0) ---------------------------------------------------
+LEDGER_DIR = "review-gate-ledger"
+try:
+    _LEDGER_TTL = int(os.environ.get("OCR_LEDGER_TTL", str(7 * 24 * 3600)))
+    _LEDGER_TTL = max(3600, _LEDGER_TTL)
+except ValueError:
+    _LEDGER_TTL = 7 * 24 * 3600
+try:
+    _LEDGER_MAX_RECORDS = int(os.environ.get("OCR_LEDGER_MAX_RECORDS", "5000"))
+    _LEDGER_MAX_RECORDS = max(100, _LEDGER_MAX_RECORDS)
+except ValueError:
+    _LEDGER_MAX_RECORDS = 5000
+_LEDGER_SCHEMA = 1
+_CHAIN_DEPTH_MAX = 5   # max delta-chain length before forcing full
+# Env vars that affect the review prompt and therefore invalidate cached records.
+_FINGERPRINT_ENV_VARS = (
+    "OCR_MODEL", "OCR_BLOCK_SEVERITY", "OCR_BLOCK_CONFIDENCE",
+    "OCR_CLAUDE_ARGS", "OCR_CLAUDE_EXTRA_ARGS",
+)
 # -----------------------------------------------------------------------------
+
+PROTOCOL_VERSION = 1   # bumped whenever state-file semantics change
 
 _EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 # git exports these to its own hooks (pre-push runs with GIT_DIR set, among
@@ -2425,6 +2446,10 @@ def _drive_review(common_dir, repo_root, meta, mode, budget):
             continue
         s = st.get("state")
         now = time.time()
+        # A non-terminal state from an older protocol is stale: start fresh.
+        if s in ("running", "claimed", "failed"):
+            if int(st.get("protocol_version") or 0) < PROTOCOL_VERSION:
+                s = None  # treat as absent; fall through to (re)start
         if s == "done":
             if now - float(st.get("done_ts") or 0) < MARKER_TTL and not (force and not forced_once):
                 return st
@@ -2471,6 +2496,7 @@ def _drive_review(common_dir, repo_root, meta, mode, budget):
             new.update({
                 "state": "claimed", "run_id": run_id, "claimed_ts": time.time(),
                 "mode": mode, "attempts": attempts,
+                "protocol_version": PROTOCOL_VERSION,
             })
             _write_state(state_path, new)
             forced_once = True
@@ -2552,8 +2578,9 @@ def _supervise(state_path, run_id):
     failure = None
     limit_info = None   # (resets_at, chunks_done, chunks_total) for limit failures
     result, ran, raw_name = None, False, ""
-    chunks_new = 0   # chunks newly reviewed in this run (not from cache)
+    chunks_new = 0   # chunks reviewed in this run
     progress = {"new": 0}
+    plan_summary = ""
     try:
         worktree = _make_worktree(repo_root, tip, run_id)
         if worktree:
@@ -2572,23 +2599,167 @@ def _supervise(state_path, run_id):
                 "were during the review rather than at the pushed commit."
             )
 
-        chunks, planner_warnings = _plan_chunks(review_root, base, tip)
-        if chunks is not None:
-            # Multi-chunk path: _run_chunked handles caching, fencing, budget.
-            result, ran, raw_name, chunks_new = _run_chunked(
-                state_path, run_id, common_dir, review_root, mode, git_dir,
-                tip, push_range, chunks, planner_warnings, fenced, progress,
-            )
-        else:
-            # Single-chunk path: exactly today's behaviour, same argv.
-            result, ran, raw_name = _run_review(
-                review_root, mode, git_dir, tip, push_range
-            )
+        fp = _compute_fingerprint(review_root, tip)
+        _prune_ledger(common_dir)
+        plan, planner_warnings = _plan_review(review_root, base, tip, common_dir, fp)
+
+        if plan is None or plan == []:
+            # git diff failed OR no allowed files: fall back to single-context (0.7.0 path).
+            result, ran, raw_name = _run_review(review_root, mode, git_dir, tip, push_range)
             chunks_new = 1 if ran else 0
             if planner_warnings and isinstance(result, dict):
                 result = dict(result)
                 result["warnings"] = (_planner_warning_objs(planner_warnings)
                                       + list(result.get("warnings") or []))
+        else:
+            active_items = [p for p in plan if p["mode"] in ("delta", "full")]
+            carry_items = [p for p in plan if p["mode"] == "carry"]
+            carry_paths = [p["entry"]["path"] for p in carry_items]
+
+            if not active_items:
+                # All files already reviewed in a prior run: replay from ledger.
+                ran = True  # got a valid result (from records)
+                result = {"status": "replayed", "findings": [], "warnings": []}
+                chunks_new = 0
+                plan_summary = f"carried {len(carry_items)} file(s), 0 reviewed"
+            elif len(active_items) > _CHUNK_THRESHOLD:
+                # Multi-chunk path.
+                result, ran, raw_name, chunks_new = _run_chunked(
+                    state_path, run_id, common_dir, review_root, mode, git_dir,
+                    tip, push_range, active_items, planner_warnings, fenced, progress,
+                    fp=fp, carry_paths=carry_paths,
+                )
+                n_delta = sum(1 for p in active_items if p["mode"] == "delta")
+                n_full = len(active_items) - n_delta
+                plan_summary = (
+                    f"reviewed {len(active_items)} file(s) ({n_delta} delta, {n_full} full)"
+                    + (f", carried {len(carry_items)}" if carry_items else "")
+                )
+            else:
+                # Single-context path.
+                all_full = all(p["mode"] == "full" for p in active_items)
+                if all_full and not carry_items:
+                    # Golden argv: byte-identical to 0.7.0 (no --paths-file).
+                    result, ran, raw_name = _run_review(
+                        review_root, mode, git_dir, tip, push_range
+                    )
+                    chunks_new = 1 if ran else 0
+                else:
+                    # Single context with paths-file (some delta or some carry).
+                    manifest_path = str(
+                        _async_dir(common_dir) / f"manifest-{run_id}-sc.json"
+                    )
+                    manifest = {
+                        "paths": [item["entry"]["path"] for item in active_items],
+                        "renames": [
+                            [item["entry"]["old_path"], item["entry"]["path"]]
+                            for item in active_items if item["entry"].get("old_path")
+                        ],
+                        "other_changed": [],
+                        "files": [
+                            {
+                                "path": item["entry"]["path"],
+                                "mode": item["mode"],
+                                "from_oid": item.get("from_oid") or "",
+                                "to_oid": item["entry"].get("new_oid") or "",
+                            }
+                            for item in active_items
+                        ],
+                        "carried": carry_paths,
+                    }
+                    try:
+                        tmp = manifest_path + ".tmp"
+                        Path(tmp).write_text(
+                            json.dumps(manifest, ensure_ascii=False), encoding="utf-8"
+                        )
+                        os.replace(tmp, manifest_path)
+                    except Exception as exc:
+                        raise ReviewGateError(
+                            f"could not write single-context manifest: {exc}"
+                        )
+                    try:
+                        result, ran, raw_name = _run_review(
+                            review_root, mode, git_dir, tip, push_range,
+                            paths_file=manifest_path,
+                        )
+                    finally:
+                        try:
+                            Path(manifest_path).unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                    chunks_new = 1 if ran else 0
+                if ran and _ledger_enabled():
+                    _write_run_records(result, active_items, common_dir, fp, run_id)
+                n_delta = sum(1 for p in active_items if p["mode"] == "delta")
+                n_full = len(active_items) - n_delta
+                plan_summary = (
+                    f"reviewed {len(active_items)} file(s) ({n_delta} delta, {n_full} full)"
+                    + (f", carried {len(carry_items)}" if carry_items else "")
+                )
+
+            if planner_warnings and isinstance(result, dict):
+                result = dict(result)
+                result["warnings"] = (_planner_warning_objs(planner_warnings)
+                                      + list(result.get("warnings") or []))
+
+            # Handle prior findings from carry/delta records.
+            to_resolve, auto_resolved, carried_findings = _classify_priors(
+                plan, tip, review_root, common_dir, fp, run_id
+            )
+            resolver_results = {}
+            if to_resolve and active_items:
+                resolver_results = _run_resolver(
+                    review_root, mode, git_dir, tip, push_range,
+                    to_resolve, active_items, common_dir, fp, run_id,
+                )
+
+            # Process resolver output: guard, write resolutions, build still_present.
+            still_present = []
+            for p in to_resolve:
+                fid = p["id"]
+                res = resolver_results.get(fid) or {"status": "still_present"}
+                if (res.get("status") == "resolved"
+                        and _guard_resolution(res, active_items, push_range, review_root)):
+                    _write_resolution(
+                        common_dir, fp, fid,
+                        p["record"].get("head_oid") or "",
+                        res.get("evidence_path") or "",
+                        _blob_oids_at(review_root, tip,
+                                      [res.get("evidence_path") or ""]).get(
+                            res.get("evidence_path") or "", ""),
+                        res.get("evidence_quote") or "",
+                        run_id,
+                    )
+                else:
+                    f = dict(p["finding"])
+                    f, _ = _reanchor_finding(f, review_root, tip)
+                    still_present.append(dict(f, provenance="still_present"))
+
+            # Re-anchor carried findings and mark provenance.
+            anchored_carried = []
+            for f in carried_findings:
+                f2, _ = _reanchor_finding(f, review_root, tip)
+                anchored_carried.append(f2)
+
+            # Merge new findings (from reviewer) with priors.
+            prior_findings = still_present + anchored_carried
+            if isinstance(result, dict):
+                new_findings = list(result.get("findings") or [])
+                for nf in new_findings:
+                    nf.setdefault("provenance", "new")
+                # Python dedup: drop new findings that nearly duplicate a still_present.
+                deduped_new = []
+                for nf in new_findings:
+                    if any(_findings_similar(nf, sp) for sp in still_present):
+                        continue
+                    deduped_new.append(nf)
+                all_findings = deduped_new + prior_findings
+                result = dict(result, findings=all_findings)
+                if plan_summary:
+                    result = dict(result, plan_summary=plan_summary)
+
+        if plan is not None and plan_summary and isinstance(result, dict):
+            result.setdefault("plan_summary", plan_summary)
     except _Fenced:
         stop.set()
         if worktree:
@@ -2753,7 +2924,6 @@ def _reap_async(common_dir):
     try:
         now = time.time()
         cutoff = now - MARKER_TTL
-        chunk_cutoff = now - _CHECKPOINT_TTL
 
         # Collect live-run worktree paths so the sweep below can skip them.
         live_worktrees = set()
@@ -2772,13 +2942,8 @@ def _reap_async(common_dir):
         for p in _async_dir(common_dir).glob("*"):
             try:
                 if p.is_dir() and p.name == "chunks":
-                    # Chunk cache: separate, longer TTL; skip each file individually.
-                    for cp in p.iterdir():
-                        try:
-                            if cp.is_file() and cp.stat().st_mtime < chunk_cutoff:
-                                cp.unlink()
-                        except OSError:
-                            continue
+                    # 0.7.0 chunk cache: remove entirely; 0.8.0 uses the ledger.
+                    shutil.rmtree(p, ignore_errors=True)
                     continue
                 if p.is_file() and p.stat().st_mtime < cutoff:
                     p.unlink()
@@ -2896,71 +3061,6 @@ def _plugin_version():
         return json.loads(pj.read_text(encoding="utf-8")).get("version", "")
     except Exception:
         return ""
-
-
-def _chunk_id(entries, ocr_tree_oid=""):
-    """Content-addressed SHA-256 key for a chunk (base/tip not included)."""
-    key_entries = sorted([
-        (e["path"], e.get("old_path") or "", e["old_oid"], e["new_oid"])
-        for e in entries
-    ])
-    key = json.dumps(
-        {"entries": key_entries, "model": _MODEL,
-         "version": _plugin_version(), "ocr": ocr_tree_oid},
-        sort_keys=True, ensure_ascii=False,
-    )
-    return hashlib.sha256(key.encode()).hexdigest()
-
-
-def _chunk_cache_dir(common_dir):
-    return _async_dir(common_dir) / "chunks"
-
-
-def _chunk_cache_path(common_dir, chunk_id):
-    return _chunk_cache_dir(common_dir) / f"{chunk_id[:24]}.json"
-
-
-def _read_chunk_cache(common_dir, chunk_id):
-    """Return the cached chunk dict, or None if missing/unreadable."""
-    try:
-        data = json.loads(
-            _chunk_cache_path(common_dir, chunk_id).read_text(encoding="utf-8")
-        )
-        return data if isinstance(data, dict) else None
-    except Exception:
-        return None
-
-
-def _write_chunk_cache(common_dir, chunk_id, entries, result, tip):
-    """Atomically write a chunk result to the content-addressed cache."""
-    path = _chunk_cache_path(common_dir, chunk_id)
-    data = {
-        "chunk_id": chunk_id, "entries": entries, "result": result,
-        "computed_at_tip": tip, "completed_ts": time.time(),
-    }
-    _write_state(path, data)
-
-
-def _validate_chunk_cache(cache, root, tip):
-    """Return True if the cached chunk is still usable at tip.
-
-    Checks: result has findings key; every finding's path has the same blob
-    at the current tip as at computed_at_tip (a changed file makes the finding
-    potentially stale).
-    """
-    result = cache.get("result")
-    if not isinstance(result, dict) or "findings" not in result:
-        return False
-    computed_at_tip = cache.get("computed_at_tip")
-    if not computed_at_tip or computed_at_tip == tip:
-        return True  # same tip or unknown: no staleness check needed
-    findings = result.get("findings") or []
-    finding_paths = list({f.get("path") for f in findings if f.get("path")})
-    if not finding_paths:
-        return True
-    oids_now = _blob_oids_at(root, tip, finding_paths)
-    oids_then = _blob_oids_at(root, computed_at_tip, finding_paths)
-    return all(oids_now.get(p) == oids_then.get(p) for p in finding_paths)
 
 
 def _collect_diff_entries(root, base, tip):
@@ -3097,6 +3197,488 @@ def _plan_chunks(root, base, tip):
     return _group_into_chunks(allowed), warnings
 
 
+# --- review ledger (0.8.0) ---------------------------------------------------
+
+
+def _ledger_enabled():
+    return os.environ.get("OCR_LEDGER", "1").strip().lower() not in ("0", "false", "no")
+
+
+def _ledger_dir(common_dir):
+    return Path(common_dir) / LEDGER_DIR
+
+
+def _fp_dir(common_dir, fp):
+    return _ledger_dir(common_dir) / fp[:16]
+
+
+def _record_key(path, old_path, status, base_oid):
+    """16-hex key that identifies a file entry independent of its head blob."""
+    raw = "\x00".join([path or "", old_path or "", status or "", base_oid or ""])
+    return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def _finding_id(f):
+    """Stable sha256 id for a finding (path, existing_code, content)."""
+    raw = "\x00".join([
+        f.get("path") or "",
+        f.get("existing_code") or "",
+        f.get("content") or "",
+    ])
+    return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()
+
+
+def _record_path(common_dir, fp, key, head_oid):
+    return _fp_dir(common_dir, fp) / f"{key}-{head_oid[:16]}.json"
+
+
+def _resolution_path(common_dir, fp, res_id, target_oid, evidence_path, evidence_blob_oid):
+    ctx_raw = "\x00".join([target_oid or "", evidence_path or "", evidence_blob_oid or ""])
+    ctx16 = hashlib.sha256(ctx_raw.encode("utf-8", "replace")).hexdigest()[:16]
+    return _fp_dir(common_dir, fp) / "resolutions" / f"{res_id[:16]}-{ctx16}.json"
+
+
+def _compute_fingerprint(root, tip):
+    """sha256 of model, PROTOCOL_VERSION, skill/rubric/rules/agents file contents,
+    .ocr/ tree OID, and prompt-affecting env vars. The plugin version is
+    intentionally excluded so code-only releases keep the ledger."""
+    h = hashlib.sha256()
+    h.update(_MODEL.encode("utf-8"))
+    h.update(b"\x00")
+    h.update(str(PROTOCOL_VERSION).encode("utf-8"))
+    h.update(b"\x00")
+    for rel in ("skills/review/SKILL.md", "skills/review/rubric.md"):
+        try:
+            h.update((Path(_PLUGIN_ROOT) / rel).read_bytes())
+        except OSError:
+            pass
+        h.update(b"\x00")
+    for subdir in ("skills/review/rules", "agents"):
+        d = Path(_PLUGIN_ROOT) / subdir
+        if d.is_dir():
+            for f in sorted(d.glob("*.md")):
+                try:
+                    h.update(f.read_bytes())
+                except OSError:
+                    pass
+                h.update(b"\x00")
+    h.update((_ocr_tree_oid(root, tip) or "").encode("utf-8"))
+    h.update(b"\x00")
+    for var in _FINGERPRINT_ENV_VARS:
+        h.update((os.environ.get(var) or "").encode("utf-8"))
+        h.update(b"\x00")
+    return h.hexdigest()
+
+
+def _read_ledger_record(record_path, fp, key, head_oid):
+    """Return the record dict or None (miss, corrupt, mismatch, expired)."""
+    try:
+        raw = Path(record_path).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return None
+    if not isinstance(data, dict) or data.get("schema") != _LEDGER_SCHEMA:
+        return None
+    if data.get("fp") != fp or data.get("key") != key or data.get("head_oid") != head_oid:
+        return None
+    try:
+        if time.time() - Path(record_path).stat().st_mtime > _LEDGER_TTL:
+            return None
+    except OSError:
+        return None
+    return data
+
+
+def _write_ledger_record(common_dir, fp, key, head_oid, path, old_path,
+                         status, base_oid, findings, chain_depth, run_id):
+    """Write one per-file ledger record. Best-effort: never breaks the gate."""
+    try:
+        rpath = _record_path(common_dir, fp, key, head_oid)
+        rpath.parent.mkdir(parents=True, exist_ok=True)
+        stamped = [dict(f, id=_finding_id(f)) for f in (findings or [])]
+        data = {
+            "schema": _LEDGER_SCHEMA, "fp": fp, "key": key,
+            "path": path, "old_path": old_path or "",
+            "status": status, "base_oid": base_oid, "head_oid": head_oid,
+            "findings": stamped, "chain_depth": int(chain_depth or 0),
+            "reviewed_ts": time.time(), "run_id": run_id or "",
+        }
+        _write_state(rpath, data)
+        try:
+            rpath.touch(exist_ok=True)  # refresh mtime for TTL
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def _find_delta_record(common_dir, fp, key, head_oid):
+    """Find the newest valid ledger record for `key` with a *different* head OID.
+
+    Used to identify a delta base: the file was reviewed at X, now at head_oid,
+    so we review only X→head_oid. Returns (record, from_oid) or (None, '').
+    """
+    fp_d = _fp_dir(common_dir, fp)
+    if not fp_d.is_dir():
+        return None, ""
+    candidates = []
+    prefix = key + "-"
+    for p in fp_d.glob(f"{prefix}*.json"):
+        if p.name == f"{key}-{head_oid[:16]}.json":
+            continue  # exact match already checked by caller
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(data, dict) or data.get("schema") != _LEDGER_SCHEMA:
+            continue
+        if data.get("fp") != fp or data.get("key") != key:
+            continue
+        if int(data.get("chain_depth") or 0) >= _CHAIN_DEPTH_MAX:
+            continue
+        try:
+            if time.time() - p.stat().st_mtime > _LEDGER_TTL:
+                continue
+        except OSError:
+            continue
+        candidates.append((data.get("reviewed_ts") or 0, data))
+    if not candidates:
+        return None, ""
+    candidates.sort(reverse=True)
+    record = candidates[0][1]
+    from_oid = record.get("head_oid") or ""
+    return (record, from_oid) if from_oid else (None, "")
+
+
+def _read_resolution(common_dir, fp, res_id, target_oid, evidence_path, evidence_blob_oid):
+    """Return a matching resolution dict, or None."""
+    rpath = _resolution_path(
+        common_dir, fp, res_id, target_oid, evidence_path, evidence_blob_oid
+    )
+    try:
+        data = json.loads(rpath.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    if (data.get("target_oid") != target_oid or
+            data.get("evidence_path") != evidence_path or
+            data.get("evidence_blob_oid") != evidence_blob_oid):
+        return None
+    return data
+
+
+def _write_resolution(common_dir, fp, res_id, target_oid, evidence_path,
+                      evidence_blob_oid, evidence_quote, run_id):
+    """Persist a finding resolution. Best-effort."""
+    try:
+        rpath = _resolution_path(
+            common_dir, fp, res_id, target_oid, evidence_path, evidence_blob_oid
+        )
+        rpath.parent.mkdir(parents=True, exist_ok=True)
+        data = {
+            "res_id": res_id, "target_oid": target_oid,
+            "evidence_path": evidence_path, "evidence_blob_oid": evidence_blob_oid,
+            "evidence_quote": evidence_quote or "",
+            "resolved_ts": time.time(), "run_id": run_id or "",
+        }
+        _write_state(rpath, data)
+    except Exception:
+        pass
+
+
+def _plan_review(root, base, tip, common_dir, fp):
+    """Classify every diff entry as carry, delta, or full.
+
+    Returns (plan_items, warnings) where each item is a dict:
+      {entry, mode, record, from_oid, miss_reason}
+    Returns (None, warnings) when git diff fails (same as _plan_chunks).
+    Returns ([], warnings) when no reviewable files.
+    """
+    if not base:
+        base = _EMPTY_TREE
+    entries, warnings = _collect_diff_entries(root, base, tip)
+    if entries is None:
+        return None, warnings
+
+    allowed = [e for e in entries if _is_allowed_path(e["path"])]
+    if not allowed:
+        return [], warnings
+
+    if len(allowed) > _MAX_FILES:
+        allowed.sort(key=lambda e: e["lines"], reverse=True)
+        skipped = len(allowed) - _MAX_FILES
+        warnings.append(
+            f"file ceiling: {skipped} file(s) skipped (only the {_MAX_FILES} with "
+            "the largest diffs are reviewed; set OCR_MAX_FILES to raise the cap)"
+        )
+        allowed = allowed[:_MAX_FILES]
+
+    force = os.environ.get("OCR_FORCE_REVIEW", "").strip().lower() in ("1", "true", "yes")
+    use_ledger = _ledger_enabled() and not force
+
+    plan = []
+    for e in allowed:
+        if not use_ledger:
+            plan.append({"entry": e, "mode": "full", "record": None,
+                         "from_oid": "", "miss_reason": "none"})
+            continue
+        key = _record_key(e["path"], e.get("old_path") or "", e["status"], e["old_oid"])
+        head_oid = e["new_oid"]
+        rec_path = _record_path(common_dir, fp, key, head_oid)
+        record = _read_ledger_record(rec_path, fp, key, head_oid)
+        if record is not None:
+            plan.append({"entry": e, "mode": "carry", "record": record,
+                         "from_oid": head_oid, "miss_reason": "none"})
+            continue
+        delta_record, from_oid = _find_delta_record(common_dir, fp, key, head_oid)
+        if delta_record is not None:
+            plan.append({"entry": e, "mode": "delta", "record": delta_record,
+                         "from_oid": from_oid, "miss_reason": "none"})
+            continue
+        plan.append({"entry": e, "mode": "full", "record": None,
+                     "from_oid": "", "miss_reason": "no_record"})
+    return plan, warnings
+
+
+def _classify_priors(plan_items, tip, review_root, common_dir, fp, run_id):
+    """Decide the fate of prior findings from carry/delta records.
+
+    Returns (to_resolve, auto_resolved, carried_findings):
+      to_resolve   — list of {id, finding, record} for the resolver
+      auto_resolved — findings where the target file no longer exists
+      carried_findings — findings replayed as-is (low/info, blob unchanged)
+    """
+    has_active = any(item["mode"] in ("delta", "full") for item in plan_items)
+    to_resolve, auto_resolved, carried_findings = [], [], []
+
+    for item in plan_items:
+        record = item.get("record")
+        if record is None or item["mode"] == "full":
+            continue
+        for f in record.get("findings") or []:
+            fpath = f.get("path") or item["entry"]["path"]
+            sev = (f.get("severity") or "").lower()
+            blob = _blob_oids_at(review_root, tip, [fpath]).get(fpath, "")
+            if not blob:
+                auto_resolved.append(f)
+                continue
+            fid = f.get("id") or _finding_id(f)
+            # Check if already resolved from a previous run
+            evidence_blob = record.get("head_oid") or ""
+            # We don't have evidence_path/blob yet; that comes from the resolver output.
+            # For now, add to resolver if criteria met; guard validates on return.
+            if sev in ("high", "medium", "critical") and has_active:
+                to_resolve.append({"id": fid, "finding": f, "record": record})
+            elif sev in ("low", "info", ""):
+                # Only route to resolver if the blob changed
+                recorded_blob = record.get("head_oid") or ""
+                if blob != recorded_blob:
+                    to_resolve.append({"id": fid, "finding": f, "record": record})
+                else:
+                    carried_findings.append(dict(f, provenance="carried"))
+            else:
+                # Unknown severity: treat as medium (route to resolver)
+                if has_active:
+                    to_resolve.append({"id": fid, "finding": f, "record": record})
+                else:
+                    carried_findings.append(dict(f, provenance="carried"))
+
+    return to_resolve, auto_resolved, carried_findings
+
+
+def _run_resolver(repo_root, mode, git_dir, tip, push_range, to_resolve,
+                  active_plan_items, common_dir, fp, run_id):
+    """Invoke the resolver agent once. Returns {id: {status, evidence_path, ...}}.
+
+    On failure returns all still_present (fail closed).
+    """
+    if not to_resolve:
+        return {}
+    prior_data = [{"id": p["id"], **p["finding"]} for p in to_resolve]
+    manifest_path = str(_async_dir(common_dir) / f"resolver-{run_id}.json")
+    try:
+        _tmp = manifest_path + ".tmp"
+        Path(_tmp).write_text(
+            json.dumps({
+                "resolve": prior_data,
+                "active_paths": [item["entry"]["path"] for item in active_plan_items],
+            }, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        os.replace(_tmp, manifest_path)
+    except Exception as exc:
+        _warn(f"review-gate: could not write resolver manifest: {exc}")
+        return {p["id"]: {"status": "still_present"} for p in to_resolve}
+    try:
+        result, _, _ = _run_review(
+            repo_root, mode, git_dir, tip, push_range,
+            paths_file=manifest_path,
+            timeout=_CHUNK_TIMEOUT,
+            raw_tag="-resolve",
+        )
+        if not isinstance(result, dict):
+            raise ReviewGateError("resolver returned non-dict")
+        resolutions = result.get("resolutions") or {}
+        if not isinstance(resolutions, dict):
+            resolutions = {}
+        return resolutions
+    except (ReviewGateError, ReviewLimitError):
+        return {p["id"]: {"status": "still_present"} for p in to_resolve}
+    finally:
+        try:
+            Path(manifest_path).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _guard_resolution(resolution, active_plan_items, push_range, review_root):
+    """True if a 'resolved' verdict passes the Python guard.
+
+    A resolution is accepted only when:
+    - evidence_path names a delta/full file in this push
+    - evidence_quote appears verbatim (whitespace-normalised) on the added
+      side of that file's diff in this push
+    """
+    if not isinstance(resolution, dict) or resolution.get("status") != "resolved":
+        return True  # still_present always passes
+    evidence_path = resolution.get("evidence_path") or ""
+    evidence_quote = (resolution.get("evidence_quote") or "").strip()
+    if not evidence_path or not evidence_quote:
+        return False
+    active_paths = {item["entry"]["path"] for item in active_plan_items}
+    if evidence_path not in active_paths:
+        return False
+    if not push_range:
+        return False
+    diff_out, rc = _git(
+        ["diff", push_range, "--", evidence_path], cwd=review_root
+    )
+    if rc != 0:
+        return False
+    added = "\n".join(
+        line[1:] for line in diff_out.splitlines()
+        if line.startswith("+") and not line.startswith("+++")
+    )
+    return " ".join(evidence_quote.split()) in " ".join(added.split())
+
+
+def _reanchor_finding(f, review_root, tip):
+    """Try to update a finding's lines by locating its existing_code at tip.
+
+    Returns the (possibly updated) finding and a bool indicating success.
+    """
+    existing_code = (f.get("existing_code") or "").strip()
+    path = f.get("path") or ""
+    if not existing_code or not path:
+        return f, False
+    out, rc = _git(["show", f"{tip}:{path}"], cwd=review_root)
+    if rc != 0 or not out:
+        return dict(f, unanchored=True), False
+    norm_code = " ".join(existing_code.split())
+    lines = out.splitlines()
+    span = existing_code.count("\n") + 1
+    for i in range(len(lines) - span + 1):
+        block = " ".join(" ".join(lines[i:i + span]).split())
+        if norm_code == block:
+            return dict(f, start_line=i + 1, end_line=i + span), True
+    return dict(f, unanchored=True), False
+
+
+def _prune_ledger(common_dir):
+    """Remove stale/excess ledger records. Best-effort, called once per run."""
+    try:
+        led_dir = _ledger_dir(common_dir)
+        if not led_dir.is_dir():
+            return
+        now = time.time()
+        cutoff = now - _LEDGER_TTL
+        all_records = []
+        for fp_dir in list(led_dir.iterdir()):
+            if not fp_dir.is_dir():
+                continue
+            try:
+                # Prune whole fp dir if its mtime is stale
+                if fp_dir.stat().st_mtime < cutoff:
+                    shutil.rmtree(fp_dir, ignore_errors=True)
+                    continue
+            except OSError:
+                continue
+            for rec_file in fp_dir.glob("*.json"):
+                try:
+                    mtime = rec_file.stat().st_mtime
+                    if mtime < cutoff:
+                        rec_file.unlink()
+                    else:
+                        all_records.append((mtime, rec_file))
+                except OSError:
+                    continue
+        if len(all_records) > _LEDGER_MAX_RECORDS:
+            all_records.sort(reverse=True)  # keep newest
+            for _, stale in all_records[_LEDGER_MAX_RECORDS:]:
+                try:
+                    stale.unlink()
+                except OSError:
+                    pass
+    except Exception:
+        pass
+
+
+def _plan_to_chunks(active_items):
+    """Group active (delta/full) plan items into chunks for _run_chunked.
+
+    Returns a list of lists of plan_item dicts (each item has 'entry', 'mode',
+    'from_oid'). Mirrors _group_into_chunks but operates on plan items.
+    """
+    entries = [item["entry"] for item in active_items]
+    path_to_item = {item["entry"]["path"]: item for item in active_items}
+    grouped_entries = _group_into_chunks(entries)
+    return [
+        [path_to_item[e["path"]] for e in chunk_entries]
+        for chunk_entries in grouped_entries
+    ]
+
+
+def _write_run_records(result, active_items, common_dir, fp, run_id):
+    """Write per-file ledger records after a successful single-context review.
+
+    Only writes records when status is success/completed_with_warnings and no
+    global diff_truncated warning is present. Best-effort.
+    """
+    if not isinstance(result, dict):
+        return
+    status = result.get("status", "")
+    if status not in ("success", "completed_with_warnings"):
+        return
+    warnings = result.get("warnings") or []
+    for w in warnings:
+        wtype = w.get("type") if isinstance(w, dict) else ""
+        wtext = str(w) if not isinstance(w, dict) else ""
+        if wtype == "diff_truncated" or "diff_truncated" in wtext:
+            return
+    findings = result.get("findings") or []
+    by_path = {}
+    for f in findings:
+        p = f.get("path") or ""
+        by_path.setdefault(p, []).append(f)
+    for item in active_items:
+        e = item["entry"]
+        path = e["path"]
+        old_path = e.get("old_path") or ""
+        prev = item.get("record")
+        chain_depth = (int(prev.get("chain_depth") or 0) + 1) if (prev and item["mode"] == "delta") else 0
+        key = _record_key(path, old_path, e["status"], e["old_oid"])
+        head_oid = e["new_oid"]
+        file_findings = by_path.get(path) or []
+        _write_ledger_record(
+            common_dir, fp, key, head_oid, path, old_path,
+            e["status"], e["old_oid"], file_findings, chain_depth, run_id,
+        )
+
+
 def _update_state_owned(state_path, run_id, **fields):
     """Fence-checked state update under _StateLock.
 
@@ -3207,30 +3789,28 @@ def _merge_chunk_results(chunk_results, planner_warnings=None):
 
 
 def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
-                 tip, push_range, chunks, planner_warnings, fenced, progress=None):
-    """Run per-chunk reviews with caching, fencing, budget and retry.
+                 tip, push_range, active_items, planner_warnings, fenced,
+                 progress=None, fp="", carry_paths=None):
+    """Run per-chunk reviews with fencing, budget and retry.
 
-    Returns (merged_result, True, raw_name, chunks_new) on success, where
-    raw_name is the archived snapshot of the merged result, and
-    chunks_new is the count of chunks actually reviewed in THIS run (cached
-    chunks do not count).  The caller uses chunks_new to decide whether to
-    increment the attempt counter.  `progress["new"]` mirrors chunks_new as
-    it grows, so the caller still has it when this raises part-way.
-    Raises ReviewLimitError, ReviewBudgetError, ReviewGateError,
-    or _Fenced when the supervisor has been superseded.
+    active_items is a list of plan_item dicts (mode delta/full). Chunks are
+    computed internally via _plan_to_chunks. carry_paths is the list of
+    already-carried file paths (for the manifest's carried field).
+
+    Returns (merged_result, True, raw_name, chunks_new) on success.
+    chunks_new is the count of chunks reviewed in THIS run.
+    Raises ReviewLimitError, ReviewBudgetError, ReviewGateError, or _Fenced.
     """
+    chunks = _plan_to_chunks(active_items)
     total = len(chunks)
-    ocr_oid = _ocr_tree_oid(review_root, tip)
     budget_end = time.monotonic() + _RUN_BUDGET
     chunk_results = []
-    chunks_done = 0   # cumulative (cached + newly reviewed)
-    chunks_new = 0    # newly reviewed in THIS run (not from cache)
+    chunks_done = 0
+    chunks_new = 0
 
-    for k, chunk_entries in enumerate(chunks):
+    for k, chunk_items in enumerate(chunks):
         if fenced["hit"]:
             raise _Fenced()
-
-        cid = _chunk_id(chunk_entries, ocr_oid)
 
         # Progress update (fence-checked).
         try:
@@ -3240,17 +3820,6 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
             )
         except _Fenced:
             raise
-
-        # Reuse cached result if still valid.
-        cached = _read_chunk_cache(common_dir, cid)
-        if cached is not None and _validate_chunk_cache(cached, review_root, tip):
-            try:
-                _chunk_cache_path(common_dir, cid).touch(exist_ok=True)
-            except Exception:
-                pass
-            chunk_results.append(cached["result"])
-            chunks_done += 1
-            continue
 
         # Check run budget before starting a new chunk.
         if time.monotonic() > budget_end:
@@ -3270,18 +3839,30 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
         manifest_path = str(
             _async_dir(common_dir) / f"manifest-{run_id}-{k}.json"
         )
+        # other_changed: paths in OTHER chunks that are also being reviewed
         other_changed = [
-            e["path"] for i, ch in enumerate(chunks)
-            for e in ch if i != k
+            item["entry"]["path"]
+            for i, ch in enumerate(chunks)
+            for item in ch if i != k
         ]
         manifest = {
             "chunk_index": k, "chunks_total": total,
-            "paths": [e["path"] for e in chunk_entries],
+            "paths": [item["entry"]["path"] for item in chunk_items],
             "renames": [
-                [e["old_path"], e["path"]]
-                for e in chunk_entries if e.get("old_path")
+                [item["entry"]["old_path"], item["entry"]["path"]]
+                for item in chunk_items if item["entry"].get("old_path")
             ],
             "other_changed": other_changed,
+            "files": [
+                {
+                    "path": item["entry"]["path"],
+                    "mode": item["mode"],
+                    "from_oid": item.get("from_oid") or "",
+                    "to_oid": item["entry"].get("new_oid") or "",
+                }
+                for item in chunk_items
+            ],
+            "carried": carry_paths or [],
         }
         try:
             tmp = manifest_path + ".tmp"
@@ -3332,7 +3913,7 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
                 pass
 
         # Fence-check before persisting: if another run claimed the state while
-        # the stub was running, do not write the cache and let _Fenced propagate.
+        # the reviewer was running, do not write records.
         try:
             _update_state_owned(
                 state_path, run_id,
@@ -3341,8 +3922,10 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
         except _Fenced:
             raise
 
-        # Persist and record (only reached if not fenced).
-        _write_chunk_cache(common_dir, cid, chunk_entries, result, tip)
+        # Write ledger records for this chunk (only reached if not fenced).
+        if fp and _ledger_enabled():
+            _write_run_records(result, chunk_items, common_dir, fp, run_id)
+
         chunk_results.append(result)
         chunks_done += 1
         chunks_new += 1
@@ -3455,7 +4038,14 @@ def _format_reasons(result, limit=20):
         content = _sanitize(f.get("content") or "").strip() or (
             "(reviewer omitted a description for this finding - see raw output log)"
         )
-        lines.append(f"  [{sev}] {loc} - {content}")
+        prov = f.get("provenance", "")
+        if prov == "carried":
+            prefix = "(carried) "
+        elif prov == "still_present":
+            prefix = "(still present) "
+        else:
+            prefix = ""
+        lines.append(f"  [{sev}] {prefix}{loc} - {content}")
     # limit=0 means "all of them" -- used by --history, which is read on demand
     # and has no context budget to protect, unlike the gate's own messages.
     return "\n".join(lines if not limit else lines[:limit])

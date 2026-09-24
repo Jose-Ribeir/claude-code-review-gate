@@ -876,6 +876,7 @@ def test_a_running_review_past_the_budget_is_denied_not_allowed(tmp_path, monkey
     review_gate._write_state(path, {
         "state": "running", "run_id": "other", "tip": "a" * 40, "branch": "feat/x",
         "started_ts": time.time() - 700, "heartbeat_ts": time.time(), "supervisor_pid": 0,
+        "protocol_version": review_gate.PROTOCOL_VERSION,
     })
     _run_hook(monkeypatch)
     payload = json.loads(capsys.readouterr().out)["hookSpecificOutput"]
@@ -2424,10 +2425,6 @@ _group_into_chunks = review_gate._group_into_chunks
 _merge_chunk_results = review_gate._merge_chunk_results
 _merge_near_dup_findings = review_gate._merge_near_dup_findings
 _findings_similar = review_gate._findings_similar
-_validate_chunk_cache = review_gate._validate_chunk_cache
-_read_chunk_cache = review_gate._read_chunk_cache
-_write_chunk_cache = review_gate._write_chunk_cache
-_chunk_id = review_gate._chunk_id
 _check_limit = review_gate._check_limit
 _parse_resets_at = review_gate._parse_resets_at
 _reap_async = review_gate._reap_async
@@ -2636,67 +2633,33 @@ def _fake_entries():
              "old_oid": "a" * 40, "new_oid": "b" * 40, "lines": 20}]
 
 
-def test_validate_chunk_cache_accepts_valid_cache(monkeypatch):
-    entries = _fake_entries()
-    result = {"status": "pass", "verdict": "pass", "findings": [], "warnings": []}
-    cache = {
-        "chunk_id": _chunk_id(entries),
-        "entries": entries,
-        "result": result,
-        "computed_at_tip": "c" * 40,
-    }
-    # No findings cite any path, so blob-oid check passes trivially.
+def test_ledger_record_write_then_read(monkeypatch, tmp_path):
     monkeypatch.setattr(review_gate, "_blob_oids_at", lambda root, tip, paths: {})
-    assert _validate_chunk_cache(cache, ".", "d" * 40) is True
+    e = _fake_entries()[0]
+    fp = "a" * 16
+    key = review_gate._record_key(e["path"], e.get("old_path") or "", e["status"], e["old_oid"])
+    head_oid = e["new_oid"]
+    findings = [dict(_BASE_FINDING, path=e["path"])]
+    review_gate._write_ledger_record(
+        str(tmp_path), fp, key, head_oid, e["path"], e.get("old_path") or "",
+        e["status"], e["old_oid"], findings, 0, "test-run",
+    )
+    rec_path = review_gate._record_path(str(tmp_path), fp, key, head_oid)
+    record = review_gate._read_ledger_record(rec_path, fp, key, head_oid)
+    assert record is not None
+    assert record["key"] == key
+    assert record["fp"] == fp
+    assert len(record["findings"]) == 1
 
 
-def test_validate_chunk_cache_rejects_stale_finding(monkeypatch):
-    # A finding on a file whose blob changed since the chunk was computed must
-    # be rejected — a stale block-level finding would permanently deny the push.
-    entries = _fake_entries()
-    result = {
-        "status": "block", "verdict": "block",
-        "findings": [dict(_BASE_FINDING, path="app/x.py")],
-        "warnings": [],
-    }
-    # computed_at_tip = "c"*40, current tip = "e"*40 — different, so check runs.
-    cache = {
-        "chunk_id": _chunk_id(entries),
-        "entries": entries,
-        "result": result,
-        "computed_at_tip": "c" * 40,
-    }
-    # The function calls _blob_oids_at twice: once for the new tip and once for
-    # computed_at_tip. Return different blobs so the comparison fails.
-    def _different_blobs(root, tip, paths):
-        if tip == "c" * 40:
-            return {"app/x.py": "b" * 40}   # old blob
-        return {"app/x.py": "d" * 40}        # new (changed) blob
-
-    monkeypatch.setattr(review_gate, "_blob_oids_at", _different_blobs)
-    assert _validate_chunk_cache(cache, ".", "e" * 40) is False
-
-
-def test_corrupt_cache_treated_as_miss(tmp_path):
-    d = tmp_path / "review-gate-async" / "chunks"
-    d.mkdir(parents=True)
-    entries = _fake_entries()
-    cid = _chunk_id(entries)
-    (d / f"{cid[:24]}.json").write_text("{broken", encoding="utf-8")
-    result = _read_chunk_cache(str(tmp_path), cid)
+def test_corrupt_ledger_record_treated_as_miss(tmp_path):
+    fp = "b" * 16
+    fp_dir = tmp_path / fp
+    fp_dir.mkdir(parents=True)
+    rec_path = fp_dir / "deadbeef12345678-cafebabe12345678.json"
+    rec_path.write_text("{broken", encoding="utf-8")
+    result = review_gate._read_ledger_record(rec_path, fp, "deadbeef12345678", "cafebabe12345678")
     assert result is None
-
-
-def test_write_then_read_chunk_cache(monkeypatch, tmp_path):
-    monkeypatch.setattr(review_gate, "_blob_oids_at", lambda root, tip, paths: {})
-    entries = _fake_entries()
-    result = {"status": "pass", "verdict": "pass", "findings": [], "warnings": []}
-    _write_chunk_cache(str(tmp_path), _chunk_id(entries), entries, result, "c" * 40)
-    cid = _chunk_id(entries)
-    cached = _read_chunk_cache(str(tmp_path), cid)
-    assert cached is not None
-    assert cached["result"] == result
-    assert _validate_chunk_cache(cached, ".", "d" * 40) is True
 
 
 # --- limit detection ----------------------------------------------------------
@@ -2739,15 +2702,18 @@ def test_parse_resets_at_returns_none_on_garbage():
 
 # --- _reap_async: chunks TTL and live-worktree protection ---------------------
 
-def test_reap_async_keeps_fresh_chunk_files(monkeypatch, tmp_path):
+def test_reap_async_removes_chunks_dir_as_0_8_migration(monkeypatch, tmp_path):
+    # 0.8.0: the old 0.7.0 chunks/ directory is removed entirely by _reap_async
+    # as a one-time migration regardless of file age.
     monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(tmp_path / "gate-data"))
     chunks_dir = _async_dir(str(tmp_path)) / "chunks"
     chunks_dir.mkdir(parents=True)
     fresh = chunks_dir / "abc123.json"
     fresh.write_text("{}", encoding="utf-8")
-    # fresh mtime → should survive
     _reap_async(str(tmp_path))
-    assert fresh.exists()
+    # Both the file and the directory are removed (migration).
+    assert not fresh.exists()
+    assert not chunks_dir.exists()
 
 
 def test_reap_async_removes_old_chunk_files(monkeypatch, tmp_path):
@@ -2762,9 +2728,9 @@ def test_reap_async_removes_old_chunk_files(monkeypatch, tmp_path):
     assert not old.exists()
 
 
-def test_reap_async_does_not_remove_fresh_chunk_with_marker_age(monkeypatch, tmp_path):
-    # Chunks live longer than MARKER_TTL. A chunk file that's between MARKER_TTL
-    # and CHECKPOINT_TTL old must survive the sweep (it's under the chunks/ dir).
+def test_reap_async_removes_chunks_dir_regardless_of_age(monkeypatch, tmp_path):
+    # 0.8.0: even a chunk file that's between MARKER_TTL and CHECKPOINT_TTL old
+    # is removed because the whole chunks/ directory is migrated away.
     monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(tmp_path / "gate-data"))
     chunks_dir = _async_dir(str(tmp_path)) / "chunks"
     chunks_dir.mkdir(parents=True)
@@ -2773,59 +2739,33 @@ def test_reap_async_does_not_remove_fresh_chunk_with_marker_age(monkeypatch, tmp
     # Age to just past MARKER_TTL (1 h) but well within CHECKPOINT_TTL (24 h).
     os.utime(mid_age, (time.time() - MARKER_TTL - 60,) * 2)
     _reap_async(str(tmp_path))
-    assert mid_age.exists()
+    assert not mid_age.exists()  # removed as part of migration
 
 
 def test_attempts_increments_when_no_new_chunks_reviewed(monkeypatch, tmp_path):
-    """Cached chunks must not count as 'progress': if a run completed NO new
-    chunks (chunks_new == 0) but had cached ones, the attempt counter still
-    increments.  This regression test guards against the pre-fix behaviour
-    where cur_chunks_done (which included cached chunks) prevented incrementing.
+    """If _run_review errors on the first chunk (chunks_new == 0), the attempt
+    counter must still increment in _supervise.  This tests _run_chunked directly
+    with a _run_review stub that always errors, using the 0.8.0 active_items API.
     """
-    # Stub: 4 entries above threshold, cached chunks 0-1 valid, chunk 2 always errors.
     entries = _make_entries(4)
-    cached_result = {"status": "success", "findings": [], "warnings": []}
-
-    # Pre-populate cache for chunks 0 and 1 (OCR_CHUNK_FILES=1 → 4 chunks of 1).
-    # We exercise via _supervise via the monkeypatched _stub_gate pattern.
-    # Instead, test _run_chunked directly with a _run_review that always errors.
 
     # Patch constants so 4 files → chunked, 1 file per chunk.
     monkeypatch.setattr(review_gate, "_CHUNK_THRESHOLD", 3)
     monkeypatch.setattr(review_gate, "_CHUNK_FILES", 1)
     monkeypatch.setattr(review_gate, "_CHUNK_LINES", 99999)
     monkeypatch.setattr(review_gate, "_RUN_BUDGET", 9999)
-
-    # Mock _collect_diff_entries to return the 4 entries.
-    monkeypatch.setattr(review_gate, "_collect_diff_entries",
-                        lambda root, base, tip: (entries[:], []))
-    # Mock _blob_oids_at so cache validation passes.
-    monkeypatch.setattr(review_gate, "_blob_oids_at",
-                        lambda root, tip, paths: {})
-    # Mock _ocr_tree_oid.
-    monkeypatch.setattr(review_gate, "_ocr_tree_oid", lambda root, tip: "")
-    # Mock _git so git clean / checkout no-ops.
     monkeypatch.setattr(review_gate, "_git", lambda args, cwd=None: ("", 0))
 
-    # Compute chunks.
-    chunks, _ = review_gate._plan_chunks(".", "base", "tip")
-    assert chunks and len(chunks) == 4
-
-    # Pre-populate cache for chunks 0 and 1.
-    common = str(tmp_path)
-    for chunk_entries in chunks[:2]:
-        cid = review_gate._chunk_id(chunk_entries, "")
-        review_gate._write_chunk_cache(common, cid, chunk_entries,
-                                       cached_result, "tip")
-
-    # _run_review always errors for chunks 2 and 3.
-    def _always_error(*a, **kw):
-        raise review_gate.ReviewGateError("stub error for chunk")
-
-    monkeypatch.setattr(review_gate, "_run_review", _always_error)
+    # Build active_items (plan_item dicts) from entries.
+    active_items = [
+        {"entry": e, "mode": "full", "record": None,
+         "from_oid": "", "miss_reason": "no_record"}
+        for e in entries
+    ]
 
     # Write a state file for the run.
     import pathlib
+    common = str(tmp_path)
     async_d = pathlib.Path(common) / review_gate.ASYNC_DIR
     async_d.mkdir(parents=True, exist_ok=True)
     state_path = str(async_d / "tip.json")
@@ -2834,31 +2774,35 @@ def test_attempts_increments_when_no_new_chunks_reviewed(monkeypatch, tmp_path):
                                            "attempts": 0})
     fenced = {"hit": False}
 
-    # Only cached chunks, then an error: no new progress.
-    progress = {"new": 0}
-    with pytest.raises(review_gate.ReviewGateError):
-        review_gate._run_chunked(
-            state_path, run_id, common, ".", "hook", "",
-            "tip", "base..tip", chunks, [], fenced, progress,
-        )
-    assert progress["new"] == 0
-    assert review_gate._read_state(state_path)["chunks_done"] == 2
-
-    # Chunk 2 is reviewed fresh, chunk 3 errors: the new chunk must survive the raise.
-    calls = {"n": 0}
-
-    def _second_errors(*a, **kw):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            return cached_result, True, ""
+    # _run_review always errors → chunks_new stays 0.
+    def _always_error(*a, **kw):
         raise review_gate.ReviewGateError("stub error for chunk")
 
-    monkeypatch.setattr(review_gate, "_run_review", _second_errors)
+    monkeypatch.setattr(review_gate, "_run_review", _always_error)
     progress = {"new": 0}
     with pytest.raises(review_gate.ReviewGateError):
         review_gate._run_chunked(
             state_path, run_id, common, ".", "hook", "",
-            "tip", "base..tip", chunks, [], fenced, progress,
+            "tip", "base..tip", active_items, [], fenced, progress,
+        )
+    assert progress["new"] == 0
+
+    # One chunk succeeds, then error: the successful chunk counts.
+    calls = {"n": 0}
+    pass_result = {"status": "success", "findings": [], "warnings": []}
+
+    def _first_ok(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return pass_result, True, ""
+        raise review_gate.ReviewGateError("stub error for chunk")
+
+    monkeypatch.setattr(review_gate, "_run_review", _first_ok)
+    progress = {"new": 0}
+    with pytest.raises(review_gate.ReviewGateError):
+        review_gate._run_chunked(
+            state_path, run_id, common, ".", "hook", "",
+            "tip", "base..tip", active_items, [], fenced, progress,
         )
     assert progress["new"] == 1
 
