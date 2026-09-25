@@ -32,6 +32,7 @@
     "--strict-mcp-config",
     "--exclude-dynamic-system-prompt-sections",
     "--output-format",
-    "stream-json"
+    "stream-json",
+    "--verbose"
   ]
 }

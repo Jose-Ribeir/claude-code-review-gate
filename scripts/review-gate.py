@@ -151,6 +151,7 @@ DEFAULT_CLAUDE_ARGS = [
     # becomes a later event, not a replacement, so it can no longer cause a
     # "could not parse review output" failure.
     "--output-format", "stream-json",
+    "--verbose",   # required when --output-format stream-json is used in -p mode
 ]
 try:
     TIMEOUT = int(os.environ.get("OCR_TIMEOUT", "1800"))
@@ -408,9 +409,10 @@ class ReviewGateError(Exception):
     Claude Code adds one more that no code here can reach: a hook that fails to
     launch or gets killed is treated as non-blocking.
     """
-    def __init__(self, msg="", is_timeout=False):
+    def __init__(self, msg="", is_timeout=False, is_parse_failure=False):
         super().__init__(msg)
         self.is_timeout = is_timeout
+        self.is_parse_failure = is_parse_failure
 
 
 class ReviewLimitError(ReviewGateError):
@@ -2381,7 +2383,8 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
             f"{_raw_note}"
             f"  Claude stdout (first 400 chars): {out_text[:400]!r}\n"
             f"{_auth_hint(out_text or '')}"
-            f"{bypass}"
+            f"{bypass}",
+            is_parse_failure=True,
         )
     return result, True, raw_name
 
@@ -2693,6 +2696,18 @@ def _write_telemetry(state_path, run_id):
     ocr_telemetry.append(common_dir_of(Path(state_path)), rec)
 
 
+def _run_review_with_retry(call):
+    """Run `call()` and retry once on a parse failure (exit 0, unparseable output)."""
+    for attempt in range(2):
+        try:
+            return call()
+        except ReviewGateError as exc:
+            if attempt == 0 and exc.is_parse_failure and not exc.is_timeout:
+                _warn("[gate] parse failure on first attempt; retrying once.")
+                continue
+            raise
+
+
 def _supervise_run(state_path, run_id):
     """The detached worker: run ONE review for the tip named in state_path.
 
@@ -2787,15 +2802,9 @@ def _supervise_run(state_path, run_id):
 
         if plan is None or plan == []:
             # git diff failed OR no allowed files: fall back to single-context (0.7.0 path).
-            for _attempt in range(2):
-                try:
-                    result, ran, raw_name = _run_review(review_root, mode, git_dir, tip, push_range)
-                    break
-                except ReviewGateError as exc:
-                    if _attempt == 0 and "could not parse" in str(exc) and not exc.is_timeout:
-                        _warn("[gate] parse failure on first attempt; retrying once.")
-                        continue
-                    raise
+            result, ran, raw_name = _run_review_with_retry(
+                lambda: _run_review(review_root, mode, git_dir, tip, push_range)
+            )
             chunks_new = 1 if ran else 0
             if planner_warnings and isinstance(result, dict):
                 result = dict(result)
@@ -2853,17 +2862,9 @@ def _supervise_run(state_path, run_id):
                 extras = _review_extras(0, [p["entry"]["path"] for p in active_items])
                 if all_full and not carry_items and not extras:
                     # Golden argv: byte-identical to 0.7.0 (no --paths-file).
-                    for _attempt in range(2):
-                        try:
-                            result, ran, raw_name = _run_review(
-                                review_root, mode, git_dir, tip, push_range
-                            )
-                            break
-                        except ReviewGateError as exc:
-                            if _attempt == 0 and "could not parse" in str(exc) and not exc.is_timeout:
-                                _warn("[gate] parse failure on first attempt; retrying once.")
-                                continue
-                            raise
+                    result, ran, raw_name = _run_review_with_retry(
+                        lambda: _run_review(review_root, mode, git_dir, tip, push_range)
+                    )
                     chunks_new = 1 if ran else 0
                 else:
                     # Single context with paths-file (some delta or some carry).
@@ -2900,18 +2901,12 @@ def _supervise_run(state_path, run_id):
                             f"could not write single-context manifest: {exc}"
                         )
                     try:
-                        for _attempt in range(2):
-                            try:
-                                result, ran, raw_name = _run_review(
-                                    review_root, mode, git_dir, tip, push_range,
-                                    paths_file=manifest_path,
-                                )
-                                break
-                            except ReviewGateError as exc:
-                                if _attempt == 0 and "could not parse" in str(exc) and not exc.is_timeout:
-                                    _warn("[gate] parse failure on first attempt; retrying once.")
-                                    continue
-                                raise
+                        result, ran, raw_name = _run_review_with_retry(
+                            lambda: _run_review(
+                                review_root, mode, git_dir, tip, push_range,
+                                paths_file=manifest_path,
+                            )
+                        )
                     finally:
                         try:
                             Path(manifest_path).unlink(missing_ok=True)
