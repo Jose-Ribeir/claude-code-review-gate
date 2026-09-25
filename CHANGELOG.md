@@ -6,6 +6,40 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-09-25
+
+### Fixed
+- **Crash on malformed resolver output.** A resolver answer of
+  `{"resolutions": {"<id>": true}}` crashed the gate with
+  `AttributeError: 'bool' object has no attribute 'get'`, which blocked the
+  push "to preserve gate integrity" and recorded nothing. Each per-finding
+  value is now checked separately. A value that is not an object, or has a
+  missing or unknown `status`, is treated as an evidence-free `still_present`
+  and noted in the result's warnings. The gate no longer crashes on it.
+- **Fixes lost after a failed resolver run.** The resolver only saw the
+  incremental diff since the last reviewed tip. If the fix landed in a push
+  whose resolver run failed, later runs could not see it, and the resolver
+  answered `still_present` with empty evidence for code that was already
+  gone. The resolver manifest now has `prior_files`: for each finding, the
+  diff from the file as it was reviewed then to the file at the tip. The
+  guard accepts `resolved` evidence from the added side of that diff. A
+  high/medium prior in a file that changed since the finding goes to the
+  resolver even when no other file is under review, instead of replaying and
+  blocking.
+- **`still_present` needs evidence.** A `still_present` verdict counts only
+  when its quote, or the finding's own `existing_code`, is in the file at the
+  tip. Otherwise it is *unverified*. Unverified priors are sent to the
+  resolver once more with `"recheck": true`, and the agent is told to read the
+  file at the tip. A finding that is still unverified keeps blocking, but its
+  block reason says `(unverified: ...)` instead of `(still present)`.
+
+### Changed
+- `agents/code-resolver.md` and the skill's resolve mode (§R) take the
+  since-raised diffs (`{{SINCE_DIFFS}}`) and a re-check note. They now spell
+  out that every `resolutions` value must be an object with `status`,
+  `evidence_path` and `evidence_quote`, and that `still_present` must quote
+  the code as it is at the tip.
+
 ## [0.8.0] - 2026-09-24
 
 ### Added

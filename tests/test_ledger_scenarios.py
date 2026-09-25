@@ -313,11 +313,13 @@ def test_scenario_3_garbage_output_becomes_all_still_present(monkeypatch, tmp_pa
     monkeypatch.setattr(review_gate, "_run_review", _fail_review)
     active_items = [{"entry": {"path": "c.py"}, "mode": "full",
                      "record": None, "from_oid": "", "miss_reason": "no_record"}]
-    result = review_gate._run_resolver(
+    result, warnings = review_gate._run_resolver(
         ".", "hook", ".", "tip", "base..tip",
         to_resolve, active_items, str(tmp_path), "fp" * 8, "run1",
     )
     assert result.get(fid, {}).get("status") == "still_present"
+    assert result[fid]["evidence_quote"] == ""  # evidence-free: the caller re-checks it
+    assert any("failed" in w for w in warnings)
 
 
 # ---------------------------------------------------------------------------

@@ -2715,12 +2715,41 @@ def _supervise(state_path, run_id):
             to_resolve, auto_resolved, carried_findings = _classify_priors(
                 plan, tip, review_root, common_dir, fp, run_id
             )
-            resolver_results = {}
-            if to_resolve and active_items:
-                resolver_results = _run_resolver(
+            resolver_results, resolver_warnings, judged = {}, [], {}
+            if to_resolve:
+                resolver_results, resolver_warnings = _run_resolver(
                     review_root, mode, git_dir, tip, push_range,
                     to_resolve, active_items, common_dir, fp, run_id,
                 )
+                tip_cache = {}
+
+                def _judge_all(items):
+                    for p in items:
+                        judged[p["id"]] = _judge_resolution(
+                            p, resolver_results[p["id"]], active_items, push_range,
+                            review_root, tip, tip_cache)
+
+                _judge_all(to_resolve)
+                # An answer nothing backs gets one more look, told to read the tip.
+                recheck = [p for p in to_resolve if judged[p["id"]] == "unverified"]
+                if recheck:
+                    again, more = _run_resolver(
+                        review_root, mode, git_dir, tip, push_range,
+                        recheck, active_items, common_dir, fp, run_id, recheck=True,
+                    )
+                    resolver_results.update(again)
+                    resolver_warnings += more
+                    _judge_all(recheck)
+                n_unverified = sum(1 for v in judged.values() if v == "unverified")
+                if n_unverified:
+                    resolver_warnings.append(
+                        f"resolver: {n_unverified} prior finding(s) unverified - no evidence "
+                        "they were fixed, and the flagged code is no longer at the tip; "
+                        "kept as blocking until a resolver run can back a verdict")
+                if resolver_warnings and isinstance(result, dict):
+                    result = dict(result)
+                    result["warnings"] = (list(result.get("warnings") or [])
+                                          + _planner_warning_objs(resolver_warnings))
 
             # Process resolver output: guard check, defer writing resolutions until
             # after the reviewer dedup check (scenario: reviewer overrides resolver).
@@ -2728,17 +2757,19 @@ def _supervise(state_path, run_id):
             still_present = []
             for p in to_resolve:
                 fid = p["id"]
-                res = resolver_results.get(fid) or {"status": "still_present"}
+                res = resolver_results.get(fid)
+                if not isinstance(res, dict):
+                    res = _no_evidence()
                 ev_path = res.get("evidence_path") or ""
                 ev_blob = (_blob_oids_at(review_root, tip, [ev_path]).get(ev_path, "")
                            if ev_path else "")
-                if (res.get("status") == "resolved"
-                        and _guard_resolution(res, active_items, push_range, review_root)):
+                verdict_p = judged.get(fid, "unverified")
+                if verdict_p == "resolved":
                     provisional_resolved.append((p, res, ev_path, ev_blob))
                 else:
                     f = dict(p["finding"])
                     f, _ = _reanchor_finding(f, review_root, tip)
-                    still_present.append(dict(f, provenance="still_present"))
+                    still_present.append(dict(f, provenance=verdict_p))
 
             # Re-anchor carried findings and mark provenance.
             anchored_carried = []
@@ -3533,7 +3564,11 @@ def _classify_priors(plan_items, tip, review_root, common_dir, fp, run_id):
             if _find_valid_resolution(common_dir, fp, fid, target_oid,
                                       review_root, tip) is not None:
                 continue  # suppressed by existing resolution
-            if sev in ("high", "medium", "critical") and has_active:
+            # A file that changed since the finding is re-judged even when nothing
+            # else is under review: the fix may sit in a push whose resolver run
+            # never got recorded, and replaying the finding would block on it forever.
+            changed = bool(target_oid) and blob != target_oid
+            if sev in ("high", "medium", "critical") and (has_active or changed):
                 to_resolve.append({"id": fid, "finding": f, "record": record,
                                    "target_oid": target_oid})
             elif sev in ("low", "info", ""):
@@ -3544,7 +3579,7 @@ def _classify_priors(plan_items, tip, review_root, common_dir, fp, run_id):
                     carried_findings.append(dict(f, provenance="carried"))
             else:
                 # Unknown severity, or high/medium with nothing reviewed this run.
-                if has_active:
+                if has_active or changed:
                     to_resolve.append({"id": fid, "finding": f, "record": record,
                                        "target_oid": target_oid})
                 else:
@@ -3553,21 +3588,96 @@ def _classify_priors(plan_items, tip, review_root, common_dir, fp, run_id):
     return to_resolve, auto_resolved, carried_findings
 
 
-def _run_resolver(repo_root, mode, git_dir, tip, push_range, to_resolve,
-                  active_plan_items, common_dir, fp, run_id):
-    """Invoke the resolver agent once. Returns {id: {status, evidence_path, ...}}.
+_RESOLVER_STATUSES = ("resolved", "still_present")
 
-    On failure returns all still_present (fail closed).
+
+def _no_evidence():
+    """A still_present nobody backed: the gate re-checks it against the tip."""
+    return {"status": "still_present", "evidence_path": "", "evidence_quote": ""}
+
+
+def _normalize_resolutions(raw, to_resolve):
+    """Validate the resolver's `resolutions` map, one value at a time.
+
+    Returns ({id: {status, evidence_path, evidence_quote}}, [warning]) with an
+    entry for every id in `to_resolve` and none other. A value that is not an
+    object, or whose status is not one of _RESOLVER_STATUSES, becomes an
+    evidence-free still_present -- never an exception: this is model output, and
+    `{"<id>": true}` has been seen in the field.
+    """
+    warnings = []
+    if not isinstance(raw, dict):
+        if raw not in (None, {}):
+            warnings.append(f"resolver: `resolutions` was {type(raw).__name__}, not an object")
+        raw = {}
+    out = {}
+    for p in to_resolve:
+        fid = p["id"]
+        val = raw.get(fid)
+        short = fid[:12]
+        if val is None:
+            warnings.append(f"resolver: no verdict for finding {short}")
+            out[fid] = _no_evidence()
+            continue
+        if not isinstance(val, dict):
+            warnings.append(f"resolver: verdict for finding {short} is "
+                            f"{type(val).__name__}, not an object")
+            out[fid] = _no_evidence()
+            continue
+        status = val.get("status")
+        if status not in _RESOLVER_STATUSES:
+            warnings.append(f"resolver: verdict for finding {short} has "
+                            f"status {status!r}")
+            out[fid] = _no_evidence()
+            continue
+        ev_path, ev_quote = val.get("evidence_path"), val.get("evidence_quote")
+        out[fid] = {
+            "status": status,
+            "evidence_path": ev_path if isinstance(ev_path, str) else "",
+            "evidence_quote": ev_quote if isinstance(ev_quote, str) else "",
+        }
+    return out, warnings
+
+
+def _since_finding_specs(review_root, tip, to_resolve):
+    """{path, from_oid, to_oid} per prior whose file changed since the finding.
+
+    The incremental delta only covers the change since the last recorded review;
+    a fix made in a push whose resolver never got recorded is outside it. The
+    since-finding diff (finding's target blob -> tip blob) always contains it.
+    """
+    paths = sorted({p["finding"].get("path") or "" for p in to_resolve} - {""})
+    tips = _blob_oids_at(review_root, tip, paths) if (paths and tip) else {}
+    specs, seen = [], set()
+    for p in to_resolve:
+        path = p["finding"].get("path") or ""
+        frm, to = p.get("target_oid") or "", tips.get(path, "")
+        if not (path and frm and to) or frm == to or (path, frm) in seen:
+            continue
+        seen.add((path, frm))
+        specs.append({"path": path, "from_oid": frm, "to_oid": to})
+    return specs
+
+
+def _run_resolver(repo_root, mode, git_dir, tip, push_range, to_resolve,
+                  active_plan_items, common_dir, fp, run_id, recheck=False):
+    """Invoke the resolver agent once.
+
+    Returns ({id: {status, evidence_path, evidence_quote}}, [warning]); every id
+    in `to_resolve` is present. On failure every id is an evidence-free
+    still_present, which the caller re-checks against the tip (fail closed).
     """
     if not to_resolve:
-        return {}
+        return {}, []
+    fallback = {p["id"]: _no_evidence() for p in to_resolve}
     # Priors are reviewer output about an untrusted diff; cap what goes back into a prompt.
     prior_data = [
         {**{k: (v[:2000] if isinstance(v, str) else v) for k, v in p["finding"].items()},
          "id": p["id"]}
         for p in to_resolve
     ]
-    manifest_path = str(_async_dir(common_dir) / f"resolver-{run_id}.json")
+    tag = "-recheck" if recheck else ""
+    manifest_path = str(_async_dir(common_dir) / f"resolver-{run_id}{tag}.json")
     try:
         _tmp = manifest_path + ".tmp"
         Path(_tmp).write_text(
@@ -3580,28 +3690,27 @@ def _run_resolver(repo_root, mode, git_dir, tip, push_range, to_resolve,
                      "to_oid": item["entry"].get("new_oid") or ""}
                     for item in active_plan_items
                 ],
+                "prior_files": _since_finding_specs(repo_root, tip, to_resolve),
+                "recheck": bool(recheck),
             }, ensure_ascii=False),
             encoding="utf-8",
         )
         os.replace(_tmp, manifest_path)
     except Exception as exc:
         _warn(f"review-gate: could not write resolver manifest: {exc}")
-        return {p["id"]: {"status": "still_present"} for p in to_resolve}
+        return fallback, [f"resolver: could not write manifest ({exc})"]
     try:
         result, _, _ = _run_review(
             repo_root, mode, git_dir, tip, push_range,
             resolve_file=manifest_path,
             timeout=_CHUNK_TIMEOUT,
-            raw_tag="-resolve",
+            raw_tag="-resolve" + tag,
         )
         if not isinstance(result, dict):
             raise ReviewGateError("resolver returned non-dict")
-        resolutions = result.get("resolutions") or {}
-        if not isinstance(resolutions, dict):
-            resolutions = {}
-        return resolutions
-    except (ReviewGateError, ReviewLimitError):
-        return {p["id"]: {"status": "still_present"} for p in to_resolve}
+        return _normalize_resolutions(result.get("resolutions"), to_resolve)
+    except (ReviewGateError, ReviewLimitError) as exc:
+        return fallback, [f"resolver: failed ({_sanitize(str(exc), 200)})"]
     finally:
         try:
             Path(manifest_path).unlink(missing_ok=True)
@@ -3609,13 +3718,31 @@ def _run_resolver(repo_root, mode, git_dir, tip, push_range, to_resolve,
             pass
 
 
-def _guard_resolution(resolution, active_plan_items, push_range, review_root):
+def _norm_ws(text):
+    return " ".join((text or "").split())
+
+
+def _quote_in_added_lines(diff_args, quote, review_root):
+    diff_out, rc = _git(diff_args, cwd=review_root)
+    if rc != 0:
+        return False
+    added = "\n".join(
+        line[1:] for line in diff_out.splitlines()
+        if line.startswith("+") and not line.startswith("+++")
+    )
+    return _norm_ws(quote) in _norm_ws(added)
+
+
+def _guard_resolution(resolution, active_plan_items, push_range, review_root,
+                      prior=None, tip=""):
     """True if a 'resolved' verdict passes the Python guard.
 
-    A resolution is accepted only when:
-    - evidence_path names a delta/full file in this push
-    - evidence_quote appears verbatim (whitespace-normalised) on the added
-      side of that file's diff in this push
+    A resolution is accepted only when evidence_quote appears verbatim
+    (whitespace-normalised) on the added side of either:
+    - the diff in this push of evidence_path, a delta/full file, or
+    - with `prior` and `tip`, the since-finding diff of the finding's own file
+      (its target blob -> its tip blob): a fix from an earlier push whose
+      resolution was never recorded is still a fix, and still an addition.
     """
     if not isinstance(resolution, dict) or resolution.get("status") != "resolved":
         return True  # still_present always passes
@@ -3624,24 +3751,61 @@ def _guard_resolution(resolution, active_plan_items, push_range, review_root):
     if not evidence_path or not evidence_quote:
         return False
     item = next((i for i in active_plan_items if i["entry"]["path"] == evidence_path), None)
-    if item is None:
+    if item is not None:
+        # A delta file's earlier lines predate the finding; only the fix's own
+        # additions can count as evidence that it was fixed.
+        if item["mode"] == "delta" and item.get("from_oid") and item["entry"].get("new_oid"):
+            diff_args = ["diff", item["from_oid"], item["entry"]["new_oid"]]
+        elif push_range:
+            diff_args = ["diff", push_range, "--", evidence_path]
+        else:
+            diff_args = None
+        if diff_args and _quote_in_added_lines(diff_args, evidence_quote, review_root):
+            return True
+    if prior is None or not tip:
         return False
-    # A delta file's earlier lines predate the finding; only the fix's own
-    # additions can count as evidence that it was fixed.
-    if item["mode"] == "delta" and item.get("from_oid") and item["entry"].get("new_oid"):
-        diff_args = ["diff", item["from_oid"], item["entry"]["new_oid"]]
-    elif push_range:
-        diff_args = ["diff", push_range, "--", evidence_path]
-    else:
+    if evidence_path != (prior["finding"].get("path") or ""):
         return False
-    diff_out, rc = _git(diff_args, cwd=review_root)
-    if rc != 0:
+    target_oid = prior.get("target_oid") or ""
+    tip_oid = _blob_oids_at(review_root, tip, [evidence_path]).get(evidence_path, "")
+    if not target_oid or not tip_oid or target_oid == tip_oid:
         return False
-    added = "\n".join(
-        line[1:] for line in diff_out.splitlines()
-        if line.startswith("+") and not line.startswith("+++")
-    )
-    return " ".join(evidence_quote.split()) in " ".join(added.split())
+    return _quote_in_added_lines(["diff", target_oid, tip_oid], evidence_quote, review_root)
+
+
+def _tip_text(review_root, tip, path, cache):
+    if path not in cache:
+        out, rc = _git(["show", f"{tip}:{path}"], cwd=review_root) if (path and tip) else ("", 1)
+        cache[path] = out if rc == 0 else ""
+    return cache[path]
+
+
+def _judge_resolution(prior, res, active_plan_items, push_range, review_root, tip,
+                      _cache=None):
+    """'resolved' | 'still_present' | 'unverified' for one normalized verdict.
+
+    resolved      -- the guard found the fix on an added side (see _guard_resolution).
+    still_present -- backed by the tip: the resolver's still_present quote, or
+                     failing that the finding's own existing_code, is in the
+                     tip file. A diff that no longer shows the code proves
+                     nothing, so the tip decides.
+    unverified    -- neither: nothing at the tip supports "still present" and
+                     nothing in a diff supports "resolved".
+    """
+    cache = {} if _cache is None else _cache
+    if res.get("status") == "resolved" and _guard_resolution(
+            res, active_plan_items, push_range, review_root, prior=prior, tip=tip):
+        return "resolved"
+    f = prior["finding"]
+    if res.get("status") == "still_present":
+        quote = _norm_ws(res.get("evidence_quote"))
+        path = res.get("evidence_path") or f.get("path") or ""
+        if quote and quote in _norm_ws(_tip_text(review_root, tip, path, cache)):
+            return "still_present"
+    code = _norm_ws(f.get("existing_code"))
+    if code and code in _norm_ws(_tip_text(review_root, tip, f.get("path") or "", cache)):
+        return "still_present"
+    return "unverified"
 
 
 def _reanchor_finding(f, review_root, tip):
@@ -4192,6 +4356,9 @@ def _format_reasons(result, limit=20):
             prefix = "(carried) "
         elif prov == "still_present":
             prefix = "(still present) "
+        elif prov == "unverified":
+            prefix = ("(unverified: the resolver gave no evidence either way and the "
+                      "flagged code is no longer at the tip - check by hand) ")
         else:
             prefix = ""
         lines.append(f"  [{sev}] {prefix}{loc} - {content}")

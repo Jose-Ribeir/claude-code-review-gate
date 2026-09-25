@@ -12,6 +12,10 @@ environment variables so one command line serves every scenario:
   STUB_FINDINGS_FOR  JSON mapping path → {severity, content} for path-scripted verdicts
   STUB_RESOLVE       JSON mapping finding_id → {status, evidence_path, evidence_quote}
                      Used when --resolve <file> is in argv; return resolver output.
+                     Values are passed through verbatim, so a malformed answer
+                     (e.g. `true`) can be scripted too.
+  STUB_RESOLVE_RECHECK like STUB_RESOLVE, but used instead of it when the resolver
+                     manifest has "recheck": true (the gate's second look).
   STUB_RESOLVE_VERDICT pass|fail|garbage  Controls resolver exit for all ids (default pass).
 
 The last non-flag argument is the range the gate asked to review; it is echoed
@@ -69,6 +73,7 @@ if trace:
             "pid": os.getpid(), "cwd": os.getcwd(), "range": rng,
             "ts": time.time(), "paths_file": paths_file,
             "resolve_file": resolve_file,
+            "resolve_manifest": resolve_input,
             "manifest": manifest,
             "file_modes": file_modes,
         }) + "\n")
@@ -100,6 +105,8 @@ if resolve_file is not None:
     # Build resolutions from STUB_RESOLVE env var or mark all still_present.
     scripted = {}
     raw_resolve = os.environ.get("STUB_RESOLVE", "")
+    if (resolve_input or {}).get("recheck") and "STUB_RESOLVE_RECHECK" in os.environ:
+        raw_resolve = os.environ["STUB_RESOLVE_RECHECK"]
     if raw_resolve:
         try:
             scripted = json.loads(raw_resolve)

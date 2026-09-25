@@ -238,6 +238,8 @@ Only delta and full files are sent to the reviewer. A no-change re-push (same bl
 
 **Resolver pass.** After the reviewer finishes, one targeted `--resolve` call re-judges every high/medium prior finding from carried/delta records. A finding the resolver clears is suppressed from the verdict; if the reviewer independently re-reports the same finding, the resolution is discarded and the reviewer wins. A later push where the resolving evidence has been reverted brings the finding back.
 
+The resolver is judged against the tip, not trusted. A `resolved` verdict must quote the fix from the added side of either this push's diff or the finding's *since-raised* diff (the file as it was when the finding was made, compared with the tip), so a fix made in an earlier push whose resolver run failed still counts. A `still_present` verdict must quote the offending code as it exists at the tip; failing that, the gate checks the finding's own `existing_code` at the tip. A verdict that neither check backs, including a malformed one such as `{"<id>": true}`, is sent back to the resolver once with a re-check flag. If it is still unbacked, the finding keeps blocking and is labelled `(unverified: ...)` in the block reason, and the next push checks it again. Priors in a file that changed since the finding are re-judged even on a push where nothing else is reviewed.
+
 **Summary line.** Each verdict now includes a line such as:
 ```
 reviewed 3 files (2 delta, 1 full), re-checked 2 prior findings (1 resolved), carried 41 files
