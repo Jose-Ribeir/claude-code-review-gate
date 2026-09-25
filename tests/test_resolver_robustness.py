@@ -277,6 +277,25 @@ def test_guard_fallback_accepts_context_spanning_quote(tmp_path):
                                          prior=prior, tip=commits[1])
 
 
+def test_guard_fallback_fails_closed_on_missing_blob(tmp_path):
+    # If git show <target_oid> fails (e.g. object missing / GC'd), the fallback
+    # must return False (fail closed) rather than True (fail open).
+    work, commits, blobs = _repo_with_history(tmp_path, [
+        '"--output-format", "stream-json",\n]\n',
+        '"--output-format", "stream-json",\n"--verbose",\n]\n',
+    ])
+    res = {
+        "status": "resolved",
+        "evidence_path": "x.py",
+        "evidence_quote": '"--output-format", "stream-json",\n"--verbose",',
+    }
+    rng = f"{commits[0]}..{commits[1]}"
+    # Supply a nonexistent target_oid so git show fails; guard must fail closed.
+    prior = dict(_prior(), target_oid="0" * 40)
+    assert not review_gate._guard_resolution(res, [], rng, str(work),
+                                             prior=prior, tip=commits[1])
+
+
 def test_judge_requires_tip_evidence_for_still_present(tmp_path):
     work, commits, blobs = _repo_with_history(tmp_path, [
         "def bad(): pass\n", "def good(): pass\n"])
