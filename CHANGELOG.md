@@ -6,6 +6,31 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.4] - 2026-09-25
+
+### Fixed
+- **Guard resolution fallback for context-spanning evidence quotes.** The resolver
+  sometimes quotes a newly-added line together with its unchanged neighbour (e.g.
+  the existing `"--output-format", "stream-json",` line plus the new `"--verbose"`
+  line). `_quote_in_added_lines` only collects `+` lines, so the multi-line quote
+  never matched and the finding stayed "unverified" even though the fix was present.
+  Added a tip-text fallback: when the since-finding diff check fails, accept the
+  resolution if the full evidence_quote is present in the current tip file (file was
+  still changed, so `target_oid != tip_oid`).
+
+## [0.9.3] - 2026-09-25
+
+### Fixed
+- **`--output-format stream-json` requires `--verbose` in `-p` mode.** Without
+  it the CLI rejects the combination outright. Added `--verbose` to
+  `DEFAULT_CLAUDE_ARGS` (after `--output-format stream-json`) and to the golden
+  argv fixture.
+- **Brittle substring-match retry duplicated at three call sites.** Extracted the
+  2-attempt parse-failure retry into `_run_review_with_retry(call)` helper and
+  replaced all three copy-pasted loops. Added `is_parse_failure` typed flag to
+  `ReviewGateError` so the guard uses an attribute instead of `"could not parse"
+  in str(exc)`.
+
 ## [0.9.2] - 2026-09-25
 
 ### Fixed

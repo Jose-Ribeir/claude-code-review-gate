@@ -4226,7 +4226,13 @@ def _guard_resolution(resolution, active_plan_items, push_range, review_root,
     tip_oid = _blob_oids_at(review_root, tip, [evidence_path]).get(evidence_path, "")
     if not target_oid or not tip_oid or target_oid == tip_oid:
         return False
-    return _quote_in_added_lines(["diff", target_oid, tip_oid], evidence_quote, review_root)
+    if _quote_in_added_lines(["diff", target_oid, tip_oid], evidence_quote, review_root):
+        return True
+    # Fallback: evidence_quote may span context + added lines (e.g. a newly inserted
+    # line quoted together with its neighbour). Accept when the full quote exists in
+    # the current tip file and the file *was* changed (target_oid != tip_oid above).
+    tip_text = _tip_text(review_root, tip, evidence_path, {})
+    return bool(tip_text and _norm_ws(evidence_quote) in _norm_ws(tip_text))
 
 
 def _tip_text(review_root, tip, path, cache):
