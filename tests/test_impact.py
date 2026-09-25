@@ -822,3 +822,104 @@ class TestGitRunner:
         out, rc = run(["this-command-does-not-exist"])
         assert isinstance(out, str)
         assert rc != 0
+
+
+# ---------------------------------------------------------------------------
+# 0.9.1 regressions
+# ---------------------------------------------------------------------------
+
+class TestRegexBlockEnd:
+    """A block ends at the first line back at its own indentation. Scanning on
+    to the next definition credited top-level code to the function above."""
+
+    def _defs(self, text, lang):
+        return {d["name"]: d for d in oi._regex_defs(text, lang)}
+
+    def test_top_level_code_after_a_function_is_not_inside_it(self):
+        text = textwrap.dedent("""\
+            function a() {
+              return 1;
+            }
+            const LIMIT = 10;
+            doSetup(LIMIT);
+            function b() {
+              return 2;
+            }
+        """)
+        d = self._defs(text, "js")
+        assert d["a"]["end_line"] == 3  # the closing brace, not line 5
+        old, new = text, text.replace("doSetup(LIMIT)", "doSetup(LIMIT * 2)")
+        r = oi.changed_symbols("app.js", old, new)
+        assert "a" not in {s["name"] for s in r["symbols"]}
+
+    def test_closing_keyword_belongs_to_the_block(self):
+        text = "def greet\n  puts 'hi'\nend\nputs 'top'\n"
+        assert self._defs(text, "ruby")["greet"]["end_line"] == 3
+        sh = "setup() {\n  echo hi\n}\necho top\n"
+        assert self._defs(sh, "shell")["setup"]["end_line"] == 3
+
+    def test_allman_brace_and_wrapped_params_stay_in_the_header(self):
+        allman = "function a()\n{\n  return 1;\n}\nx = 1;\n"
+        assert self._defs(allman, "js")["a"]["end_line"] == 4
+        go = "func Run(\n\tx int,\n) error {\n\treturn nil\n}\nvar y = 1\n"
+        assert self._defs(go, "go")["Run"]["end_line"] == 5
+
+
+class TestSameNamedSymbols:
+    """Two changed symbols sharing a name are different symbols: separate
+    pools, cursors and quotas, and a caller an importer search tied to one of
+    them is never handed to the other."""
+
+    def _sym(self, name, defined_in, qual=None):
+        return {"name": name, "qualname": qual or name, "kind": "function",
+                "change": "body", "defined_in": defined_in, "line": 1,
+                "old_signature": "", "new_signature": "", "renamed_to": "",
+                "lines_changed": 1}
+
+    def test_each_definition_gets_its_own_quota_and_its_own_callers(self, tmp_path):
+        cwd = _init_repo(tmp_path)
+        tip = _commit(cwd, {"x.py": "pass\n"})
+        run = oi.git_runner(cwd)
+        syms = [self._sym("run", "a.py"), self._sym("run", "b.py")]
+        sites = ([{"id": f"a{i}", "path": f"ua{i}.py", "line": 1, "name": "run",
+                   "tier": 1, "text": "run()", "via": ["a.py"]} for i in range(5)]
+                 + [{"id": f"b{i}", "path": f"ub{i}.py", "line": 1, "name": "run",
+                     "tier": 1, "text": "run()", "via": ["b.py"]} for i in range(5)])
+        result = oi.build_bundle(run, tip, syms, sites, {"run": 10},
+                                 per_symbol=3, max_sites=40, max_bytes=999999)
+        by_def = {}
+        for s in result["sites"]:
+            by_def.setdefault(s["defined_in"], set()).add(s["id"][0])
+        # Each definition got its own 3, drawn only from its own importers.
+        assert by_def == {"a.py": {"a"}, "b.py": {"b"}}
+        assert len(result["sites"]) == 6
+        assert [s["sites_included"] for s in result["symbols"]] == [3, 3]
+        assert not any(s.get("ambiguous") for s in result["sites"])
+
+    def test_a_shared_untied_site_goes_out_once_and_is_marked_ambiguous(self, tmp_path):
+        cwd = _init_repo(tmp_path)
+        tip = _commit(cwd, {"x.py": "pass\n"})
+        run = oi.git_runner(cwd)
+        syms = [self._sym("run", "a.py"), self._sym("run", "b.py")]
+        sites = [{"id": "g1", "path": "u.py", "line": 3, "name": "run", "tier": 2,
+                  "text": "run()", "via": []}]
+        result = oi.build_bundle(run, tip, syms, sites, {"run": 1}, max_bytes=999999)
+        assert [s["id"] for s in result["sites"]] == ["g1"]
+        assert result["sites"][0]["ambiguous"] is True
+
+    def test_find_references_records_which_definition_an_importer_belongs_to(self, tmp_path):
+        cwd = _init_repo(tmp_path)
+        tip = _commit(cwd, {
+            "pkg/a.py": "def run():\n    pass\n",
+            "pkg/b.py": "def run():\n    pass\n",
+            "use_a.py": "from pkg.a import run\nrun()\n",
+            "use_b.py": "from pkg.b import run\nrun()\n",
+        })
+        run_git = oi.git_runner(cwd)
+        syms = [self._sym("run", "pkg/a.py"), self._sym("run", "pkg/b.py")]
+        out = oi.find_references(run_git, tip, syms)
+        via = {(s["path"], s["line"]): s["via"] for s in out["sites"]}
+        assert via[("use_a.py", 2)] == ["pkg/a.py"]
+        assert via[("use_b.py", 2)] == ["pkg/b.py"]
+        # Neither defining file is reported as a caller of the other's `run`.
+        assert not {"pkg/a.py", "pkg/b.py"} & {s["path"] for s in out["sites"]}

@@ -6,6 +6,30 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-09-25
+
+### Fixed
+- **Same-named changed symbols shared one call-site pool.** The impact
+  bundle kept its per-symbol pools, round-robin cursors and quotas keyed by
+  the bare name, so two changed `__init__`s or `run`s split one quota and
+  reported the same counts. They are now keyed by definition
+  (`defined_in` + `qualname`). Each call site records which definition's
+  importer search found it (`via`) and goes only to that definition. A site
+  no importer ties to one of them is sent once and marked `ambiguous`. Every
+  site now says whose caller it is (`defined_in`). The whole-repo search also
+  excludes every file defining a name, not just one of them.
+- **Function boundaries outside Python ran on to the next definition.** For
+  JS/TS, Go, Rust, shell, PowerShell, JVM, Ruby and PHP, a definition's
+  computed end skipped past top-level code up to the next definition, so a
+  change to that code was credited to the function above it. A block now ends
+  at the first line back at its own indentation. A closing `}`, `end`, `fi`,
+  `esac` or `done` there belongs to the block. An Allman `{` or a `) {` after
+  wrapped parameters stays in the header.
+
+### Removed
+- `ocr_impact.route_to_chunks`, which nothing called. The gate applies the
+  same per-chunk rule inline in `_impact_bundle`.
+
 ## [0.9.0] - 2026-09-25
 
 Targeted re-checks instead of re-reviews: nothing already reviewed is reviewed

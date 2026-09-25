@@ -496,8 +496,12 @@ def _regex_defs(text: str, lang: str) -> List[Dict]:
             if m:
                 add(m.group(2), m.group(2), "class", i, line.strip())
 
-    # Resolve end_line for all defs that don't have one: the line before the
-    # next definition at the same or shallower indentation, or EOF.
+    # Resolve end_line (1-based, inclusive) for all defs that don't have one:
+    # the block ends at the first non-blank line at the same or shallower
+    # indentation. A closing token there (`}`, `end`, `fi`, ...) belongs to the
+    # block; anything else -- another definition, or top-level code -- does
+    # not. Scanning on past top-level code would credit a change to that code
+    # to the function above it.
     for idx, d in enumerate(defs):
         if d.get("end_line") is not None:
             continue
@@ -505,19 +509,16 @@ def _regex_defs(text: str, lang: str) -> List[Dict]:
         own_indent = len(lines[line0]) - len(lines[line0].lstrip()) if line0 < n else 0
         end = n  # default: EOF
         for j in range(line0 + 1, n):
-            if not lines[j].strip():
+            stripped = lines[j].strip()
+            if not stripped:
                 continue
             j_indent = len(lines[j]) - len(lines[j].lstrip())
-            if j_indent <= own_indent:
-                # Check if this line starts a new def at same/shallower level
-                for k, d2 in enumerate(defs):
-                    if d2.get("_line0", d2["line"] - 1) == j:
-                        end = j
-                        break
-                else:
-                    # Not a new def — keep scanning unless we closed a block
-                    continue
-                break
+            if j_indent > own_indent:
+                continue
+            if _is_header_continuation(stripped):
+                continue  # `{` on its own line, or `) {` after wrapped params
+            end = j + 1 if _is_block_close(stripped) else j
+            break
         d["end_line"] = end
 
     # Remove internal helpers
@@ -526,6 +527,19 @@ def _regex_defs(text: str, lang: str) -> List[Dict]:
         d.pop("_class", None)
 
     return defs
+
+
+_BLOCK_CLOSE_RE = re.compile(r"^(\}|\]|end\b|fi\b|esac\b|done\b)")
+
+
+def _is_block_close(stripped):
+    return bool(_BLOCK_CLOSE_RE.match(stripped))
+
+
+def _is_header_continuation(stripped):
+    """Still the definition's header: an Allman-style `{` on its own line, or
+    the `) {` / `): T {` that closes a wrapped parameter list."""
+    return stripped == "{" or (stripped[:1] in (")", "]") and stripped.endswith("{"))
 
 
 def _find_enclosing_regex(defs: List[Dict], lineno: int) -> Optional[Dict]:
@@ -877,7 +891,14 @@ def _find_references_inner(run, tip, symbols, *, is_allowed, max_sites, warnings
 
     tier1_files: Set[str] = set()
 
-    def _add_site(path, name, lineno, text, tier):
+    # (path, name, lineno) -> defining files whose importer search found it.
+    # A name can be defined in several changed files; this is what lets the
+    # bundle tell whose caller a tier-1 site is.
+    found_via: Dict[Tuple[str, str, int], Set[str]] = {}
+
+    def _add_site(path, name, lineno, text, tier, via=None):
+        if via:
+            found_via.setdefault((path, name, lineno), set()).add(via)
         found_sites.setdefault(path, {}).setdefault(name, [])
         # Avoid duplicates
         existing = found_sites[path][name]
@@ -965,7 +986,7 @@ def _find_references_inner(run, tip, symbols, *, is_allowed, max_sites, warnings
                         # Which name matched?
                         for nm in names:
                             if _uses_name(nm, text):
-                                _add_site(fpath, nm, lineno, text, 1)
+                                _add_site(fpath, nm, lineno, text, 1, via=def_file)
                         tier1_files.add(fpath)
 
     # Tier 2: global search for all names
@@ -977,8 +998,10 @@ def _find_references_inner(run, tip, symbols, *, is_allowed, max_sites, warnings
         args2 += [tip, "--"]
         out3, rc3 = run(args2)
         if rc3 == 0 and out3:
-            # Map name -> defining file for exclusion
-            def_files_by_name: Dict[str, str] = {s["name"]: s["defined_in"] for s in to_search}
+            # Map name -> every changed file defining it, for exclusion
+            def_files_by_name: Dict[str, Set[str]] = {}
+            for s in to_search:
+                def_files_by_name.setdefault(s["name"], set()).add(s["defined_in"])
             for line in out3.splitlines():
                 parsed = _parse_grep_line(line, tip)
                 if parsed:
@@ -988,7 +1011,7 @@ def _find_references_inner(run, tip, symbols, *, is_allowed, max_sites, warnings
                     for nm in all_names:
                         if _uses_name(nm, text):
                             # Exclude the defining file entirely
-                            if fpath == def_files_by_name.get(nm):
+                            if fpath in def_files_by_name.get(nm, ()):
                                 continue
                             # Tier 2 only if not already tier 1
                             tier = 1 if fpath in tier1_files else 2
@@ -1012,6 +1035,7 @@ def _find_references_inner(run, tip, symbols, *, is_allowed, max_sites, warnings
                     "name": name,
                     "tier": tier,
                     "text": text,
+                    "via": sorted(found_via.get((fpath, name, lineno), ())),
                 })
                 ref_file_sets.setdefault(name, set()).add(fpath)
             else:
@@ -1113,16 +1137,26 @@ def _build_bundle_inner(
                     if sites_by_sym.get(s["name"])]
     truncated = len(dropped_syms) > 0
 
-    # Build site pools per symbol: tier-1 first, then tier-2; exclude exclude_set,
-    # cap at 2 per (symbol, file)
+    # Everything per symbol is keyed by its DEFINITION, not its name: two
+    # changed `__init__`s or `run`s are different symbols with their own pool,
+    # cursor and quota. Sites are found by name, so a site is shared between
+    # same-named symbols unless an importer search tied it to one of them.
+    def _key(sym):
+        return (sym.get("defined_in") or "", sym.get("qualname") or sym["name"])
+
+    # Build site pools per symbol: its own importers' sites first, then the
+    # other tier-1 and tier-2 sites of that name that are not tied to another
+    # definition; exclude exclude_set; cap at 2 per (symbol, file)
     def _sym_sites(sym):
         name = sym["name"]
+        mine = sym.get("defined_in") or ""
         raw = sites_by_sym.get(name, [])
-        # Exclude paths
-        raw = [s for s in raw if s.get("path") not in exclude_set]
-        # Sort: tier 1 first
-        t1 = [s for s in raw if s.get("tier") == 1]
-        t2 = [s for s in raw if s.get("tier") != 1]
+        # Exclude paths, and callers an importer search tied to a different
+        # definition of the same name.
+        raw = [s for s in raw if s.get("path") not in exclude_set
+               and (not s.get("via") or mine in s["via"])]
+        t1 = [s for s in raw if s.get("via")]
+        t2 = [s for s in raw if not s.get("via")]
         ordered = t1 + t2
         # Cap 2 per file
         file_count: Dict[str, int] = {}
@@ -1134,7 +1168,10 @@ def _build_bundle_inner(
                 file_count[fp] = file_count.get(fp, 0) + 1
         return result
 
-    sym_pools = {s["name"]: _sym_sites(s) for s in included_syms}
+    sym_pools = {_key(s): _sym_sites(s) for s in included_syms}
+    name_count: Dict[str, int] = {}
+    for s in included_syms:
+        name_count[s["name"]] = name_count.get(s["name"], 0) + 1
 
     # Round-robin allocation
     # Blob cache: path -> list of lines
@@ -1175,27 +1212,32 @@ def _build_bundle_inner(
         return "\n".join(parts)
 
     allocated_sites = []
-    sym_given: Dict[str, int] = {}
+    allocated_ids: Set[str] = set()  # a site shared by same-named symbols goes out once
+    sym_given: Dict[Tuple[str, str], int] = {}
     total_bytes = 0
     sites_included = 0
 
     # Round-robin: iterate through symbols repeatedly until all pools exhausted
     # or limits hit.
-    pointers: Dict[str, int] = {s["name"]: 0 for s in included_syms}
+    pointers: Dict[Tuple[str, str], int] = {_key(s): 0 for s in included_syms}
     active = list(included_syms)  # in ranked order for round-robin
 
     while active and sites_included < max_sites and total_bytes < max_bytes:
         still_active = []
         for sym in active:
-            name = sym["name"]
-            pool = sym_pools[name]
-            idx = pointers[name]
+            key = _key(sym)
+            pool = sym_pools[key]
+            idx = pointers[key]
+            # Skip sites another same-named symbol already took.
+            while idx < len(pool) and pool[idx].get("id") in allocated_ids:
+                idx += 1
+            pointers[key] = idx
             if idx >= len(pool):
                 continue
-            if sym_given.get(name, 0) >= per_symbol:
+            if sym_given.get(key, 0) >= per_symbol:
                 continue
             site = pool[idx]
-            pointers[name] = idx + 1
+            pointers[key] = idx + 1
 
             if sites_included >= max_sites:
                 truncated = True
@@ -1208,8 +1250,15 @@ def _build_bundle_inner(
 
             site_out = dict(site)
             site_out["snippet"] = snippet
+            # Whose caller this is. A name defined in several changed files
+            # without an importer tying the site to one of them is ambiguous,
+            # and the reviewer is told so rather than guessing.
+            site_out["defined_in"] = sym.get("defined_in") or ""
+            if name_count.get(sym["name"], 0) > 1 and not site.get("via"):
+                site_out["ambiguous"] = True
             allocated_sites.append(site_out)
-            sym_given[name] = sym_given.get(name, 0) + 1
+            allocated_ids.add(site.get("id"))
+            sym_given[key] = sym_given.get(key, 0) + 1
             total_bytes += entry_bytes
             sites_included += 1
             still_active.append(sym)
@@ -1218,16 +1267,15 @@ def _build_bundle_inner(
             break
         # Keep only symbols that still have room
         active = [s for s in still_active
-                  if pointers[s["name"]] < len(sym_pools[s["name"]])
-                  and sym_given.get(s["name"], 0) < per_symbol]
+                  if pointers[_key(s)] < len(sym_pools[_key(s)])
+                  and sym_given.get(_key(s), 0) < per_symbol]
 
     # Build output symbol entries
     out_syms = []
     for sym in included_syms:
-        name = sym["name"]
         entry = dict(sym)
-        entry["ref_count"] = ref_counts.get(name, 0)
-        entry["sites_included"] = sym_given.get(name, 0)
+        entry["ref_count"] = ref_counts.get(sym["name"], 0)
+        entry["sites_included"] = sym_given.get(_key(sym), 0)
         out_syms.append(entry)
 
     return {
@@ -1246,31 +1294,7 @@ def _build_bundle_inner(
 
 
 # ---------------------------------------------------------------------------
-# 5. route_to_chunks
-# ---------------------------------------------------------------------------
-
-def route_to_chunks(symbols: List[Dict], chunks: List[List[str]]) -> List[Dict]:
-    """For each chunk, return include_paths and exclude_paths.
-
-    A chunk's bundle covers symbols defined in that chunk and call sites OUTSIDE
-    that chunk — the reviewer of this chunk cannot see other chunks' files.
-    """
-    result = []
-    for chunk in chunks:
-        chunk_set = set(chunk)
-        all_other = set()
-        for other in chunks:
-            if other is not chunk:
-                all_other.update(other)
-        result.append({
-            "include_paths": chunk_set,
-            "exclude_paths": chunk_set,  # exclude same-chunk sites (reviewer sees the diff)
-        })
-    return result
-
-
-# ---------------------------------------------------------------------------
-# 6. Sibling sweep
+# 5. Sibling sweep
 # ---------------------------------------------------------------------------
 
 # Words that alone don't make a good search signature — pure punctuation/control flow.

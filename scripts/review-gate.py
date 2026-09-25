@@ -3844,7 +3844,7 @@ def _impact_bundle(review_root, tip, impact, chunk_paths):
                         for s in b.get("symbols") or []]
     tele["sites"] += [{"id": s.get("id"), "path": s.get("path"), "line": s.get("line"),
                        "name": s.get("name"), "tier": s.get("tier"),
-                       "defined_in": defined.get(s.get("name"))}
+                       "defined_in": s.get("defined_in") or defined.get(s.get("name"))}
                       for s in b.get("sites") or []]
     tele["dropped_symbols"] += list(b.get("dropped_symbols") or [])
     tele["unsupported"] += b["unsupported"]
