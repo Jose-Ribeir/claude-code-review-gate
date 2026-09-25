@@ -4229,10 +4229,18 @@ def _guard_resolution(resolution, active_plan_items, push_range, review_root,
     if _quote_in_added_lines(["diff", target_oid, tip_oid], evidence_quote, review_root):
         return True
     # Fallback: evidence_quote may span context + added lines (e.g. a newly inserted
-    # line quoted together with its neighbour). Accept when the full quote exists in
-    # the current tip file and the file *was* changed (target_oid != tip_oid above).
+    # line quoted together with its unchanged neighbour). Accept only when:
+    # - the full quote is present in the current tip file (the fix is there), AND
+    # - it was NOT present in the blob at target_oid (so it was genuinely new,
+    #   not pre-existing unchanged code that a hallucinating resolver cited).
+    # Note: target_oid and tip_oid are BLOB OIDs here; use `git show <oid>` (no
+    # `:<path>` suffix) to read the blob content directly.
     tip_text = _tip_text(review_root, tip, evidence_path, {})
-    return bool(tip_text and _norm_ws(evidence_quote) in _norm_ws(tip_text))
+    if not (tip_text and _norm_ws(evidence_quote) in _norm_ws(tip_text)):
+        return False
+    orig_blob, rc = _git(["show", target_oid], cwd=review_root)
+    original_text = orig_blob if rc == 0 else ""
+    return _norm_ws(evidence_quote) not in _norm_ws(original_text)
 
 
 def _tip_text(review_root, tip, path, cache):
