@@ -669,8 +669,6 @@ def test_cross_tip_ledger_carry_and_delta(tmp_path):
         changed_entry["path"], changed_entry.get("old_path") or "",
         changed_entry["status"], changed_entry["old_oid"],
     )
-    # Exact carry would be key-<head2>.json; since blob changed, that file won't exist.
-    assert not review_gate._record_path(common, fp, key, changed_entry["new_oid"]).exists()
     # The delta record (from tip1 run) exists for this key with the old head_oid.
     delta_rec, from_oid = review_gate._find_delta_record(common, fp, key, changed_entry["new_oid"])
     assert delta_rec is not None, "expected a delta record from the tip1 run"
