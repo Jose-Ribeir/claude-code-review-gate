@@ -4239,8 +4239,9 @@ def _guard_resolution(resolution, active_plan_items, push_range, review_root,
     if not (tip_text and _norm_ws(evidence_quote) in _norm_ws(tip_text)):
         return False
     orig_blob, rc = _git(["show", target_oid], cwd=review_root)
-    original_text = orig_blob if rc == 0 else ""
-    return _norm_ws(evidence_quote) not in _norm_ws(original_text)
+    if rc != 0:
+        return False  # can't read original blob; fail closed rather than open
+    return _norm_ws(evidence_quote) not in _norm_ws(orig_blob)
 
 
 def _tip_text(review_root, tip, path, cache):
