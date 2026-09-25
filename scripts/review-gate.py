@@ -145,6 +145,12 @@ DEFAULT_CLAUDE_ARGS = [
     # Move per-machine sections (cwd, env, git status) out of the system prompt
     # so the cached prefix stays stable across runs.
     "--exclude-dynamic-system-prompt-sections",
+    # Emit NDJSON (one event per turn) instead of the bare last-turn text.
+    # This lets _extract_from_stream_json scan EVERY assistant turn for the
+    # verdict -- a stray task-notification ack that lands after the verdict
+    # becomes a later event, not a replacement, so it can no longer cause a
+    # "could not parse review output" failure.
+    "--output-format", "stream-json",
 ]
 try:
     TIMEOUT = int(os.environ.get("OCR_TIMEOUT", "1800"))
@@ -1689,6 +1695,66 @@ def _hookspath_shadowed(repo_root):
     return True
 
 
+def _is_valid_verdict(obj):
+    """Return True only if obj is a properly-shaped verdict or resolver result."""
+    if not isinstance(obj, dict):
+        return False
+    if "resolutions" in obj:
+        return True  # resolver path
+    return "status" in obj and "verdict" in obj and "findings" in obj
+
+
+def _num_turns_from_stream_json(text):
+    """Extract num_turns from the result event of --output-format stream-json output."""
+    for line in reversed(text.splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+            if isinstance(ev, dict) and ev.get("type") == "result":
+                return ev.get("num_turns")
+        except Exception:
+            continue
+    return None
+
+
+def _extract_from_stream_json(text):
+    """Scan ALL assistant-turn events for a valid verdict; return the last match.
+
+    With --output-format stream-json, claude emits NDJSON where each assistant
+    turn is its own event. A stray notification ack after the verdict becomes a
+    later event whose text has no verdict JSON -- it cannot replace the earlier
+    turn's payload because we scan every event, not just the last.
+    """
+    if not text:
+        return None
+    match = None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        event_type = event.get("type")
+        if event_type == "assistant":
+            content = event.get("message", {}).get("content", [])
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    candidate = _extract_json(block.get("text", ""))
+                    if candidate is not None:
+                        match = candidate
+        elif event_type == "result":
+            candidate = _extract_json(event.get("result") or "")
+            if candidate is not None:
+                match = candidate
+    return match
+
+
 def _extract_json(text):
     """Pull the review JSON object out of claude's stdout. Returns dict or None."""
     if not text:
@@ -1696,7 +1762,9 @@ def _extract_json(text):
     text = text.strip()
     # 1) whole thing
     try:
-        return json.loads(text)
+        obj = json.loads(text)
+        if _is_valid_verdict(obj):
+            return obj
     except Exception:
         pass
     # 2) fenced ```json ... ``` block (last one)
@@ -1705,7 +1773,9 @@ def _extract_json(text):
     blocks = re.findall(r"```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```", text, re.DOTALL)
     for b in reversed(blocks):
         try:
-            return json.loads(b)
+            obj = json.loads(b)
+            if _is_valid_verdict(obj):
+                return obj
         except Exception:
             continue
     # 3) balanced scan from each '{' in turn (json.JSONDecoder.raw_decode stops
@@ -1715,18 +1785,18 @@ def _extract_json(text):
     # the JSON despite being told to print only the object -- and turns a valid
     # verdict into an unparseable-output failure.
     #
-    # Only a dict carrying "findings" (mandatory per the skill's --json contract)
-    # is accepted as a candidate. Without that check the first '{' that happens
-    # to decode would win even if it's an unrelated JSON value the model quoted
-    # from the reviewed diff itself (e.g. a config fixture) before the real
-    # verdict -- and take the LAST candidate, not the first, since that quoted
-    # case necessarily precedes the model's actual answer.
+    # Only a dict carrying "findings"/"resolutions" that also satisfies
+    # _is_valid_verdict is accepted as a candidate. Without that check the first
+    # '{' that happens to decode would win even if it's an unrelated JSON value
+    # the model quoted from the reviewed diff itself (e.g. a config fixture)
+    # before the real verdict -- and take the LAST candidate, not the first,
+    # since that quoted case necessarily precedes the model's actual answer.
     decoder = json.JSONDecoder()
     idx, match = text.find("{"), None
     while idx != -1:
         try:
             obj, end = decoder.raw_decode(text, idx)
-            if isinstance(obj, dict) and "findings" in obj:
+            if _is_valid_verdict(obj):
                 match = obj
             idx = text.find("{", end)
         except json.JSONDecodeError:
@@ -2292,7 +2362,7 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
             f"{_auth_hint(detail)}"
             f"{bypass}"
         )
-    result = _extract_json(out_text)
+    result = _extract_from_stream_json(out_text) or _extract_json(out_text)
     if result is None:
         # Exit 0 but no JSON. Check for limit before auth hint.
         is_limit, resets_at = _check_limit(out_text)
@@ -2303,8 +2373,12 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
             )
         # Auth failures have been seen to exit 0 too
         # (the Desktop-bundled claude.exe does exactly this), so still check.
+        _num_turns = _num_turns_from_stream_json(out_text)
+        _turns_note = f" ({_num_turns} turn(s) captured)" if _num_turns is not None else ""
+        _raw_note = f"  Raw output saved: {raw_name!r}\n" if raw_name else ""
         raise ReviewGateError(
-            "could not parse review output - blocking commit to preserve gate integrity.\n"
+            f"could not parse review output{_turns_note} - blocking commit to preserve gate integrity.\n"
+            f"{_raw_note}"
             f"  Claude stdout (first 400 chars): {out_text[:400]!r}\n"
             f"{_auth_hint(out_text or '')}"
             f"{bypass}"
@@ -2713,7 +2787,15 @@ def _supervise_run(state_path, run_id):
 
         if plan is None or plan == []:
             # git diff failed OR no allowed files: fall back to single-context (0.7.0 path).
-            result, ran, raw_name = _run_review(review_root, mode, git_dir, tip, push_range)
+            for _attempt in range(2):
+                try:
+                    result, ran, raw_name = _run_review(review_root, mode, git_dir, tip, push_range)
+                    break
+                except ReviewGateError as exc:
+                    if _attempt == 0 and "could not parse" in str(exc) and not exc.is_timeout:
+                        _warn("[gate] parse failure on first attempt; retrying once.")
+                        continue
+                    raise
             chunks_new = 1 if ran else 0
             if planner_warnings and isinstance(result, dict):
                 result = dict(result)
@@ -2771,9 +2853,17 @@ def _supervise_run(state_path, run_id):
                 extras = _review_extras(0, [p["entry"]["path"] for p in active_items])
                 if all_full and not carry_items and not extras:
                     # Golden argv: byte-identical to 0.7.0 (no --paths-file).
-                    result, ran, raw_name = _run_review(
-                        review_root, mode, git_dir, tip, push_range
-                    )
+                    for _attempt in range(2):
+                        try:
+                            result, ran, raw_name = _run_review(
+                                review_root, mode, git_dir, tip, push_range
+                            )
+                            break
+                        except ReviewGateError as exc:
+                            if _attempt == 0 and "could not parse" in str(exc) and not exc.is_timeout:
+                                _warn("[gate] parse failure on first attempt; retrying once.")
+                                continue
+                            raise
                     chunks_new = 1 if ran else 0
                 else:
                     # Single context with paths-file (some delta or some carry).
@@ -2810,10 +2900,18 @@ def _supervise_run(state_path, run_id):
                             f"could not write single-context manifest: {exc}"
                         )
                     try:
-                        result, ran, raw_name = _run_review(
-                            review_root, mode, git_dir, tip, push_range,
-                            paths_file=manifest_path,
-                        )
+                        for _attempt in range(2):
+                            try:
+                                result, ran, raw_name = _run_review(
+                                    review_root, mode, git_dir, tip, push_range,
+                                    paths_file=manifest_path,
+                                )
+                                break
+                            except ReviewGateError as exc:
+                                if _attempt == 0 and "could not parse" in str(exc) and not exc.is_timeout:
+                                    _warn("[gate] parse failure on first attempt; retrying once.")
+                                    continue
+                                raise
                     finally:
                         try:
                             Path(manifest_path).unlink(missing_ok=True)
