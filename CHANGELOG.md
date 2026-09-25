@@ -6,6 +6,64 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-25
+
+Targeted re-checks instead of re-reviews: nothing already reviewed is reviewed
+again, and what a change can break elsewhere is checked instead.
+
+### Added
+- **Impact analysis** (`scripts/ocr_impact.py`). For every reviewed file the
+  gate lists the symbols the change touched — definition changes, body-only
+  changes, and fixes that only delete lines (mapped through the old version) —
+  and `git grep`s the tip for their uses, importers of the changed module
+  first. The call sites go to the reviewer as `impact_sites`, including ones in
+  carried files and in files the push never touched; it answers
+  `ok`/`broken`/`unsure` per site, and a broken caller blocks at the call site,
+  labelled `(caller of changed code)`. Such a finding is also kept on the
+  caller's own ledger record. Chunked reviews get callers in other chunks'
+  files. Capped (30 symbols, 5 sites each, 40 sites, 12 KB), allocated
+  round-robin. The reviewer's own cross-file step (§2b) still runs, now aimed
+  at what the exact-name search cannot see. `OCR_IMPACT=0` turns it off.
+- **Same defect elsewhere.** Code in the push matching a prior high/medium
+  finding goes to the reviewer as `known_defects`; a confirmed match blocks,
+  labelled `(same defect as an earlier finding)`. Matches of a new finding,
+  and any match in a file the push does not touch, are non-blocking `(note)`
+  lines. `OCR_SIBLINGS=0` turns it off.
+- **Local run log** (`scripts/ocr_telemetry.py`): one JSON line per review in
+  `.git/review-gate-telemetry/<date>.jsonl` — file classes, cost-rule numbers,
+  symbols and call sites from both searches, per-site verdicts, same-defect
+  matches, resolver inputs and outcomes, findings by provenance, verdict, and
+  each model call's duration. `review-gate.py --telemetry-report [--days N]`
+  summarises it. Local only; `OCR_TELEMETRY=0` turns it off.
+
+### Changed
+- **Cost rule replaces the delta-chain cap.** A file with a delta base is
+  reviewed over its whole push range when that diff is at most 1.5× the delta,
+  and keeps the record's owed findings when it is. The fixed cap (a full
+  re-review after 5 deltas) is gone.
+- **The ledger fingerprint covers review criteria only**: model, rubric,
+  language rules, the reviewer and filter prompts, the repo's `.ocr/`, and
+  `OCR_MODEL`/`OCR_BLOCK_SEVERITY`/`OCR_BLOCK_CONFIDENCE`. SKILL.md, the state
+  protocol version, `OCR_CLAUDE_ARGS`/`OCR_CLAUDE_EXTRA_ARGS` and the resolver
+  prompt no longer invalidate earlier reviews. This release changes the
+  fingerprint itself, so existing records are reviewed afresh once.
+- **Ledger TTL default is 30 days** (was 7).
+- The reviewer may anchor findings at `impact_sites` / `known_defects`
+  locations outside the change set, and returns
+  `{"findings": [...], "impact_verdicts": {...}}` when given call sites. The
+  skill emits `cross_file_context_summary` and `impact_verdicts` for the run
+  log. The finding schema gains `impact_site` and `sibling_of`.
+- A first push whose changes have call sites elsewhere now goes through a
+  manifest instead of the bare 0.7.0 command line.
+
+### Fixed
+- **Console windows on Windows.** The detached review supervisor has no
+  console, and every `git` it started without `CREATE_NO_WINDOW` opened a
+  window of its own — dozens per review, some left hanging with `0x800700e8`
+  (the chunk cleanup's `git checkout -q -- .`). All git calls now pass it.
+- A cost-rule or delta file's resolver guard only accepts evidence from lines
+  added since the file was last reviewed.
+
 ## [0.8.1] - 2026-09-25
 
 ### Fixed

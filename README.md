@@ -156,7 +156,7 @@ git push --no-verify
 | File ceiling | `40` | `OCR_MAX_FILES` | maximum reviewable files across all chunks; the largest-diff files are kept when the ceiling fires |
 | Chunk cache TTL | `86400`s (24 h) | `OCR_CHECKPOINT_TTL` | how long a completed chunk's result is kept in `.git/review-gate-async/chunks/`; re-pushing the same tip before expiry reuses cached chunks without re-reviewing them |
 | Review ledger | on | `OCR_LEDGER=0` to disable | per-file content-addressed cache that powers incremental re-review; `0` reviews every file in full, matching 0.7.0 behaviour without the chunk cache |
-| Ledger TTL | `604800`s (7 days) | `OCR_LEDGER_TTL` | a ledger record older than this is treated as a miss; the mtime is touched on each reuse, so actively-changing files keep their records alive |
+| Ledger TTL | `2592000`s (30 days) | `OCR_LEDGER_TTL` | a ledger record older than this is treated as a miss; the mtime is touched on each reuse, so actively-changing files keep their records alive |
 | Ledger record cap | `5000` | `OCR_LEDGER_MAX_RECORDS` | maximum number of records kept across all fingerprint dirs; oldest are pruned first, once per run at start |
 
 Rule precedence (highest first): `--rule` → project `.ocr/rule.json` → global `~/.ocr/rule.json` → built-in `skills/review/rubric.md`, then the matching `skills/review/rules/<lang>.md` and `rules/llm-authored-code.md` appended. See `examples/.ocr/rule.json`.
@@ -231,8 +231,8 @@ On each push the planner classifies every file in the diff:
 | Class | Condition | What happens |
 |---|---|---|
 | **carry** | Same before/after blob OIDs as in a prior record | Findings replayed from the record; no reviewer call |
-| **delta** | Same base blob, different head blob, chain depth < 5, delta diff is smaller than full diff | Reviewer sees only the `old → new` diff for that file |
-| **full** | No prior record, or record is expired/corrupt | Reviewed exactly as before |
+| **delta** | Same base blob, different head blob, and the push-range diff is more than 1.5× the delta | Reviewer sees only the `old → new` diff for that file |
+| **full** | No prior record, record expired/corrupt, or the push-range diff is at most 1.5× the delta (the *cost rule*) | Reviewed over the whole push range; a cost-rule full keeps the record's owed findings |
 
 Only delta and full files are sent to the reviewer. A no-change re-push (same blobs) returns a verdict with zero `claude -p` calls.
 
@@ -248,9 +248,19 @@ reviewed 3 files (2 delta, 1 full), re-checked 2 prior findings (1 resolved), ca
 **Kill switch.** `OCR_LEDGER=0` disables all ledger reads and writes; every file is reviewed in full on every push. `OCR_FORCE_REVIEW=1` bypasses ledger *reads* (all full for one run) but still writes records afterwards.
 
 **Limits.**
-- A behavioural interaction between a fix and a *carried* file (no code change in the carried file) is not re-examined. This is the same gap as 0.7.0 chunking and as incremental human review; use `OCR_FORCE_REVIEW=1` when you need a ground-truth sweep.
-- Delta records chain: a file reviewed as `B → X` in full then `X → head` as a delta is a weaker guarantee than a fresh full review of `B → head`. Chains are capped at 5; the sixth re-push is a full review.
 - A carry survives an upstream rebase only for files whose base blob is unchanged.
+- Impact analysis (below) finds callers by exact name. Calls through dynamic dispatch, reflection, string-keyed registries or aliases are left to the reviewer's own cross-file step, which still runs.
+
+### Targeted re-checks instead of re-reviews (0.9.0)
+
+Nothing already reviewed is reviewed again. What a change can break elsewhere is checked instead:
+
+- **Impact analysis.** Python lists the symbols each reviewed file changed, including body-only changes and fixes that only delete lines, and `git grep`s the tip for where they are used: first in files that import the changed module, then everywhere. The reviewer gets those call sites, including ones in carried files and in files the push never touched, and answers `ok` / `broken` / `unsure` for each. A broken caller blocks, anchored at the call site (`(caller of changed code)`), and is also kept on that file's own ledger record. With chunked reviews, a chunk's bundle includes callers in *other* chunks' files. Caps: 30 symbols, 5 sites per symbol, 40 sites, 12 KB, allocated round-robin so one widely used name cannot crowd out the rest. `OCR_IMPACT=0` turns it off.
+- **Same defect elsewhere.** Where code in the push matches a prior high/medium finding's line, the reviewer is asked whether it is the same defect; a confirmed one blocks (`(same defect as an earlier finding)`). Matches of a *new* finding, and matches in files the push does not touch, are shown as non-blocking `(note)` lines. `OCR_SIBLINGS=0` turns it off.
+- **Cost rule.** A file with a delta base is reviewed over its whole push range when that diff is at most 1.5× the delta: about the same cost, and it also shows changes that are only harmful together. There is no longer a fixed cap on how many deltas can chain.
+- **Criteria, not mechanics.** The ledger fingerprint covers what the review looks for — model, rubric, language rules, the reviewer and filter prompts, the repo's `.ocr/`, `OCR_MODEL`/`OCR_BLOCK_*`. Orchestration (SKILL.md), CLI args, the resolver prompt and the plugin version no longer invalidate earlier reviews.
+
+**Local run log.** Every review appends one JSON line to `.git/review-gate-telemetry/<date>.jsonl`: file classes and the cost rule's numbers, the symbols and call sites found (and the reviewer's own cross-file step's, side by side), the per-site verdicts, same-defect matches, the resolver's inputs and outcomes, findings with provenance, the verdict and each model call's duration. It stays inside `.git` and holds paths, line numbers and finding text from your code. `python scripts/review-gate.py --telemetry-report [--days N]` summarises it; `OCR_TELEMETRY=0` turns it off.
 
 
 ### Optional: Serena MCP (enhanced cross-file analysis for interactive sessions)

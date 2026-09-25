@@ -62,6 +62,8 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ocr_verdict import compute_verdict  # noqa: E402
+import ocr_impact  # noqa: E402
+import ocr_telemetry  # noqa: E402
 
 PROMPT = "/review-gate:review --unpushed --json"
 # With an explicit range the skill reviews exactly what the remote is about to
@@ -225,23 +227,35 @@ except ValueError:
     _CHECKPOINT_TTL = 24 * 3600
 # --- review ledger (0.8.0) ---------------------------------------------------
 LEDGER_DIR = "review-gate-ledger"
+# 30 days: a branch picked up again after a week or two keeps its review
+# history. The record cap below bounds disk use; the TTL only retires the
+# records of branches that have truly gone stale.
 try:
-    _LEDGER_TTL = int(os.environ.get("OCR_LEDGER_TTL", str(7 * 24 * 3600)))
+    _LEDGER_TTL = int(os.environ.get("OCR_LEDGER_TTL", str(30 * 24 * 3600)))
     _LEDGER_TTL = max(3600, _LEDGER_TTL)
 except ValueError:
-    _LEDGER_TTL = 7 * 24 * 3600
+    _LEDGER_TTL = 30 * 24 * 3600
 try:
     _LEDGER_MAX_RECORDS = int(os.environ.get("OCR_LEDGER_MAX_RECORDS", "5000"))
     _LEDGER_MAX_RECORDS = max(100, _LEDGER_MAX_RECORDS)
 except ValueError:
     _LEDGER_MAX_RECORDS = 5000
 _LEDGER_SCHEMA = 1
-_CHAIN_DEPTH_MAX = 5   # max delta-chain length before forcing full
-# Env vars that affect the review prompt and therefore invalidate cached records.
+# Cost rule: a file with a delta base is reviewed over its whole push range
+# instead when that diff is at most this many times the delta's size. It costs
+# about the same, and it also shows changes that are only harmful together --
+# which a chain of small deltas never shows at once. Replaces a fixed cap on
+# the delta chain, which forced a full re-review however large the file.
+_COST_RULE_RATIO = 1.5
+# Env vars that change the review CRITERIA and so invalidate cached records.
+# CLI plumbing (OCR_CLAUDE_ARGS/EXTRA_ARGS) is deliberately absent: it changes
+# how the reviewer runs, not what it is asked to find.
 _FINGERPRINT_ENV_VARS = (
     "OCR_MODEL", "OCR_BLOCK_SEVERITY", "OCR_BLOCK_CONFIDENCE",
-    "OCR_CLAUDE_ARGS", "OCR_CLAUDE_EXTRA_ARGS",
 )
+# Agents whose prompts decide which findings exist. The resolver only judges
+# whether a known finding was fixed, so editing it keeps the ledger.
+_FINGERPRINT_AGENTS = ("code-reviewer.md", "code-filter.md")
 # -----------------------------------------------------------------------------
 
 PROTOCOL_VERSION = 1   # bumped whenever state-file semantics change
@@ -437,6 +451,10 @@ def _git(args, cwd=None):
             encoding="utf-8",
             errors="replace",
             timeout=30,
+            # The supervisor runs DETACHED_PROCESS, with no console: on Windows
+            # every console child it starts without this flag gets a window of
+            # its own, one per git call -- dozens per review.
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         return out.stdout.strip(), out.returncode
     except Exception:
@@ -1996,8 +2014,46 @@ def _test_reviewer_cmd():
     return argv
 
 
+# What this supervisor process learned about its run, for the local run log
+# (scripts/ocr_telemetry.py). One supervisor runs one review, so a module
+# global is enough; _supervise resets it.
+_TELE = {}
+
+
+def _tele_call(kind, seconds, outcome, manifest=None):
+    entry = {"kind": kind, "seconds": round(seconds, 2), "outcome": outcome}
+    if manifest:
+        try:
+            entry["manifest_bytes"] = os.path.getsize(manifest)
+        except OSError:
+            pass
+    _TELE.setdefault("calls", []).append(entry)
+
+
 def _run_review(repo_root, mode, git_dir=None, head_sha="", push_range="",
                 paths_file=None, timeout=None, raw_tag="", resolve_file=None):
+    """_run_review_once, timed into the run log."""
+    kind = ("recheck" if "recheck" in raw_tag else "resolve") if resolve_file else "review"
+    started = time.monotonic()
+    outcome = "error"
+    try:
+        out = _run_review_once(repo_root, mode, git_dir, head_sha, push_range,
+                               paths_file=paths_file, timeout=timeout,
+                               raw_tag=raw_tag, resolve_file=resolve_file)
+        outcome = "ok" if out[1] else "skipped"
+        return out
+    except ReviewLimitError:
+        outcome = "limit"
+        raise
+    except ReviewGateError as exc:
+        outcome = "timeout" if getattr(exc, "is_timeout", False) else "error"
+        raise
+    finally:
+        _tele_call(kind, time.monotonic() - started, outcome, resolve_file or paths_file)
+
+
+def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
+                     paths_file=None, timeout=None, raw_tag="", resolve_file=None):
     """Return (result_dict, True, raw_archive_name) on success.
 
     paths_file: path to a chunk manifest JSON; if given, --paths-file is added
@@ -2528,6 +2584,39 @@ def _drive_review(common_dir, repo_root, meta, mode, budget):
 
 
 def _supervise(state_path, run_id):
+    """_supervise_run, then one line in the local run log (best-effort)."""
+    _TELE.clear()
+    _TELE.update({"ts": time.time(), "run_id": run_id})
+    rc = 1
+    try:
+        rc = _supervise_run(state_path, run_id)
+        return rc
+    finally:
+        try:
+            _write_telemetry(state_path, run_id)
+        except Exception:
+            pass
+
+
+def _write_telemetry(state_path, run_id):
+    if not ocr_telemetry.enabled():
+        return
+    st = _read_state(Path(state_path)) or {}
+    if st.get("run_id") != run_id:
+        return  # fenced: the run that took over logs its own line
+    rec = dict(_TELE)
+    rec.update({
+        "repo": st.get("repo_root") or "", "tip": st.get("tip") or "",
+        "base": st.get("base") or "", "branch": st.get("branch") or "",
+        "mode": st.get("mode") or "", "state": st.get("state") or "",
+        "verdict": st.get("verdict") or "", "blocked": bool(st.get("blocked")),
+        "reason": st.get("reason") or "",
+        "seconds": round(time.time() - rec.get("ts", time.time()), 1),
+    })
+    ocr_telemetry.append(common_dir_of(Path(state_path)), rec)
+
+
+def _supervise_run(state_path, run_id):
     """The detached worker: run ONE review for the tip named in state_path.
 
     Writes `running` with a heartbeat every HEARTBEAT_S; a hook that sees no
@@ -2608,8 +2697,16 @@ def _supervise(state_path, run_id):
             )
 
         fp = _compute_fingerprint(review_root, tip)
+        _TELE.update(fp=fp, fp_parts=_fingerprint_parts(review_root, tip))
         _prune_ledger(common_dir)
         plan, planner_warnings = _plan_review(review_root, base, tip, common_dir, fp)
+        _TELE["plan"] = [
+            {"path": p["entry"]["path"], "mode": p["mode"],
+             "miss_reason": p.get("miss_reason") or "",
+             "delta_lines": p.get("delta_lines"), "full_lines": p.get("full_lines"),
+             "chain_depth": (p.get("record") or {}).get("chain_depth")}
+            for p in (plan or [])
+        ]
 
         if plan is None or plan == []:
             # git diff failed OR no allowed files: fall back to single-context (0.7.0 path).
@@ -2623,6 +2720,28 @@ def _supervise(state_path, run_id):
             active_items = [p for p in plan if p["mode"] in ("delta", "full")]
             carry_items = [p for p in plan if p["mode"] == "carry"]
             carry_paths = [p["entry"]["path"] for p in carry_items]
+            push_paths = {p["entry"]["path"] for p in plan}
+
+            # Priors are classified before the review: their known defects go
+            # to the reviewer, and the resolver judges them afterwards.
+            to_resolve, auto_resolved, carried_findings = _classify_priors(
+                plan, tip, review_root, common_dir, fp, run_id
+            )
+            impact = _compute_impact(review_root, tip, active_items)
+            if impact and impact.get("warnings"):
+                _TELE["impact_warnings"] = impact["warnings"][:50]
+            defects, defect_notes = _known_defects(
+                review_root, tip, [p["finding"] for p in to_resolve] + carried_findings,
+                push_paths)
+
+            def _review_extras(k, chunk_paths):
+                extras = {}
+                bundle = _impact_bundle(review_root, tip, impact, chunk_paths)
+                if bundle:
+                    extras["impact"] = bundle
+                if defects and k == 0:  # each defect needs judging once
+                    extras["known_defects"] = defects
+                return extras
 
             if not active_items:
                 # All files already reviewed in a prior run: replay from ledger.
@@ -2635,7 +2754,7 @@ def _supervise(state_path, run_id):
                 result, ran, raw_name, chunks_new = _run_chunked(
                     state_path, run_id, common_dir, review_root, mode, git_dir,
                     tip, push_range, active_items, planner_warnings, fenced, progress,
-                    fp=fp, carry_paths=carry_paths,
+                    fp=fp, carry_paths=carry_paths, chunk_extras=_review_extras,
                 )
                 n_delta = sum(1 for p in active_items if p["mode"] == "delta")
                 n_full = len(active_items) - n_delta
@@ -2646,7 +2765,8 @@ def _supervise(state_path, run_id):
             else:
                 # Single-context path.
                 all_full = all(p["mode"] == "full" for p in active_items)
-                if all_full and not carry_items:
+                extras = _review_extras(0, [p["entry"]["path"] for p in active_items])
+                if all_full and not carry_items and not extras:
                     # Golden argv: byte-identical to 0.7.0 (no --paths-file).
                     result, ran, raw_name = _run_review(
                         review_root, mode, git_dir, tip, push_range
@@ -2675,6 +2795,7 @@ def _supervise(state_path, run_id):
                         ],
                         "carried": carry_paths,
                     }
+                    manifest.update(extras)
                     try:
                         tmp = manifest_path + ".tmp"
                         Path(tmp).write_text(
@@ -2711,10 +2832,7 @@ def _supervise(state_path, run_id):
                 result["warnings"] = (_planner_warning_objs(planner_warnings)
                                       + list(result.get("warnings") or []))
 
-            # Handle prior findings from carry/delta records.
-            to_resolve, auto_resolved, carried_findings = _classify_priors(
-                plan, tip, review_root, common_dir, fp, run_id
-            )
+            # Handle prior findings from carry/delta records (classified above).
             resolver_results, resolver_warnings, judged = {}, [], {}
             if to_resolve:
                 resolver_results, resolver_warnings = _run_resolver(
@@ -2740,6 +2858,10 @@ def _supervise(state_path, run_id):
                     resolver_results.update(again)
                     resolver_warnings += more
                     _judge_all(recheck)
+                _TELE["resolver"] = {
+                    "sent": len(to_resolve), "recheck": len(recheck),
+                    "warnings": list(resolver_warnings), "judged": dict(judged),
+                }
                 n_unverified = sum(1 for v in judged.values() if v == "unverified")
                 if n_unverified:
                     resolver_warnings.append(
@@ -2781,7 +2903,13 @@ def _supervise(state_path, run_id):
             prior_findings = still_present + anchored_carried
             if isinstance(result, dict):
                 new_findings = list(result.get("findings") or [])
+                site_ids = {s.get("id") for s in (_TELE.get("impact") or {}).get("sites") or []}
+                defect_ids = {d.get("sid") for d in defects}
                 for nf in new_findings:
+                    if nf.get("sibling_of") and nf["sibling_of"] in defect_ids:
+                        nf.setdefault("provenance", "sibling")
+                    elif nf.get("impact_site") and nf["impact_site"] in site_ids:
+                        nf.setdefault("provenance", "impact")
                     nf.setdefault("provenance", "new")
                 # Python dedup: drop new findings that nearly duplicate a still_present.
                 # Detect if the reviewer re-confirms a provisionally-resolved finding.
@@ -2811,8 +2939,17 @@ def _supervise(state_path, run_id):
                         self_resolved.setdefault(ev_path, set()).add(p["id"])
                 if self_resolved and _ledger_enabled():
                     _drop_self_resolved(active_items, self_resolved, common_dir, fp, run_id)
+                if ran and carry_items and _ledger_enabled():
+                    _attach_to_carried_records(deduped_new, carry_items, common_dir, fp,
+                                               run_id, review_root, tip)
 
-                all_findings = deduped_new + prior_findings
+                # Info notes: same code as a finding, elsewhere. Never blocking,
+                # never recorded; a prior's in-push matches went to the reviewer.
+                notes = defect_notes + _new_finding_notes(
+                    review_root, tip,
+                    [nf for nf in deduped_new if nf.get("provenance") == "new"], push_paths)
+
+                all_findings = deduped_new + prior_findings + notes
                 result = dict(result, findings=all_findings)
                 if plan_summary:
                     result = dict(result, plan_summary=plan_summary)
@@ -2899,6 +3036,21 @@ def _supervise(state_path, run_id):
             "end_line": "-", "content": cwd_note,
         }] + list(result.get("findings") or [])
     verdict = compute_verdict(result)
+    if isinstance(result, dict):
+        _TELE["findings"] = [
+            {"id": f.get("id") or _finding_id(f), "path": f.get("path"),
+             "start_line": f.get("start_line"), "severity": f.get("severity"),
+             "confidence": f.get("confidence"), "category": f.get("category"),
+             "provenance": f.get("provenance") or "new",
+             "content": str(f.get("content") or "")[:300]}
+            for f in (result.get("findings") or []) if isinstance(f, dict)
+        ]
+        _TELE["warnings"] = [w if isinstance(w, dict) else {"message": str(w)}
+                             for w in (result.get("warnings") or [])][:50]
+        if isinstance(result.get("cross_file_context_summary"), dict):
+            _TELE["model_cross_file"] = result["cross_file_context_summary"]
+        if isinstance(result.get("impact_verdicts"), dict):
+            _TELE["site_verdicts"] = result["impact_verdicts"]
     reasons = _format_reasons(result)
     advisory = _is_advisory(repo_root)
     blocked = verdict == "block" and not advisory
@@ -3297,36 +3449,44 @@ def _resolution_path(common_dir, fp, res_id, target_oid, evidence_path, evidence
     return _fp_dir(common_dir, fp) / "resolutions" / f"{res_id[:16]}-{ctx16}.json"
 
 
-def _compute_fingerprint(root, tip):
-    """sha256 of model, PROTOCOL_VERSION, skill/rubric/rules/agents file contents,
-    .ocr/ tree OID, and prompt-affecting env vars. The plugin version is
-    intentionally excluded so code-only releases keep the ledger."""
-    h = hashlib.sha256()
-    h.update(_MODEL.encode("utf-8"))
-    h.update(b"\x00")
-    h.update(str(PROTOCOL_VERSION).encode("utf-8"))
-    h.update(b"\x00")
-    for rel in ("skills/review/SKILL.md", "skills/review/rubric.md"):
+def _fingerprint_parts(root, tip):
+    """{input name: short hash} for every input of the review CRITERIA: model,
+    rubric, language rules, the reviewer and filter prompts, the repo's .ocr/
+    tree, and the criteria env vars. Kept by name so the run log can say which
+    one changed.
+
+    Mechanics are deliberately absent -- SKILL.md orchestration, the state
+    PROTOCOL_VERSION, CLI args, the resolver prompt, the plugin version -- so a
+    plugin update does not throw every earlier review away."""
+    def digest(data):
+        return hashlib.sha256(data).hexdigest()[:16]
+
+    def file_digest(path):
         try:
-            h.update((Path(_PLUGIN_ROOT) / rel).read_bytes())
+            return digest(Path(path).read_bytes())
         except OSError:
-            pass
-        h.update(b"\x00")
-    for subdir in ("skills/review/rules", "agents"):
-        d = Path(_PLUGIN_ROOT) / subdir
-        if d.is_dir():
-            for f in sorted(d.glob("*.md")):
-                try:
-                    h.update(f.read_bytes())
-                except OSError:
-                    pass
-                h.update(b"\x00")
-    h.update((_ocr_tree_oid(root, tip) or "").encode("utf-8"))
-    h.update(b"\x00")
+            return ""
+
+    parts = {"model": digest(_MODEL.encode("utf-8")),
+             "rubric.md": file_digest(Path(_PLUGIN_ROOT) / "skills/review/rubric.md")}
+    rules = Path(_PLUGIN_ROOT) / "skills/review/rules"
+    if rules.is_dir():
+        for f in sorted(rules.glob("*.md")):
+            parts[f"rules/{f.name}"] = file_digest(f)
+    for name in _FINGERPRINT_AGENTS:
+        parts[f"agents/{name}"] = file_digest(Path(_PLUGIN_ROOT) / "agents" / name)
+    parts[".ocr/"] = _ocr_tree_oid(root, tip) or ""
     for var in _FINGERPRINT_ENV_VARS:
-        h.update((os.environ.get(var) or "").encode("utf-8"))
-        h.update(b"\x00")
-    return h.hexdigest()
+        parts[f"env:{var}"] = digest((os.environ.get(var) or "").encode("utf-8"))
+    return parts
+
+
+def _compute_fingerprint(root, tip):
+    """sha256 over _fingerprint_parts. A record reviewed under other criteria
+    is not trusted."""
+    parts = _fingerprint_parts(root, tip)
+    raw = "\x00".join(f"{k}={v}" for k, v in parts.items())
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def _read_ledger_record(record_path, fp, key, head_oid):
@@ -3395,8 +3555,6 @@ def _find_delta_record(common_dir, fp, key, head_oid):
         if not isinstance(data, dict) or data.get("schema") != _LEDGER_SCHEMA:
             continue
         if data.get("fp") != fp or data.get("key") != key:
-            continue
-        if int(data.get("chain_depth") or 0) >= _CHAIN_DEPTH_MAX:
             continue
         try:
             if time.time() - p.stat().st_mtime > _LEDGER_TTL:
@@ -3525,12 +3683,32 @@ def _plan_review(root, base, tip, common_dir, fp):
             continue
         delta_record, from_oid = _find_delta_record(common_dir, fp, key, head_oid)
         if delta_record is not None:
-            plan.append({"entry": e, "mode": "delta", "record": delta_record,
-                         "from_oid": from_oid, "miss_reason": "none"})
+            delta_lines = _blob_diff_lines(root, from_oid, head_oid)
+            full_lines = int(e.get("lines") or 0)
+            item = {"entry": e, "mode": "delta", "record": delta_record,
+                    "from_oid": from_oid, "miss_reason": "none",
+                    "delta_lines": delta_lines, "full_lines": full_lines}
+            if delta_lines is not None and full_lines <= _COST_RULE_RATIO * delta_lines:
+                # Keeps the record: the findings still owed on it go to the resolver.
+                item.update(mode="full", miss_reason="cost_rule")
+            plan.append(item)
             continue
         plan.append({"entry": e, "mode": "full", "record": None,
                      "from_oid": "", "miss_reason": "no_record"})
     return plan, warnings
+
+
+def _blob_diff_lines(root, from_oid, to_oid):
+    """Added+removed lines between two blobs, or None when git can't say."""
+    out, rc = _git(["diff", "--numstat", from_oid, to_oid], cwd=root)
+    if rc != 0:
+        return None
+    total = 0
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+            total += int(parts[0]) + int(parts[1])
+    return total
 
 
 def _classify_priors(plan_items, tip, review_root, common_dir, fp, run_id):
@@ -3547,7 +3725,9 @@ def _classify_priors(plan_items, tip, review_root, common_dir, fp, run_id):
 
     for item in plan_items:
         record = item.get("record")
-        if record is None or item["mode"] == "full":
+        # A cost-rule full item keeps its delta base's record, and with it the
+        # findings still owed on that file.
+        if record is None:
             continue
         for f in record.get("findings") or []:
             fid = f.get("id") or _finding_id(f)
@@ -3586,6 +3766,183 @@ def _classify_priors(plan_items, tip, review_root, common_dir, fp, run_id):
                     carried_findings.append(dict(f, provenance="carried"))
 
     return to_resolve, auto_resolved, carried_findings
+
+
+# --- impact analysis and known defects (0.9.0) --------------------------------
+# Deterministic context for the reviewer, computed here rather than by the model:
+# where the symbols this push changed are called outside the files under
+# review (scripts/ocr_impact.py), and where code in the push matches a defect an
+# earlier review reported. Both only ADD context or findings; any failure leaves
+# the review exactly as it would have been without them.
+
+def _impact_enabled():
+    return os.environ.get("OCR_IMPACT", "1").strip().lower() not in ("0", "false", "no")
+
+
+def _siblings_enabled():
+    return os.environ.get("OCR_SIBLINGS", "1").strip().lower() not in ("0", "false", "no")
+
+
+def _is_null_oid(oid):
+    return not oid or set(oid) == {"0"}
+
+
+def _compute_impact(review_root, tip, active_items):
+    """Changed symbols of the active files and every place they are used.
+
+    A delta file is compared with the state it was last reviewed at; any other
+    file with its base version, i.e. everything the push changed in it.
+    Returns None when disabled or on failure.
+    """
+    if not _impact_enabled() or not active_items or not tip:
+        return None
+    try:
+        run = ocr_impact.git_runner(review_root)
+        symbols, unsupported, warnings = [], [], []
+        for item in active_items:
+            e = item["entry"]
+            old_oid = item.get("from_oid") if item["mode"] == "delta" else e.get("old_oid")
+            new_oid = e.get("new_oid")
+            old_text = None if _is_null_oid(old_oid) else run(["cat-file", "-p", old_oid])[0]
+            new_text = None if _is_null_oid(new_oid) else run(["cat-file", "-p", new_oid])[0]
+            got = ocr_impact.changed_symbols(e["path"], old_text, new_text)
+            if not got.get("supported"):
+                unsupported.append(e["path"])
+            symbols += [s for s in got.get("symbols") or [] if s.get("change") != "added"]
+            warnings += got.get("warnings") or []
+        refs = ocr_impact.find_references(run, tip, symbols, is_allowed=_is_allowed_path)
+        return {"symbols": symbols, "sites": refs.get("sites") or [],
+                "ref_counts": refs.get("ref_counts") or {}, "unsupported": unsupported,
+                "warnings": warnings + list(refs.get("warnings") or [])}
+    except Exception as exc:
+        return {"symbols": [], "sites": [], "ref_counts": {}, "unsupported": [],
+                "warnings": [f"impact analysis failed ({exc})"]}
+
+
+def _impact_bundle(review_root, tip, impact, chunk_paths):
+    """The `impact` manifest field for one reviewer context, or None.
+
+    Covers symbols defined in this context's files, and call sites OUTSIDE them
+    -- including files another chunk reviews, which this reviewer cannot see.
+    """
+    if not impact:
+        return None
+    paths = set(chunk_paths)
+    try:
+        b = ocr_impact.build_bundle(
+            ocr_impact.git_runner(review_root), tip, impact["symbols"], impact["sites"],
+            impact["ref_counts"], include_paths=paths, exclude_paths=paths)
+    except Exception as exc:
+        _TELE.setdefault("impact_warnings", []).append(f"bundle failed ({exc})")
+        return None
+    b["unsupported"] = [p for p in impact["unsupported"] if p in paths]
+    defined = {s.get("name"): s.get("defined_in") for s in b.get("symbols") or []}
+    tele = _TELE.setdefault("impact", {"symbols": [], "sites": [], "dropped_symbols": [],
+                                       "unsupported": [], "truncated": False})
+    tele["symbols"] += [{k: s.get(k) for k in ("name", "change", "defined_in", "ref_count",
+                                                "sites_included")}
+                        for s in b.get("symbols") or []]
+    tele["sites"] += [{"id": s.get("id"), "path": s.get("path"), "line": s.get("line"),
+                       "name": s.get("name"), "tier": s.get("tier"),
+                       "defined_in": defined.get(s.get("name"))}
+                      for s in b.get("sites") or []]
+    tele["dropped_symbols"] += list(b.get("dropped_symbols") or [])
+    tele["unsupported"] += b["unsupported"]
+    tele["truncated"] = bool(tele["truncated"] or b.get("truncated"))
+    if not (b.get("sites") or b.get("dropped_symbols") or b["unsupported"]):
+        return None
+    return b
+
+
+def _known_defects(review_root, tip, prior_findings, push_paths):
+    """Places matching a prior high/medium finding's code.
+
+    Returns (for_reviewer, notes): hits in files of this push go to the
+    reviewer as `known_defects`; hits in untouched files become info notes --
+    old code must not block an unrelated push.
+    """
+    if not _siblings_enabled() or not prior_findings:
+        return [], []
+    run = ocr_impact.git_runner(review_root)
+    for_reviewer, notes, seen = [], [], set()
+    for f in prior_findings:
+        if (f.get("severity") or "").lower() not in ("high", "medium", "critical"):
+            continue
+        try:
+            got = ocr_impact.find_siblings(run, tip, dict(f, id=f.get("id") or _finding_id(f)),
+                                           push_paths=push_paths, is_allowed=_is_allowed_path)
+        except Exception:
+            continue
+        for s in got.get("siblings") or []:
+            if s.get("sid") in seen:
+                continue
+            seen.add(s.get("sid"))
+            if s.get("in_push"):
+                entry = {k: s.get(k) for k in ("sid", "of", "of_content", "path", "line")}
+                entry["text"] = str(s.get("text") or "")[:200]
+                for_reviewer.append(entry)
+            else:
+                notes.append(_sibling_note(s, f, untouched=True))
+    _TELE["siblings"] = {"to_reviewer": for_reviewer, "noted": list(notes)}
+    return for_reviewer, notes
+
+
+def _sibling_note(s, f, untouched=False):
+    where = "a file this push does not touch" if untouched else "this push"
+    return {
+        "severity": "info", "path": s.get("path"), "start_line": s.get("line"),
+        "end_line": s.get("line"), "category": "correctness", "provenance": "sibling_note",
+        "content": (f"same code as the {f.get('severity')} finding at {f.get('path')}:"
+                    f"{f.get('start_line')} ({str(f.get('content') or '')[:160]}) appears "
+                    f"here, in {where} - check whether the same defect applies"),
+    }
+
+
+def _new_finding_notes(review_root, tip, new_findings, push_paths):
+    """Info notes where a NEW high/medium finding's code also appears. They
+    never block; the next push's reviewer judges them as known defects."""
+    if not _siblings_enabled():
+        return []
+    run = ocr_impact.git_runner(review_root)
+    notes, taken = [], {(f.get("path"), f.get("start_line")) for f in new_findings}
+    for f in new_findings:
+        if (f.get("severity") or "").lower() not in ("high", "medium", "critical"):
+            continue
+        try:
+            got = ocr_impact.find_siblings(run, tip, dict(f, id=f.get("id") or _finding_id(f)),
+                                           push_paths=push_paths, is_allowed=_is_allowed_path)
+        except Exception:
+            continue
+        for s in got.get("siblings") or []:
+            if (s.get("path"), s.get("line")) in taken:
+                continue
+            taken.add((s.get("path"), s.get("line")))
+            notes.append(_sibling_note(s, f, untouched=not s.get("in_push")))
+    _TELE.setdefault("siblings", {"to_reviewer": [], "noted": []})["noted"] += notes
+    return notes
+
+
+def _attach_to_carried_records(findings, carry_items, common_dir, fp, run_id, review_root, tip):
+    """Also keep a finding about a carried file on THAT file's record, so it
+    stays owed however the files that revealed it change later."""
+    by_path = {item["entry"]["path"]: item for item in carry_items}
+    grouped = {}
+    for f in findings:
+        if f.get("path") in by_path and (f.get("severity") or "").lower() != "info":
+            grouped.setdefault(f["path"], []).append(f)
+    for path, fs in grouped.items():
+        e = by_path[path]["entry"]
+        key = _record_key(path, e.get("old_path") or "", e["status"], e["old_oid"])
+        rec = _read_ledger_record(_record_path(common_dir, fp, key, e["new_oid"]),
+                                  fp, key, e["new_oid"])
+        if rec is None:
+            continue
+        stamped = [dict(f, target_oid=f.get("target_oid") or e["new_oid"]) for f in fs]
+        merged = _dedup_by_id(list(rec.get("findings") or []) + stamped)
+        if len(merged) != len(rec.get("findings") or []):
+            _write_ledger_record(common_dir, fp, key, e["new_oid"], path,
+                                 e.get("old_path") or "", e["status"], e["old_oid"],
+                                 merged, rec.get("chain_depth") or 0, run_id)
 
 
 _RESOLVER_STATUSES = ("resolved", "still_present")
@@ -3752,9 +4109,12 @@ def _guard_resolution(resolution, active_plan_items, push_range, review_root,
         return False
     item = next((i for i in active_plan_items if i["entry"]["path"] == evidence_path), None)
     if item is not None:
-        # A delta file's earlier lines predate the finding; only the fix's own
-        # additions can count as evidence that it was fixed.
-        if item["mode"] == "delta" and item.get("from_oid") and item["entry"].get("new_oid"):
+        # A reviewed file's earlier lines predate the finding; only the fix's
+        # own additions can count as evidence that it was fixed. That holds
+        # for a cost-rule full item too: its push-range diff also shows lines
+        # that were already there when the finding was made.
+        if (item.get("record") is not None and item.get("from_oid")
+                and item["entry"].get("new_oid")):
             diff_args = ["diff", item["from_oid"], item["entry"]["new_oid"]]
         elif push_range:
             diff_args = ["diff", push_range, "--", evidence_path]
@@ -3920,7 +4280,7 @@ def _record_findings_for(item, new_by_path, orphans, active_paths):
     own = list(new_by_path.get(path) or [])
     carried = []
     prev = item.get("record")
-    if item["mode"] == "delta" and prev:
+    if prev:
         for f in prev.get("findings") or []:
             if any(_findings_similar(f, n) for n in own):
                 continue
@@ -4072,11 +4432,17 @@ def _merge_chunk_results(chunk_results, planner_warnings=None):
         "completed_with_errors": 2,
     }
     worst_status_rank = 0
+    cross_symbols, verdicts = [], {}
     for r in chunk_results:
         if not isinstance(r, dict):
             continue
         all_findings.extend(r.get("findings") or [])
         all_warnings.extend(r.get("warnings") or [])
+        cfs = r.get("cross_file_context_summary")
+        if isinstance(cfs, dict) and isinstance(cfs.get("symbols"), list):
+            cross_symbols.extend(cfs["symbols"])
+        if isinstance(r.get("impact_verdicts"), dict):
+            verdicts.update(r["impact_verdicts"])
         s = r.get("status") or ""
         rank = _STATUS_RANK.get(s, 0)
         if rank > worst_status_rank:
@@ -4089,7 +4455,7 @@ def _merge_chunk_results(chunk_results, planner_warnings=None):
     medium = sum(1 for f in merged if f.get("severity") == "medium")
     low = sum(1 for f in merged if f.get("severity") == "low")
     files_reviewed = len({f.get("path") for f in merged if f.get("path")})
-    return {
+    out = {
         "status": worst_status,
         "findings": merged,
         "warnings": all_warnings,
@@ -4099,16 +4465,23 @@ def _merge_chunk_results(chunk_results, planner_warnings=None):
             "high": high, "medium": medium, "low": low,
         },
     }
+    if cross_symbols:
+        out["cross_file_context_summary"] = {"symbols": cross_symbols}
+    if verdicts:
+        out["impact_verdicts"] = verdicts
+    return out
 
 
 def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
                  tip, push_range, active_items, planner_warnings, fenced,
-                 progress=None, fp="", carry_paths=None):
+                 progress=None, fp="", carry_paths=None, chunk_extras=None):
     """Run per-chunk reviews with fencing, budget and retry.
 
     active_items is a list of plan_item dicts (mode delta/full). Chunks are
     computed internally via _plan_to_chunks. carry_paths is the list of
     already-carried file paths (for the manifest's carried field).
+    chunk_extras(k, chunk_paths) returns extra manifest fields for chunk k
+    (impact sites, known defects) or None.
 
     Returns (merged_result, True, raw_name, chunks_new) on success.
     chunks_new is the count of chunks reviewed in THIS run.
@@ -4177,6 +4550,8 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
             ],
             "carried": carry_paths or [],
         }
+        if chunk_extras is not None:
+            manifest.update(chunk_extras(k, manifest["paths"]) or {})
         try:
             tmp = manifest_path + ".tmp"
             Path(tmp).write_text(
@@ -4356,6 +4731,12 @@ def _format_reasons(result, limit=20):
             prefix = "(carried) "
         elif prov == "still_present":
             prefix = "(still present) "
+        elif prov == "impact":
+            prefix = "(caller of changed code) "
+        elif prov == "sibling":
+            prefix = "(same defect as an earlier finding) "
+        elif prov == "sibling_note":
+            prefix = "(note) "
         elif prov == "unverified":
             prefix = ("(unverified: the resolver gave no evidence either way and the "
                       "flagged code is no longer at the tip - check by hand) ")
@@ -4378,6 +4759,25 @@ def _output_hints(git_dir, record=None):
             f"\n  Replay past findings: python \"{os.path.abspath(__file__)}\" --history"
         )
     return hint
+
+
+def _print_telemetry_report(argv):
+    """`review-gate.py --telemetry-report [--days N]` - summarise the local run
+    log of this repository (see scripts/ocr_telemetry.py). Returns an exit code."""
+    days = 7
+    if "--days" in argv:
+        i = argv.index("--days")
+        try:
+            days = max(1, int(argv[i + 1]))
+        except (IndexError, ValueError):
+            pass
+    common = _git_common_dir(_repo_root())
+    if not common:
+        _warn("not inside a git repository - no run log here.")
+        return 1
+    sys.stdout.write(f"{ocr_telemetry.telemetry_dir(common)} (last {days} day(s))\n\n")
+    sys.stdout.write(ocr_telemetry.report(ocr_telemetry.load(common, days)) + "\n")
+    return 0
 
 
 def _print_history(argv):
@@ -5026,6 +5426,8 @@ def main(argv):
     # it never spawns a review, touches a marker, or needs a hook payload.
     if "--history" in argv:
         sys.exit(_print_history(argv))
+    if "--telemetry-report" in argv:
+        sys.exit(_print_telemetry_report(argv))
 
     _mode_arg0 = ""
     if "--mode" in argv:

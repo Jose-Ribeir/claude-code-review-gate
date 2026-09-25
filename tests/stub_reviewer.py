@@ -173,4 +173,33 @@ if findings_for_raw:
     except Exception:
         pass
 
-sys.stdout.write(json.dumps({"status": "success", "verdict": verdict, "findings": findings}))
+out = {"status": "success", "verdict": verdict, "findings": findings}
+
+# 0.9.0 manifest fields. STUB_IMPACT_BREAK=1 reports every impact site as
+# broken (a high finding anchored at the call site); otherwise each is "ok".
+# STUB_CONFIRM_SIBLINGS=1 confirms every known defect as the same defect.
+# STUB_CROSS_FILE is echoed verbatim as the §2b summary.
+impact = (manifest or {}).get("impact") or {}
+if impact.get("sites"):
+    broken = os.environ.get("STUB_IMPACT_BREAK") == "1"
+    out["impact_verdicts"] = {s["id"]: ("broken" if broken else "ok") for s in impact["sites"]}
+    if broken:
+        for s in impact["sites"]:
+            findings.append({
+                "path": s["path"], "start_line": s["line"], "end_line": s["line"],
+                "severity": "high", "confidence": 0.95, "category": "correctness",
+                "content": f"caller broken by the change to {s['name']}",
+                "existing_code": s.get("text") or "", "evidence": "impact_sites",
+                "impact_site": s["id"],
+            })
+if os.environ.get("STUB_CONFIRM_SIBLINGS") == "1":
+    for d in (manifest or {}).get("known_defects") or []:
+        findings.append({
+            "path": d["path"], "start_line": d["line"], "end_line": d["line"],
+            "severity": "high", "confidence": 0.95, "category": "security",
+            "content": "same defect as the earlier finding", "existing_code": d.get("text") or "",
+            "evidence": "known_defects", "sibling_of": d["sid"],
+        })
+if os.environ.get("STUB_CROSS_FILE"):
+    out["cross_file_context_summary"] = json.loads(os.environ["STUB_CROSS_FILE"])
+sys.stdout.write(json.dumps(out))

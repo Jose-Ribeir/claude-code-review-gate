@@ -62,7 +62,15 @@
           "type": "string",
           "description": "What Grep/Read was called and what it showed. Required for cross-file claims."
         },
-        "thinking": { "type": "string" }
+        "thinking": { "type": "string" },
+        "impact_site": {
+          "type": "string",
+          "description": "Id of the impact_sites call site this finding is about (0.9.0)."
+        },
+        "sibling_of": {
+          "type": "string",
+          "description": "Id of the known_defects entry this finding confirms (0.9.0)."
+        }
       }
     }
   }

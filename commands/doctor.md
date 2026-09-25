@@ -100,8 +100,12 @@ if a command fails — a failure *is* a result.
   `ledger_stats` field: `{full, delta, carry, total}`. A first push will
   show all full; subsequent pushes with unchanged files should show mostly
   carry.
-- Note the configured TTL (`OCR_LEDGER_TTL`, default 7 days) and whether any
+- Note the configured TTL (`OCR_LEDGER_TTL`, default 30 days) and whether any
   records appear older than it.
+- Report the local run log (0.9.0): whether `.git/review-gate-telemetry/`
+  exists, its size, and the date of the newest line. `python
+  scripts/review-gate.py --telemetry-report` prints the summary; if
+  `OCR_TELEMETRY=0` is set, say the log is off.
 - If `OCR_LEDGER=0` is set in the environment or in a project settings file,
   report it as **warn**: the incremental review is disabled and every push is
   reviewed in full. This is intentional (kill-switch) but worth surfacing.
@@ -152,7 +156,7 @@ Report any of these that are set, since each changes the verdict: `OCR_MODEL`,
 `OCR_BLOCK_CONFIDENCE`, `OCR_CLAUDE_ARGS`, `OCR_CLAUDE_EXTRA_ARGS`,
 `OCR_INLINE_BUDGET`, `OCR_INLINE_BUDGET_GIT`, `OCR_FORCE_REVIEW`,
 `OCR_LEGACY_RANGE`, `OCR_UNSET_ENV`, `OCR_LEDGER`, `OCR_LEDGER_TTL`,
-`OCR_LEDGER_MAX_RECORDS`.
+`OCR_LEDGER_MAX_RECORDS`, `OCR_IMPACT`, `OCR_SIBLINGS`, `OCR_TELEMETRY`.
 
 Also read the current repository's `.claude/settings.json` (and
 `settings.local.json`) and flag any `env` entry that sets an `OCR_*` variable:

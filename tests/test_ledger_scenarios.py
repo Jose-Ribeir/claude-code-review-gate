@@ -358,6 +358,45 @@ def test_scenario_8_plugin_version_bump_keeps_records(tmp_path, monkeypatch):
     assert fp1 == fp2, "fingerprint is not deterministic"
 
 
+def _plugin_copy(tmp_path):
+    """A throwaway plugin root holding just the files the fingerprint reads."""
+    root = tmp_path / "plugin"
+    (root / "skills" / "review" / "rules").mkdir(parents=True)
+    (root / "agents").mkdir()
+    for rel in ("skills/review/SKILL.md", "skills/review/rubric.md",
+                "skills/review/rules/python.md", "agents/code-reviewer.md",
+                "agents/code-filter.md", "agents/code-resolver.md"):
+        (root / rel).write_text(f"{rel} v1\n", encoding="utf-8")
+    return root
+
+
+def test_fingerprint_tracks_criteria_not_mechanics(tmp_path, monkeypatch):
+    """0.9.0 split: what the review looks for invalidates records; how the gate
+    runs it does not, so a plugin update keeps earlier reviews."""
+    root = _plugin_copy(tmp_path)
+    monkeypatch.setattr(review_gate, "_PLUGIN_ROOT", str(root))
+    for var in ("OCR_CLAUDE_ARGS", "OCR_CLAUDE_EXTRA_ARGS", "OCR_BLOCK_SEVERITY"):
+        monkeypatch.delenv(var, raising=False)
+
+    def fp():
+        return review_gate._compute_fingerprint(str(tmp_path), "")
+
+    base = fp()
+    for rel in ("skills/review/SKILL.md", "agents/code-resolver.md"):
+        (root / rel).write_text("edited\n", encoding="utf-8")
+    monkeypatch.setenv("OCR_CLAUDE_EXTRA_ARGS", "--verbose")
+    assert fp() == base, "mechanics must not invalidate the ledger"
+
+    for rel in ("skills/review/rubric.md", "skills/review/rules/python.md",
+                "agents/code-reviewer.md", "agents/code-filter.md"):
+        before = fp()
+        (root / rel).write_text(f"{rel} tightened\n", encoding="utf-8")
+        assert fp() != before, f"{rel} is review criteria"
+    before = fp()
+    monkeypatch.setenv("OCR_BLOCK_SEVERITY", "medium")
+    assert fp() != before
+
+
 # ---------------------------------------------------------------------------
 # Scenario 10: target deleted → auto-resolved
 # ---------------------------------------------------------------------------
@@ -399,29 +438,12 @@ def test_scenario_10_deleted_target_auto_resolved(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Scenario 11: delta chain depth capping
+# Scenario 11: delta chains are not capped; the cost rule picks the range
 # ---------------------------------------------------------------------------
 
-def test_scenario_11_chain_depth_cap(tmp_path):
-    """_find_delta_record must not return a record whose chain_depth == _CHAIN_DEPTH_MAX."""
-    e = {"path": "app/x.py", "old_path": "", "status": "M",
-         "old_oid": "a" * 40, "new_oid": "b" * 40, "lines": 10}
-    fp = "fp16" * 4
-    key = review_gate._record_key(e["path"], "", e["status"], e["old_oid"])
-    old_head = "0" * 40  # different from new_oid
-    review_gate._write_ledger_record(
-        str(tmp_path), fp, key, old_head,
-        e["path"], "", e["status"], e["old_oid"],
-        [], review_gate._CHAIN_DEPTH_MAX, "run1",
-    )
-    # chain_depth == _CHAIN_DEPTH_MAX → should NOT be returned as delta base
-    rec, from_oid = review_gate._find_delta_record(str(tmp_path), fp, key, e["new_oid"])
-    assert rec is None, "chain at max depth must force full review"
-    assert from_oid == ""
-
-
-def test_scenario_11_chain_depth_below_max_is_delta(tmp_path):
-    """chain_depth < _CHAIN_DEPTH_MAX → returns the record as delta base."""
+def test_scenario_11_deep_chain_is_still_a_delta_base(tmp_path):
+    """0.9.0 dropped the fixed chain cap: however many fix rounds a file has had,
+    its newest record is still a delta base."""
     e = {"path": "app/x.py", "old_path": "", "status": "M",
          "old_oid": "a" * 40, "new_oid": "b" * 40, "lines": 10}
     fp = "fp16" * 4
@@ -430,11 +452,67 @@ def test_scenario_11_chain_depth_below_max_is_delta(tmp_path):
     review_gate._write_ledger_record(
         str(tmp_path), fp, key, old_head,
         e["path"], "", e["status"], e["old_oid"],
-        [], review_gate._CHAIN_DEPTH_MAX - 1, "run1",
+        [], 50, "run1",
     )
     rec, from_oid = review_gate._find_delta_record(str(tmp_path), fp, key, e["new_oid"])
     assert rec is not None
     assert from_oid == old_head
+
+
+def _cost_rule_repo(tmp_path, reviewed, fixed):
+    """base -> x.py=reviewed (T1) -> x.py=fixed (T2). Returns (work, base, blob1, tip)."""
+    work = tmp_path / "cr"
+    work.mkdir()
+    _git(["init", "-b", "main", str(work)], cwd=tmp_path)
+    _git(["config", "user.email", "t@t.com"], cwd=work)
+    _git(["config", "user.name", "t"], cwd=work)
+    _git(["config", "commit.gpgsign", "false"], cwd=work)
+    (work / "readme.txt").write_text("r\n")
+    _git(["add", "."], cwd=work)
+    _git(["commit", "-q", "-m", "base"], cwd=work)
+    base = _git(["rev-parse", "HEAD"], cwd=work)
+    (work / "x.py").write_text(reviewed)
+    _git(["add", "."], cwd=work)
+    _git(["commit", "-q", "-m", "t1"], cwd=work)
+    blob1 = _git(["rev-parse", "HEAD:x.py"], cwd=work)
+    (work / "x.py").write_text(fixed)
+    _git(["add", "."], cwd=work)
+    _git(["commit", "-q", "-m", "t2"], cwd=work)
+    return work, base, blob1, _git(["rev-parse", "HEAD"], cwd=work)
+
+
+def _plan_after_record(tmp_path, work, base, blob1, tip, findings=None):
+    common, fp = str(tmp_path / "common"), "c" * 64
+    entries, _ = review_gate._collect_diff_entries(str(work), base, tip)
+    e = next(x for x in entries if x["path"] == "x.py")
+    key = review_gate._record_key(e["path"], e.get("old_path") or "", e["status"], e["old_oid"])
+    review_gate._write_ledger_record(common, fp, key, blob1, "x.py", "", e["status"],
+                                     e["old_oid"], findings or [], 0, "r1")
+    plan, _ = review_gate._plan_review(str(work), base, tip, common, fp)
+    return next(p for p in plan if p["entry"]["path"] == "x.py")
+
+
+def test_cost_rule_keeps_a_small_fix_to_a_big_file_as_a_delta(tmp_path):
+    big = "".join(f"v{i} = {i}\n" for i in range(200))
+    work, base, blob1, tip = _cost_rule_repo(tmp_path, big, big.replace("v7 = 7", "v7 = 70"))
+    item = _plan_after_record(tmp_path, work, base, blob1, tip)
+    assert item["mode"] == "delta"
+    assert item["delta_lines"] == 2 and item["full_lines"] == 200
+
+
+def test_cost_rule_reviews_the_whole_range_when_it_costs_about_the_same(tmp_path):
+    # A small new file whose fix rewrites most of it: the push-range diff is
+    # barely bigger than the delta, so the whole range is reviewed -- and the
+    # record, with its owed findings, is kept.
+    f = {"path": "x.py", "severity": "high", "content": "bad", "existing_code": "a = 1",
+         "start_line": 1, "end_line": 1}
+    work, base, blob1, tip = _cost_rule_repo(tmp_path, "a = 1\nb = 2\n", "a = 3\nb = 4\nc = 5\n")
+    item = _plan_after_record(tmp_path, work, base, blob1, tip, findings=[f])
+    assert item["mode"] == "full" and item["miss_reason"] == "cost_rule"
+    assert item["record"] is not None and item["from_oid"] == blob1
+    to_resolve, _, _ = review_gate._classify_priors(
+        [item], tip, str(work), str(tmp_path / "common"), "c" * 64, "r2")
+    assert [p["finding"]["content"] for p in to_resolve] == ["bad"]
 
 
 # ---------------------------------------------------------------------------
@@ -784,7 +862,10 @@ def test_scenario_1_block_x_fix_x_delta_and_resolver_ran(tmp_path):
     })
 
     # T1: commit that changes x.py AND stable.py; reviewer blocks with finding in x.py.
-    (work / "x.py").write_text("x = 1\ndef bad(): pass\n")
+    # x.py gains enough code that a one-line fix is far smaller than the push
+    # range, so the cost rule keeps it a delta.
+    body = "".join(f"v{i} = {i}\n" for i in range(20))
+    (work / "x.py").write_text("x = 1\n" + body + "def bad(): pass\n")
     (work / "stable.py").write_text("# stable v2\n")
     _git(["add", "x.py", "stable.py"], cwd=work)
     _git(["commit", "-q", "-m", "t1"], cwd=work)
@@ -804,7 +885,7 @@ def test_scenario_1_block_x_fix_x_delta_and_resolver_ran(tmp_path):
     assert len(calls1) == 1
 
     # T2: fix x.py (change the blob), stable.py unchanged.
-    (work / "x.py").write_text("x = 1\ndef good(): pass\n")
+    (work / "x.py").write_text("x = 1\n" + body + "def good(): pass\n")
     _git(["add", "x.py"], cwd=work)
     _git(["commit", "-q", "--amend", "--no-edit"], cwd=work)
     tip2 = _git(["rev-parse", "HEAD"], cwd=work)
