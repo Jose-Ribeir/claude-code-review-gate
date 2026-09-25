@@ -6,6 +6,21 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-09-25
+
+### Fixed
+- **Parse failures ("could not parse review output"):** switched the headless reviewer to
+  `--output-format stream-json`; the gate now scans *all* assistant turns for the verdict rather
+  than only the last one. A stray task-notification ack landing after the JSON no longer replaces
+  it and causes a false-closed block.
+- Added a bounded single retry on exit-0 parse failure in the non-chunked review path (parity
+  with `_run_chunked` which already retried once per chunk).
+- `_extract_json` now accepts `resolutions`-keyed dicts (resolver path) in the balanced-scan
+  fallback, and validates that extracted dicts carry the required `status`/`verdict`/`findings`
+  keys before accepting them.
+- Parse-failure error now includes the number of turns captured and the path to the archived raw
+  output, making failures self-diagnosing.
+
 ## [0.9.1] - 2026-09-25
 
 ### Fixed

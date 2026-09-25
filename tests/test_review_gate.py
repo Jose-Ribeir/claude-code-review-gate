@@ -14,11 +14,19 @@ review_gate = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(review_gate)
 
 _extract_json = review_gate._extract_json
+_is_valid_verdict = review_gate._is_valid_verdict
+_extract_from_stream_json = review_gate._extract_from_stream_json
 _format_reasons = review_gate._format_reasons
 compute_verdict = review_gate.compute_verdict
 
+# Full-shaped verdict used by _extract_json tests now that _is_valid_verdict gates all methods.
+_FULL_V = {"status": "success", "verdict": "pass", "findings": []}
 
-def _fake_popen(seen, stdout='{"findings": []}', stderr="", returncode=0):
+
+_PASS_STDOUT = '{"status": "success", "verdict": "pass", "findings": []}'
+
+
+def _fake_popen(seen, stdout=_PASS_STDOUT, stderr="", returncode=0):
     """subprocess.Popen stand-in for _run_review's tests.
 
     Captures the constructor's positional cmd (as seen["cmd"]) and every
@@ -52,12 +60,14 @@ def _fake_popen(seen, stdout='{"findings": []}', stderr="", returncode=0):
 
 
 def test_whole_string_json():
-    assert _extract_json('{"findings": []}') == {"findings": []}
+    import json as _json
+    assert _extract_json(_json.dumps(_FULL_V)) == _FULL_V
 
 
 def test_fenced_json_block():
-    text = 'Here is the verdict:\n```json\n{"findings": [{"severity": "low"}]}\n```\n'
-    assert _extract_json(text) == {"findings": [{"severity": "low"}]}
+    import json as _json
+    text = f'Here is the verdict:\n```json\n{_json.dumps(_FULL_V)}\n```\n'
+    assert _extract_json(text) == _FULL_V
 
 
 def test_trailing_prose_with_stray_brace_after_json():
@@ -65,20 +75,27 @@ def test_trailing_prose_with_stray_brace_after_json():
     # the LAST '}' in the whole text -- including the one in the parenthetical
     # below -- and fail to parse. A balanced scan must stop at the object's own
     # matching brace and ignore everything after it.
-    text = 'Review complete - verdict pass {"findings": []} (no blocking issues found}'
-    assert _extract_json(text) == {"findings": []}
+    import json as _json
+    text = f'Review complete - verdict pass {_json.dumps(_FULL_V)} (no blocking issues found}}'
+    assert _extract_json(text) == _FULL_V
 
 
 def test_skips_unrelated_json_object_without_findings_key():
     # An earlier JSON-looking value quoted from the reviewed diff (e.g. a config
     # fixture) must not win over the real verdict that follows it.
-    text = 'Example fixture: {"severity": "high"}\nActual verdict: {"findings": [{"severity": "high"}]}'
-    assert _extract_json(text) == {"findings": [{"severity": "high"}]}
+    import json as _json
+    text = f'Example fixture: {{"severity": "high"}}\nActual verdict: {_json.dumps(_FULL_V)}'
+    assert _extract_json(text) == _FULL_V
 
 
 def test_last_findings_object_wins_when_multiple_present():
-    text = '{"findings": [{"id": 1}]}\nWait, corrected: {"findings": [{"id": 2}]}'
-    assert _extract_json(text) == {"findings": [{"id": 2}]}
+    import json as _json
+    v1 = dict(_FULL_V, findings=[{"id": 1, "severity": "low", "path": "a.py",
+                                   "start_line": 1, "end_line": 1, "content": "x"}])
+    v2 = dict(_FULL_V, findings=[{"id": 2, "severity": "low", "path": "b.py",
+                                   "start_line": 2, "end_line": 2, "content": "y"}])
+    text = f'{_json.dumps(v1)}\nWait, corrected: {_json.dumps(v2)}'
+    assert _extract_json(text) == v2
 
 
 def test_no_json_present_returns_none():
@@ -91,6 +108,107 @@ def test_empty_string_returns_none():
 
 def test_malformed_braces_return_none():
     assert _extract_json("{not: valid json at all") is None
+
+
+# --- _is_valid_verdict tests ---
+
+def test_is_valid_verdict_accepts_full_review():
+    assert _is_valid_verdict({"status": "success", "verdict": "pass", "findings": []})
+
+
+def test_is_valid_verdict_accepts_resolutions():
+    assert _is_valid_verdict({"resolutions": {"f-0": {"status": "resolved"}}})
+
+
+def test_is_valid_verdict_rejects_missing_keys():
+    assert not _is_valid_verdict({"findings": []})  # no status/verdict
+    assert not _is_valid_verdict({"status": "ok"})  # no verdict/findings
+    assert not _is_valid_verdict("not a dict")
+    assert not _is_valid_verdict(None)
+
+
+# --- _extract_json updated behavior ---
+
+def test_extract_json_now_rejects_dict_without_status_and_verdict():
+    # A JSON object with "findings" but no "status"/"verdict" was previously returned;
+    # now _is_valid_verdict gates it.
+    result = _extract_json('{"findings": []}')
+    assert result is None
+
+
+def test_extract_json_accepts_resolutions_in_method3():
+    # Prose prefix forces method 3; resolver output has no "findings" but has "resolutions".
+    text = ('Here is the resolver result: {"resolutions": {"f-0": {"status": "resolved",'
+            ' "evidence_path": "a.py", "evidence_quote": "x"}}}')
+    result = _extract_json(text)
+    assert result is not None
+    assert "resolutions" in result
+
+
+# --- _extract_from_stream_json tests ---
+
+_BASE_VERDICT = {
+    "status": "success", "verdict": "pass",
+    "findings": [], "warnings": [],
+    "summary": {"files_reviewed": 1, "findings": 0, "high": 0, "medium": 0, "low": 0},
+    "cross_file_context_summary": {"symbols": []},
+}
+
+
+def _stream_event(event_type, **kwargs):
+    return json.dumps({"type": event_type, **kwargs})
+
+
+def _assistant_event(text_content):
+    return _stream_event(
+        "assistant",
+        message={"content": [{"type": "text", "text": text_content}]},
+    )
+
+
+def test_extract_from_stream_json_finds_verdict_in_early_turn():
+    lines = [
+        _assistant_event(json.dumps(_BASE_VERDICT)),
+        _assistant_event("Task completed. No further action needed."),
+        _stream_event("result", subtype="success", result="Task completed. No further action needed.", num_turns=2),
+    ]
+    result = _extract_from_stream_json("\n".join(lines))
+    assert result == _BASE_VERDICT
+
+
+def test_extract_from_stream_json_returns_none_for_pure_prose():
+    lines = [
+        _assistant_event("I have reviewed the code."),
+        _assistant_event("Everything looks fine."),
+    ]
+    result = _extract_from_stream_json("\n".join(lines))
+    assert result is None
+
+
+def test_extract_from_stream_json_prefers_last_valid_turn():
+    early = dict(_BASE_VERDICT, verdict="block", findings=[{"path": "fake.py", "severity": "high",
+                                                             "start_line": 1, "end_line": 1,
+                                                             "content": "x"}])
+    real = dict(_BASE_VERDICT, verdict="pass")
+    lines = [
+        _assistant_event(json.dumps(early)),
+        _assistant_event(json.dumps(real)),
+    ]
+    result = _extract_from_stream_json("\n".join(lines))
+    assert result["verdict"] == "pass"
+
+
+def test_extract_from_stream_json_returns_none_for_empty():
+    assert _extract_from_stream_json("") is None
+    assert _extract_from_stream_json(None) is None
+
+
+def test_extract_from_stream_json_also_checks_result_event():
+    lines = [
+        _stream_event("result", subtype="success", result=json.dumps(_BASE_VERDICT), num_turns=1),
+    ]
+    result = _extract_from_stream_json("\n".join(lines))
+    assert result == _BASE_VERDICT
 
 
 def test_format_reasons_full_finding():
@@ -2554,7 +2672,7 @@ def test_run_review_argv_includes_paths_file_when_given(monkeypatch, tmp_path):
     (tmp_path / "manifest.json").write_text('{"paths": []}', encoding="utf-8")
     rng = "b" * 40 + ".." + "a" * 40
     monkeypatch.setattr(review_gate.subprocess, "Popen",
-                        _fake_popen(seen, stdout='{"findings": []}'))
+                        _fake_popen(seen, stdout=_PASS_STDOUT))
     monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
     review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40,
                             rng, paths_file=pf)

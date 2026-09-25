@@ -30,6 +30,8 @@
     "--mcp-config",
     "{\"mcpServers\":{}}",
     "--strict-mcp-config",
-    "--exclude-dynamic-system-prompt-sections"
+    "--exclude-dynamic-system-prompt-sections",
+    "--output-format",
+    "stream-json"
   ]
 }
