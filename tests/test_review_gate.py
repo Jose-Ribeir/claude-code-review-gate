@@ -2612,8 +2612,10 @@ def test_merge_chunk_results_block_propagates():
 
 
 def test_merge_chunk_results_combines_findings_from_all_chunks():
-    f = lambda p: dict(_BASE_FINDING, path=p, start_line=1, end_line=2)
-    r1 = {"status": "completed_with_warnings", "findings": [f("a.py")], "warnings": []}
+    def f(p):
+        return dict(_BASE_FINDING, path=p, start_line=1, end_line=2)
+
+    r1 ={"status": "completed_with_warnings", "findings": [f("a.py")], "warnings": []}
     r2 = {"status": "completed_with_warnings", "findings": [f("b.py")], "warnings": []}
     merged = _merge_chunk_results([r1, r2])
     paths = {fn["path"] for fn in merged["findings"]}

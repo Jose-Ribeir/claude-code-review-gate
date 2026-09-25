@@ -25,7 +25,6 @@ Scenarios covered here:
   20 first push ≤15 files → golden argv (see test_argv_golden.py)
   21 real run calibration (live, skipped unless OCR_LIVE_TESTS=1)
 """
-import hashlib
 import importlib.util
 import json
 import os
@@ -250,12 +249,8 @@ def test_scenario_2_guard_passes_still_present_unconditionally(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_scenario_3_unknown_ids_are_ignored(tmp_path):
-    """An id returned by the resolver that isn't in to_resolve is ignored."""
-    # The stub resolver returns an extra id "extra-id" not in the input.
-    # _classify_priors + _run_resolver should silently ignore it.
-    # We test this at the _run_resolver level by checking the output dict.
-    # Since _run_resolver returns a raw dict, the unknown key is just extra.
-    # The caller iterates over `to_resolve`, so the unknown id is never acted on.
+    """An id returned by the resolver that isn't in to_resolve is ignored:
+    _normalize_resolutions keeps exactly the ids that were asked about."""
     known_id = "a" * 64
     to_resolve = [{"id": known_id, "finding": _base_finding(), "record": {"head_oid": "x"}}]
     # Simulate resolver returning known_id as resolved + an extra unknown id.
@@ -264,14 +259,10 @@ def test_scenario_3_unknown_ids_are_ignored(tmp_path):
         "extra-id-that-was-not-asked": {"status": "resolved", "evidence_path": "x.py",
                                          "evidence_quote": "other"},
     }
-    # Process: only known_id is iterated; extra-id has no effect.
-    active_items = [{"entry": {"path": "c.py"}, "mode": "full",
-                     "record": None, "from_oid": "", "miss_reason": "no_record"}]
-    acted_ids = {p["id"] for p in to_resolve}
-    for extra in resolver_out:
-        if extra not in acted_ids:
-            pass  # confirmed: not acted on
-    assert "extra-id-that-was-not-asked" not in acted_ids
+    out, warnings = review_gate._normalize_resolutions(resolver_out, to_resolve)
+    assert set(out) == {known_id}
+    assert out[known_id]["status"] == "resolved"
+    assert warnings == []
 
 
 def test_scenario_3_guard_rejects_evidence_in_inactive_file(tmp_path):

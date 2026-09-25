@@ -4,13 +4,11 @@ import subprocess
 import sys
 import textwrap
 
-import pytest
-
 # Make sure the scripts directory is importable.
 _SCRIPTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts")
 sys.path.insert(0, _SCRIPTS)
 
-import ocr_impact as oi
+import ocr_impact as oi  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers

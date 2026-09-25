@@ -21,7 +21,6 @@ import hashlib
 import os
 import re
 import subprocess
-import sys
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 # ---------------------------------------------------------------------------
@@ -1191,7 +1190,7 @@ def _build_bundle_inner(
             return None
         lines = out.splitlines()
         # Reject minified: avg line length > 500
-        if lines and sum(len(l) for l in lines) / len(lines) > 500:
+        if lines and sum(len(line) for line in lines) / len(lines) > 500:
             blob_cache[path] = None
             return None
         blob_cache[path] = lines

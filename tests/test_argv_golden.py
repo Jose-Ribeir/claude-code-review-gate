@@ -27,8 +27,7 @@ _PLACEHOLDER_RANGE = "A" * 40 + ".." + "B" * 40
 
 def _build_normalized_argv(push_range=_PLACEHOLDER_RANGE, model=None):
     """Build the non-stub argv _run_review would use and normalise machine parts."""
-    effective_model = model if model is not None else review_gate._MODEL
-    prompt = review_gate.PROMPT_RANGE.format(rng=push_range)
+    prompt =review_gate.PROMPT_RANGE.format(rng=push_range)
     # Rebuild DEFAULT_CLAUDE_ARGS with the requested model if overridden.
     if model is not None and model != review_gate._MODEL:
         args = list(review_gate.DEFAULT_CLAUDE_ARGS)

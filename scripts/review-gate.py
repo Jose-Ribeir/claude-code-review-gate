@@ -2067,7 +2067,10 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
     returns (None, False, "") when claude is not installed (fail-open).
     """
     claude = _find_claude()
-    if not claude:
+    # The test stub runs INSTEAD of claude, so it must not need claude to be
+    # installed -- CI runners have none, and every end-to-end test there was
+    # silently "skipped (fail-open)" instead of exercising the gate.
+    if not claude and not _test_reviewer_cmd():
         _warn("`claude` CLI not found on PATH or CLAUDE_CODE_EXECPATH - skipping review (fail-open).")
         return None, False, ""
     # OCR_CLAUDE_ARGS replaces the defaults wholesale (full escape hatch, also
