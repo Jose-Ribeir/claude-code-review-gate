@@ -243,6 +243,40 @@ def test_guard_accepts_a_fix_made_before_the_incremental_delta(tmp_path):
                                              prior=prior, tip=commits[2])
 
 
+def test_guard_fallback_rejects_evidence_unchanged_in_original(tmp_path):
+    # evidence_quote present in BOTH target_oid and tip_oid (never added) → rejected.
+    work, commits, blobs = _repo_with_history(tmp_path, [
+        "def good(): pass\nx = 0\n",
+        "def good(): pass\nx = 1\n",
+    ])
+    res = {"status": "resolved", "evidence_path": "x.py",
+           "evidence_quote": "def good(): pass"}
+    rng = f"{commits[0]}..{commits[1]}"
+    prior = dict(_prior(), target_oid=blobs[0])
+    # Quote is in tip but was already in the original; the fallback must reject it.
+    assert not review_gate._guard_resolution(res, [], rng, str(work),
+                                             prior=prior, tip=commits[1])
+
+
+def test_guard_fallback_accepts_context_spanning_quote(tmp_path):
+    # evidence_quote spans an unchanged context line + the new added line → accepted.
+    work, commits, blobs = _repo_with_history(tmp_path, [
+        '"--output-format", "stream-json",\n]\n',
+        '"--output-format", "stream-json",\n"--verbose",\n]\n',
+    ])
+    res = {
+        "status": "resolved",
+        "evidence_path": "x.py",
+        # Quote deliberately spans the unchanged line and the newly-added line.
+        "evidence_quote": '"--output-format", "stream-json",\n"--verbose",',
+    }
+    rng = f"{commits[0]}..{commits[1]}"
+    prior = dict(_prior(), target_oid=blobs[0])
+    # Quote is in tip AND was absent from original: fallback must accept it.
+    assert review_gate._guard_resolution(res, [], rng, str(work),
+                                         prior=prior, tip=commits[1])
+
+
 def test_judge_requires_tip_evidence_for_still_present(tmp_path):
     work, commits, blobs = _repo_with_history(tmp_path, [
         "def bad(): pass\n", "def good(): pass\n"])
