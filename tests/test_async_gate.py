@@ -779,3 +779,47 @@ def test_agents_md_injection_blocked_by_env_var(tmp_path):
     assert "CANARY-7731" not in flags_only, (
         f"the gate's default flags did not keep AGENTS.md out: {flags_only[:300]!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Non-ASCII paths (core.quotePath)
+# ---------------------------------------------------------------------------
+# With git's default core.quotePath=true, `git diff --raw` / `--numstat` print
+# a path like café.py C-quoted as "caf\303\251.py"; the allowlist then saw the
+# extension `.py"` and silently dropped the file -- an unreviewed file passing
+# the push gate. -z output is never quoted.
+
+def test_collect_diff_entries_non_ascii_paths(repo):
+    base = _git(["rev-parse", "HEAD"], cwd=repo)
+    (repo / "café.py").write_text("x = 1\ny = 2\n", encoding="utf-8")
+    (repo / "naïve dir").mkdir()
+    (repo / "naïve dir" / "módulo.py").write_text(
+        "".join(f"v{i} = {i}\n" for i in range(20)), encoding="utf-8")
+    _git(["add", "."], cwd=repo)
+    _git(["commit", "-q", "-m", "non-ascii"], cwd=repo)
+    tip1 = _git(["rev-parse", "HEAD"], cwd=repo)
+
+    entries, warnings = review_gate._collect_diff_entries(str(repo), base, tip1)
+    by_path = {e["path"]: e for e in entries}
+    assert "café.py" in by_path, entries
+    assert "naïve dir/módulo.py" in by_path, entries
+    assert by_path["café.py"]["lines"] == 2
+    assert by_path["naïve dir/módulo.py"]["lines"] == 20
+    assert all(review_gate._is_allowed_path(p) for p in by_path), by_path
+    assert not warnings
+
+    # A rename between non-ASCII names keeps old_path and its line count.
+    _git(["mv", "naïve dir/módulo.py", "naïve dir/módulo_novo.py"], cwd=repo)
+    (repo / "naïve dir" / "módulo_novo.py").write_text(
+        "".join(f"v{i} = {i}\n" for i in range(20)) + "extra = 1\n", encoding="utf-8")
+    _git(["add", "."], cwd=repo)
+    _git(["commit", "-q", "-m", "rename"], cwd=repo)
+    tip2 = _git(["rev-parse", "HEAD"], cwd=repo)
+
+    entries, _ = review_gate._collect_diff_entries(str(repo), tip1, tip2)
+    by_path = {e["path"]: e for e in entries}
+    assert set(by_path) == {"naïve dir/módulo_novo.py"}, entries
+    e = by_path["naïve dir/módulo_novo.py"]
+    assert e["status"].startswith("R")
+    assert e["old_path"] == "naïve dir/módulo.py"
+    assert e["lines"] == 1

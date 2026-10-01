@@ -2623,9 +2623,10 @@ def test_plan_chunks_skips_control_char_paths(monkeypatch):
         "path": "bad\x01path.py", "old_path": "", "status": "M",
         "old_oid": "0" * 40, "new_oid": "1" * 40, "lines": 10,
     })
+    # `git diff --raw -z` format: NUL-separated meta and path fields.
     raw_with_ctrl = (
-        ":100644 100644 " + "0" * 40 + " " + "1" * 40 + " M\tbad\x01path.py\n"
-        + "".join(f":100644 100644 {'0'*40} {'1'*40} M\tsrc/f{i}.py\n" for i in range(20))
+        ":100644 100644 " + "0" * 40 + " " + "1" * 40 + " M\0bad\x01path.py\0"
+        + "".join(f":100644 100644 {'0'*40} {'1'*40} M\0src/f{i}.py\0" for i in range(20))
     )
     # Call _collect_diff_entries directly (mocked); the ctrl check is in there.
     # We verify warnings are emitted.

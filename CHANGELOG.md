@@ -6,6 +6,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **Non-ASCII paths silently skipped by the push gate.** `_collect_diff_entries`
+  parsed `git diff --raw` / `--numstat` without `-z`, so under git's default
+  `core.quotePath=true` a path like `café.py` arrived C-quoted as
+  `"caf\303\251.py"`; the allowlist saw the extension `.py"` and dropped the
+  file, letting it through unreviewed. Both calls now use `-z` and parse
+  NUL-separated records, which also replaces the fragile `{a => b}` numstat
+  rename regex.
+
 ## [0.9.4] - 2026-09-25
 
 ### Fixed

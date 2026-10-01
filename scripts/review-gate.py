@@ -3375,36 +3375,44 @@ def _collect_diff_entries(root, base, tip):
 
     Each entry: {path, old_path, status, old_oid, new_oid, lines}.
     Returns (None, warnings) on a git error.
+
+    Both git calls use -z: without it git's default core.quotePath=true
+    C-quotes any non-ASCII path ("caf\\303\\251.py"), which the allowlist then
+    rejects on its extension -- an unreviewed file passing the gate. -z
+    output is never quoted, and renames arrive as separate fields rather than
+    numstat's ambiguous `{a => b}` shorthand.
     """
     raw_out, rc = _git(
-        ["diff", "--raw", "-M", "--full-index", f"{base}..{tip}"], cwd=root
+        ["diff", "--raw", "-z", "-M", "--full-index", f"{base}..{tip}"], cwd=root
     )
     if rc != 0:
         return None, ["could not run git diff --raw; skipping chunking"]
 
-    stat_out, _ = _git(["diff", "-M", "--numstat", f"{base}..{tip}"], cwd=root)
+    stat_out, _ = _git(["diff", "-M", "--numstat", "-z", f"{base}..{tip}"], cwd=root)
 
     entries = {}
     warnings = []
-    for line in raw_out.splitlines():
-        if not line.startswith(":"):
+    # Records are ":meta\0path\0", or ":meta\0src\0dst\0" for R/C.
+    fields = raw_out.split("\0")
+    i = 0
+    while i < len(fields):
+        head = fields[i]
+        i += 1
+        if not head.startswith(":"):
             continue
-        parts = line[1:].split("\t", 2)
-        if not parts:
-            continue
-        meta = parts[0].split()
+        meta = head[1:].split()
         if len(meta) < 5:
             continue
         old_oid, new_oid, status_score = meta[2], meta[3], meta[4]
         status = status_score[0]
+        n_paths = 2 if status in ("R", "C") else 1
+        paths = fields[i:i + n_paths]
+        i += n_paths
+        if len(paths) < n_paths:
+            break
         if status == "D" or new_oid.strip("0") == "":
             continue  # pure deletion
-        if status in ("R", "C") and len(parts) >= 3:
-            old_path, new_path = parts[1], parts[2]
-        elif len(parts) >= 2:
-            old_path = new_path = parts[1]
-        else:
-            continue
+        old_path, new_path = paths[0], paths[-1]
         for p in (old_path, new_path):
             if _CTRL_CHAR_RE.search(p):
                 warnings.append(f"skipped {p!r}: path contains control characters")
@@ -3419,25 +3427,29 @@ def _collect_diff_entries(root, base, tip):
                 "lines": 0,
             }
 
-    # Fill in line counts from numstat.
-    _RENAME_RE = re.compile(r'\{([^}]*) => ([^}]*)\}')
-    for line in (stat_out or "").splitlines():
-        parts = line.split("\t", 2)
+    # Fill in line counts from numstat. Records are "add\tdel\tpath\0", or
+    # "add\tdel\t\0src\0dst\0" for a rename/copy (empty path field).
+    fields = (stat_out or "").split("\0")
+    i = 0
+    while i < len(fields):
+        parts = fields[i].split("\t", 2)
+        i += 1
         if len(parts) < 3:
             continue
         added_s, deleted_s, path_s = parts
+        if path_s == "":
+            if i + 1 >= len(fields):
+                break
+            new_path = fields[i + 1]
+            i += 2
+        else:
+            new_path = path_s
         if added_s == "-" or deleted_s == "-":
             continue  # binary
         try:
             lines = int(added_s) + int(deleted_s)
         except ValueError:
             continue
-        m = _RENAME_RE.search(path_s)
-        if m:
-            prefix, suffix = path_s[:m.start()], path_s[m.end():]
-            new_path = (prefix + m.group(2) + suffix).replace("//", "/")
-        else:
-            new_path = path_s
         if new_path in entries:
             entries[new_path]["lines"] = lines
 
