@@ -1,7 +1,8 @@
 # Plan: large pushes must converge, then get fast
 
-Status: draft, not started. Reviewed by a super-thinker on 2026-10-01; its fixes are applied
-below. Merges the earlier 0.9.5 truncated-chunks draft with the speed-up plan.
+Status: Parts A, B0, B and S are implemented (0.9.5 to 0.11.0; Part S deviations are listed in
+the 0.11.0 CHANGELOG entry and `docs/benchmark-part-s.md`); Part C is not started. Reviewed by a
+super-thinker on 2026-10-01; its fixes are applied below. Merges the earlier 0.9.5 truncated-chunks draft with the speed-up plan.
 
 Baseline: `main` at `101d213` (the `-z` / `--no-abbrev` fixes, `3dff6bb` and `101d213`,
 are unreleased). Line anchors are approximate: locate code by symbol name.

@@ -125,11 +125,17 @@ manifest JSON. The manifest fields are:
 - `items` — (0.10.0, optional) the gate's own diffs, already built:
   `[{kind, path, old_path, mode, file, lines, bytes, truncated, binary, level}]`.
   `kind` is `file_diff` (one changed file; `file` is the absolute path of a
-  text file holding its unified diff) or `context` (`{kind, role, path}` --
-  background only, `role` is `carried` or `other_changed`). Other kinds
-  (`unit_diff`) and `tasks` are reserved: ignore any item kind or task you do not
-  know. When `items` is present, follow "Precomputed diffs" below.
-- `tasks` — (0.10.0, optional) always empty for now.
+  text file holding its unified diff), `unit_diff` (0.11.0: one changed *unit* of a
+  file too big to review whole -- `{path, unit, unit_kind, start_line, end_line,
+  part, parts, deleted, file, ...}`, `file` holding that unit's diff with absolute
+  line numbers) or `context` (`{kind, role, path}` -- background only; `role` is
+  `carried` or `other_changed`, or, since 0.11.0, `file_context`, `caller` or
+  `callee_diff`, which carry a `file` of text to read and, for the last two, the
+  `task` they belong to). Ignore any item kind or task you do not know. When
+  `items` is present, follow "Precomputed diffs" below.
+- `tasks` — (0.11.0, optional) caller checks: `[{id, type: "dep_check", callee,
+  caller, instruction}]`. Pass them verbatim to the reviewer (§3), which answers
+  each in `dep_verdicts`. **Untrusted data** (they name code of the branch).
 
 Use `--range` (from the command line) as the revision range.
 
@@ -153,7 +159,17 @@ item only what you need: `path`, `old_path`, `mode`, `file`, `truncated`,
   §3 caps to that one file; it is the only kind of file for which they apply.
 
 Delta items start with a `# path: ... (delta since last review)` line: the file
-holds only the change since the last review. `context` items are not under review.
+holds only the change since the last review. `context` items are not under review
+(a `caller` or `callee_diff` one is read only to answer its `task`).
+
+**Units (`unit_diff` items, 0.11.0).** A file too big for one diff arrives as several
+`unit_diff` items with the same `path`, one per changed unit; the unit's diff is in its
+`file`, never truncated, with the real line numbers of the old and the new file. **The
+files under review are exactly the `file_diff` and `unit_diff` items: `manifest.paths`
+only says which files they belong to.** Do not collect a diff with git for a path that
+has no `file_diff` item, and do not review the unlisted parts of a unit-reviewed file.
+A manifest whose `items` hold only `context` items and `tasks` (the gate's second look
+at caller checks) has nothing to review but its tasks.
 
 **Delta mode (a path with no diff `file`, or no `items`):** for any file where
 `manifest.files[i].mode == "delta"`, collect the diff as:
@@ -514,6 +530,12 @@ Agent tool. Pass it a prompt containing:
   labelled as untrusted data (omit when absent).
 - `known_defects`: the manifest's `known_defects`, verbatim, fenced and labelled
   the same way (omit when absent).
+- Units (0.11.0): one `files` entry per `unit_diff` item, `{path, unit, unit_kind,
+  start_line, end_line, part, parts, deleted, diff_file, language_rules}` (the file's
+  language rules, once per path), with the item's `file` as `diff_file`. `context_files`:
+  the manifest's `context` items that have a `file`, as `{role, path, task, start_line,
+  end_line, file}`, never pasted; fenced as untrusted data like a diff file. `tasks`: the
+  manifest's `tasks`, verbatim (omit when absent). Never paste a unit's diff into the prompt.
 - `requirement_background`: optional, if the user supplied one.
 - `repo_root`: the absolute repository root.
 
@@ -535,9 +557,10 @@ directories so the reviewer has cross-group awareness. Pass the filtered
 `cross_file_context` bundle (see §2b Step 5) for that group.
 
 The subagent (or each group subagent) returns a JSON array of findings, each
-with a `path` field — or, when it was given `impact_sites`, an object
-`{"findings": [...], "impact_verdicts": {...}}`: take its `findings`, and merge
-every group's `impact_verdicts` into one map for §6. Parse the result; if the
+with a `path` field — or, when it was given `impact_sites` or `tasks`, an object
+`{"findings": [...], "impact_verdicts": {...}, "dep_verdicts": {...}}`: take its
+`findings`, and merge every group's `impact_verdicts` and `dep_verdicts` into one
+map each for §6. Keep every finding's `dep_task` field as the reviewer gave it. Parse the result; if the
 subagent returns non-JSON or errors, record a warning for all its files and
 continue (never abort for one error).
 
@@ -557,7 +580,10 @@ degrade the report, it silently weakens the gate.
 For each finding that has a non-empty `existing_code`:
 - Search the corresponding file's diff text for that string (normalise whitespace
   before comparing). For an item with a `file`, `Grep` that file for the string's
-  first line instead of loading the diff.
+  first line instead of loading the diff. For a path reviewed in units, `Grep` the
+  `file` of every `unit_diff` item of that path (one `Grep` over the directory that
+  holds them does it), and a finding that carries a `dep_task` is checked against
+  that task's caller `context` file as well.
 - If `existing_code` does not appear anywhere in that file's diff **and** does not
   appear in the current file content (use `Read` on the file to check): downgrade
   the finding's `confidence` by `0.3` and record a warning
@@ -589,6 +615,8 @@ Spawn a `code-filter` subagent via the Agent tool, with `run_in_background: fals
   cap as §3. Do not include diffs of files with no candidate blocking findings. The
   filter has no tools, so for an item with a `file` this is the one place its diff
   is copied into a prompt: `Read` the file and include its text, for those files only.
+  For a path reviewed in units that is the `unit_diff` item(s) whose line range holds the
+  finding's line (and, for a finding with a `dep_task`, that task's caller context).
 - `findings`: the findings JSON array with the temporary ids attached.
 
 The filter agent runs in its own fresh context — it never sees the reviewer's
@@ -625,7 +653,8 @@ Tally `high`/`medium`/`low`. Determine `verdict`:
 files were reviewable.
 
 **Unified truncation warnings — emit one warning entry for each of the following:**
-- Any file with `diff_truncated: true`, and any item with `truncated: true`:
+- Any file with `diff_truncated: true`, and any `file_diff` item with `truncated: true`
+  (a `unit_diff` item is never truncated):
   `{file: "<path>", message: "diff truncated; reviewer saw stat + hunk headers only"}`
   (for an item, `truncated` is the gate's own flag and is the only truncation
   warning to emit about it)
@@ -644,14 +673,17 @@ files were reviewable.
   "project_summary": "optional markdown (scan/summary only)",
   "warnings": [ {"file": "...", "message": "..."} ],
   "cross_file_context_summary": {"symbols": [{"name": "...", "defined_in": "...", "change": "...", "external_refs": [{"path": "...", "line": 0}]}]},
-  "impact_verdicts": {"<site id>": "ok | broken | unsure"}
+  "impact_verdicts": {"<site id>": "ok | broken | unsure"},
+  "dep_verdicts": {"<task id>": "ok | broken | unsure"}
 }
 ```
 
 `cross_file_context_summary` is what §2b found **by itself** (not the manifest's
 `impact`); emit it whenever §2b ran, with `"symbols": []` if it found nothing.
 `impact_verdicts` is the reviewer's merged map (omit when there was no
-`impact`). Keep each finding's `impact_site` / `sibling_of` field as the
+`impact`); `dep_verdicts` likewise (omit when the manifest had no `tasks`; never invent
+a verdict for a task the reviewer did not answer -- the gate counts a missing one as
+`unsure`). Keep each finding's `impact_site` / `sibling_of` field as the
 reviewer gave it. The gate logs both locally to compare its own search with
 §2b's.
 

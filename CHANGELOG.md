@@ -6,6 +6,90 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-01
+
+Big files are reviewed in **stable units**, and the callers of a changed unit are
+checked. Part S of `docs/plans/resume-truncated-chunks.md`.
+
+**Every cached review is invalidated once** (`agents/code-reviewer.md` is part of the
+ledger fingerprint and had to change: units, context files, tasks and `dep_verdicts`
+are new reviewer input and output). `OCR_SEGMENT=0` restores the 0.10.0 review of a
+big file exactly, for one release.
+
+### Added
+- **Units with content identity** (`scripts/ocr_segment.py`, pure functions over text).
+  Python by `ast` (top-level functions and classes; a class over 150 lines into its
+  methods; decorators and leading comments belong to the unit after them),
+  TS/JS/Go/Rust/shell/PowerShell/Java/Kotlin/C#/Ruby/PHP by the definitions
+  `ocr_impact._regex_defs` finds (outermost only: a big class is one unit), Markdown by
+  heading, everything else and module-level code by content-defined regions (24-120
+  lines; a cut is a starting line whose hash is the smallest within 24 lines, so an edit
+  moves the cuts around it and no others). Identity is the full blake2b-256 of the
+  normalised text (CRLF = LF, trailing whitespace ignored); a Python unit's hash includes
+  its parent's qualname. The units tile the file: every non-blank line is in exactly one.
+- **What a push compares**: a unit whose hash is on both sides is never reviewed
+  (order-preserving match first; then, for ast units only, by multiset, so a function moved
+  within its parent is no change); a heuristic unit that only changes position is changed;
+  the rest are paired by qualname, bare name, then position inside the same gap (a rename is
+  one pair); a removed unit gets a deletion item.
+- **Fail-closed coverage check.** Every changed line of `git diff -U0` (whitespace-only and
+  blank-line changes excluded) must lie in a unit, and the units must tile the file; if not,
+  that file is reviewed whole, as before, and the gap is logged (`seg_decline`). A changed
+  line over 500 characters declines too (a cut line is a line the reviewer did not see).
+- **`unit_diff` manifest items**: the unit's base -> tip diff with absolute line numbers, never
+  truncated; a unit too big for one item is split into parts at hunk boundaries (a single
+  huge hunk is cut inside), one record for all of them. A `file_context` item per file (imports,
+  at most 60 lines, and an index of every unit with the changed ones marked).
+- **Unit cache.** `seg:<version>:<fingerprint>:<lang>:<path hash>:<base>:<tip>` records, with
+  each finding's `anchor_hash`, `rel_start` and `rel_end`; a hit replays at the unit's current
+  lines, falling back to the finding's `existing_code`, else dropping it (`replay_dropped`). A
+  run killed halfway resumes with the unfinished units only. The file's per-file record is
+  written only when every unit and every caller check on it is final.
+- **Caller checks.** Same-file callers of each changed named unit (and of a removed or renamed
+  one under its old name), at most six, become a `context` item plus a `dep:<n>` task; the
+  reviewer answers `dep_verdicts`. Call edges: `ast` for Python; a name-reference regex
+  elsewhere (names under four characters, stoplisted or defined twice skipped; at most four).
+  A missing, malformed or `unsure` verdict is `unsure`, never `ok`: asked once more in the same
+  run, then a non-blocking "unverified dependency" note. `dep:` records keyed by both texts; a
+  check still owed when a run ends is stored `pending` and scheduled first on the next. No
+  cascade through unchanged units. A small file reviewed as a **delta** gets the same checks.
+- **Impact routing**: a symbol of a unit-reviewed file rides with the chunk holding its unit,
+  the symbol budget scales with the push (30 up to 60), a cross-file call site shows its whole
+  enclosing unit (up to 12 KB, 48 KB in all), and a missing impact verdict is a warning.
+- **File-affinity packing** (`OCR_CHUNK_DIFF_LINES`): all changed units of a file in one chunk;
+  a file is split only when it alone exceeds the budget, along call-graph components; files
+  linked by call edges are packed together; caller context capped at 80 lines per unit and 400
+  per chunk; chunks with owed caller checks run first. A timed-out chunk is retried split by
+  units.
+- **Part S never costs a review.** A failure of its own (planning a file, packing chunks,
+  recording a chunk) falls back to the 0.10.0 whole-file review of the affected files, with
+  their Part B flags restored, and is logged (`seg_decline`, `seg_plan_error`,
+  `seg_apply_error`); a caller check or unit that was not recorded is simply asked again.
+- `OCR_SEGMENT=0` (rollback), the doctor reports it and the ledger size, seg/dep records are
+  pruned by the 30-day TTL and a cap of four times `OCR_LEDGER_MAX_RECORDS`.
+- `docs/benchmark-part-s.md` and `tests/part_s_scenarios.py`: the 15 seeded scenarios, automated
+  as far as a stub reviewer allows (what the reviewer is handed), with the model half documented.
+
+### Changed
+- Only files over Part B's per-file limit (the `-U0` or hunk-header level of their diff) are
+  segmented; everything else keeps whole-file review. A delta over the limit is reviewed over
+  the whole push range in units (its record stays, for what it still owes).
+- **Truncation for unit-reviewed files**: the model's `diff truncated` warnings are ignored (Python
+  owns their diffs), and an old `truncated` record of a file that can be segmented is no longer
+  carried: the file gets its proper review. A file that cannot be segmented keeps being carried.
+- Reviewer and orchestrator prompts (`agents/code-reviewer.md`, `skills/review/SKILL.md`) gain the
+  `unit_diff`, `context` (`file_context`, `caller`, `callee_diff`) and `tasks` contract and the
+  `dep_verdicts` / `dep_task` output; the manifest's `tasks[]` is no longer always empty.
+
+### Known limits
+- Cross-file callers are the impact bundle's (`impact_verdicts`), not `dep:` records.
+- Shared state, constants and ordering have no call edge; a twin or the other half of a pair is
+  only in the unit index.
+- A prepended docstring is new text: its own one or two regions are reviewed (the plan said zero
+  calls); every function replays at its new lines.
+- Seg/dep records, like per-file ones, miss by design for a file that changed upstream (the base
+  unit hash is in the key).
+
 ## [0.10.0] - 2026-10-01
 
 The reviewer reads its diffs from files the gate builds, instead of having the
