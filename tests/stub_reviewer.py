@@ -19,6 +19,8 @@ environment variables so one command line serves every scenario:
   STUB_RESOLVE_VERDICT pass|fail|garbage  Controls resolver exit for all ids (default pass).
   STUB_SLEEP_FOR     path — sleep STUB_SLEEP_FOR_SECS (default 30) only when the chunk's
                      manifest holds this path (a file that always times out).
+  STUB_SPAWN_CHILD   a file: spawn a long-sleeping child that inherits stdout/stderr
+                     (as a reviewer's own subprocess would), write its pid there.
   STUB_TRUNCATE_FOR  path, or `*` — answer with the skill's `diff truncated` warning:
                      for that file, or naming no file at all for `*`.
   STUB_STREAM        N -- answer as `claude --output-format stream-json` does: N Read/Bash
@@ -100,6 +102,13 @@ if fail_on and trace:
     except Exception:
         pass
 
+spawn_child = os.environ.get("STUB_SPAWN_CHILD", "")
+if spawn_child:
+    import subprocess
+    _child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"],
+                              stdout=sys.stdout, stderr=sys.stderr)
+    with open(spawn_child, "w", encoding="utf-8") as fh:
+        fh.write(str(_child.pid))
 time.sleep(float(os.environ.get("STUB_SLEEP", "0") or 0))
 sleep_for = os.environ.get("STUB_SLEEP_FOR", "")
 if sleep_for and sleep_for in ((manifest or {}).get("paths") or []):

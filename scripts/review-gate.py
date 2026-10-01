@@ -2321,6 +2321,10 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
             cmd = stub + ["--paths-file", paths_file, push_range]
         else:
             cmd = stub + [push_range]
+    # POSIX: the reviewer leads its own process group, so _kill_child can take
+    # down everything it spawned (os.killpg); before, only `claude` itself died
+    # and its children outlived a timeout. Windows keeps taskkill /T (_tree_kill).
+    popen_extra = {} if sys.platform == "win32" else {"start_new_session": True}
     _run_timeout = timeout if timeout is not None else TIMEOUT
     # Wall-clock for the log line (so it lines up with Event Viewer/Task
     # Manager timestamps when correlating with a crash); monotonic for the
@@ -2349,6 +2353,7 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
             errors="replace",
             env=child_env,
             creationflags=creationflags,
+            **popen_extra,
         ) as proc:
             if debug:
                 # Names only for everything, except the short, non-secret
@@ -2510,12 +2515,14 @@ def _kill_child(proc):
     with a made-up pid, and `taskkill /PID 4242 /T /F` on a developer's box
     would hit whatever process happens to own that number.
     """
+    # The tree first: taskkill /T finds the children through the parent's pid,
+    # which is gone once the parent has been killed.
+    if type(proc) is _REAL_POPEN:
+        _tree_kill(proc.pid)
     try:
         proc.kill()
     except Exception:
         pass
-    if type(proc) is _REAL_POPEN:
-        _tree_kill(proc.pid)
 
 
 def _tree_kill(pid):
