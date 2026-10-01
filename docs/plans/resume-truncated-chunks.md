@@ -1,7 +1,7 @@
 # Plan: large pushes must converge, then get fast
 
-Status: Parts A, B0, B and S are implemented (0.9.5 to 0.11.0; Part S deviations are listed in
-the 0.11.0 CHANGELOG entry and `docs/benchmark-part-s.md`); Part C is not started. Reviewed by a
+Status: Parts A, B0, B, S and C are implemented (0.9.5 to 0.12.0; Part S deviations are listed in
+the 0.11.0 CHANGELOG entry and `docs/benchmark-part-s.md`, Part C's in the 0.12.0 one). Reviewed by a
 super-thinker on 2026-10-01; its fixes are applied below. Merges the earlier 0.9.5 truncated-chunks draft with the speed-up plan.
 
 Baseline: `main` at `101d213` (the `-z` / `--no-abbrev` fixes, `3dff6bb` and `101d213`,

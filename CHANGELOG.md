@@ -6,6 +6,45 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-10-01
+
+Chunks are reviewed **in parallel**. Part C of `docs/plans/resume-truncated-chunks.md`.
+No prompt changed: the review cache stays valid.
+
+### Added
+- **`OCR_CHUNK_CONCURRENCY`** (default 2, clamped to 1-4): chunks reviewed at once.
+  `1` is the 0.11.0 sequential review exactly (the chunk runs on the supervisor's own
+  thread, in the same order).
+- **One worktree per slot.** Slot 0 is the run's worktree; the others are made beside it
+  (`-s<i>`), each cleaned before every chunk. A slot that cannot be made means fewer slots;
+  a review reading the live tree runs one chunk at a time. The state lists them all
+  (`worktrees`, `worktree` kept), the reaper protects them while the run is live, and the
+  run removes them when it ends.
+- **Every reviewer in flight is tracked.** The heartbeat writes `reviewer_pids` (and
+  `reviewer_pid`, the first, for older readers); a fence kills all of them, and so does a
+  stale restart.
+- **Progress:** `chunks_running`; the "still running" text says `chunks 2/10 done, 2 running`
+  while more than one runs.
+- Stub reviewer: `STUB_CHUNK_VERDICT` and `STUB_CHUNK_SLEEP`, keyed by the manifest's
+  `chunk_index` (`STUB_FAIL_ON_CALL` counts calls, which races at concurrency 2).
+
+### Changed
+- **Failure policy.** A fence or a usage limit stops everything at once (the siblings are
+  killed; chunks already recorded stay). A timeout or a failed second attempt lets the
+  chunks in flight finish and record, then fails the run (Part A's timeout splitting
+  applies). When several fail, the strongest is reported: fence, then limit, then a review
+  error, then the budget. The run budget is checked before each dispatch, so up to
+  `OCR_CHUNK_CONCURRENCY` chunks can still be finishing past it.
+- The supervisor's thread owns the state file and the ledger: manifests are built and
+  records written there, workers only run the reviewer. Results are merged in chunk order.
+- Per-call time metrics are per thread, and the debug log is written under a lock.
+- The resolver stays sequential.
+
+### Known limits
+- A chunk's manifest (its impact bundle) is built when it is dispatched, while earlier chunks
+  may still be running: nothing it holds depends on their results.
+- Usage limits come sooner at concurrency 2; disk use is one more worktree per slot.
+
 ## [0.11.0] - 2026-10-01
 
 Big files are reviewed in **stable units**, and the callers of a changed unit are

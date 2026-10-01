@@ -174,7 +174,12 @@ Report any of these that are set, since each changes the verdict: `OCR_MODEL`,
 `OCR_INLINE_BUDGET`, `OCR_INLINE_BUDGET_GIT`, `OCR_FORCE_REVIEW`,
 `OCR_LEGACY_RANGE`, `OCR_UNSET_ENV`, `OCR_LEDGER`, `OCR_LEDGER_TTL`,
 `OCR_LEDGER_MAX_RECORDS`, `OCR_IMPACT`, `OCR_SIBLINGS`, `OCR_TELEMETRY`,
-`OCR_PRECOMPUTED_DIFFS`, `OCR_CHUNK_DIFF_LINES`, `OCR_SEGMENT`.
+`OCR_PRECOMPUTED_DIFFS`, `OCR_CHUNK_DIFF_LINES`, `OCR_SEGMENT`, `OCR_CHUNK_CONCURRENCY`.
+
+`OCR_CHUNK_CONCURRENCY` (0.12.0, default 2, clamped to 1-4) is how many chunks are
+reviewed at once, each in its own worktree. `1` is the sequential review of 0.11.0;
+report it as **`ok`**. Above 2, note that usage limits come sooner and every slot is
+one more worktree of the repository on disk.
 
 `OCR_SEGMENT=0` (0.11.0) is the rollback to the 0.10.0 review of a big file: whole-file
 diffs with Part B's limits, no unit cache, no caller checks. Report it as **`warn`** (a
