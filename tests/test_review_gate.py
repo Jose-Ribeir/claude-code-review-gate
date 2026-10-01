@@ -2843,21 +2843,21 @@ def test_reap_async_removes_old_chunk_files(monkeypatch, tmp_path):
     chunks_dir.mkdir(parents=True)
     old = chunks_dir / "oldchunk.json"
     old.write_text("{}", encoding="utf-8")
-    # Age it beyond _CHECKPOINT_TTL.
-    os.utime(old, (time.time() - review_gate._CHECKPOINT_TTL - 60,) * 2)
+    # Age it well beyond MARKER_TTL (the retired OCR_CHECKPOINT_TTL was 24 h).
+    os.utime(old, (time.time() - 24 * 3600 - 60,) * 2)
     _reap_async(str(tmp_path))
     assert not old.exists()
 
 
 def test_reap_async_removes_chunks_dir_regardless_of_age(monkeypatch, tmp_path):
-    # 0.8.0: even a chunk file that's between MARKER_TTL and CHECKPOINT_TTL old
+    # 0.8.0: even a chunk file that's between MARKER_TTL and 24 h old
     # is removed because the whole chunks/ directory is migrated away.
     monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(tmp_path / "gate-data"))
     chunks_dir = _async_dir(str(tmp_path)) / "chunks"
     chunks_dir.mkdir(parents=True)
     mid_age = chunks_dir / "mid.json"
     mid_age.write_text("{}", encoding="utf-8")
-    # Age to just past MARKER_TTL (1 h) but well within CHECKPOINT_TTL (24 h).
+    # Age to just past MARKER_TTL (1 h) but well within the old 24 h chunk TTL.
     os.utime(mid_age, (time.time() - MARKER_TTL - 60,) * 2)
     _reap_async(str(tmp_path))
     assert not mid_age.exists()  # removed as part of migration

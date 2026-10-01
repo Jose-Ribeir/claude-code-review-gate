@@ -1121,16 +1121,19 @@ def test_scenario_9_trust_negatives_failed_chunk_writes_no_record(monkeypatch, t
                                          e["new_oid"])
     assert not rec_path.exists(), "failed run must not write a ledger record"
 
-    # diff_truncated warning also prevents writing.
+    # A diff_truncated warning writes the record FLAGGED (0.9.5), not a complete one.
     result_trunc = {"status": "success", "findings": [],
                     "warnings": [{"type": "diff_truncated"}]}
     review_gate._write_run_records(result_trunc, active_items, str(tmp_path), fp, "run2")
-    assert not rec_path.exists(), "truncated diff must not write a ledger record"
+    trunc_rec = json.loads(rec_path.read_text(encoding="utf-8"))
+    assert trunc_rec["truncated"] is True, "truncated diff must write a flagged record"
 
     # A successful result DOES write a record.
     result_ok = {"status": "success", "findings": [], "warnings": []}
     review_gate._write_run_records(result_ok, active_items, str(tmp_path), fp, "run3")
     assert rec_path.exists(), "successful run must write a ledger record"
+    assert "truncated" not in json.loads(rec_path.read_text(encoding="utf-8")), (
+        "a complete review replaces a truncated record")
 
 
 def test_scenario_4_reviewer_overrides_resolver_no_resolution_written(monkeypatch, tmp_path):
@@ -1276,7 +1279,7 @@ def test_finding_about_a_file_outside_the_review_is_kept(tmp_path):
     _wait_state(work, tip2, {"done"})
 
 
-def test_truncated_file_gets_no_record_but_its_neighbour_does(tmp_path):
+def test_truncated_file_gets_a_flagged_record_and_its_neighbour_a_complete_one(tmp_path):
     common = str(tmp_path)
     fp = "f" * 64
 
@@ -1296,8 +1299,9 @@ def test_truncated_file_gets_no_record_but_its_neighbour_does(tmp_path):
         return review_gate._read_ledger_record(
             review_gate._record_path(common, fp, key, e["new_oid"]), fp, key, e["new_oid"])
 
-    assert _rec(items[0]) is None
-    assert _rec(items[1]) is not None
+    # 0.9.5: the truncated file's record exists, flagged; its neighbour's is complete.
+    assert _rec(items[0])["truncated"] is True
+    assert "truncated" not in _rec(items[1])
 
     # A §2b context truncation (no file) is not a diff truncation and blocks nothing.
     fp2 = "e" * 64

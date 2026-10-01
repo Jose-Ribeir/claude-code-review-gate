@@ -227,11 +227,6 @@ try:
     _MAX_FILES = max(1, _MAX_FILES)
 except ValueError:
     _MAX_FILES = 40
-try:
-    _CHECKPOINT_TTL = int(os.environ.get("OCR_CHECKPOINT_TTL", str(24 * 3600)))
-    _CHECKPOINT_TTL = max(3600, _CHECKPOINT_TTL)
-except ValueError:
-    _CHECKPOINT_TTL = 24 * 3600
 # --- review ledger (0.8.0) ---------------------------------------------------
 LEDGER_DIR = "review-gate-ledger"
 # 30 days: a branch picked up again after a week or two keeps its review
@@ -248,6 +243,18 @@ try:
 except ValueError:
     _LEDGER_MAX_RECORDS = 5000
 _LEDGER_SCHEMA = 1
+# The per-file diff cap of skills/review/SKILL.md §3: past either limit the
+# skill degrades that file's diff to stat + hunk headers, so the reviewer saw
+# only part of it. The gate re-checks it itself (_diff_exceeds_caps), because the
+# skill's own `diff truncated` warning is not always emitted.
+_TRUNC_MAX_LINES = 400
+_TRUNC_MAX_BYTES = 16 * 1024
+# A chunk that timed out is retried in halves (_timeout_marks); a marker older
+# than this is forgotten, so a transient stall cannot condemn a file for long.
+_TIMEOUT_MARK_TTL = 24 * 3600
+# The warning the skill emits for a truncated diff; the gate re-emits it for
+# every file whose recorded review was truncated (_surface_truncated).
+_TRUNCATED_MSG = "diff truncated; reviewer saw stat + hunk headers only"
 # Cost rule: a file with a delta base is reviewed over its whole push range
 # instead when that diff is at most this many times the delta's size. It costs
 # about the same, and it also shows changes that are only harmful together --
@@ -432,6 +439,21 @@ class ReviewBudgetError(ReviewGateError):
     Budget exhaustion is not an attempt: the next push resumes from the
     checkpoint and the attempt counter is left unchanged.
     """
+
+
+class ReviewChunkTimeout(ReviewGateError):
+    """A chunk timed out and the files in it are marked to be retried in halves.
+
+    Like a budget stop it is progress, not an attempt: every retry is smaller,
+    and a file that times out on its own twice ends in ReviewUnreviewableError.
+    """
+    def __init__(self, msg=""):
+        super().__init__(msg, is_timeout=True)
+
+
+class ReviewUnreviewableError(ReviewGateError):
+    """A single file timed out twice on its own: it cannot be reviewed within
+    OCR_CHUNK_TIMEOUT. Terminal for this tip -- retrying the same call is a loop."""
 
 
 class _Fenced(Exception):
@@ -869,6 +891,9 @@ def _record_review(git_dir, head_sha, branch, mode, verdict, advisory, blocked, 
             "truncated": False,
             "raw": f"{HISTORY_DIR}/{raw_name}" if raw_name else "",
         }
+        unreviewed = result.get("unreviewed_truncated") if isinstance(result, dict) else None
+        if isinstance(unreviewed, list) and unreviewed:
+            entry["unreviewed_truncated"] = len(unreviewed)
         # Shed findings until the line fits, rather than truncating the string
         # and leaving unparseable JSON behind. The dropped detail is still in
         # the raw snapshot this entry points at.
@@ -2788,6 +2813,7 @@ def _supervise_run(state_path, run_id):
                 "were during the review rather than at the pushed commit."
             )
 
+        force_review = os.environ.get("OCR_FORCE_REVIEW", "").strip().lower() in ("1", "true", "yes")
         fp = _compute_fingerprint(review_root, tip)
         _TELE.update(fp=fp, fp_parts=_fingerprint_parts(review_root, tip))
         _prune_ledger(common_dir)
@@ -2837,18 +2863,42 @@ def _supervise_run(state_path, run_id):
                     extras["known_defects"] = defects
                 return extras
 
+            # Files that timed out in an earlier run: retried in smaller chunks (even
+            # when few enough for one context), and given up on after two timeouts
+            # on their own. OCR_FORCE_REVIEW tries them once more.
+            timeout_marks = _timeout_marks(common_dir, fp, active_items)
+            if timeout_marks and not force_review:
+                stuck = _stuck_paths(timeout_marks)
+                if stuck:
+                    raise ReviewUnreviewableError(_unreviewable_message(stuck, _CHUNK_TIMEOUT))
+
+            def _single(call):
+                """The single-context review: a timeout there marks its files too."""
+                try:
+                    return _run_review_with_retry(call)
+                except ReviewGateError as exc:
+                    if not exc.is_timeout:
+                        raise
+                    if fenced["hit"]:
+                        raise _Fenced()
+                    err = _timeout_failure(exc, common_dir, fp, active_items, TIMEOUT, "review")
+                    if err is exc:
+                        raise
+                    raise err from exc
+
             if not active_items:
                 # All files already reviewed in a prior run: replay from ledger.
                 ran = True  # got a valid result (from records)
                 result = {"status": "replayed", "findings": [], "warnings": []}
                 chunks_new = 0
                 plan_summary = f"carried {len(carry_items)} file(s), 0 reviewed"
-            elif len(active_items) > _CHUNK_THRESHOLD:
+            elif len(active_items) > _CHUNK_THRESHOLD or timeout_marks:
                 # Multi-chunk path.
                 result, ran, raw_name, chunks_new = _run_chunked(
                     state_path, run_id, common_dir, review_root, mode, git_dir,
                     tip, push_range, active_items, planner_warnings, fenced, progress,
                     fp=fp, carry_paths=carry_paths, chunk_extras=_review_extras,
+                    timeout_marks=timeout_marks,
                 )
                 n_delta = sum(1 for p in active_items if p["mode"] == "delta")
                 n_full = len(active_items) - n_delta
@@ -2862,7 +2912,7 @@ def _supervise_run(state_path, run_id):
                 extras = _review_extras(0, [p["entry"]["path"] for p in active_items])
                 if all_full and not carry_items and not extras:
                     # Golden argv: byte-identical to 0.7.0 (no --paths-file).
-                    result, ran, raw_name = _run_review_with_retry(
+                    result, ran, raw_name = _single(
                         lambda: _run_review(review_root, mode, git_dir, tip, push_range)
                     )
                     chunks_new = 1 if ran else 0
@@ -2901,7 +2951,7 @@ def _supervise_run(state_path, run_id):
                             f"could not write single-context manifest: {exc}"
                         )
                     try:
-                        result, ran, raw_name = _run_review_with_retry(
+                        result, ran, raw_name = _single(
                             lambda: _run_review(
                                 review_root, mode, git_dir, tip, push_range,
                                 paths_file=manifest_path,
@@ -3047,6 +3097,7 @@ def _supervise_run(state_path, run_id):
 
                 all_findings = deduped_new + prior_findings + notes
                 result = dict(result, findings=all_findings)
+                result = _surface_truncated(result, plan, common_dir, fp)
                 if plan_summary:
                     result = dict(result, plan_summary=plan_summary)
 
@@ -3070,6 +3121,13 @@ def _supervise_run(state_path, run_id):
     except ReviewBudgetError as exc:
         # Budget exhaustion: not an attempt; next push resumes from checkpoint.
         failure = ("budget", str(exc))
+        result, ran, raw_name, chunks_new = None, False, "", progress["new"]
+    except ReviewChunkTimeout as exc:
+        # A timeout whose files are marked for splitting: progress, not an attempt.
+        failure = ("timeout", str(exc))
+        result, ran, raw_name, chunks_new = None, False, "", progress["new"]
+    except ReviewUnreviewableError as exc:
+        failure = ("unreviewable", str(exc))
         result, ran, raw_name, chunks_new = None, False, "", progress["new"]
     except ReviewGateError as exc:
         failure = ("review", str(exc))
@@ -3102,6 +3160,20 @@ def _supervise_run(state_path, run_id):
                 "state": "failed", "failed_ts": time.time(),
                 "reason": "budget", "detail": _sanitize(failure[1], 1500),
                 # attempts unchanged; chunks_done already in state from _run_chunked
+            })
+        elif failure[0] == "timeout":
+            # The timed-out chunk's files are marked: the next push splits it, so
+            # this is progress toward a verdict, not an attempt that burns the cap.
+            st.update({
+                "state": "failed", "failed_ts": time.time(),
+                "reason": "timeout", "detail": _sanitize(failure[1], 1500),
+            })
+        elif failure[0] == "unreviewable":
+            # Terminal for this tip: re-running the same call is the loop this
+            # exists to end, so the attempt cap is reached at once.
+            st.update({
+                "state": "failed", "failed_ts": time.time(), "attempts": ATTEMPT_CAP,
+                "reason": "unreviewable", "detail": _sanitize(failure[1], 1500),
             })
         else:
             # Increment attempts only when no new chunks were reviewed.
@@ -3169,6 +3241,9 @@ def _supervise_run(state_path, run_id):
             "finding_count": (
                 len(result.get("findings") or []) if isinstance(result, dict) else 0
             ),
+            "unreviewed_truncated": (
+                len(result.get("unreviewed_truncated") or []) if isinstance(result, dict) else 0
+            ),
             "record": str(record) if record else "", "raw": raw_name,
         })
     except _Fenced:
@@ -3222,11 +3297,12 @@ def _remove_worktree(repo_root, path):
 
 
 def _reap_async(common_dir):
-    """Drop async state/logs older than MARKER_TTL; chunks use CHECKPOINT_TTL.
+    """Drop async state/logs older than MARKER_TTL, and the retired chunks/ cache.
 
     The worktree sweep skips any worktree owned by a running state whose
-    heartbeat is younger than STALE_S.  Chunk cache files live in chunks/ and
-    are swept on their own longer TTL.
+    heartbeat is younger than STALE_S.  The 0.7.0 chunk cache (chunks/) is
+    removed outright: a resumed run now carries per-file ledger records, which
+    have their own TTL (OCR_LEDGER_TTL) and are pruned by _prune_ledger.
     """
     try:
         now = time.time()
@@ -3605,8 +3681,17 @@ def _compute_fingerprint(root, tip):
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def _is_truncated_record(record):
+    """True for a record whose review saw only part of the file's diff. The flag
+    is optional: a record without it (every one written before 0.9.5) is complete."""
+    return isinstance(record, dict) and record.get("truncated") is True
+
+
 def _read_ledger_record(record_path, fp, key, head_oid):
-    """Return the record dict or None (miss, corrupt, mismatch, expired)."""
+    """Return the record dict or None (miss, corrupt, mismatch, expired).
+
+    The dict is returned as stored, so `truncated` (see _is_truncated_record) is
+    in it when it was set."""
     try:
         raw = Path(record_path).read_text(encoding="utf-8")
     except OSError:
@@ -3628,8 +3713,11 @@ def _read_ledger_record(record_path, fp, key, head_oid):
 
 
 def _write_ledger_record(common_dir, fp, key, head_oid, path, old_path,
-                         status, base_oid, findings, chain_depth, run_id):
-    """Write one per-file ledger record. Best-effort: never breaks the gate."""
+                         status, base_oid, findings, chain_depth, run_id, truncated=False):
+    """Write one per-file ledger record. Best-effort: never breaks the gate.
+
+    truncated=True marks a review that saw only part of the diff. It is stored
+    only when set, so every other record stays byte-identical to 0.9.4's."""
     try:
         rpath = _record_path(common_dir, fp, key, head_oid)
         rpath.parent.mkdir(parents=True, exist_ok=True)
@@ -3641,6 +3729,8 @@ def _write_ledger_record(common_dir, fp, key, head_oid, path, old_path,
             "findings": stamped, "chain_depth": int(chain_depth or 0),
             "reviewed_ts": time.time(), "run_id": run_id or "",
         }
+        if truncated:
+            data["truncated"] = True
         _write_state(rpath, data)
         try:
             rpath.touch(exist_ok=True)  # refresh mtime for TTL
@@ -3655,6 +3745,7 @@ def _find_delta_record(common_dir, fp, key, head_oid):
 
     Used to identify a delta base: the file was reviewed at X, now at head_oid,
     so we review only X→head_oid. Returns (record, from_oid) or (None, '').
+    A truncated record is never a base: its review did not cover all of X.
     """
     fp_d = _fp_dir(common_dir, fp)
     if not fp_d.is_dir():
@@ -3672,6 +3763,8 @@ def _find_delta_record(common_dir, fp, key, head_oid):
             continue
         if data.get("fp") != fp or data.get("key") != key:
             continue
+        if _is_truncated_record(data):
+            continue  # the reviewer saw only part of that state: nothing to build a delta on
         try:
             if time.time() - p.stat().st_mtime > _LEDGER_TTL:
                 continue
@@ -3794,11 +3887,17 @@ def _plan_review(root, base, tip, common_dir, fp):
         rec_path = _record_path(common_dir, fp, key, head_oid)
         record = _read_ledger_record(rec_path, fp, key, head_oid)
         if record is not None:
+            # An exact hit carries whether or not the record is flagged truncated:
+            # re-reviewing the same blob would truncate it the same way.
             plan.append({"entry": e, "mode": "carry", "record": record,
                          "from_oid": head_oid, "miss_reason": "none"})
             continue
         delta_record, from_oid = _find_delta_record(common_dir, fp, key, head_oid)
         if delta_record is not None:
+            if _is_truncated_record(delta_record):  # _find_delta_record skips these; belt and braces
+                plan.append({"entry": e, "mode": "full", "record": None,
+                             "from_oid": "", "miss_reason": "no_record"})
+                continue
             delta_lines = _blob_diff_lines(root, from_oid, head_oid)
             full_lines = int(e.get("lines") or 0)
             item = {"entry": e, "mode": "delta", "record": delta_record,
@@ -4047,6 +4146,19 @@ def _new_finding_notes(review_root, tip, new_findings, push_paths):
     return notes
 
 
+def _rewrite_record_findings(common_dir, fp, key, rec, findings):
+    """Store `findings` on an existing record, changing nothing else: the
+    `truncated` flag, chain_depth, run_id and timestamps are the record's own
+    facts about the review that wrote it, and a rewrite of the findings is not
+    a new review. Atomic, best-effort."""
+    try:
+        data = dict(rec)
+        data["findings"] = [dict(f, id=_finding_id(f)) for f in (findings or [])]
+        _write_state(_record_path(common_dir, fp, key, rec["head_oid"]), data)
+    except Exception:
+        pass
+
+
 def _attach_to_carried_records(findings, carry_items, common_dir, fp, run_id, review_root, tip):
     """Also keep a finding about a carried file on THAT file's record, so it
     stays owed however the files that revealed it change later."""
@@ -4065,9 +4177,7 @@ def _attach_to_carried_records(findings, carry_items, common_dir, fp, run_id, re
         stamped = [dict(f, target_oid=f.get("target_oid") or e["new_oid"]) for f in fs]
         merged = _dedup_by_id(list(rec.get("findings") or []) + stamped)
         if len(merged) != len(rec.get("findings") or []):
-            _write_ledger_record(common_dir, fp, key, e["new_oid"], path,
-                                 e.get("old_path") or "", e["status"], e["old_oid"],
-                                 merged, rec.get("chain_depth") or 0, run_id)
+            _rewrite_record_findings(common_dir, fp, key, rec, merged)
 
 
 _RESOLVER_STATUSES = ("resolved", "still_present")
@@ -4358,6 +4468,12 @@ def _prune_ledger(common_dir):
                         all_records.append((mtime, rec_file))
                 except OSError:
                     continue
+            for mark in (fp_dir / "timeouts").glob("*.json"):
+                try:
+                    if now - mark.stat().st_mtime > _TIMEOUT_MARK_TTL:
+                        mark.unlink()
+                except OSError:
+                    continue
         if len(all_records) > _LEDGER_MAX_RECORDS:
             all_records.sort(reverse=True)  # keep newest
             for _, stale in all_records[_LEDGER_MAX_RECORDS:]:
@@ -4369,19 +4485,151 @@ def _prune_ledger(common_dir):
         pass
 
 
-def _plan_to_chunks(active_items):
+# --- chunk timeouts (0.9.5) ----------------------------------------------------
+# A chunk that times out saves nothing, so retrying it unchanged would time out
+# again, forever. Instead every file in it gets a marker (kept beside the ledger
+# records, keyed like them: a changed blob starts afresh), and the next run
+# retries those files in halves down to one file. A file that times out ALONE
+# twice cannot be reviewed within OCR_CHUNK_TIMEOUT: the review then fails with
+# a terminal reason naming it, instead of "still running, re-push" for ever.
+
+def _timeout_mark_path(common_dir, fp, key, head_oid):
+    return _fp_dir(common_dir, fp) / "timeouts" / f"{key}-{head_oid[:16]}.json"
+
+
+def _item_record_key(item):
+    e = item["entry"]
+    return _record_key(e["path"], e.get("old_path") or "", e["status"], e["old_oid"])
+
+
+def _read_timeout_mark(path):
+    """The marker at `path`, or None (absent, corrupt, expired)."""
+    try:
+        if time.time() - Path(path).stat().st_mtime > _TIMEOUT_MARK_TTL:
+            return None
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _timeout_marks(common_dir, fp, items):
+    """{path: marker} for the items that timed out in an earlier run.
+
+    A marker from a shorter timeout than the one in force is ignored: whoever
+    raised OCR_CHUNK_TIMEOUT wants the file tried again, at any size."""
+    out = {}
+    if not (fp and common_dir) or not _ledger_enabled():
+        return out
+    for item in items:
+        e = item["entry"]
+        mark = _read_timeout_mark(_timeout_mark_path(
+            common_dir, fp, _item_record_key(item), e["new_oid"]))
+        if mark and int(mark.get("timeout_s") or 0) >= _CHUNK_TIMEOUT:
+            out[e["path"]] = mark
+    return out
+
+
+def _stuck_paths(marks):
+    """Files that timed out twice on their own."""
+    return [p for p, m in marks.items() if int(m.get("solo_attempts") or 0) >= 2]
+
+
+def _note_chunk_timeout(common_dir, fp, chunk_items, timeout_s):
+    """Mark every file of a chunk that timed out. Returns the path of a file that
+    has now timed out twice on its own, "" when the chunk is merely to be split
+    next time, or None when nothing could be recorded (so nothing will change)."""
+    n, stuck = len(chunk_items), ""
+    try:
+        for item in chunk_items:
+            e = item["entry"]
+            mark_path = _timeout_mark_path(
+                common_dir, fp, _item_record_key(item), e["new_oid"])
+            prev = _read_timeout_mark(mark_path) or {}
+            if int(prev.get("timeout_s") or 0) < timeout_s:
+                prev = {}
+            solo = int(prev.get("solo_attempts") or 0) + (1 if n == 1 else 0)
+            mark_path.parent.mkdir(parents=True, exist_ok=True)
+            _write_state(mark_path, {
+                "path": e["path"], "chunk_size": n, "timeout_s": timeout_s,
+                "attempts": int(prev.get("attempts") or 0) + 1, "solo_attempts": solo,
+                "ts": time.time(),
+            })
+            if n == 1 and solo >= 2:
+                stuck = e["path"]
+    except Exception:
+        return None
+    return stuck
+
+
+def _clear_timeout_mark(common_dir, fp, key, head_oid):
+    """A file that has a record was reviewed: its timeouts are behind it."""
+    try:
+        _timeout_mark_path(common_dir, fp, key, head_oid).unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _unreviewable_message(paths, timeout_s):
+    names = ", ".join(sorted(paths)[:5]) + (" ..." if len(paths) > 5 else "")
+    return (
+        f"file {names} cannot be reviewed within the timeout: it timed out on its own "
+        f"twice at OCR_CHUNK_TIMEOUT={timeout_s}s. Split the file, or raise OCR_CHUNK_TIMEOUT "
+        "in the environment Claude Code was launched from, then push again."
+    )
+
+
+def _timeout_failure(exc, common_dir, fp, items, timeout_s, label):
+    """The exception to raise for a review call that timed out, after marking
+    its files: ReviewUnreviewableError for a file that timed out alone twice,
+    ReviewChunkTimeout when they will be split next push, `exc` itself when
+    nothing could be recorded."""
+    if not (fp and common_dir) or not _ledger_enabled():
+        return exc
+    stuck = _note_chunk_timeout(common_dir, fp, items, timeout_s)
+    if stuck is None:
+        return exc
+    if stuck:
+        return ReviewUnreviewableError(_unreviewable_message([stuck], timeout_s))
+    n = len(items)
+    if n == 1:
+        return ReviewChunkTimeout(
+            f"{label} timed out after {timeout_s}s on one file alone; one more timeout "
+            "and that file is declared unreviewable")
+    return ReviewChunkTimeout(
+        f"{label} of {n} file(s) timed out after {timeout_s}s; the next push retries "
+        "them in smaller chunks")
+
+
+def _plan_to_chunks(active_items, marks=None):
     """Group active (delta/full) plan items into chunks for _run_chunked.
 
     Returns a list of lists of plan_item dicts (each item has 'entry', 'mode',
     'from_oid'). Mirrors _group_into_chunks but operates on plan items.
+    `marks` (see _timeout_marks) splits any chunk holding a file that timed
+    out before: into pieces half the size it timed out at, down to one file.
     """
     entries = [item["entry"] for item in active_items]
     path_to_item = {item["entry"]["path"]: item for item in active_items}
     grouped_entries = _group_into_chunks(entries)
-    return [
+    chunks = [
         [path_to_item[e["path"]] for e in chunk_entries]
         for chunk_entries in grouped_entries
     ]
+    if not marks:
+        return chunks
+    out = []
+    for chunk in chunks:
+        if not chunk:
+            out.append(chunk)
+            continue
+        cap = len(chunk)
+        for item in chunk:
+            mark = marks.get(item["entry"]["path"])
+            if mark:
+                cap = min(cap, max(1, int(mark.get("chunk_size") or 1) // 2))
+        out.extend(chunk[i:i + cap] for i in range(0, len(chunk), cap))
+    return out
 
 
 def _truncated_paths(result):
@@ -4399,6 +4647,47 @@ def _truncated_paths(result):
     for f in (result.get("findings") or []):
         if isinstance(f, dict) and f.get("diff_truncated") and f.get("path"):
             out.add(f["path"])
+    return out
+
+
+def _surface_truncated(result, plan, common_dir, fp):
+    """Keep truncation visible once it is cached.
+
+    A truncated review is carried like any other (re-reviewing the same blob
+    would truncate it the same way), which would let the file pass silently on
+    every later run. So, for every file of this push whose recorded review is
+    flagged truncated -- carried or reviewed just now -- and every file the
+    reviewer warned about: re-emit the skill's truncation warning (when the
+    result has none for that file), make the status completed_with_warnings,
+    and count them in `summary.unreviewed_truncated` / `unreviewed_truncated`
+    (the paths), which _format_reasons turns into the verdict line. The verdict
+    itself is untouched: this only adds, never downgrades.
+    """
+    if not isinstance(result, dict):
+        return result
+    in_push = {p["entry"]["path"] for p in plan or []}
+    flagged = set()
+    if fp and common_dir and _ledger_enabled():
+        for p in plan or []:
+            e = p["entry"]
+            key = _item_record_key(p)
+            rec = _read_ledger_record(_record_path(common_dir, fp, key, e["new_oid"]),
+                                      fp, key, e["new_oid"])
+            if _is_truncated_record(rec):
+                flagged.add(e["path"])
+    flagged |= {w for w in _truncated_paths(result) if w != "*"} & in_push
+    if not flagged:
+        return result
+    warnings = list(result.get("warnings") or [])
+    warned = {w.get("file") for w in warnings
+              if isinstance(w, dict) and "diff truncated" in str(w.get("message") or "").lower()}
+    for path in sorted(flagged - warned):
+        warnings.append({"file": path, "message": _TRUNCATED_MSG})
+    summary = dict(result["summary"]) if isinstance(result.get("summary"), dict) else {}
+    summary["unreviewed_truncated"] = len(flagged)
+    out = dict(result, warnings=warnings, summary=summary, unreviewed_truncated=sorted(flagged))
+    if out.get("status") != "completed_with_errors":
+        out["status"] = "completed_with_warnings"
     return out
 
 
@@ -4428,19 +4717,57 @@ def _record_findings_for(item, new_by_path, orphans, active_paths):
     return _dedup_by_id(own + list(orphans) + carried)
 
 
+def _diff_exceeds_caps(item, review_root=""):
+    """True when the gate's own size check says the skill capped this file's diff.
+
+    Applies SKILL.md §3's per-file cap (_TRUNC_MAX_LINES / _TRUNC_MAX_BYTES) to
+    what the reviewer was handed: the delta for a delta item, the push-range diff
+    otherwise. Only a numeric line count counts -- binary files have none
+    (numstat prints `-`; the entry keeps 0) and are not this check's business.
+    The byte size needs git and is skipped without a review_root.
+    """
+    e = item["entry"]
+    if item.get("mode") == "delta" and item.get("from_oid"):
+        old_oid = item["from_oid"]
+        lines = item.get("delta_lines")
+        if not isinstance(lines, int):
+            lines = e.get("lines")
+    else:
+        old_oid, lines = e.get("old_oid"), e.get("lines")
+    new_oid = e.get("new_oid")
+    if not isinstance(lines, int) or lines <= 0:
+        return False
+    if lines > _TRUNC_MAX_LINES:
+        return True
+    if not review_root or _is_null_oid(new_oid):
+        return False
+    if _is_null_oid(old_oid):
+        out, rc = _git(["cat-file", "-s", new_oid], cwd=review_root)
+        size = int(out) if rc == 0 and out.isdigit() else 0
+    else:
+        out, rc = _git(["diff", "--no-ext-diff", old_oid, new_oid], cwd=review_root)
+        size = len(out.encode("utf-8", "replace")) if rc == 0 else 0
+    return size > _TRUNC_MAX_BYTES
+
+
 def _write_run_records(result, active_items, common_dir, fp, run_id, review_root="", tip=""):
     """Write per-file ledger records after a completed review of `active_items`.
 
-    No record for a file whose diff the reviewer saw truncated, and none at all
-    unless the review finished cleanly. Best-effort.
+    None at all unless the review finished cleanly. A file whose diff the
+    reviewer saw only partly -- named by a truncation warning, any file of the
+    chunk when the warning names none ("*"), or over the gate's own size cap --
+    gets its record flagged `truncated`: the same blob would be truncated the
+    same way, so a resume must not review it again, but the flag keeps that
+    state visible (_surface_truncated) and keeps it from being a delta base.
+    A flagged write never replaces a valid unflagged record; an unflagged one
+    replaces a flagged record. Best-effort. Returns the paths flagged.
     """
+    flagged_paths = set()
     if not isinstance(result, dict):
-        return
+        return flagged_paths
     if result.get("status", "") not in ("success", "completed_with_warnings"):
-        return
+        return flagged_paths
     truncated = _truncated_paths(result)
-    if "*" in truncated:
-        return
     active_paths = {item["entry"]["path"] for item in active_items}
     findings = [f for f in (result.get("findings") or []) if isinstance(f, dict)]
     oids = _blob_oids_at(review_root, tip, sorted({f.get("path") for f in findings if f.get("path")})) \
@@ -4457,17 +4784,25 @@ def _write_run_records(result, active_items, common_dir, fp, run_id, review_root
     for item in active_items:
         e = item["entry"]
         path = e["path"]
-        if path in truncated:
-            continue
         old_path = e.get("old_path") or ""
         prev = item.get("record")
         chain_depth = (int(prev.get("chain_depth") or 0) + 1) if (prev and item["mode"] == "delta") else 0
         key = _record_key(path, old_path, e["status"], e["old_oid"])
+        flagged = ("*" in truncated or path in truncated
+                   or _diff_exceeds_caps(item, review_root))
+        if flagged:
+            existing = _read_ledger_record(
+                _record_path(common_dir, fp, key, e["new_oid"]), fp, key, e["new_oid"])
+            if existing is not None and not _is_truncated_record(existing):
+                continue  # a complete review of this very blob is already on file
+            flagged_paths.add(path)
         _write_ledger_record(
             common_dir, fp, key, e["new_oid"], path, old_path, e["status"], e["old_oid"],
             _record_findings_for(item, new_by_path, orphans, active_paths),
-            chain_depth, run_id,
+            chain_depth, run_id, truncated=flagged,
         )
+        _clear_timeout_mark(common_dir, fp, key, e["new_oid"])
+    return flagged_paths
 
 
 def _drop_self_resolved(active_items, resolved_ids_by_path, common_dir, fp, run_id):
@@ -4487,9 +4822,7 @@ def _drop_self_resolved(active_items, resolved_ids_by_path, common_dir, fp, run_
             continue
         kept = [f for f in rec.get("findings") or [] if (f.get("id") or _finding_id(f)) not in ids]
         if len(kept) != len(rec.get("findings") or []):
-            _write_ledger_record(common_dir, fp, key, e["new_oid"], e["path"],
-                                 e.get("old_path") or "", e["status"], e["old_oid"],
-                                 kept, rec.get("chain_depth") or 0, run_id)
+            _rewrite_record_findings(common_dir, fp, key, rec, kept)
 
 
 def _update_state_owned(state_path, run_id, **fields):
@@ -4614,20 +4947,26 @@ def _merge_chunk_results(chunk_results, planner_warnings=None):
 
 def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
                  tip, push_range, active_items, planner_warnings, fenced,
-                 progress=None, fp="", carry_paths=None, chunk_extras=None):
+                 progress=None, fp="", carry_paths=None, chunk_extras=None,
+                 timeout_marks=None):
     """Run per-chunk reviews with fencing, budget and retry.
 
     active_items is a list of plan_item dicts (mode delta/full). Chunks are
     computed internally via _plan_to_chunks. carry_paths is the list of
     already-carried file paths (for the manifest's carried field).
     chunk_extras(k, chunk_paths) returns extra manifest fields for chunk k
-    (impact sites, known defects) or None.
+    (impact sites, known defects) or None. timeout_marks is _timeout_marks()
+    of the active items (read here when not given): chunks holding a file that
+    timed out before are split.
 
     Returns (merged_result, True, raw_name, chunks_new) on success.
     chunks_new is the count of chunks reviewed in THIS run.
-    Raises ReviewLimitError, ReviewBudgetError, ReviewGateError, or _Fenced.
+    Raises ReviewLimitError, ReviewBudgetError, ReviewChunkTimeout,
+    ReviewUnreviewableError, ReviewGateError, or _Fenced.
     """
-    chunks = _plan_to_chunks(active_items)
+    if timeout_marks is None:
+        timeout_marks = _timeout_marks(common_dir, fp, active_items)
+    chunks = _plan_to_chunks(active_items, timeout_marks)
     total = len(chunks)
     budget_end = time.monotonic() + _RUN_BUDGET
     chunk_results = []
@@ -4727,7 +5066,18 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
                     raise  # propagate immediately; do not retry limits
                 except ReviewGateError as exc:
                     last_exc = exc
-                    if exc.is_timeout or attempt > 0:
+                    if exc.is_timeout:
+                        # Not retried: it would time out again. Mark the files so
+                        # the next push splits the chunk (or gives up on one file).
+                        if fenced["hit"]:
+                            raise _Fenced()
+                        err = _timeout_failure(
+                            exc, common_dir, fp, chunk_items, _CHUNK_TIMEOUT,
+                            f"chunk {k + 1}/{total}")
+                        if err is exc:
+                            raise
+                        raise err from exc
+                    if attempt > 0:
                         raise
                     # Non-timeout error: retry once.
                     continue
@@ -4826,6 +5176,23 @@ def _failed_reason(st, mode):
             f"review-gate: usage limit{progress}; re-push {after}; "
             f"OCR_FORCE_REVIEW=1 retries now\n{_bypass_hint(mode)}"
         )
+    if why == "unreviewable":
+        return (
+            "review-gate: the review cannot complete - blocking to preserve gate integrity.\n"
+            + "\n".join("  " + line for line in detail.splitlines()[:12]) + "\n"
+            + "  Not retried automatically; OCR_FORCE_REVIEW=1 (in the environment Claude Code "
+            "was launched from) tries once more.\n" + _bypass_hint(mode)
+        )
+    if why == "timeout":
+        cd = int(st.get("chunks_done") or 0)
+        ct = int(st.get("chunks_total") or 0)
+        progress = f" ({cd}/{ct} chunks saved)" if ct else ""
+        return (
+            f"review-gate: a review chunk timed out{progress}; the files it held are retried "
+            "in smaller chunks - run the push again.\n"
+            + "\n".join("  " + line for line in detail.splitlines()[:12]) + "\n"
+            + _bypass_hint(mode)
+        )
     head = f"review-gate: the review could not complete ({why}) - blocking to preserve gate integrity.\n"
     if attempts >= ATTEMPT_CAP:
         head += (
@@ -4885,7 +5252,17 @@ def _format_reasons(result, limit=20):
         lines.append(f"  [{sev}] {prefix}{loc} - {content}")
     # limit=0 means "all of them" -- used by --history, which is read on demand
     # and has no context budget to protect, unlike the gate's own messages.
-    return "\n".join(lines if not limit else lines[:limit])
+    out = "\n".join(lines if not limit else lines[:limit])
+    paths = result.get("unreviewed_truncated") if isinstance(result, dict) else None
+    if isinstance(paths, list) and paths:
+        # Cached truncated reviews (see _surface_truncated): said on every verdict, because
+        # a pass that carries them is otherwise indistinguishable from a full review.
+        n = len(paths)
+        names = ", ".join(_sanitize(p, 120) for p in paths[:5]) + (" ..." if n > 5 else "")
+        out += ("\n" if out else "") + (
+            f"  {n} file{'s' if n != 1 else ''} effectively unreviewed (truncated): the "
+            f"reviewer saw only part of the diff - {names}")
+    return out
 
 
 def _output_hints(git_dir, record=None):
@@ -4950,6 +5327,7 @@ def _print_history(argv):
             ("BLOCKED", e.get("blocked")),
             ("advisory", e.get("advisory")),
             ("truncated", e.get("truncated")),
+            (f"{e.get('unreviewed_truncated')} unreviewed (truncated)", e.get("unreviewed_truncated")),
         ) if on]
         out.write(
             "{at}  {head}  {verdict}  {n} finding(s)  branch={branch}{flags}\n".format(
@@ -4991,7 +5369,8 @@ def _post_context(entry, git_dir, shadow=False):
     # review happened", so the model went and checked the log anyway -- the
     # exact chore this mode exists to remove. One line ends it. No raw-output
     # or replay pointers: a clean pass has nothing to go and read.
-    if verdict == "pass" and not count:
+    unreviewed = int(entry.get("unreviewed_truncated") or 0)
+    if verdict == "pass" and not count and not unreviewed:
         return "review-gate: pass - no findings." + ("\n" + _SHADOW_NOTE if shadow else "")
     lines = ["review-gate: " + _post_label(entry)]
     body = _format_reasons(entry, limit=POST_FINDING_LIMIT)
@@ -5003,6 +5382,9 @@ def _post_context(entry, git_dir, shadow=False):
         # zero. Say so, rather than rendering an empty block that reads like
         # the review found nothing worth describing.
         lines.append(f"  ({count - shown} more finding(s) not recorded in the log line)")
+    if unreviewed:
+        lines.append(f"  {unreviewed} file(s) effectively unreviewed (truncated): the reviewer "
+                     "saw only part of their diffs")
     raw = entry.get("raw")
     if raw and git_dir:
         lines.append(f"  Raw reviewer output: {Path(git_dir) / _sanitize(str(raw), 200)}")

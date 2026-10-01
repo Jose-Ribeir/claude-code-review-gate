@@ -17,6 +17,10 @@ environment variables so one command line serves every scenario:
   STUB_RESOLVE_RECHECK like STUB_RESOLVE, but used instead of it when the resolver
                      manifest has "recheck": true (the gate's second look).
   STUB_RESOLVE_VERDICT pass|fail|garbage  Controls resolver exit for all ids (default pass).
+  STUB_SLEEP_FOR     path — sleep STUB_SLEEP_FOR_SECS (default 30) only when the chunk's
+                     manifest holds this path (a file that always times out).
+  STUB_TRUNCATE_FOR  path, or `*` — answer with the skill's `diff truncated` warning:
+                     for that file, or naming no file at all for `*`.
 
 The last non-flag argument is the range the gate asked to review; it is echoed
 into the trace so a test can assert what was reviewed.
@@ -92,6 +96,9 @@ if fail_on and trace:
         pass
 
 time.sleep(float(os.environ.get("STUB_SLEEP", "0") or 0))
+sleep_for = os.environ.get("STUB_SLEEP_FOR", "")
+if sleep_for and sleep_for in ((manifest or {}).get("paths") or []):
+    time.sleep(float(os.environ.get("STUB_SLEEP_FOR_SECS", "30") or 30))
 
 # --- resolve mode -------------------------------------------------------
 if resolve_file is not None:
@@ -174,6 +181,15 @@ if findings_for_raw:
         pass
 
 out = {"status": "success", "verdict": verdict, "findings": findings}
+
+# STUB_TRUNCATE_FOR: the skill's truncation warning, for one file or (`*`) for none in particular.
+truncate_for = os.environ.get("STUB_TRUNCATE_FOR", "")
+if truncate_for:
+    chunk_paths = (manifest or {}).get("paths")
+    if truncate_for == "*" or chunk_paths is None or truncate_for in chunk_paths:
+        out["status"] = "completed_with_warnings"
+        out["warnings"] = [{"file": None if truncate_for == "*" else truncate_for,
+                            "message": "diff truncated; reviewer saw stat + hunk headers only"}]
 
 # 0.9.0 manifest fields. STUB_IMPACT_BREAK=1 reports every impact site as
 # broken (a high finding anchored at the call site); otherwise each is "ok".

@@ -880,3 +880,355 @@ def test_entry_oids_match_blob_oids_at(repo):
     entries, _ = review_gate._collect_diff_entries(str(repo), base, tip)
     oids = review_gate._blob_oids_at(str(repo), tip, [e["path"] for e in entries])
     assert {e["path"]: e["new_oid"] for e in entries} == oids
+
+
+# ---------------------------------------------------------------------------
+# 0.9.5: convergence -- truncated reviews carry, timeouts split
+# ---------------------------------------------------------------------------
+# Same setup as the chunk tests above: OCR_CHUNK_THRESHOLD=3, OCR_CHUNK_FILES=1.
+
+_TRUNC_MSG = "diff truncated; reviewer saw stat + hunk headers only"
+
+
+def _ledger_ctx(repo):
+    """(common_dir, fp, base, tip, allowed entries) for the repo's pushed range."""
+    tip = _git(["rev-parse", "HEAD"], cwd=repo)
+    base = _git(["rev-parse", "origin/main"], cwd=repo)
+    entries, _ = review_gate._collect_diff_entries(str(repo), base, tip)
+    allowed = [e for e in entries if review_gate._is_allowed_path(e["path"])]
+    return (review_gate._git_common_dir(str(repo)),
+            review_gate._compute_fingerprint(str(repo), tip), base, tip, allowed)
+
+
+def _item(e, mode="full", record=None):
+    return {"entry": e, "mode": mode, "record": record, "from_oid": "",
+            "miss_reason": "no_record"}
+
+
+def _record(common, fp, e):
+    key = review_gate._record_key(e["path"], e.get("old_path") or "", e["status"], e["old_oid"])
+    return review_gate._read_ledger_record(
+        review_gate._record_path(common, fp, key, e["new_oid"]), fp, key, e["new_oid"])
+
+
+def _plan(repo, common, fp, base, tip):
+    plan, _ = review_gate._plan_review(str(repo), base, tip, common, fp)
+    return {p["entry"]["path"]: p for p in plan}
+
+
+def test_a_truncated_file_is_carried_on_resume_and_stays_visible(tmp_path):
+    """(a) Chunk 0 is truncated and the budget runs out after it. The re-push
+    on the same tip does not review that file again; the verdict keeps its
+    finding, and says it is effectively unreviewed."""
+    repo = _big_repo(tmp_path, n_files=4)
+    tip = _git(["rev-parse", "HEAD"], cwd=repo)
+    findings = json.dumps({"mod0.py": {"severity": "medium", "content": "risky thing",
+                                      "existing_code": "x = 0"}})
+    env = _chunk_env(tmp_path, STUB_SLEEP=6, STUB_TRUNCATE_FOR="mod0.py",
+                     STUB_FINDINGS_FOR=findings)
+    env["OCR_RUN_BUDGET"] = "5"
+    decision, reason, _, _ = _hook(repo, "git push origin main", env, timeout=120)
+    assert decision == "deny", reason
+    st = _wait_state(repo, tip, {"failed"}, timeout=30)
+    assert st.get("reason") == "budget" and int(st.get("chunks_done") or 0) == 1
+    common, fp, _, _, allowed = _ledger_ctx(repo)
+    rec = _record(common, fp, next(e for e in allowed if e["path"] == "mod0.py"))
+    assert rec is not None and rec["truncated"] is True
+
+    # Run 2, same tip: no sleep, no truncation warning from the stub any more.
+    env2 = _chunk_env(tmp_path, STUB_FINDINGS_FOR=findings)
+    env2["STUB_TRACE"] = str(tmp_path / "stub2.trace")
+    decision2, reason2, _, _ = _hook(repo, "git push origin main", env2, timeout=60)
+    assert decision2 == "allow", reason2  # a medium finding warns, never blocks
+    st2 = _wait_state(repo, tip, {"done"})
+    calls2 = [json.loads(line) for line in
+              (tmp_path / "stub2.trace").read_text().splitlines() if line.strip()]
+    reviewed = [p for c in calls2 for p in ((c.get("manifest") or {}).get("paths") or [])]
+    assert "mod0.py" not in reviewed and sorted(reviewed) == ["mod1.py", "mod2.py", "mod3.py"]
+    assert not [c for c in calls2 if c.get("resolve_file")]  # identical blob: no resolver
+    assert st2["verdict"] == "warn"
+    assert "risky thing" in st2["reasons"] and "(carried)" in st2["reasons"]
+    assert "1 file effectively unreviewed (truncated)" in st2["reasons"]
+    assert "mod0.py" in st2["reasons"]
+    assert st2["unreviewed_truncated"] == 1
+
+
+def test_surface_truncated_reemits_the_warning_and_the_status(tmp_path):
+    """The carried flagged record re-emits the skill's warning; the status is
+    completed_with_warnings; the verdict is left alone."""
+    repo = _big_repo(tmp_path, n_files=4)
+    common, fp, _, _, allowed = _ledger_ctx(repo)
+    ok = {"status": "success", "findings": [], "warnings": []}
+    review_gate._write_run_records(
+        {"status": "success", "findings": [],
+         "warnings": [{"file": allowed[0]["path"], "message": _TRUNC_MSG}]},
+        [_item(allowed[0])], common, fp, "r1")
+    review_gate._write_run_records(ok, [_item(allowed[1])], common, fp, "r1")
+    plan = [_item(allowed[0], "carry"), _item(allowed[1], "carry")]
+    replayed = {"status": "replayed", "findings": [], "warnings": []}
+    out = review_gate._surface_truncated(replayed, plan, common, fp)
+    assert out["status"] == "completed_with_warnings"
+    assert out["warnings"] == [{"file": allowed[0]["path"], "message": _TRUNC_MSG}]
+    assert out["unreviewed_truncated"] == [allowed[0]["path"]]
+    assert out["summary"]["unreviewed_truncated"] == 1
+    assert "1 file effectively unreviewed (truncated)" in review_gate._format_reasons(out)
+    # Nothing flagged: the result is returned untouched.
+    clean = review_gate._surface_truncated(dict(replayed), [plan[1]], common, fp)
+    assert clean == replayed and review_gate._format_reasons(clean) == ""
+    # A warning the model already gave for that file is not repeated.
+    warned = dict(replayed, warnings=[{"file": allowed[0]["path"], "message": _TRUNC_MSG}])
+    again = review_gate._surface_truncated(warned, plan, common, fp)
+    assert again["warnings"] == warned["warnings"]
+    # An errored status is never softened.
+    errored = review_gate._surface_truncated(dict(replayed, status="completed_with_errors"),
+                                             plan, common, fp)
+    assert errored["status"] == "completed_with_errors"
+
+
+def test_a_star_truncation_flags_every_file_of_the_chunk_and_all_carry(tmp_path):
+    """(b)"""
+    repo = _big_repo(tmp_path, n_files=4)
+    common, fp, base, tip, allowed = _ledger_ctx(repo)
+    star = {"status": "completed_with_warnings", "findings": [],
+            "warnings": [{"file": None, "message": _TRUNC_MSG}]}
+    review_gate._write_run_records(star, [_item(e) for e in allowed[:2]], common, fp, "r1")
+    for e in allowed[:2]:
+        assert _record(common, fp, e)["truncated"] is True
+    assert _record(common, fp, allowed[2]) is None  # the other chunk is untouched
+    plan = _plan(repo, common, fp, base, tip)
+    assert [plan[e["path"]]["mode"] for e in allowed[:2]] == ["carry", "carry"]
+    assert [plan[e["path"]]["mode"] for e in allowed[2:]] == ["full", "full"]
+
+
+def test_a_changed_blob_is_full_never_a_delta_from_a_truncated_record(tmp_path):
+    """(c) -- and (d): an unchanged blob carries."""
+    repo = _big_repo(tmp_path, n_files=4)
+    common, fp, base, tip1, allowed = _ledger_ctx(repo)
+    star = {"status": "completed_with_warnings", "findings": [],
+            "warnings": [{"file": None, "message": _TRUNC_MSG}]}
+    review_gate._write_run_records(star, [_item(e) for e in allowed[:2]], common, fp, "r1")
+    ok = {"status": "success", "findings": [], "warnings": []}
+    review_gate._write_run_records(ok, [_item(e) for e in allowed[2:]], common, fp, "r1")
+
+    (repo / "mod0.py").write_text("x = 0\ny = 1\n")  # truncated before; now changed
+    (repo / "mod2.py").write_text("x = 2\ny = 1\n")  # complete before; now changed
+    _git(["add", "."], cwd=repo)
+    _git(["commit", "-q", "--amend", "--no-edit"], cwd=repo)
+    tip2 = _git(["rev-parse", "HEAD"], cwd=repo)
+    plan = _plan(repo, common, fp, base, tip2)
+    assert plan["mod0.py"]["mode"] == "full" and plan["mod0.py"]["miss_reason"] == "no_record"
+    assert plan["mod0.py"]["record"] is None
+    assert plan["mod2.py"]["mode"] in ("delta", "full")  # control: a complete record may be a base
+    assert plan["mod2.py"]["record"] is not None
+    # (d) the blob that did not change carries, flagged or not.
+    assert plan["mod1.py"]["mode"] == "carry" and plan["mod1.py"]["record"]["truncated"] is True
+    assert plan["mod3.py"]["mode"] == "carry"
+
+
+def test_rewriting_a_record_keeps_its_flag_chain_depth_and_run(tmp_path):
+    """(e)"""
+    repo = _big_repo(tmp_path, n_files=4)
+    common, fp, _, tip, allowed = _ledger_ctx(repo)
+    e = allowed[0]
+    key = review_gate._record_key(e["path"], "", e["status"], e["old_oid"])
+    f1 = {"path": e["path"], "severity": "high", "content": "one", "existing_code": "x",
+          "start_line": 1, "end_line": 1}
+    f2 = dict(f1, content="two")
+    review_gate._write_ledger_record(common, fp, key, e["new_oid"], e["path"], "", e["status"],
+                                     e["old_oid"], [f1], 3, "run-A", truncated=True)
+    item = _item(e, "carry", record=_record(common, fp, e))
+    review_gate._attach_to_carried_records([f2], [item], common, fp, "run-B", str(repo), tip)
+    rec = _record(common, fp, e)
+    assert [f["content"] for f in rec["findings"]] == ["one", "two"]
+    assert rec["truncated"] is True and rec["chain_depth"] == 3 and rec["run_id"] == "run-A"
+    drop = next(f["id"] for f in rec["findings"] if f["content"] == "one")
+    review_gate._drop_self_resolved([item], {e["path"]: {drop}}, common, fp, "run-C")
+    rec2 = _record(common, fp, e)
+    assert [f["content"] for f in rec2["findings"]] == ["two"]
+    assert rec2["truncated"] is True and rec2["chain_depth"] == 3 and rec2["run_id"] == "run-A"
+    # ...and a record that was complete stays complete.
+    e2 = allowed[1]
+    key2 = review_gate._record_key(e2["path"], "", e2["status"], e2["old_oid"])
+    review_gate._write_ledger_record(common, fp, key2, e2["new_oid"], e2["path"], "", e2["status"],
+                                     e2["old_oid"], [dict(f1, path=e2["path"])], 0, "run-A")
+    item2 = _item(e2, "carry", record=_record(common, fp, e2))
+    review_gate._attach_to_carried_records([dict(f2, path=e2["path"])], [item2], common, fp,
+                                           "run-B", str(repo), tip)
+    assert "truncated" not in _record(common, fp, e2)
+
+
+def test_a_truncated_write_never_replaces_a_complete_record(tmp_path):
+    """(f), and the converse: a complete write replaces a truncated record."""
+    repo = _big_repo(tmp_path, n_files=4)
+    common, fp, _, _, allowed = _ledger_ctx(repo)
+    e = allowed[0]
+    item = _item(e)
+    finding = {"path": e["path"], "severity": "medium", "content": "kept", "start_line": 1,
+               "end_line": 1, "confidence": 0.9, "existing_code": "x"}
+    review_gate._write_run_records(
+        {"status": "success", "findings": [finding], "warnings": []}, [item], common, fp, "r1")
+    before = _record(common, fp, e)
+    assert "truncated" not in before
+    trunc = {"status": "completed_with_warnings", "findings": [],
+             "warnings": [{"file": e["path"], "message": _TRUNC_MSG}]}
+    flagged = review_gate._write_run_records(trunc, [item], common, fp, "r2")
+    assert _record(common, fp, e) == before and flagged == set()
+    # Converse: complete over truncated.
+    e2 = allowed[1]
+    review_gate._write_run_records(
+        {"status": "completed_with_warnings", "findings": [],
+         "warnings": [{"file": e2["path"], "message": _TRUNC_MSG}]},
+        [_item(e2)], common, fp, "r1")
+    assert _record(common, fp, e2)["truncated"] is True
+    review_gate._write_run_records({"status": "success", "findings": [], "warnings": []},
+                                   [_item(e2)], common, fp, "r2")
+    assert "truncated" not in _record(common, fp, e2)
+
+
+def test_the_size_check_flags_a_big_diff_without_any_reviewer_warning(tmp_path):
+    """(g) lines over 400, or bytes over 16 KB; never a binary (non-numeric) entry."""
+    repo = _big_repo(tmp_path, n_files=4)
+    common, fp, _, tip, allowed = _ledger_ctx(repo)
+    clean = {"status": "success", "findings": [], "warnings": []}
+    big, small, binary = (dict(e) for e in allowed[:3])
+    big["lines"] = 450
+    small["lines"] = 3
+    binary["lines"] = 0  # numstat said `-`; the entry keeps 0
+    flagged = review_gate._write_run_records(
+        clean, [_item(big), _item(small), _item(binary)], common, fp, "r1", str(repo), tip)
+    assert flagged == {big["path"]}
+    assert _record(common, fp, big)["truncated"] is True
+    assert "truncated" not in _record(common, fp, small)
+    assert "truncated" not in _record(common, fp, binary)
+    # Few lines, but over 16 KB: 60 changed lines of 400 characters.
+    (repo / "wide.py").write_text("".join(f"v{i} = '{'x' * 400}'\n" for i in range(60)))
+    _git(["add", "."], cwd=repo)
+    _git(["commit", "-q", "-m", "wide"], cwd=repo)
+    tip2 = _git(["rev-parse", "HEAD"], cwd=repo)
+    base = _git(["rev-parse", "origin/main"], cwd=repo)
+    entries, _ = review_gate._collect_diff_entries(str(repo), base, tip2)
+    wide = next(e for e in entries if e["path"] == "wide.py")
+    assert 0 < wide["lines"] <= 400
+    assert review_gate._diff_exceeds_caps(_item(wide), str(repo)) is True
+    assert review_gate._diff_exceeds_caps(_item(wide), "") is False  # bytes need git
+    assert review_gate._diff_exceeds_caps(
+        _item(next(e for e in entries if e["path"] == "mod1.py")), str(repo)) is False
+
+
+# --- (i) a chunk that always times out is split, then given up on ---------------
+
+def _supervise_inproc(repo, tip, run_id, attempts=0):
+    """One supervisor run, in this process, against the real stub reviewer."""
+    common = review_gate._git_common_dir(str(repo))
+    state_path = review_gate._state_path(common, tip)
+    base = _git(["rev-parse", "origin/main"], cwd=repo)
+    review_gate._write_state(state_path, {
+        "state": "claimed", "run_id": run_id, "claimed_ts": time.time(), "tip": tip,
+        "branch": "main", "base": base, "range": f"{base}..{tip}", "repo_root": str(repo),
+        "git_dir": review_gate._git_dir(str(repo)), "mode": "hook", "attempts": attempts,
+        "protocol_version": review_gate.PROTOCOL_VERSION,
+    })
+    review_gate._supervise(str(state_path), run_id)
+    return review_gate._read_state(state_path)
+
+
+def test_a_chunk_that_always_times_out_is_split_and_then_fails_naming_the_file(
+        tmp_path, monkeypatch):
+    """(i) Run 1 times out on a chunk of 2; run 2 retries those files one by one
+    and times out on the slow file alone; run 3 times out on it alone again and
+    fails the review terminally, naming it; run 4 does not even call the reviewer."""
+    repo = _big_repo(tmp_path, n_files=4)
+    tip = _git(["rev-parse", "HEAD"], cwd=repo)
+    env = _chunk_env(tmp_path, STUB_SLEEP_FOR="mod1.py", STUB_SLEEP_FOR_SECS=30)
+    for k in ("CLAUDE_PLUGIN_DATA", "OCR_REVIEWER_CMD", "STUB_TRACE", "STUB_SLEEP_FOR",
+              "STUB_SLEEP_FOR_SECS"):
+        monkeypatch.setenv(k, env[k])
+    monkeypatch.delenv("OCR_FORCE_REVIEW", raising=False)
+    monkeypatch.setattr(review_gate, "_CHUNK_TIMEOUT", 2)
+    monkeypatch.setattr(review_gate, "_CHUNK_THRESHOLD", 3)
+    monkeypatch.setattr(review_gate, "_CHUNK_FILES", 2)
+    monkeypatch.setattr(review_gate, "_CHUNK_LINES", 99999)
+    monkeypatch.setattr(review_gate, "_RUN_BUDGET", 9999)
+
+    def chunks_called():
+        return [(c.get("manifest") or {}).get("paths") for c in _trace(tmp_path)]
+
+    # Run 1: [mod0, mod1] times out.
+    st = _supervise_inproc(repo, tip, "run-1")
+    assert st["state"] == "failed" and st["reason"] == "timeout", st
+    assert int(st.get("attempts") or 0) == 0  # progress, not an attempt
+    assert chunks_called() == [["mod0.py", "mod1.py"]]
+    assert "smaller chunks" in st["detail"]
+    assert "run the push again" in review_gate._failed_reason(st, "hook")
+
+    # Run 2: the same two files, one chunk each. mod0 is fine; mod1 times out alone.
+    st = _supervise_inproc(repo, tip, "run-2")
+    assert st["state"] == "failed" and st["reason"] == "timeout", st
+    assert chunks_called()[1:3] == [["mod0.py"], ["mod1.py"]]
+    common, fp, _, _, allowed = _ledger_ctx(repo)
+    assert _record(common, fp, allowed[0]) is not None  # mod0 got its record at last
+
+    # Run 3: mod1 alone times out a second time: terminal, naming the file.
+    n_before = len(chunks_called())
+    st = _supervise_inproc(repo, tip, "run-3")
+    assert chunks_called()[n_before] == ["mod1.py"]
+    assert st["state"] == "failed" and st["reason"] == "unreviewable", st
+    assert "file mod1.py cannot be reviewed within the timeout" in st["detail"]
+    assert int(st["attempts"]) == review_gate.ATTEMPT_CAP  # no automatic restart
+    text = review_gate._failed_reason(st, "hook")
+    assert "mod1.py cannot be reviewed within the timeout" in text
+    assert "still running" not in text
+
+    # Run 4 (a retry after the state expired): refused before any reviewer call.
+    n_before = len(chunks_called())
+    st = _supervise_inproc(repo, tip, "run-4", attempts=1)
+    assert st["reason"] == "unreviewable" and "mod1.py" in st["detail"]
+    assert len(chunks_called()) == n_before
+
+    # OCR_FORCE_REVIEW tries it once more -- which times out alone again.
+    monkeypatch.setenv("OCR_FORCE_REVIEW", "1")
+    st = _supervise_inproc(repo, tip, "run-5")
+    assert len(chunks_called()) > n_before and st["reason"] == "unreviewable"
+
+
+def test_raising_the_chunk_timeout_forgets_earlier_timeout_marks(tmp_path, monkeypatch):
+    repo = _big_repo(tmp_path, n_files=2)
+    common, fp, _, _, allowed = _ledger_ctx(repo)
+    items = [_item(e) for e in allowed]
+    monkeypatch.setattr(review_gate, "_CHUNK_TIMEOUT", 100)
+    assert review_gate._note_chunk_timeout(common, fp, items, 100) == ""
+    assert review_gate._note_chunk_timeout(common, fp, items[:1], 100) == ""
+    assert review_gate._note_chunk_timeout(common, fp, items[:1], 100) == allowed[0]["path"]
+    marks = review_gate._timeout_marks(common, fp, items)
+    assert set(marks) == {allowed[0]["path"], allowed[1]["path"]}
+    assert review_gate._stuck_paths(marks) == [allowed[0]["path"]]
+    monkeypatch.setattr(review_gate, "_CHUNK_TIMEOUT", 200)
+    assert review_gate._timeout_marks(common, fp, items) == {}
+    # With the ledger off nothing is recorded, so the plain timeout error stands.
+    monkeypatch.setenv("OCR_LEDGER", "0")
+    exc = review_gate.ReviewGateError("t", is_timeout=True)
+    assert review_gate._timeout_failure(exc, common, fp, items, 100, "chunk") is exc
+    # A mark older than its TTL is pruned with the ledger, whatever the ledger TTL.
+    monkeypatch.delenv("OCR_LEDGER")
+    mark = review_gate._timeout_mark_path(
+        common, fp, review_gate._item_record_key(items[0]), allowed[0]["new_oid"])
+    assert mark.exists()
+    os.utime(mark, (time.time() - review_gate._TIMEOUT_MARK_TTL - 60,) * 2)
+    review_gate._prune_ledger(common)
+    assert not mark.exists()
+
+
+def test_a_split_chunk_is_halved_down_to_one_file(monkeypatch):
+    monkeypatch.setattr(review_gate, "_CHUNK_FILES", 8)
+    monkeypatch.setattr(review_gate, "_CHUNK_LINES", 99999)
+    items = [_item({"path": f"f{i}.py", "old_path": "", "status": "A", "old_oid": "0" * 40,
+                    "new_oid": f"{i:040x}", "lines": 1}) for i in range(8)]
+
+    def sizes(marks):
+        return [len(c) for c in review_gate._plan_to_chunks(items, marks)]
+
+    assert sizes(None) == [8]
+    assert sizes({"f3.py": {"chunk_size": 8}}) == [4, 4]
+    assert sizes({"f3.py": {"chunk_size": 4}}) == [2, 2, 2, 2]
+    assert sizes({"f3.py": {"chunk_size": 2}}) == [1] * 8
+    assert sizes({"f3.py": {"chunk_size": 1}}) == [1] * 8
