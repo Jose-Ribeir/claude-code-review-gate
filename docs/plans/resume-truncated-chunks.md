@@ -369,15 +369,146 @@ seg:<SEG_VERSION>:<fingerprint>:<lang>:<path_hash>:<base_unit_hash or ->:<tip_un
 6. A run killed after chunk 1 keeps chunk 1's unit records, and the resume reviews only
    the rest.
 
-### Later (Phase 2 of the design)
+### Cross-function bugs (must ship with Part S)
 
-- **Signature-change context.** When a unit's signature changes, callers in the same file
-  are included as read-only context units.
-- **Resolver short-circuit.** A finding whose `anchor_hash` still exists is still open,
-  with no resolver call. Otherwise only that unit's diff goes to the resolver.
-- **Cross-file move detection.**
-- **Unit-level delta reviews.**
-- **A lower segmentation threshold**, for example 200 lines, once this is stable.
+Source: a second super-thinker review.
+
+**The risk.** Unit records are keyed on the unit's own text. Suppose changed unit A starts
+returning `None`, raises something new, changes a default, or becomes `async`. An
+unchanged caller B keeps its cached review and is never looked at again. Also, two
+changed units of the same file could land in different chunks and never be seen together.
+
+**Baseline.** For the files Part S touches (over 400 lines or 16 KB), today's review is
+already nearly blind across functions, because the diff is `-U0` or only hunk headers.
+Whole-file review of small files is the strong baseline, and it does not change.
+
+The must-haves below add **no extra LLM calls**: they add tokens, not calls.
+
+1. **Call edges, deterministically.**
+   - Python: `ast` on the tip file the segmenter already parsed, using names, `self.X`
+     calls and attribute calls. Other languages: a name-reference regex.
+   - Regex filtering: names under 4 characters are skipped, as are names defined twice
+     and stoplisted names (`get`, `set`, `run`, `init`, …).
+   - Caps: 8 callers per changed unit, or 4 for regex languages.
+   - Cross-file references keep using `find_references`. A hit in a segmented file is
+     mapped to its enclosing unit.
+2. **Unit-driven impact analysis.** `ocr_impact.changed_symbols` is fed the changed-unit
+   list, so changes that only touch a body still produce call sites, as today.
+   - `max_symbols` scales with the push, up to 60.
+   - Each site is routed to the chunk that holds the changed callee.
+   - `impact_verdicts` are required, as today.
+3. **Context units with verify tasks.** For each changed unit A, its same-file callers go
+   into A's chunk as read-only context units, with a task id `dep:<n>`. The task: "A
+   changed; verify B still handles its arguments, return value, exceptions, `await` and
+   shared state."
+   - The reviewer returns `dep_verdicts: {id: ok|broken|unsure}`, and a broken caller
+     gets a finding located in B.
+   - Caps: 6 callers per unit, 80 lines per context unit, 400 context lines per chunk.
+   - Cross-file call sites widen from ±6 lines to the whole enclosing unit when there is
+     budget (up to 12 KB).
+4. **File-affinity packing.** All changed units of a file go in the same chunk. A file is
+   split only if it alone exceeds the chunk cap, and then along call-graph components.
+   Cross-file changed units linked by call edges are packed together.
+5. **Dependency-check records**, a new ledger record type:
+   `dep:<segver>:<fp>:<lang>:<path_hash_B>:<B_hash>:<path_hash_A>:<A_hash>`.
+   - A (caller, changed callee) pair is checked **exactly once**. `ok` and `broken` are
+     final for that pair of texts.
+   - `unsure` is retried once on a later push, then recorded as a non-blocking
+     "unverified dependency".
+   - Pairs that didn't fit the budget are stored as `pending` and scheduled first next
+     time.
+   - There is no cascade through unchanged units: a broken B gets edited, and that
+     schedules B's callers on the next push. This is one hop per push, the same depth as
+     today's impact analysis.
+   - The result is convergent. Unit and dep keys depend only on text, and a no-op re-push
+     makes zero LLM calls.
+6. **Removed and renamed units are fed to §2b deterministically**, instead of relying on
+   the orchestrator spotting them in the diff.
+7. **Delta mode on small files** also gets same-file caller context units and dep
+   records. Delta mode is where small files lose whole-file visibility today.
+8. **Telemetry:** dep tasks scheduled, answered and pending; the verdict mix; the edge
+   source (ast or regex); context lines per chunk.
+
+**Rejected:**
+- **Callee contract digests in cache keys.** They cause cascades, and every false
+  positive becomes an LLM re-review.
+- **Propagation through unchanged units.** It is unbounded, and real edits already
+  propagate.
+- **An always-on cross-unit summary pass.** It costs about 5 minutes per push with no
+  proven value, and its cross-file claims are capped at confidence 0.4.
+
+**Agent prompt edit.** Context units, `dep_verdicts` and absolute-line items change the
+reviewer's input and output contract. That means editing `agents/code-reviewer.md`, which
+invalidates every cached review **once**. Ship it in the same release as Part S so it
+happens only once.
+
+### Phase 1.5 (first follow-up, ≤1 extra call on a minority of pushes)
+
+- **`contract_delta`.** Each reviewed unit reports one of `returns_none`, `raises_new`,
+  `mutates_state`, `async_change`, … plus a note. It is stored on the unit record and shown
+  in the verdict. It is never part of a cache key.
+- **Gated stage-2 call.** At most one extra call, and only when a unit's contract moved,
+  some callers stayed unchecked (pending), and the push isn't already blocked.
+- **Sibling-fix grep.** Take distinctive removed lines from a changed unit and `git grep`
+  them at the tip. This catches the unpatched twin of a fixed function.
+- **Interface digest, for prioritising budgets only.** It covers signature, async and
+  generator flags, return shapes, the raise set, globals and `self.X` mutations.
+
+### Phase 2
+
+- **Module-level constants and class fields as symbols.** For example `MAX_ITEMS = 10`,
+  or a removed dataclass field.
+- **Cross-file callee signatures for Python**, resolved through imports.
+- **Resolver short-circuit.** An `anchor_hash` that still exists means the finding is
+  still open, with no resolver call. Otherwise send only that unit's diff.
+- Cross-file move detection, unit-level delta reviews, and a lower segmentation threshold
+  (200 lines).
+
+### Benchmark and ship criteria for Part S
+
+**Seeded benchmark.** A synthetic repo, 3 runs per scenario, comparing whole-file (today),
+Unit (Part S alone) and Unit+ (with the must-haves):
+
+1. A body-only change now returns `None`; a same-file caller dereferences the result.
+2. The same, with the caller in another file.
+3. A function now raises `TimeoutError`; its caller catches only `ValueError`.
+4. Parameters reordered, with 3 callers across 2 files.
+5. A default changed from `retries=3` to `0`.
+6. `def` became `async def`, and a caller doesn't `await`.
+7. A module constant changed, breaking a pagination assumption elsewhere.
+8. A rename in a 900-line file, with same-file and cross-file callers.
+9. A sibling fix: `encode_v1` was fixed, but its twin `encode_v2` wasn't.
+10. Lock pairing: `acquire()` changed, `release()` didn't.
+11. Two changed units in one 1,200-line file must agree (a serializer/deserializer pair).
+12. A dataclass field removed in `models.py` is still read in `report.py`.
+13. Resume: abort after chunk 1, re-run, and the run converges.
+14. A no-op re-push after a prepended 50-line docstring makes zero calls, with correct
+    lines.
+15. The TS variant of scenarios 1 and 4.
+
+**Ship when:**
+- **Same-function bug classes.** Unit+ is at least as good as whole-file on 1–6, 8, 11 and
+  13–15. Scenarios 11, 13 and 14 pass 3/3.
+- **Known weak spots.** On 7, 9, 10 and 12, Unit+ is at least as good as today's
+  large-file baseline. Gaps are documented, not claimed as covered.
+- **Historical replay** of past blocked pushes, with the ledger cleared:
+  - every past blocking finding reproduces in at least 2/3 runs;
+  - no blocked push turns into a pass;
+  - the warn/pass sample gains under 20% new blocking findings.
+- **Cost.** Median reviewer calls per push are no higher than today, and p90 tokens per
+  chunk are at most 1.5× today's.
+- **Reflexive-`ok` check.** If `dep_verdicts` come back 100% `ok` on the seeded bugs, the
+  prompt is being ignored, so fix it before shipping. Today's telemetry (13 impact sites,
+  all `ok`) is a warning sign.
+
+**Size estimate.** About 1.2–1.6k lines including tests, roughly 3–5 agent-days, on top of
+the segmenter.
+
+**Confidence (super-thinker's estimate):**
+- About 0.85 that Unit+ is no worse than today for big files.
+- About 0.65 that it beats whole-file review on same-file cross-function bugs.
+- Low for shared state, constants and ordering (scenarios 5–7 and 10). Those depend on the
+  LLM's judgement in every mode, so they are documented as limits.
 
 ---
 
