@@ -3122,6 +3122,9 @@ def _supervise_run(state_path, run_id):
             _mark_phase("review", chunks=chunks_new)
             if seg is not None:
                 seg_unverified = seg.report()[2]       # includes the checks that stayed unsure just now
+                if seg.segmented_paths():
+                    plan_summary += (f"; {len(seg.segmented_paths())} big file(s) in units "
+                                     f"({seg.stats['hits']} of {seg.stats['units']} cached)")
             if planner_warnings and isinstance(result, dict):
                 result = dict(result)
                 result["warnings"] = (_planner_warning_objs(planner_warnings)
@@ -3213,8 +3216,12 @@ def _supervise_run(state_path, run_id):
                 # Detect if the reviewer re-confirms a provisionally-resolved finding.
                 reviewer_override = set()
                 deduped_new = []
+                # A flagged-truncated record Part S re-reviews still carries what the partial
+                # review found: the proper review must not report the same defect again.
+                reviewed_again = set(seg.trials) if seg is not None else set()
+                held = still_present + [f for f in anchored_carried if f.get("path") in reviewed_again]
                 for nf in new_findings:
-                    if any(_findings_similar(nf, sp) for sp in still_present):
+                    if any(_findings_similar(nf, sp) for sp in held):
                         continue
                     deduped_new.append(nf)
                     for prov_p, _, _, _ in provisional_resolved:
@@ -5736,6 +5743,7 @@ class _SegState:
         self.diffs = {}
         self.trials = {}             # flagged-truncated carries that can be segmented
         self._counters = {}          # directory -> numbering of its unit and context files
+        self.orig_diffs = {}         # path -> the whole-file diff replaced by units
 
     # --- building ------------------------------------------------------------------
 
@@ -5953,42 +5961,18 @@ class _SegState:
         run = ocr_impact.git_runner(self.review_root)
         for item in active_items:
             path = item["entry"]["path"]
-            d = diffs.get(path)
-            usable = d is not None and not d["failed"] and not d["binary"]
-            over = usable and d["level"] != "full"
-            sf = None
-            trial = self.trials.get(path)
-            if trial is not None:
-                # a flagged-truncated carry that CAN be segmented: reviewed in units when
-                # its diff is still over the limit, plainly (and properly) when it is not
-                if over:
-                    self.complete(trial)
-                    sf = trial
-            elif over:
-                if item["mode"] == "delta":
-                    # the units carry the cache now: this file is reviewed over the whole push
-                    # range (its record stays, for what it still owes)
-                    saved = dict(item)
-                    item.update(mode="full", miss_reason="seg")
-                    sf = self.build(item)
-                    if sf is None:
-                        item.clear()
-                        item.update(saved)
-                    else:
-                        try:
-                            diffs[path] = d = _build_item_diff(
-                                run, _item_diff_spec(item, self.base, self.tip), _CHUNK_DIFF_LINES)
-                        except Exception:
-                            diffs[path] = d = _failed_diff()
-                else:
-                    sf = self.build(item)
-            elif usable and item["mode"] == "delta":
-                sf = self.build(item, delta=True)
-                if sf is not None and not sf.deps:
-                    del self.files[path]
-                    sf = None
-            if sf is not None and not sf.delta and d is not None:
-                diffs[path] = dict(d, owned=True, truncated=False, segmented=True)
+            saved_item, saved_d = dict(item), diffs.get(path)
+            try:
+                self._plan_one(item, diffs, run)
+            except Exception as exc:
+                # Part S is an optimisation: whatever goes wrong, the file is reviewed whole
+                self.files.pop(path, None)
+                self.orig_diffs.pop(path, None)
+                item.clear()
+                item.update(saved_item)
+                if saved_d is not None:
+                    diffs[path] = saved_d
+                self._decline(path, "error_" + type(exc).__name__[:30])
         self.diffs = diffs
         for sf in self.files.values():
             if sf.delta and sf.deps:
@@ -5997,6 +5981,54 @@ class _SegState:
         _TELE["seg"] = dict(self.stats, files=len(self.files),
                             declined={k: v for k, v in list(self.declined.items())[:20]})
         return self
+
+    def _plan_one(self, item, diffs, run):
+        path = item["entry"]["path"]
+        d = diffs.get(path)
+        usable = d is not None and not d["failed"] and not d["binary"]
+        over = usable and d["level"] != "full"
+        sf = None
+        trial = self.trials.get(path)
+        if trial is not None:
+            # a flagged-truncated carry that CAN be segmented: reviewed in units when
+            # its diff is still over the limit, plainly (and properly) when it is not
+            if over:
+                self.complete(trial)
+                sf = trial
+        elif over:
+            if item["mode"] == "delta":
+                # the units carry the cache now: this file is reviewed over the whole push
+                # range (its record stays, for what it still owes)
+                saved = dict(item)
+                item.update(mode="full", miss_reason="seg")
+                sf = self.build(item)
+                if sf is None:
+                    item.clear()
+                    item.update(saved)
+                else:
+                    try:
+                        diffs[path] = d = _build_item_diff(
+                            run, _item_diff_spec(item, self.base, self.tip), _CHUNK_DIFF_LINES)
+                    except Exception:
+                        diffs[path] = d = _failed_diff()
+            else:
+                sf = self.build(item)
+        elif usable and item["mode"] == "delta":
+            sf = self.build(item, delta=True)
+            if sf is not None and not sf.deps:
+                del self.files[path]
+                sf = None
+        if sf is not None and not sf.delta and d is not None:
+            self.orig_diffs[path] = d
+            diffs[path] = dict(d, owned=True, truncated=False, segmented=True)
+
+    def abandon(self, diffs):
+        """Part S gave up on this run (a planning error): every unit-reviewed file goes
+        back to the whole-file diff it had, flags and all, and is reviewed as in 0.10.0."""
+        for path, d in self.orig_diffs.items():
+            diffs[path] = d
+        self.files = {}
+        self.orig_diffs = {}
 
     def _cap_delta_deps(self, sf):
         """A delta file's chunk cannot be split, so its caller checks must fit one."""
@@ -6668,13 +6700,22 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
     """
     if timeout_marks is None:
         timeout_marks = _timeout_marks(common_dir, fp, active_items)
+    chunks = None
     if seg is not None and seg.files:
-        sizes = {p: d["lines"] for p, d in (diffs or {}).items() if not d["failed"] and d["lines"]}
-        done_in_units = seg.segmented_paths()
-        chunks = seg.plan_chunks(
-            [it for it in active_items if it["entry"]["path"] not in done_in_units],
-            timeout_marks, sizes, _CHUNK_DIFF_LINES, impact)
-        planner_warnings = list(planner_warnings or []) + list(seg.warnings)
+        try:
+            sizes = {p: d["lines"] for p, d in (diffs or {}).items() if not d["failed"] and d["lines"]}
+            done_in_units = seg.segmented_paths()
+            chunks = seg.plan_chunks(
+                [it for it in active_items if it["entry"]["path"] not in done_in_units],
+                timeout_marks, sizes, _CHUNK_DIFF_LINES, impact)
+            planner_warnings = list(planner_warnings or []) + list(seg.warnings)
+        except Exception as exc:
+            _metric_log("seg_plan_error", kind=type(exc).__name__[:30])
+            _debug_log(f"seg planning failed, reviewing whole files: {type(exc).__name__}: {exc}")
+            seg.abandon(diffs or {})
+            seg, chunks = None, None
+    if chunks is not None:
+        pass
     elif diffs is not None:
         sizes = {p: d["lines"] for p, d in diffs.items() if not d["failed"] and d["lines"]}
         chunks = _plan_to_chunks(active_items, timeout_marks, sizes, _CHUNK_DIFF_LINES)
@@ -6838,7 +6879,11 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
                                common_dir, fp, run_id, review_root, tip,
                                precomputed=_owned_truncation(diffs))
         if seg is not None:
-            seg.apply([it for it in chunk_items if it.get("seg_file") is not None], result)
+            try:
+                seg.apply([it for it in chunk_items if it.get("seg_file") is not None], result)
+            except Exception as exc:    # the chunk's findings stay; nothing is recorded for its units
+                _metric_log("seg_apply_error", kind=type(exc).__name__[:30])
+                _debug_log(f"seg apply failed: {type(exc).__name__}: {exc}")
 
         chunk_results.append(result)
         chunks_done += 1

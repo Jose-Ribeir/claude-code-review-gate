@@ -555,3 +555,92 @@ def test_two_unit_reviewed_files_in_one_chunk_have_their_own_files(tmp_path, gat
             if i["kind"] == "unit_diff" and i["unit"] == "f3":
                 texts[i["path"]] = c["item_files"][f"unit:{i['path']}:f3:1"]
     assert "+    q = 1" in texts["big2.py"] and "+    q = 1" not in texts["big.py"]
+
+
+def _state_for(work, tip, paths, tmp_path):
+    base = ag._git(["rev-parse", "origin/main"], cwd=work)
+    entries, _ = review_gate._collect_diff_entries(str(work), base, tip)
+    state = review_gate._SegState(str(work), base, tip, common_of(work), "f" * 64, "r", False)
+    items = []
+    for e in entries:
+        if e["path"] in paths:
+            item = {"entry": e, "mode": "full", "record": None, "from_oid": "", "miss_reason": "x"}
+            assert state.build(item) is not None, state.declined
+            items.append(item)
+    return state, items
+
+
+def test_chunks_with_a_caller_check_owed_from_an_earlier_run_run_first(tmp_path, gate_env):
+    gate_env.setattr(review_gate, "_PRECOMPUTED_MAX_LINES", 1)
+    work = rr._tiny_repo(tmp_path, {"keep.py": "x = 0\n", "a.py": small_module(), "z.py": small_module()})
+    tip = commit(work, {"a.py": small_module("    return None\n"), "z.py": small_module("    return None\n")})
+    state, items = _state_for(work, tip, {"a.py", "z.py"}, tmp_path)
+    sf_z = state.files["z.py"]
+    assert all(d["status"] == "needed" and not d["pending"] for sf in state.files.values() for d in sf.deps)
+    plain = lambda: []  # noqa: E731 -- every file is segmented: no plain items
+    budget = 12                                                # one file's work per chunk
+    order = [c[0]["entry"]["path"] for c in state.plan_chunks(plain(), {}, {}, budget)]
+    assert order == ["a.py", "z.py"]
+    state, items = _state_for(work, tip, {"a.py", "z.py"}, tmp_path)
+    for d in state.files["z.py"].deps:
+        d["pending"] = True                                    # owed since an earlier run
+    order = [c[0]["entry"]["path"] for c in state.plan_chunks(plain(), {}, {}, budget)]
+    assert order == ["z.py", "a.py"] and sf_z
+
+
+def test_files_that_call_each_other_are_packed_side_by_side():
+    def g(path):
+        return {"sf": None, "plain": {"entry": {"path": path}}, "size": 1, "ctx": 0,
+                "members": 1, "pending": False, "atoms": []}
+    state = object.__new__(review_gate._SegState)
+    groups = [g("a.py"), g("b.py"), g("c.py"), g("d.py")]
+    impact = {"symbols": [{"name": "alpha", "defined_in": "a.py"}],
+              "sites": [{"name": "alpha", "path": "d.py"}]}
+    assert [x["plain"]["entry"]["path"] for x in state._link_order(groups, impact)] == [
+        "a.py", "d.py", "b.py", "c.py"]
+    assert state._link_order(groups, None) == groups
+
+
+# --- Part S never costs a review: any failure of its own falls back to whole-file review -------------
+
+def _whole_file_review(call):
+    assert not kinds(call, "unit_diff")
+    (item,) = kinds(call, "file_diff")
+    assert item["path"] == "big.py" and item["truncated"] is True and item["level"] == "stat"
+
+
+def test_a_crash_while_planning_a_file_reviews_it_whole(tmp_path, gate_env):
+    def boom(self, sf):
+        raise RuntimeError("planning bug")
+    gate_env.setattr(review_gate._SegState, "complete", boom)
+    work, tip = push_big(tmp_path, {"big.py": module(40)})
+    st, calls = run(work, tip, tmp_path, gate_env)
+    assert st["state"] == "done"
+    (call,) = reviews(calls)
+    _whole_file_review(call)
+    assert review_gate._TELE["seg"]["declined"] == {"big.py": "error_RuntimeError"}
+    assert review_gate._is_truncated_record(file_record(work, tip, "big.py"))   # Part A's flag, as before
+
+
+def test_a_crash_while_packing_chunks_reviews_everything_whole(tmp_path, gate_env):
+    def boom(self, *a, **k):
+        raise RuntimeError("packing bug")
+    gate_env.setattr(review_gate._SegState, "plan_chunks", boom)
+    work, tip = push_big(tmp_path, {"big.py": module(40)})
+    st, calls = run(work, tip, tmp_path, gate_env)
+    assert st["state"] == "done"
+    (call,) = reviews(calls)
+    _whole_file_review(call)
+    # Python's flag for the file is the whole-file one again, not the "owned, untruncated" of units
+    assert st.get("unreviewed_truncated") == 1
+
+
+def test_a_crash_while_recording_a_chunk_keeps_its_findings_and_records_nothing(tmp_path, gate_env):
+    def boom(self, *a, **k):
+        raise RuntimeError("recording bug")
+    gate_env.setattr(review_gate._SegState, "apply", boom)
+    gate_env.setenv("STUB_UNIT_FINDINGS", json.dumps({"f2": {"severity": "high", "content": "f2 bad", "offset": 1}}))
+    work, tip = push_big(tmp_path, {"big.py": module(40)})
+    st, calls = run(work, tip, tmp_path, gate_env)
+    assert st["state"] == "done" and st["verdict"] == "block" and "f2 bad" in st["reasons"]
+    assert seg_recs(work, tip) == [] and file_record(work, tip, "big.py") is None   # re-reviewed next time
