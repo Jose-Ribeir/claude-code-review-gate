@@ -295,6 +295,8 @@ def segment(path, text, class_split=None):
             units, method = _regions(lines, 1, len(lines)), "cut"
         except Exception:
             units = []
+    for i, u in enumerate(units):
+        u["idx"] = i
     return {"lang": lang, "method": method, "units": units, "lines": lines}
 
 

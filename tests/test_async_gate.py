@@ -937,8 +937,10 @@ def test_a_truncated_file_is_carried_on_resume_and_stays_visible(tmp_path):
     rec = _record(common, fp, next(e for e in allowed if e["path"] == "mod0.py"))
     assert rec is not None and rec["truncated"] is True
 
-    # Run 2, same tip: no sleep, no truncation warning from the stub any more.
-    env2 = _chunk_env(tmp_path, STUB_FINDINGS_FOR=findings)
+    # Run 2, same tip: no sleep, no truncation warning from the stub any more. Still on the
+    # 0.9.x path: since 0.11.0 a flagged record of a file that can be reviewed in units is
+    # reviewed afresh instead (tests/test_segment_gate.py), which is not what this checks.
+    env2 = _chunk_env(tmp_path, STUB_FINDINGS_FOR=findings, OCR_PRECOMPUTED_DIFFS="0")
     env2["STUB_TRACE"] = str(tmp_path / "stub2.trace")
     decision2, reason2, _, _ = _hook(repo, "git push origin main", env2, timeout=60)
     assert decision2 == "allow", reason2  # a medium finding warns, never blocks

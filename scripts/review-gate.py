@@ -63,6 +63,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ocr_verdict import compute_verdict  # noqa: E402
 import ocr_impact  # noqa: E402
+import ocr_segment  # noqa: E402
 import ocr_telemetry  # noqa: E402
 
 PROMPT = "/review-gate:review --unpushed --json"
@@ -2956,6 +2957,13 @@ def _supervise_run(state_path, run_id):
                 result["warnings"] = (_planner_warning_objs(planner_warnings)
                                       + list(result.get("warnings") or []))
         else:
+            # Part S: a flagged-truncated record of a file that CAN be reviewed in
+            # units is no longer carried -- the file gets its proper review.
+            seg = None
+            if _seg_enabled():
+                seg = _SegState(review_root, base, tip, common_dir, fp,
+                                run_id, _ledger_enabled() and not force_review)
+                seg.convert_truncated_carries(plan)
             active_items = [p for p in plan if p["mode"] in ("delta", "full")]
             carry_items = [p for p in plan if p["mode"] == "carry"]
             carry_paths = [p["entry"]["path"] for p in carry_items]
@@ -2975,9 +2983,10 @@ def _supervise_run(state_path, run_id):
                 push_paths)
             _mark_phase("impact", sites=len((_TELE.get("impact") or {}).get("sites") or []))
 
-            def _review_extras(k, chunk_paths):
+            def _review_extras(k, chunk_paths, chunk_items=None):
                 extras = {}
-                bundle = _impact_bundle(review_root, tip, impact, chunk_paths)
+                bundle = _impact_bundle(review_root, tip, impact, chunk_paths,
+                                        seg=seg, k=k, chunk_items=chunk_items)
                 if bundle:
                     extras["impact"] = bundle
                 if defects and k == 0:  # each defect needs judging once
@@ -3008,6 +3017,25 @@ def _supervise_run(state_path, run_id):
                     fallback=sum(1 for d in diffs.values() if d["failed"]),
                     binary=sum(1 for d in diffs.values() if d["binary"]))
 
+            # Part S: files over Part B's limit are reviewed in units, with their callers
+            # checked; what is already cached replays here.
+            seg_local, seg_foreign, seg_unverified = [], [], []
+            if seg is not None and diffs is not None and active_items:
+                seg.plan_active(active_items, diffs)
+                seg.annotate_impact(impact)
+                if seg.files or seg.declined:
+                    _mark_phase("segment", files=len(seg.files), units=seg.stats["units"],
+                                hits=seg.stats["hits"], deps=seg.stats["deps"],
+                                declined=seg.stats["declined"])
+                seg_local, seg_foreign, seg_unverified = seg.report()
+                prior_ids = {p["id"] for p in to_resolve} | {
+                    f.get("id") or _finding_id(f) for f in carried_findings}
+                more_resolve, more_carried = _seg_classify_foreign(
+                    seg_foreign, review_root, tip, common_dir, fp, set(prior_ids))
+                to_resolve += more_resolve
+                carried_findings += more_carried
+                seg_local = _seg_suppress_resolved(seg_local, prior_ids, review_root, tip, common_dir, fp)
+
             def _single(call):
                 """The single-context review: a timeout there marks its files too."""
                 try:
@@ -3028,13 +3056,14 @@ def _supervise_run(state_path, run_id):
                 result = {"status": "replayed", "findings": [], "warnings": []}
                 chunks_new = 0
                 plan_summary = f"carried {len(carry_items)} file(s), 0 reviewed"
-            elif len(active_items) > _CHUNK_THRESHOLD or timeout_marks:
+            elif (len(active_items) > _CHUNK_THRESHOLD or timeout_marks
+                  or (seg is not None and seg.files)):
                 # Multi-chunk path.
                 result, ran, raw_name, chunks_new = _run_chunked(
                     state_path, run_id, common_dir, review_root, mode, git_dir,
                     tip, push_range, active_items, planner_warnings, fenced, progress,
                     fp=fp, carry_paths=carry_paths, chunk_extras=_review_extras,
-                    timeout_marks=timeout_marks, diffs=diffs,
+                    timeout_marks=timeout_marks, diffs=diffs, seg=seg, impact=impact,
                 )
                 n_delta = sum(1 for p in active_items if p["mode"] == "delta")
                 n_full = len(active_items) - n_delta
@@ -3091,6 +3120,8 @@ def _supervise_run(state_path, run_id):
                 )
 
             _mark_phase("review", chunks=chunks_new)
+            if seg is not None:
+                seg_unverified = seg.report()[2]       # includes the checks that stayed unsure just now
             if planner_warnings and isinstance(result, dict):
                 result = dict(result)
                 result["warnings"] = (_planner_warning_objs(planner_warnings)
@@ -3167,7 +3198,7 @@ def _supervise_run(state_path, run_id):
                 anchored_carried.append(f2)
 
             # Merge new findings (from reviewer) with priors.
-            prior_findings = still_present + anchored_carried
+            prior_findings = still_present + anchored_carried + seg_local
             if isinstance(result, dict):
                 new_findings = list(result.get("findings") or [])
                 site_ids = {s.get("id") for s in (_TELE.get("impact") or {}).get("sites") or []}
@@ -3216,7 +3247,7 @@ def _supervise_run(state_path, run_id):
                     review_root, tip,
                     [nf for nf in deduped_new if nf.get("provenance") == "new"], push_paths)
 
-                all_findings = deduped_new + prior_findings + notes
+                all_findings = deduped_new + prior_findings + notes + seg_unverified
                 result = dict(result, findings=all_findings)
                 result = _surface_truncated(result, plan, common_dir, fp,
                                             set(_owned_truncation(diffs)))
@@ -4190,19 +4221,29 @@ def _compute_impact(review_root, tip, active_items):
                 "warnings": [f"impact analysis failed ({exc})"]}
 
 
-def _impact_bundle(review_root, tip, impact, chunk_paths):
+def _impact_bundle(review_root, tip, impact, chunk_paths, seg=None, k=None, chunk_items=None):
     """The `impact` manifest field for one reviewer context, or None.
 
     Covers symbols defined in this context's files, and call sites OUTSIDE them
     -- including files another chunk reviews, which this reviewer cannot see.
+
+    With `seg` (Part S) a segmented file's symbols go to the chunk that holds
+    their unit, the symbol budget scales with the push (up to 60), and a call
+    site of such a symbol shows its whole enclosing unit instead of +-6 lines.
     """
     if not impact:
         return None
     paths = set(chunk_paths)
+    symbols, kw = impact["symbols"], {}
+    if seg is not None and chunk_items is not None:
+        symbols = seg.route_symbols(impact, chunk_items, k)
+        kw["max_symbols"] = min(_SEG_MAX_SYMBOLS, max(30, len(symbols)))
     try:
         b = ocr_impact.build_bundle(
-            ocr_impact.git_runner(review_root), tip, impact["symbols"], impact["sites"],
-            impact["ref_counts"], include_paths=paths, exclude_paths=paths)
+            ocr_impact.git_runner(review_root), tip, symbols, impact["sites"],
+            impact["ref_counts"], include_paths=paths, exclude_paths=paths, **kw)
+        if seg is not None and chunk_items is not None:
+            seg.widen_sites(b)
     except Exception as exc:
         _TELE.setdefault("impact_warnings", []).append(f"bundle failed ({exc})")
         return None
@@ -4625,7 +4666,7 @@ def _prune_ledger(common_dir):
             return
         now = time.time()
         cutoff = now - _LEDGER_TTL
-        all_records = []
+        all_records, seg_records = [], []
         for fp_dir in list(led_dir.iterdir()):
             if not fp_dir.is_dir():
                 continue
@@ -4651,13 +4692,26 @@ def _prune_ledger(common_dir):
                         mark.unlink()
                 except OSError:
                     continue
-        if len(all_records) > _LEDGER_MAX_RECORDS:
-            all_records.sort(reverse=True)  # keep newest
-            for _, stale in all_records[_LEDGER_MAX_RECORDS:]:
-                try:
-                    stale.unlink()
-                except OSError:
-                    pass
+            # Part S records (units and caller checks): the same TTL, and their own cap
+            for sub in ("seg", "dep"):
+                for rec_file in (fp_dir / sub).glob("*.json"):
+                    try:
+                        mtime = rec_file.stat().st_mtime
+                        if mtime < cutoff:
+                            rec_file.unlink()
+                        else:
+                            seg_records.append((mtime, rec_file))
+                    except OSError:
+                        continue
+        for records, cap in ((all_records, _LEDGER_MAX_RECORDS),
+                             (seg_records, _LEDGER_MAX_RECORDS * _SEG_RECORD_CAP_FACTOR)):
+            if len(records) > cap:
+                records.sort(reverse=True)  # keep newest
+                for _, stale in records[cap:]:
+                    try:
+                        stale.unlink()
+                    except OSError:
+                        pass
     except Exception:
         pass
 
@@ -4712,11 +4766,17 @@ def _stuck_paths(marks):
     return [p for p, m in marks.items() if int(m.get("solo_attempts") or 0) >= 2]
 
 
+def _chunk_members(items):
+    """How many pieces of work a chunk holds: one per file, except that a file
+    reviewed in units (Part S) counts the groups of units it brought."""
+    return sum(max(1, int(it.get("members") or 1)) for it in items)
+
+
 def _note_chunk_timeout(common_dir, fp, chunk_items, timeout_s):
     """Mark every file of a chunk that timed out. Returns the path of a file that
     has now timed out twice on its own, "" when the chunk is merely to be split
     next time, or None when nothing could be recorded (so nothing will change)."""
-    n, stuck = len(chunk_items), ""
+    n, stuck = _chunk_members(chunk_items), ""
     try:
         for item in chunk_items:
             e = item["entry"]
@@ -4768,13 +4828,15 @@ def _timeout_failure(exc, common_dir, fp, items, timeout_s, label):
         return exc
     if stuck:
         return ReviewUnreviewableError(_unreviewable_message([stuck], timeout_s))
-    n = len(items)
+    n = _chunk_members(items)
     if n == 1:
         return ReviewChunkTimeout(
             f"{label} timed out after {timeout_s}s on one file alone; one more timeout "
             "and that file is declared unreviewable")
+    what = "piece(s) of work (files, or units of a big file)" if any(
+        it.get("seg_file") is not None for it in items) else "file(s)"
     return ReviewChunkTimeout(
-        f"{label} of {n} file(s) timed out after {timeout_s}s; the next push retries "
+        f"{label} of {n} {what} timed out after {timeout_s}s; the next push retries "
         "them in smaller chunks")
 
 
@@ -4995,12 +5057,12 @@ def _diff_warnings(diffs):
             "(NUL bytes or a `-diff` attribute): their content was not shown to the reviewer"]
 
 
-def _write_diff_file(directory, n, text):
+def _write_diff_file(directory, n, text, name=None):
     """Write one diff as `<nnn>.diff` (bytes, LF) in `directory`; "" on failure.
     The name is generated here -- never derived from a path in the reviewed tree."""
     try:
         directory.mkdir(parents=True, exist_ok=True)
-        f = directory / f"{n:03d}.diff"
+        f = directory / (name or f"{n:03d}.diff")
         f.write_bytes((text + "\n").encode("utf-8", "replace"))
         return str(f).replace("\\", "/")
     except OSError:
@@ -5030,6 +5092,12 @@ def _diff_items(directory, entries, role=None, mark_owned=True):
     return items
 
 
+def _context_only(item):
+    """A virtual item (Part S) whose work is caller checks alone."""
+    return item.get("seg_file") is not None and not any(
+        a["kind"] in ("unit", "filediff") for a in item["seg_work"])
+
+
 def _build_review_manifest(common_dir, run_id, k, total, chunk_items, other_changed,
                            carry_paths, extras=None, diffs=None):
     """The reviewer's manifest for one chunk (k, total) or the single-context
@@ -5039,12 +5107,18 @@ def _build_review_manifest(common_dir, run_id, k, total, chunk_items, other_chan
     from_oid, to_oid), carried, plus the impact / known_defects extras. With
     `diffs` (_build_diffs) it adds `items[]` -- one file_diff per file whose diff
     is written under this run's diffs/<k>/ -- `context` items for the files the
-    reviewer should treat as background, and an (empty for now) `tasks[]`:
-    Part S's unit_diff and dep tasks use the same contract.
+    reviewer should treat as background, and `tasks[]` (0.11.0, Part S: caller
+    checks, empty otherwise). A chunk's virtual items (see _SegState) add
+    `unit_diff` items for the changed units of a big file, a `file_context` item per
+    such file, and a `caller` (+ `callee_diff`) context item per task.
     """
     manifest = {}
     if k is not None:
         manifest.update(chunk_index=k, chunks_total=total)
+    # A chunk of caller checks alone (Part S's retry) has files in its items[] as
+    # context only: they are not under review, so they are not in paths/files.
+    all_items = chunk_items
+    chunk_items = [it for it in chunk_items if not _context_only(it)]
     manifest.update({
         "paths": [item["entry"]["path"] for item in chunk_items],
         "renames": [
@@ -5069,13 +5143,21 @@ def _build_review_manifest(common_dir, run_id, k, total, chunk_items, other_chan
             directory,
             [({"path": it["entry"]["path"], "old_path": it["entry"].get("old_path"),
                "mode": it["mode"]}, diffs.get(it["entry"]["path"]))
-             for it in chunk_items])
+             for it in chunk_items
+             if it.get("seg_file") is None
+             or any(a["kind"] == "filediff" for a in it["seg_work"])])
+        tasks = []
+        for it in all_items:
+            if it.get("seg_file") is not None:
+                seg_items, seg_tasks = it["seg"].manifest_items(directory, it)
+                manifest["items"] += seg_items
+                tasks += seg_tasks
         manifest["items"] += (
             [{"kind": "context", "role": "other_changed", "path": p}
              for p in manifest["other_changed"]]
             + [{"kind": "context", "role": "carried", "path": p}
                for p in manifest["carried"]])
-        manifest["tasks"] = []
+        manifest["tasks"] = tasks
     manifest.update(extras or {})
     return manifest
 
@@ -5392,7 +5474,7 @@ def _merge_chunk_results(chunk_results, planner_warnings=None):
         "completed_with_errors": 2,
     }
     worst_status_rank = 0
-    cross_symbols, verdicts = [], {}
+    cross_symbols, verdicts, dep_verdicts = [], {}, {}
     for r in chunk_results:
         if not isinstance(r, dict):
             continue
@@ -5403,6 +5485,8 @@ def _merge_chunk_results(chunk_results, planner_warnings=None):
             cross_symbols.extend(cfs["symbols"])
         if isinstance(r.get("impact_verdicts"), dict):
             verdicts.update(r["impact_verdicts"])
+        if isinstance(r.get("dep_verdicts"), dict):
+            dep_verdicts.update(r["dep_verdicts"])
         s = r.get("status") or ""
         rank = _STATUS_RANK.get(s, 0)
         if rank > worst_status_rank:
@@ -5429,13 +5513,1133 @@ def _merge_chunk_results(chunk_results, planner_warnings=None):
         out["cross_file_context_summary"] = {"symbols": cross_symbols}
     if verdicts:
         out["impact_verdicts"] = verdicts
+    if dep_verdicts:
+        out["dep_verdicts"] = dep_verdicts
     return out
+
+
+# --- big files in stable units, with caller checks (0.11.0, Part S) ---------------
+# A file whose diff is over Part B's per-file limit (_build_item_diff's `u0` or
+# `stat` level) is cut into UNITS (scripts/ocr_segment.py) and compared with its
+# base unit by unit: a unit whose text is on both sides is never reviewed again,
+# so a push that edits one function of a 2,000-line file reviews that function,
+# and a run killed halfway resumes with what is left. The reviewer is handed each
+# changed unit's base -> tip diff (`unit_diff` items, absolute line numbers; never
+# truncated) instead of a degraded whole-file diff.
+#
+# Each changed named unit A also gets its same-file callers checked: the caller B
+# goes in as a `context` item with a `dep:<n>` task ("does B still handle A's
+# arguments, return, exceptions, await and state?"), and the reviewer answers in
+# `dep_verdicts`. One hop per push -- no cascade through unchanged units. A
+# verdict that is missing, malformed or `unsure` is `unsure`, never `ok`.
+#
+# Records (all under the ledger's fingerprint directory, which already holds
+# every input of the review criteria):
+#   seg/<sha256(key)>.json  one finished unit review (findings, anchored by
+#                           `anchor_hash` + `rel_start`/`rel_end` in the unit)
+#   dep/<sha256(key)>.json  one caller check: ok | broken | unsure | pending
+# The file's own per-file record is written only when every unit and every
+# caller check that touches it is final, so a file is carried whole only once
+# nothing is owed on it. OCR_SEGMENT=0 restores the 0.10.0 behaviour exactly.
+
+SEG_VERSION = "1"
+_SEG_RECORD_CAP_FACTOR = 4     # unit + caller-check records kept, as a multiple of the record cap
+_SEG_DEP_PER_UNIT = 6          # caller checks per changed unit
+_SEG_CTX_UNIT_LINES = 80       # lines of one caller context unit
+_SEG_CTX_CHUNK_LINES = 400     # caller context lines per chunk
+_SEG_WIDEN_BYTES = 12 * 1024   # a cross-file call site widened to its whole unit
+_SEG_WIDEN_TOTAL = 48 * 1024
+_SEG_MAX_SYMBOLS = 60          # impact symbols per chunk, at most (scales with the push)
+_SEG_VERDICTS = ("ok", "broken", "unsure")
+_SEG_TASK_TEXT = (
+    "Verify that the caller still handles the callee's change: the arguments it "
+    "passes, the return value it relies on, exceptions the callee now raises, "
+    "async/await, and any state or ordering it assumes. Answer ok, broken (and "
+    "emit a finding at the caller, with dep_task set to this task's id) or unsure.")
+
+
+def _seg_enabled():
+    return _precomputed_enabled() and os.environ.get(
+        "OCR_SEGMENT", "1").strip().lower() not in ("0", "false", "no")
+
+
+def _seg_part_lines():
+    return max(100, _CHUNK_DIFF_LINES // 2)
+
+
+def _seg_key(fp, lang, path, base_hash, tip_hash):
+    return (f"seg:{SEG_VERSION}:{fp}:{lang}:{ocr_segment.path_hash(path)}:"
+            f"{base_hash or '-'}:{tip_hash or '-'}")
+
+
+def _dep_key(fp, lang, path_b, hash_b, path_a, hash_a):
+    return (f"dep:{SEG_VERSION}:{fp}:{lang}:{ocr_segment.path_hash(path_b)}:{hash_b}:"
+            f"{ocr_segment.path_hash(path_a)}:{hash_a}")
+
+
+def _seg_rec_path(common_dir, fp, sub, key):
+    return _fp_dir(common_dir, fp) / sub / (hashlib.sha256(key.encode("utf-8")).hexdigest()[:32] + ".json")
+
+
+def _read_seg_rec(common_dir, fp, sub, key):
+    """The unit (sub="seg") or caller-check (sub="dep") record for `key`, or None
+    (absent, corrupt, another key or fingerprint, expired)."""
+    path = _seg_rec_path(common_dir, fp, sub, key)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if time.time() - path.stat().st_mtime > _LEDGER_TTL:
+            return None
+    except Exception:
+        return None
+    if (not isinstance(data, dict) or data.get("schema") != _LEDGER_SCHEMA
+            or data.get("key") != key or data.get("fp") != fp):
+        return None
+    return data
+
+
+def _write_seg_rec(common_dir, fp, sub, key, payload):
+    """Best-effort, like every ledger write."""
+    try:
+        path = _seg_rec_path(common_dir, fp, sub, key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _write_state(path, dict(payload, schema=_LEDGER_SCHEMA, fp=fp, key=key, ts=time.time()))
+        try:
+            path.touch(exist_ok=True)
+        except Exception:
+            pass
+        return True
+    except Exception:
+        return False
+
+
+def _clean_dep_verdicts(raw):
+    """{task id: ok|broken|unsure} from the reviewer's `dep_verdicts`, strictly:
+    anything else (a non-object, a value that is not one of the three) is simply
+    absent, and an absent verdict counts as `unsure` -- never as `ok`."""
+    out = {}
+    if isinstance(raw, dict):
+        for k, v in raw.items():
+            if isinstance(k, str) and isinstance(v, str) and v.strip().lower() in _SEG_VERDICTS:
+                out[k] = v.strip().lower()
+    return out
+
+
+def _seg_anchor(f, unit, tip_lines):
+    """`f` with where it sits in its unit: rel_start/rel_end (0-based offsets from
+    the unit's first line) and anchor_hash (the hash of the anchored lines), so a
+    later push that only moves the unit can place the finding again."""
+    try:
+        s = int(f.get("start_line"))
+        e = int(f.get("end_line") or s)
+    except (TypeError, ValueError):
+        return None
+    if not (unit["start"] <= s <= unit["end"]):
+        return None
+    e = max(s, min(e, unit["end"]))
+    return dict(f, rel_start=s - unit["start"], rel_end=e - unit["start"],
+                anchor_hash=ocr_segment.text_hash("", "anchor", tip_lines[s - 1:e][:200]))
+
+
+def _seg_remap(f, unit, tip_lines):
+    """The stored finding `f` at its unit's CURRENT position, or None.
+
+    Lines are the unit's start plus rel_start; the anchored text must hash to the
+    stored anchor_hash. When it does not, the finding's `existing_code` is looked
+    for inside the unit; failing that the finding is dropped (the caller logs
+    `replay_dropped`) -- a finding pinned on the wrong line is worse than none."""
+    try:
+        rs, re_ = int(f["rel_start"]), int(f["rel_end"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    out = {k: v for k, v in f.items() if k not in ("rel_start", "rel_end", "anchor_hash")}
+    s, e = unit["start"] + rs, unit["start"] + re_
+    if rs >= 0 and re_ >= rs and e <= unit["end"] and ocr_segment.text_hash(
+            "", "anchor", tip_lines[s - 1:e][:200]) == f.get("anchor_hash"):
+        return dict(out, start_line=s, end_line=e)
+    code = [ocr_segment.norm_line(x).strip() for x in str(f.get("existing_code") or "").splitlines()
+            if x.strip()]
+    if code:
+        want = [" ".join(x.split()) for x in code]
+        body = [" ".join(x.split()) for x in tip_lines[unit["start"] - 1:unit["end"]]]
+        for i in range(len(body) - len(want) + 1):
+            if body[i:i + len(want)] == want:
+                return dict(out, start_line=unit["start"] + i, end_line=unit["start"] + i + len(want) - 1)
+    return None
+
+
+def _seg_lines_numbered(sf, a, b):
+    return ocr_segment.render_numbered(sf.tip_lines, a, b)
+
+
+class _SegFile:
+    """One file under Part S. Either reviewed in units (`delta` False), or a small
+    delta-mode file that is reviewed as before and only gets its callers checked."""
+
+    def __init__(self, item, seg_base, seg_tip, changes, tip_text, delta=False):
+        self.item = item
+        self.entry = item["entry"]
+        self.path = self.entry["path"]
+        self.old_path = self.entry.get("old_path") or ""
+        self.lang = seg_tip["lang"]
+        self.method = seg_tip["method"]
+        self.base_lines, self.tip_lines = seg_base["lines"], seg_tip["lines"]
+        self.base_units, self.tip_units = seg_base["units"], seg_tip["units"]
+        self.tip_text = tip_text
+        self.changes = changes
+        self.delta = delta
+        self.deps = []
+        self.extra = []          # findings in this file, outside every unit under review
+        self.orphans = []        # findings about other files, raised in this file's chunks
+        self.result = None       # delta files: the chunk result waiting for its caller checks
+        self.written = False
+        self._parts = {}
+
+    def parts(self, ch):
+        """The unit's diff, as a list of texts (one per part): never truncated."""
+        if id(ch) not in self._parts:
+            self._parts[id(ch)] = ocr_segment.unit_diff_parts(
+                self.path, self.old_path, ch, self.base_lines, self.tip_lines, _seg_part_lines())
+        return self._parts[id(ch)]
+
+    def change_at(self, line, among=None):
+        for ch in (among if among is not None else self.changes):
+            t = ch["tip"]
+            if t and t["start"] <= line <= t["end"]:
+                return ch
+        return None
+
+    def ready(self):
+        return (all(ch["final"] for ch in self.changes) if not self.delta else True) and \
+            all(d["status"] == "final" for d in self.deps)
+
+
+class _SegState:
+    """Everything Part S knows about one run: the segmented files, their cached
+    and pending work, the chunk plan, and what to write after each chunk."""
+
+    def __init__(self, review_root, base, tip, common_dir, fp, run_id, use_cache):
+        self.review_root, self.base, self.tip = review_root, base, tip
+        self.common_dir, self.fp, self.run_id = common_dir, fp, run_id
+        self.use_cache = bool(use_cache and common_dir and fp)
+        self.write = bool(common_dir and fp and _ledger_enabled())
+        self.run = ocr_impact.git_runner(review_root)
+        self.files = {}              # path -> _SegFile
+        self.declined = {}           # path -> reason
+        self.replayed = []           # findings of cached units, at their current lines
+        self.replayed_foreign = []   # cached findings about OTHER files (need re-judging)
+        self.unverified = []         # info findings: a caller check that stayed unsure
+        self.warnings = []
+        self.dep_seq = 0
+        self.first_chunk = {}
+        self.stats = {"units": 0, "hits": 0, "items": 0, "deps": 0, "dep_hits": 0,
+                      "dropped": 0, "declined": 0}
+        self.diffs = {}
+        self.trials = {}             # flagged-truncated carries that can be segmented
+        self._counters = {}          # directory -> numbering of its unit and context files
+
+    # --- building ------------------------------------------------------------------
+
+    def _decline(self, path, reason):
+        self.declined[path] = reason
+        self.stats["declined"] += 1
+        _metric_log("seg_decline", reason=reason)
+        return None
+
+    def _blob(self, oid):
+        out, rc = self.run(["cat-file", "-p", oid])
+        return out if rc == 0 else None
+
+    def build(self, item, delta=False, trial=False):
+        """The _SegFile for a plan item, or None -- the file is then reviewed whole,
+        exactly as without Part S (the reason is in self.declined). Never raises.
+        A `trial` only proves the file can be segmented: nothing is looked up or
+        registered until complete() decides the file really is reviewed in units."""
+        path = item["entry"]["path"]
+        try:
+            sf = self._build(item, delta)
+        except Exception as exc:
+            return self._decline(path, "error_" + type(exc).__name__[:30])
+        if sf is not None and not trial:
+            self.complete(sf)
+        return sf
+
+    def _build(self, item, delta):
+        e = item["entry"]
+        path = e["path"]
+        old_oid = item.get("from_oid") if delta else e.get("old_oid")
+        new_oid = e.get("new_oid")
+        base_text = "" if _is_null_oid(old_oid) else self._blob(old_oid)
+        tip_text = self._blob(new_oid) if not _is_null_oid(new_oid) else None
+        if base_text is None or tip_text is None:
+            return self._decline(path, "unreadable")
+        if "\0" in base_text or "\0" in tip_text:
+            return self._decline(path, "binary")
+        seg_t = ocr_segment.segment(path, tip_text)
+        seg_b = ocr_segment.segment(path, base_text)
+        if max(len(seg_t["units"]), len(seg_b["units"])) > ocr_segment.MAX_UNITS:
+            return self._decline(path, "too_many_units")
+        for seg in (seg_t, seg_b):
+            for i, u in enumerate(seg["units"]):
+                u["idx"] = i
+        pairing = ocr_segment.pair_units(seg_b["units"], seg_t["units"],
+                                         seg_b["lines"], seg_t["lines"])
+        changes = ocr_segment.changes_of(pairing, seg_b["units"], seg_t["units"])
+        if not delta:
+            if _is_null_oid(old_oid):
+                tip_changed, base_changed = set(range(1, len(seg_t["lines"]) + 1)), set()
+            else:
+                out, rc = self.run(
+                    ["diff", "--no-ext-diff", "--no-textconv", "--no-color", "-U0",
+                     "--ignore-space-at-eol", "--ignore-cr-at-eol", "--ignore-blank-lines",
+                     old_oid, new_oid])
+                if rc != 0:
+                    return self._decline(path, "diff_failed")
+                tip_changed, base_changed = ocr_segment.parse_changed_lines(out)
+            gaps = ocr_segment.check_coverage(
+                seg_b["units"], seg_t["units"], tip_changed, base_changed,
+                len(seg_b["lines"]), len(seg_t["lines"]), seg_b["lines"], seg_t["lines"])
+            if gaps:
+                _debug_log(f"seg coverage gap, file reviewed whole: {gaps[0]}")
+                return self._decline(path, "coverage")
+            for ch in changes:
+                for side, lines in ((ch["tip"], seg_t["lines"]), (ch["base"], seg_b["lines"])):
+                    if side and ocr_segment.max_line_len(lines, side["start"], side["end"]) > _DIFF_LINE_CAP:
+                        # a cut line is a line the reviewer did not see: not a unit review
+                        return self._decline(path, "long_lines")
+        sf = _SegFile(item, seg_b, seg_t, changes, tip_text, delta=delta)
+        for ch in changes:
+            bh = ch["base"]["hash"] if ch["base"] else ""
+            th = ch["tip"]["hash"] if ch["tip"] else ""
+            ch.update(key=_seg_key(self.fp, sf.lang, path, bh, th), done=set(), findings=[],
+                      final=False, record=None)
+        return sf
+
+    def complete(self, sf):
+        """The file is reviewed in units (or, `delta`, gets caller checks): register
+        it, replay what is cached and plan its caller checks."""
+        self.files[sf.path] = sf
+        if not sf.delta:
+            self.stats["units"] += len(sf.changes)
+            for ch in sf.changes:
+                self._lookup(sf, ch)
+        self._plan_deps(sf)
+
+    def _lookup(self, sf, ch):
+        """A cached review of exactly this unit change replays its findings."""
+        if not self.use_cache:
+            return
+        rec = _read_seg_rec(self.common_dir, self.fp, "seg", ch["key"])
+        if rec is None:
+            return
+        ch["final"], ch["record"] = True, rec
+        self.stats["hits"] += 1
+        for f in rec.get("findings") or []:
+            if not isinstance(f, dict):
+                continue
+            if "rel_start" in f and ch["tip"] and f.get("path") == sf.path:
+                g = _seg_remap(f, ch["tip"], sf.tip_lines)
+                if g is None:
+                    self.stats["dropped"] += 1
+                    _metric_log("replay_dropped", kind="unit")
+                    continue
+                ch["findings"].append(g)
+                self.replayed.append(dict(g, provenance="carried"))
+            elif f.get("path") != sf.path:
+                self.replayed_foreign.append(dict(f, provenance="carried"))
+            else:   # a finding of this file outside its units: kept as it was
+                sf.extra.append(f)
+                self.replayed.append(dict(f, provenance="carried"))
+
+    # --- caller checks -------------------------------------------------------------
+
+    def _plan_deps(self, sf):
+        """Same-file callers of every changed named unit become caller checks. A unit
+        that was removed or renamed is checked under its OLD name too: a caller that
+        still uses it is exactly what such a change breaks."""
+        kinds_ = ("function", "method", "class")
+        jobs = [(ch, ch["tip"], False) for ch in sf.changes if ch["tip"] and ch["tip"]["kind"] in kinds_]
+        for ch in sf.changes:
+            b, t = ch["base"], ch["tip"]
+            if b and b["kind"] in kinds_ and (t is None or b["qualname"] != t["qualname"]):
+                jobs.append((ch, b, True))
+        if not jobs:
+            return
+        calls = ocr_segment.unit_calls(sf.lang, sf.tip_text, sf.tip_lines, sf.tip_units)
+        units = list(sf.tip_units) + [{"provides": u["provides"], "kind": u["kind"]}
+                                      for _, u, stale in jobs if stale]
+        extra, targets = len(sf.tip_units), []
+        for _, u, stale in jobs:
+            if stale:
+                targets.append(extra)
+                extra += 1
+            else:
+                targets.append(u["idx"])
+        edges = ocr_segment.callers_of(sf.lang, units, calls, targets)
+        for (ch, callee, stale), target in zip(jobs, targets):
+            for hit in edges.get(target, [])[:_SEG_DEP_PER_UNIT]:
+                caller = sf.tip_units[hit["caller"]]
+                if caller is ch["tip"]:
+                    continue
+                key = _dep_key(self.fp, sf.lang, sf.path, caller["hash"], sf.path,
+                               ("-" if stale else "") + callee["hash"])
+                a = max(caller["start"], min(hit["line"] - 30, caller["end"] - _SEG_CTX_UNIT_LINES + 1))
+                dep = {"ch": ch, "callee": callee, "stale": stale, "caller": caller,
+                       "name": hit["name"], "line": hit["line"],
+                       "key": key, "status": "needed", "attempt": 1, "pending": False,
+                       "ctx": (a, min(caller["end"], a + _SEG_CTX_UNIT_LINES - 1)),
+                       "id": "", "findings": [], "file": sf}
+                rec = _read_seg_rec(self.common_dir, self.fp, "dep", key) if self.use_cache else None
+                self.stats["deps"] += 1
+                st = (rec or {}).get("status")
+                if st in ("ok", "broken", "unsure_final"):
+                    dep["status"] = "final"
+                    self.stats["dep_hits"] += 1
+                    self._replay_dep(sf, dep, rec)
+                elif st == "unsure":
+                    dep["attempt"] = int(rec.get("attempts") or 1) + 1
+                    dep["pending"] = True
+                elif st == "pending":
+                    dep["pending"] = True
+                elif self.write and self.use_cache:
+                    _write_seg_rec(self.common_dir, self.fp, "dep", key,
+                                   {"kind": "dep", "status": "pending", "path": sf.path})
+                sf.deps.append(dep)
+
+    def _replay_dep(self, sf, dep, rec):
+        if rec.get("status") == "unsure_final":
+            self._unverified(sf, dep)
+            return
+        for f in rec.get("findings") or []:
+            if isinstance(f, dict) and "rel_start" in f:
+                g = _seg_remap(f, dep["caller"], sf.tip_lines)
+                if g is None:
+                    self.stats["dropped"] += 1
+                    _metric_log("replay_dropped", kind="dep")
+                    continue
+                dep["findings"].append(g)
+                self.replayed.append(dict(g, provenance="carried"))
+
+    def _unverified(self, sf, dep):
+        c, a = dep["caller"], dep["callee"]
+        f = {"severity": "info", "path": sf.path, "start_line": c["start"], "end_line": c["start"],
+             "category": "correctness", "provenance": "unverified_dependency",
+             "content": (f"unverified dependency: could not confirm that {c.get('qualname') or 'this code'} "
+                         f"still handles the change to {a.get('qualname') or 'a unit it calls'} "
+                         "(the reviewer could not decide twice); check this caller by hand")}
+        self.unverified.append(f)
+
+    # --- the plan ------------------------------------------------------------------
+
+    def convert_truncated_carries(self, plan):
+        """Part A carries a record flagged `truncated` instead of reviewing the same
+        blob again. A file Part S CAN segment finally gets its proper review: the
+        item becomes a full one (its record kept, so what it still owed is
+        re-judged as before). A file that cannot be segmented keeps being carried
+        -- reviewing it whole would truncate it the same way, and never converge."""
+        for p in plan or []:
+            if p["mode"] != "carry" or not _is_truncated_record(p.get("record")):
+                continue
+            sf = self.build(p, trial=True)
+            if sf is None:
+                continue
+            self.trials[p["entry"]["path"]] = sf
+            p.update(mode="full", from_oid="", miss_reason="no_record")
+
+    def plan_active(self, active_items, diffs):
+        """Segment the active files that are over Part B's limit, and give every
+        small delta file its caller checks. Mutates `diffs` for the segmented
+        files: Python delivers them in units, so the whole-file flags no longer
+        apply (a model's truncation warning about them is ignored)."""
+        run = ocr_impact.git_runner(self.review_root)
+        for item in active_items:
+            path = item["entry"]["path"]
+            d = diffs.get(path)
+            usable = d is not None and not d["failed"] and not d["binary"]
+            over = usable and d["level"] != "full"
+            sf = None
+            trial = self.trials.get(path)
+            if trial is not None:
+                # a flagged-truncated carry that CAN be segmented: reviewed in units when
+                # its diff is still over the limit, plainly (and properly) when it is not
+                if over:
+                    self.complete(trial)
+                    sf = trial
+            elif over:
+                if item["mode"] == "delta":
+                    # the units carry the cache now: this file is reviewed over the whole push
+                    # range (its record stays, for what it still owes)
+                    saved = dict(item)
+                    item.update(mode="full", miss_reason="seg")
+                    sf = self.build(item)
+                    if sf is None:
+                        item.clear()
+                        item.update(saved)
+                    else:
+                        try:
+                            diffs[path] = d = _build_item_diff(
+                                run, _item_diff_spec(item, self.base, self.tip), _CHUNK_DIFF_LINES)
+                        except Exception:
+                            diffs[path] = d = _failed_diff()
+                else:
+                    sf = self.build(item)
+            elif usable and item["mode"] == "delta":
+                sf = self.build(item, delta=True)
+                if sf is not None and not sf.deps:
+                    del self.files[path]
+                    sf = None
+            if sf is not None and not sf.delta and d is not None:
+                diffs[path] = dict(d, owned=True, truncated=False, segmented=True)
+        self.diffs = diffs
+        for sf in self.files.values():
+            if sf.delta and sf.deps:
+                self._cap_delta_deps(sf)
+        self.finalize_ready()
+        _TELE["seg"] = dict(self.stats, files=len(self.files),
+                            declined={k: v for k, v in list(self.declined.items())[:20]})
+        return self
+
+    def _cap_delta_deps(self, sf):
+        """A delta file's chunk cannot be split, so its caller checks must fit one."""
+        kept, total = [], 0
+        for d in sf.deps:
+            if d["status"] != "needed":
+                kept.append(d)
+                continue
+            n = d["ctx"][1] - d["ctx"][0] + 1
+            if total + n > _SEG_CTX_CHUNK_LINES:
+                self.warnings.append(
+                    f"caller checks capped: {sf.path} has more caller context than one chunk holds; "
+                    "the callers of one changed unit were not checked")
+                continue
+            total += n
+            kept.append(d)
+        sf.deps = kept
+
+    def active_files(self):
+        return [sf for sf in self.files.values() if not sf.delta]
+
+    def segmented_paths(self):
+        return {sf.path for sf in self.active_files()}
+
+    # --- chunks --------------------------------------------------------------------
+
+    def _dep_size(self, d, callee_in_chunk):
+        n = d["ctx"][1] - d["ctx"][0] + 1
+        if not callee_in_chunk:
+            n += min(_seg_part_lines(), sum(len(t.splitlines()) for t in d["file"].parts(d["ch"])[:1]))
+        return n
+
+    def _clusters(self, sf):
+        """Work of one file in call-graph order: [{atoms, size, ctx}] where a cluster
+        is one changed unit (its diff parts) with the caller checks that hang off it."""
+        out = []
+        if sf.delta:
+            deps = [d for d in sf.deps if d["status"] == "needed"]
+            if not deps:
+                return out
+            d0 = self.diffs.get(sf.path) or {}
+            atoms = [{"kind": "filediff", "size": int(d0.get("lines") or 1)}]
+            for d in deps:
+                atoms.append({"kind": "dep", "dep": d, "size": self._dep_size(d, True), "callee_in": True})
+            ctx = sum(a["size"] for a in atoms[1:])
+            return [{"atoms": atoms, "size": sum(a["size"] for a in atoms), "ctx": ctx,
+                     "pending": any(d["pending"] for d in deps), "ch": None}]
+        for ch in sf.changes:
+            atoms = []
+            if not ch["final"]:
+                parts = sf.parts(ch)
+                for j, text in enumerate(parts):
+                    atoms.append({"kind": "unit", "ch": ch, "part": j, "parts": len(parts),
+                                  "text": text, "size": text.count("\n") + 1})
+            for d in [d for d in sf.deps if d["ch"] is ch and d["status"] == "needed"]:
+                atoms.append({"kind": "dep", "dep": d, "callee_in": not ch["final"],
+                              "size": self._dep_size(d, not ch["final"])})
+            if atoms:
+                ctx = sum(a["size"] for a in atoms if a["kind"] == "dep")
+                out.append({"atoms": atoms, "size": sum(a["size"] for a in atoms), "ctx": ctx,
+                            "pending": any(a["kind"] == "dep" and a["dep"]["pending"] for a in atoms),
+                            "ch": ch})
+        # keep units linked by a call (a changed caller of a changed unit) side by side
+        by_ch = {id(c["ch"]): i for i, c in enumerate(out)}
+        parent = list(range(len(out)))
+
+        def find(i):
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+        for i, c in enumerate(out):
+            for a in c["atoms"]:
+                if a["kind"] != "dep":
+                    continue
+                other = next((x for x in sf.changes if x["tip"] is a["dep"]["caller"]), None)
+                j = by_ch.get(id(other)) if other is not None else None
+                if j is not None:
+                    parent[find(i)] = find(j)
+        order = sorted(range(len(out)), key=lambda i: (find(i), i))
+        first = {}
+        for i in order:
+            first.setdefault(find(i), len(first))
+        order.sort(key=lambda i: (first[find(i)], i))
+        return [out[i] for i in order]
+
+    def groups_of(self, sf, budget, ucap):
+        """A file's clusters packed into groups of at most `budget` lines (and `ucap`
+        clusters, and the caller context cap). A file is split only when it alone
+        exceeds the budget; a cluster alone exceeding it (a monolithic unit) is
+        split into its parts."""
+        groups, cur = [], None
+
+        def flush():
+            nonlocal cur
+            if cur:
+                groups.append(cur)
+            cur = None
+
+        def add(atoms, size, ctx, pending, members=1):
+            nonlocal cur
+            if cur and (cur["size"] + size > budget or cur["ctx"] + ctx > _SEG_CTX_CHUNK_LINES
+                        or cur["members"] + members > ucap):
+                flush()
+            if cur is None:
+                cur = {"sf": sf, "atoms": [], "size": 0, "ctx": 0, "members": 0, "pending": False,
+                       "plain": None}
+            cur["atoms"] += atoms
+            cur["size"] += size
+            cur["ctx"] += ctx
+            cur["members"] += members
+            cur["pending"] = cur["pending"] or pending
+
+        for cl in self._clusters(sf):
+            if sf.delta or cl["size"] <= budget:
+                add(cl["atoms"], cl["size"], cl["ctx"], cl["pending"])
+                continue
+            flush()
+            for a in cl["atoms"]:
+                dep = a["kind"] == "dep"
+                add([a], a["size"], a["size"] if dep else 0, dep and a["dep"]["pending"])
+        flush()
+        return groups
+
+    def plan_chunks(self, plain_items, marks, sizes, budget, impact=None):
+        """Chunks of work, as lists of items _build_review_manifest understands:
+        the plain (whole-file) active items as they are, and for each segmented file
+        one virtual item per chunk holding that chunk's share of its units and
+        caller checks. Priority to chunks with caller checks owed from an earlier
+        run (`pending`)."""
+        marks = marks or {}
+        groups = []
+        for item in plain_items:
+            p = item["entry"]["path"]
+            groups.append({"sf": None, "plain": item, "size": max(1, (sizes or {}).get(p) or 1),
+                           "ctx": 0, "members": 1, "pending": False, "atoms": []})
+        for sf in self.files.values():
+            ucap = 1 << 30
+            mark = marks.get(sf.path)
+            if mark:
+                ucap = max(1, int(mark.get("chunk_size") or 1) // 2)
+            own = self.groups_of(sf, budget, ucap)
+            if sf.delta:
+                if not own:
+                    continue        # nothing to check: the file stays an ordinary plain item
+                # its delta diff rides in the virtual item below, not as a plain item
+                groups = [g for g in groups if g.get("plain") is not sf.item]
+            groups += own
+        groups = self._link_order(groups, impact)
+        chunks, cur, size, ctx, files = [], [], 0, 0, set()
+        for g in groups:
+            f = {g["sf"].path if g["sf"] else g["plain"]["entry"]["path"]}
+            if cur and (size + g["size"] > budget or ctx + g["ctx"] > _SEG_CTX_CHUNK_LINES
+                        or len(files | f) > _CHUNK_FILES):
+                chunks.append(cur)
+                cur, size, ctx, files = [], 0, 0, set()
+            cur.append(g)
+            size += g["size"]
+            ctx += g["ctx"]
+            files |= f
+        if cur:
+            chunks.append(cur)
+        out = []
+        for ch in chunks:
+            cap = sum(g["members"] for g in ch)
+            for g in ch:
+                p = g["sf"].path if g["sf"] else g["plain"]["entry"]["path"]
+                if marks.get(p):
+                    cap = min(cap, max(1, int(marks[p].get("chunk_size") or 1) // 2))
+            piece, n = [], 0
+            for g in ch:                     # pieces of at most `cap` members (whole groups)
+                if piece and n + g["members"] > cap:
+                    out.append(piece)
+                    piece, n = [], 0
+                piece.append(g)
+                n += g["members"]
+            if piece:
+                out.append(piece)
+        out.sort(key=lambda gs: not any(g["pending"] for g in gs))
+        result = []
+        for k, gs in enumerate(out):
+            items, by_sf = [], {}
+            for g in gs:
+                if g["sf"] is None:
+                    items.append(g["plain"])
+                    continue
+                vi = by_sf.get(g["sf"].path)
+                if vi is None:
+                    vi = self._virtual(g["sf"])
+                    by_sf[g["sf"].path] = vi
+                    items.append(vi)
+                    self.first_chunk.setdefault(g["sf"].path, k)
+                vi["seg_work"] += g["atoms"]
+                vi["members"] += g["members"]
+            self._assign_ids(items)
+            result.append(items)
+        return result
+
+    def _virtual(self, sf):
+        it = sf.item
+        return {"entry": it["entry"], "mode": it["mode"] if sf.delta else "full",
+                "record": it.get("record"), "from_oid": (it.get("from_oid") or "") if sf.delta else "",
+                "miss_reason": it.get("miss_reason"), "delta_lines": it.get("delta_lines"),
+                "seg_file": sf, "seg": self, "seg_work": [], "members": 0}
+
+    def _assign_ids(self, items):
+        for vi in items:
+            for a in vi.get("seg_work") or []:
+                if a["kind"] == "dep" and not a["dep"]["id"]:
+                    self.dep_seq += 1
+                    a["dep"]["id"] = f"dep:{self.dep_seq}"
+
+    def _link_order(self, groups, impact):
+        """Groups of files that call each other (a call site of a changed symbol, from
+        the impact search) are put side by side, so they tend to share a chunk."""
+        if not impact or len(groups) < 3:
+            return groups
+        defined = {}
+        for s in impact.get("symbols") or []:
+            defined.setdefault(s.get("name"), set()).add(s.get("defined_in"))
+        path_of = [g["sf"].path if g["sf"] else g["plain"]["entry"]["path"] for g in groups]
+        have = set(path_of)
+        links = {}
+        for s in impact.get("sites") or []:
+            for d in defined.get(s.get("name"), ()):
+                if d in have and s.get("path") in have and d != s["path"]:
+                    links.setdefault(d, set()).add(s["path"])
+                    links.setdefault(s["path"], set()).add(d)
+        if not links:
+            return groups
+        out, seen = [], set()
+        for i, g in enumerate(groups):
+            if i in seen:
+                continue
+            comp, todo = set(), [path_of[i]]
+            while todo:
+                p = todo.pop()
+                if p in comp:
+                    continue
+                comp.add(p)
+                todo += list(links.get(p, ()))
+            for j, g2 in enumerate(groups):
+                if j not in seen and path_of[j] in comp:
+                    seen.add(j)
+                    out.append(g2)
+        return out
+
+    # --- what the reviewer is handed -------------------------------------------------
+
+    def manifest_items(self, directory, vi):
+        """(items, tasks) for one virtual item: unit_diff items, a file-context item,
+        and a context item plus a task for every caller check. Files are written
+        under `directory` with names generated here."""
+        sf = vi["seg_file"]
+        work = vi["seg_work"]
+        items, tasks = [], []
+        # one numbering per chunk directory: two files of a chunk must not share a name
+        files = self._counters.setdefault(str(directory), {"u": 0, "c": 0})
+
+        def write(prefix, ext, text):
+            files[prefix] += 1
+            return _write_diff_file(directory, files[prefix], text,
+                                    name=f"{prefix}{files[prefix]:03d}{ext}")
+
+        def meta(text):
+            return {"lines": text.count("\n") + 1, "bytes": len(text.encode("utf-8", "replace")) + 1}
+
+        units = [a for a in work if a["kind"] == "unit"]
+        if units:
+            changed_ids = {a["ch"]["tip"]["idx"] for a in units if a["ch"]["tip"]}
+            pre = ocr_segment.preamble_lines(sf.tip_units, sf.tip_lines)
+            index = ocr_segment.signature_index(sf.tip_units, changed_ids)
+            text = (f"# {sf.path} at the tip: context only. Only the unit_diff items of this file are "
+                    "under review; the other units are NOT part of this review.\n"
+                    f"# imports and preamble (first {len(pre)} lines):\n" + "\n".join(pre)
+                    + "\n# units of the file (line range, signature); [CHANGED] = under review:\n"
+                    + "\n".join(index))
+            items.append({"kind": "context", "role": "file_context", "path": sf.path,
+                          "file": write("c", ".txt", text)})
+        for a in units:
+            ch = a["ch"]
+            u = ch["tip"] or ch["base"]
+            text = a["text"]
+            it = {"kind": "unit_diff", "path": sf.path, "old_path": sf.old_path, "mode": "full",
+                  "unit": u.get("qualname") or u.get("sig") or u["kind"], "unit_kind": u["kind"],
+                  "start_line": ch["tip"]["start"] if ch["tip"] else 0,
+                  "end_line": ch["tip"]["end"] if ch["tip"] else 0,
+                  "part": a["part"] + 1, "parts": a["parts"], "file": write("u", ".diff", text),
+                  "truncated": False, "binary": False, "level": "full"}
+            if not ch["tip"]:
+                it.update(deleted=True, base_start=ch["base"]["start"], base_end=ch["base"]["end"])
+            it.update(meta(text))
+            items.append(it)
+        in_chunk = {id(a["ch"]) for a in units}
+        for a in work:
+            if a["kind"] != "dep":
+                continue
+            d = a["dep"]
+            callee = d["callee"]
+            if id(d["ch"]) not in in_chunk and not a.get("callee_in"):
+                text = "\n".join(sf.parts(d["ch"])[:1])
+                items.append({"kind": "context", "role": "callee_diff", "task": d["id"], "path": sf.path,
+                              "unit": callee.get("qualname") or callee.get("sig"),
+                              "start_line": callee["start"], "end_line": callee["end"],
+                              "file": write("c", ".txt",
+                                            "# the change to the callee (a unit already reviewed) -- "
+                                            "context for the caller check " + d["id"] + "\n" + text)})
+            a0, b0 = d["ctx"]
+            items.append({"kind": "context", "role": "caller", "task": d["id"], "path": sf.path,
+                          "unit": d["caller"].get("qualname") or d["caller"].get("sig"),
+                          "start_line": a0, "end_line": b0,
+                          "file": write("c", ".txt", f"# caller {d['id']}: {sf.path} lines {a0}-{b0} "
+                                                      "at the tip (numbered)\n" + _seg_lines_numbered(sf, a0, b0))})
+            tasks.append({"id": d["id"], "type": "dep_check",
+                          "callee": dict(
+                              {"path": sf.path, "unit": callee.get("qualname") or callee.get("sig"),
+                               "start_line": callee["start"], "end_line": callee["end"]},
+                              **({"removed_or_renamed": True} if d["stale"] else {})),
+                          "caller": {"path": sf.path, "unit": d["caller"].get("qualname") or d["caller"].get("sig"),
+                                     "start_line": a0, "end_line": b0},
+                          "instruction": _SEG_TASK_TEXT})
+        return items, tasks
+
+    # --- impact routing --------------------------------------------------------------
+
+    def annotate_impact(self, impact):
+        """Tag each impact symbol defined in a segmented file with the unit change it
+        belongs to (by line: the tip unit, or the base unit for a removal)."""
+        for s in (impact or {}).get("symbols") or []:
+            sf = self.files.get(s.get("defined_in"))
+            if sf is None or sf.delta:
+                continue
+            line = int(s.get("line") or 0)
+            if s.get("change") in ("removed", "renamed"):
+                ch = next((c for c in sf.changes if c["base"] and c["base"]["start"] <= line <= c["base"]["end"]), None)
+            else:
+                ch = sf.change_at(line)
+            s["_unit"] = ch["id"] if ch else None
+
+    def route_symbols(self, impact, chunk_items, k):
+        """The impact symbols for chunk k: those of plain files as before, and for a
+        segmented file only the symbols whose unit is in this chunk (a symbol with no
+        unit goes with the file's first chunk)."""
+        here = {}
+        for vi in chunk_items:
+            sf = vi.get("seg_file")
+            if sf is not None and not sf.delta:
+                here[sf.path] = {a["ch"]["id"] for a in vi["seg_work"] if a["kind"] == "unit"}
+        out = []
+        for s in impact["symbols"]:
+            sf = self.files.get(s.get("defined_in"))
+            if sf is None or sf.delta:
+                out.append(s)
+                continue
+            if s["defined_in"] not in here:
+                continue
+            u = s.get("_unit")
+            if (u is not None and u in here[s["defined_in"]]) or (
+                    u is None and self.first_chunk.get(s["defined_in"]) == k):
+                out.append({a: b for a, b in s.items() if a != "_unit"})
+        return out
+
+    def widen_sites(self, bundle):
+        """A call site in a file outside the review, of a symbol of a segmented file,
+        shows its whole enclosing unit (up to 12 KB) instead of +-6 lines."""
+        total, cache = 0, {}
+        for site in bundle.get("sites") or []:
+            if site.get("defined_in") not in self.files:
+                continue
+            path = site.get("path")
+            if path not in cache:
+                out, rc = self.run(["show", f"{self.tip}:{path}"])
+                seg = ocr_segment.segment(path, out) if rc == 0 else None
+                cache[path] = seg
+            seg = cache[path]
+            if not seg:
+                continue
+            line = int(site.get("line") or 0)
+            u = next((x for x in seg["units"] if x["start"] <= line <= x["end"] and x["kind"] != "region"), None)
+            if u is None:
+                continue
+            text = ocr_segment.render_numbered(seg["lines"], u["start"], u["end"])
+            if len(text.encode("utf-8", "replace")) > _SEG_WIDEN_BYTES \
+                    or total + len(text.encode("utf-8", "replace")) > _SEG_WIDEN_TOTAL:
+                continue
+            total += len(text.encode("utf-8", "replace"))
+            site["snippet"] = text
+            site["widened"] = True
+
+    # --- after a chunk ---------------------------------------------------------------
+
+    def apply(self, vitems, result):
+        """Fold one chunk's answer into the unit and caller-check records.
+
+        Everything is written only for a result of a review that finished cleanly
+        (the status rule of _write_run_records); a caller check with no valid
+        verdict is `unsure`. Returns nothing: findings stay in `result`, which the
+        caller merges as always."""
+        ok = isinstance(result, dict) and result.get("status", "") in ("success", "completed_with_warnings")
+        findings = [f for f in ((result or {}).get("findings") or []) if isinstance(f, dict)] if ok else []
+        verdicts = _clean_dep_verdicts((result or {}).get("dep_verdicts")) if ok else {}
+        chunk = {vi["seg_file"].path: vi for vi in vitems if vi.get("seg_file") is not None}
+        deps = {a["dep"]["id"]: a["dep"] for vi in vitems for a in vi.get("seg_work") or []
+                if a["kind"] == "dep"}
+        if not ok:
+            return
+        # progress and attribution
+        in_chunk = {}
+        for vi in vitems:
+            for a in vi.get("seg_work") or []:
+                if a["kind"] == "unit":
+                    a["ch"]["done"].add(a["part"])
+                    in_chunk.setdefault(vi["seg_file"].path, []).append(a["ch"])
+        orphans = []
+        for f in findings:
+            task = f.get("dep_task")
+            if task in deps:
+                deps[task]["findings"].append(f)
+                continue
+            sf = (chunk.get(f.get("path")) or {}).get("seg_file")
+            if sf is not None and not sf.delta:
+                try:
+                    line = int(f.get("start_line"))
+                except (TypeError, ValueError):
+                    line = 0
+                ch = sf.change_at(line, in_chunk.get(sf.path, []))
+                if ch is not None:
+                    ch["findings"].append(f)
+                else:
+                    sf.extra.append(f)
+                continue
+            orphans.append(f)
+        for vi in vitems:
+            sf = vi.get("seg_file")
+            if sf is not None:
+                if sf.delta:
+                    sf.result = result   # its record is written by _write_run_records, when its checks are final
+                else:
+                    sf.orphans += orphans
+        oids = _blob_oids_at(self.review_root, self.tip, sorted(
+            {f.get("path") for f in orphans if f.get("path")})) if orphans else {}
+        stamped = [dict(f, target_oid=f.get("target_oid") or oids.get(f.get("path") or "", ""))
+                   for f in orphans]
+        # unit records
+        for vi in vitems:
+            sf = vi.get("seg_file")
+            if sf is None or sf.delta:
+                continue
+            for ch in {id(a["ch"]): a["ch"] for a in vi["seg_work"] if a["kind"] == "unit"}.values():
+                parts = len(sf.parts(ch))
+                if ch["final"] or len(ch["done"]) < parts:
+                    continue
+                recf = []
+                for f in ch["findings"]:
+                    g = _seg_anchor(f, ch["tip"], sf.tip_lines) if ch["tip"] else None
+                    recf.append(dict(g if g is not None else f, target_oid=f.get("target_oid") or sf.entry["new_oid"]))
+                if self.write:
+                    _write_seg_rec(self.common_dir, self.fp, "seg", ch["key"], {
+                        "kind": "seg", "path": sf.path, "lang": sf.lang, "unit": (ch["tip"] or ch["base"]).get("qualname") or "",
+                        "findings": recf + stamped, "run_id": self.run_id})
+                ch["final"] = True
+        # caller checks
+        for tid, d in deps.items():
+            sf = d["file"]
+            v = verdicts.get(tid, "unsure")
+            if v == "unsure" and tid not in verdicts:
+                _metric_log("dep_verdict_missing")
+            self._finish_dep(sf, d, v)
+        for sf in {vi["seg_file"] for vi in vitems if vi.get("seg_file") is not None}:
+            self.finalize(sf)
+
+    def _finish_dep(self, sf, d, verdict):
+        rec = {"kind": "dep", "path": sf.path, "attempts": d["attempt"], "run_id": self.run_id}
+        if verdict == "ok":
+            d["status"] = "final"
+            rec["status"] = "ok"
+        elif verdict == "broken":
+            d["status"] = "final"
+            if not d["findings"]:   # `broken` with nothing to show: still never silent
+                a = d["callee"]
+                d["findings"].append({
+                    "severity": "medium", "confidence": 0.6, "category": "correctness",
+                    "path": sf.path, "start_line": d["caller"]["start"], "end_line": d["caller"]["start"],
+                    "content": (f"{d['caller'].get('qualname') or 'a caller'} may be broken by the change to "
+                                f"{a.get('qualname') or 'a unit it calls'} (the reviewer answered `broken` "
+                                "without a finding)"), "evidence": "dep_verdicts", "dep_task": d["id"]})
+            rec["status"] = "broken"
+            rec["findings"] = []
+            for f in d["findings"]:
+                g = _seg_anchor(f, d["caller"], sf.tip_lines)
+                rec["findings"].append(dict(g if g is not None else f,
+                                            target_oid=f.get("target_oid") or sf.entry["new_oid"]))
+        elif d["attempt"] >= 2:
+            d["status"] = "final"
+            rec["status"] = "unsure_final"
+            self._unverified(sf, d)
+        else:
+            d["status"] = "retry"          # asked once more, in this run, after the other chunks
+            rec["status"] = "unsure"
+        if self.write:
+            _write_seg_rec(self.common_dir, self.fp, "dep", d["key"], rec)
+
+    def retry_chunks(self):
+        """The caller checks that were `unsure` the first time, asked once more: chunks
+        of context-only virtual items (the callee's diff, the caller, the task)."""
+        todo = [d for sf in self.files.values() for d in sf.deps if d["status"] == "retry"]
+        if not todo:
+            return []
+        chunks, cur, ctx = [], {}, 0
+        for d in todo:
+            d["attempt"] = 2
+            d["findings"] = []
+            n = self._dep_size(d, False)
+            if cur and ctx + n > _SEG_CTX_CHUNK_LINES:
+                chunks.append(cur)
+                cur, ctx = {}, 0
+            sf = d["file"]
+            vi = cur.get(sf.path)
+            if vi is None:
+                vi = self._virtual(sf)
+                vi["mode"] = "full"
+                cur[sf.path] = vi
+            vi["seg_work"].append({"kind": "dep", "dep": d, "size": n, "callee_in": False})
+            vi["members"] = 1
+            ctx += n
+        if cur:
+            chunks.append(cur)
+        out = []
+        for c in chunks:
+            items = list(c.values())
+            self._assign_ids(items)
+            out.append(items)
+        return out
+
+    # --- finishing a file -----------------------------------------------------------
+
+    def finalize_ready(self):
+        for sf in list(self.files.values()):
+            self.finalize(sf)
+
+    def finalize(self, sf):
+        """Write the file's own per-file record once nothing is owed on it: every unit
+        reviewed (or cached) and every caller check final. That record is what makes
+        the next push of this same file state a plain carry."""
+        if sf.written or not sf.ready() or not self.write:
+            return False
+        if any(d["status"] != "final" for d in sf.deps):
+            return False
+        item, e = sf.item, sf.entry
+        if sf.delta:
+            if sf.result is None:
+                return False
+            _write_run_records(sf.result, [item], self.common_dir, self.fp, self.run_id,
+                               self.review_root, self.tip,
+                               precomputed={sf.path: bool((self.diffs.get(sf.path) or {}).get("truncated"))})
+            sf.written = True
+            return True
+        own = []
+        for ch in sf.changes:
+            own += ch["findings"]
+        for d in sf.deps:
+            own += d["findings"]
+        own += sf.extra
+        oids = _blob_oids_at(self.review_root, self.tip, [sf.path])
+        stamped_own = [dict(f, target_oid=f.get("target_oid") or oids.get(sf.path, "")) for f in own]
+        orphans = sf.orphans + self.replayed_foreign
+        key = _record_key(sf.path, sf.old_path, e["status"], e["old_oid"])
+        _write_ledger_record(
+            self.common_dir, self.fp, key, e["new_oid"], sf.path, sf.old_path, e["status"], e["old_oid"],
+            _record_findings_for(item, {sf.path: stamped_own}, orphans, {sf.path}), 0, self.run_id,
+            truncated=False)
+        _clear_timeout_mark(self.common_dir, self.fp, key, e["new_oid"])
+        sf.written = True
+        return True
+
+    def report(self):
+        """Findings the run owes besides the reviewer's: replayed units, unverified
+        caller checks."""
+        return list(self.replayed), list(self.replayed_foreign), list(self.unverified)
+
+
+def _seg_classify_foreign(findings, review_root, tip, common_dir, fp, seen):
+    """Findings a cached unit review had about OTHER files: the same fate as the
+    priors of a carried record -- re-judged when that file changed since, replayed
+    when it did not, dropped when the file is gone or a resolution already covers
+    them. `seen` (finding ids) is extended."""
+    to_resolve, carried = [], []
+    for f in findings:
+        fid = f.get("id") or _finding_id(f)
+        if fid in seen:
+            continue
+        seen.add(fid)
+        fpath = f.get("path") or ""
+        blob = _blob_oids_at(review_root, tip, [fpath]).get(fpath, "") if fpath else ""
+        target = f.get("target_oid") or ""
+        if not blob or _find_valid_resolution(common_dir, fp, fid, target, review_root, tip) is not None:
+            continue
+        if target and blob != target:
+            to_resolve.append({"id": fid, "finding": f, "target_oid": target,
+                               "record": {"head_oid": target, "findings": []}})
+        else:
+            carried.append(f)
+    return to_resolve, carried
+
+
+def _seg_suppress_resolved(findings, priors, review_root, tip, common_dir, fp):
+    """Replayed findings of this file's own cached units, minus the ones a recorded
+    resolution already covers and the ones a prior classification holds (`priors`,
+    finding ids: those are being re-judged, and replaying them as well would show
+    a finding twice). Two units with the same text keep their own findings: the
+    same finding on two lines is two findings."""
+    out = []
+    for f in findings:
+        fid = f.get("id") or _finding_id(f)
+        if fid in priors:
+            continue
+        if _find_valid_resolution(common_dir, fp, fid, f.get("target_oid") or "",
+                                  review_root, tip) is not None:
+            continue
+        out.append(f)
+    return out
+
+
+def _seg_check_impact_verdicts(result, manifest):
+    """Part S requires a verdict for every impact site a chunk was given: a missing
+    one is a warning (the site was not judged), not a silent pass."""
+    sites = [s.get("id") for s in ((manifest.get("impact") or {}).get("sites") or []) if isinstance(s, dict)]
+    if not sites or not isinstance(result, dict):
+        return result
+    got = result.get("impact_verdicts") if isinstance(result.get("impact_verdicts"), dict) else {}
+    missing = [i for i in sites if i not in got]
+    if not missing:
+        return result
+    _metric_log("impact_verdict_missing", n=len(missing))
+    warn = {"file": None, "message": f"impact: the reviewer gave no verdict for {len(missing)} "
+                                     "call site(s); they were not judged"}
+    return dict(result, warnings=list(result.get("warnings") or []) + [warn])
 
 
 def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
                  tip, push_range, active_items, planner_warnings, fenced,
                  progress=None, fp="", carry_paths=None, chunk_extras=None,
-                 timeout_marks=None, diffs=None):
+                 timeout_marks=None, diffs=None, seg=None, impact=None):
     """Run per-chunk reviews with fencing, budget and retry.
 
     diffs ({path: _build_item_diff result}, see _build_diffs) switches on the
@@ -5447,9 +6651,15 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
     computed internally via _plan_to_chunks. carry_paths is the list of
     already-carried file paths (for the manifest's carried field).
     chunk_extras(k, chunk_paths) returns extra manifest fields for chunk k
-    (impact sites, known defects) or None. timeout_marks is _timeout_marks()
+    (impact sites, known defects) or None; with `seg` it is called as
+    chunk_extras(k, chunk_paths, chunk_items). timeout_marks is _timeout_marks()
     of the active items (read here when not given): chunks holding a file that
     timed out before are split.
+
+    seg (a _SegState, Part S) replaces the packing: files reviewed in units are
+    cut into chunks of unit diffs and caller checks, and after the last chunk the
+    caller checks that stayed `unsure` are asked once more. With nothing to
+    review (every unit cached) there are no chunks at all.
 
     Returns (merged_result, True, raw_name, chunks_new) on success.
     chunks_new is the count of chunks reviewed in THIS run.
@@ -5458,7 +6668,14 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
     """
     if timeout_marks is None:
         timeout_marks = _timeout_marks(common_dir, fp, active_items)
-    if diffs is not None:
+    if seg is not None and seg.files:
+        sizes = {p: d["lines"] for p, d in (diffs or {}).items() if not d["failed"] and d["lines"]}
+        done_in_units = seg.segmented_paths()
+        chunks = seg.plan_chunks(
+            [it for it in active_items if it["entry"]["path"] not in done_in_units],
+            timeout_marks, sizes, _CHUNK_DIFF_LINES, impact)
+        planner_warnings = list(planner_warnings or []) + list(seg.warnings)
+    elif diffs is not None:
         sizes = {p: d["lines"] for p, d in diffs.items() if not d["failed"] and d["lines"]}
         chunks = _plan_to_chunks(active_items, timeout_marks, sizes, _CHUNK_DIFF_LINES)
     else:
@@ -5470,7 +6687,23 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
     chunks_new = 0
     chunk_secs_total = 0.0   # wall time of this run's finished chunks (for the average)
 
-    for k, chunk_items in enumerate(chunks):
+    def _chunk_stream():
+        k, retried = 0, False
+        while True:
+            if k < len(chunks):
+                yield k, chunks[k]
+                k += 1
+            elif seg is not None and not retried:
+                retried = True              # caller checks that were unsure: once more
+                more = seg.retry_chunks()
+                if not more:
+                    return
+                chunks.extend(more)
+            else:
+                return
+
+    for k, chunk_items in _chunk_stream():
+        total = len(chunks)
         if fenced["hit"]:
             raise _Fenced()
 
@@ -5502,16 +6735,23 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
             _async_dir(common_dir) / f"manifest-{run_id}-{k}.json"
         )
         # other_changed: paths in OTHER chunks that are also being reviewed
+        chunk_paths = [item["entry"]["path"] for item in chunk_items if not _context_only(item)]
         other_changed = [
             item["entry"]["path"]
             for i, ch in enumerate(chunks)
-            for item in ch if i != k
+            for item in ch
+            if i != k and not _context_only(item)
+            and item["entry"]["path"] not in {it["entry"]["path"] for it in chunk_items}
         ]
+        if chunk_extras is None:
+            extras = None
+        elif seg is not None:
+            extras = chunk_extras(k, chunk_paths, chunk_items)
+        else:
+            extras = chunk_extras(k, chunk_paths)
         manifest = _build_review_manifest(
             common_dir, run_id, k, total, chunk_items, other_changed, carry_paths,
-            chunk_extras(k, [item["entry"]["path"] for item in chunk_items])
-            if chunk_extras is not None else None,
-            diffs)
+            extras, diffs)
         _write_manifest_file(manifest_path, manifest, f"chunk manifest for chunk {k}")
 
         # Clean worktree so one chunk can't leave state for the next.
@@ -5591,9 +6831,14 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
             raise
 
         # Write ledger records for this chunk (only reached if not fenced).
+        if seg is not None:
+            result = _seg_check_impact_verdicts(result, manifest)
         if fp and _ledger_enabled():
-            _write_run_records(result, chunk_items, common_dir, fp, run_id, review_root, tip,
+            _write_run_records(result, [it for it in chunk_items if it.get("seg_file") is None],
+                               common_dir, fp, run_id, review_root, tip,
                                precomputed=_owned_truncation(diffs))
+        if seg is not None:
+            seg.apply([it for it in chunk_items if it.get("seg_file") is not None], result)
 
         chunk_results.append(result)
         chunks_done += 1

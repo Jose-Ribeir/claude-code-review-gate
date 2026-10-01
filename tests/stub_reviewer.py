@@ -33,7 +33,17 @@ environment variables so one command line serves every scenario:
                      time and cost.
 
 Every call also traces `item_files`: the text of each diff file the manifest's items[]
-name (0.10.0), read at call time.
+name (0.10.0), read at call time. (A file_diff is keyed `review:<path>`; since 0.11.0 a
+unit_diff is `unit:<path>:<unit>:<part>` and a context item `context:<role>:<path>:<n>`.)
+
+0.11.0 (Part S) knobs:
+  STUB_UNIT_FINDINGS  JSON {unit qualname: {severity, content, offset}} -- a finding anchored
+                      `offset` lines into every unit_diff item of that unit (first part only),
+                      at the unit's tip line numbers, with `existing_code` read from the tree.
+  STUB_DEP_VERDICT    verdict for every dep task: ok (default) | broken | unsure | missing (no
+                      dep_verdicts at all) | garbage (a non-object) | unsure_first (unsure the
+                      first time a task id is seen, ok afterwards). broken also emits a finding
+                      at the caller, with dep_task set.
 
 The last non-flag argument is the range the gate asked to review; it is echoed
 into the trace so a test can assert what was reviewed.
@@ -98,11 +108,16 @@ def _read_item_files(m):
     """{role:path: text} for every manifest item that names a diff file (0.10.0),
     read now, while the gate still has them on disk -- what a reviewer's Read sees."""
     out = {}
-    for it in ((m or {}).get("items") or []):
+    for n, it in enumerate((m or {}).get("items") or []):
         f = it.get("file") if isinstance(it, dict) else ""
         if not f:
             continue
-        key = (it.get("role") or "review") + ":" + it.get("path", "")
+        if it.get("kind") == "unit_diff":
+            key = "unit:%s:%s:%s" % (it.get("path", ""), it.get("unit", ""), it.get("part", 1))
+        elif it.get("kind") == "context":
+            key = "context:%s:%s:%s" % (it.get("role", ""), it.get("path", ""), n)
+        else:
+            key = (it.get("role") or "review") + ":" + it.get("path", "")
         try:
             with open(f, "rb") as fh:
                 out[key] = fh.read().decode("utf-8")
@@ -299,6 +314,52 @@ if impact.get("sites"):
                 "existing_code": s.get("text") or "", "evidence": "impact_sites",
                 "impact_site": s["id"],
             })
+
+# 0.11.0: findings inside units under review, and verdicts for caller checks.
+unit_findings = os.environ.get("STUB_UNIT_FINDINGS", "")
+if unit_findings and manifest:
+    spec_map = json.loads(unit_findings)
+    for it in manifest.get("items") or []:
+        if it.get("kind") != "unit_diff" or it.get("unit") not in spec_map or it.get("part", 1) != 1:
+            continue
+        spec = spec_map[it["unit"]]
+        line = it["start_line"] + int(spec.get("offset", 0))
+        try:
+            with open(it["path"], encoding="utf-8") as fh:
+                code = fh.read().split(chr(10))[line - 1].rstrip(chr(13))
+        except Exception:
+            code = ""
+        findings.append({
+            "path": it["path"], "start_line": line, "end_line": line, "confidence": 0.95,
+            "category": "correctness", "evidence": "stub", "severity": spec.get("severity", "high"),
+            "content": spec.get("content", "stub unit finding"), "existing_code": code.strip()})
+tasks = (manifest or {}).get("tasks") or []
+dep_mode = os.environ.get("STUB_DEP_VERDICT", "ok")
+if tasks and dep_mode != "missing":
+    if dep_mode == "garbage":
+        out["dep_verdicts"] = ["ok"]
+    else:
+        verdicts = {}
+        seen_path = os.path.join(os.path.dirname(trace), "stub.depseen") if trace else None
+        seen = set()
+        if seen_path and os.path.exists(seen_path):
+            seen = set(open(seen_path, encoding="utf-8").read().split())
+        for t in tasks:
+            v = dep_mode
+            if dep_mode == "unsure_first":
+                v = "ok" if t["id"] in seen else "unsure"
+                seen.add(t["id"])
+            verdicts[t["id"]] = v
+            if v == "broken":
+                findings.append({
+                    "path": t["caller"]["path"], "start_line": t["caller"]["start_line"],
+                    "end_line": t["caller"]["start_line"], "severity": "high", "confidence": 0.95,
+                    "category": "correctness", "content": "caller broken by the change to " + str(t["callee"]["unit"]),
+                    "existing_code": "", "evidence": "dep_check", "dep_task": t["id"]})
+        if seen_path:
+            with open(seen_path, "w", encoding="utf-8") as fh:
+                fh.write(" ".join(sorted(seen)))
+        out["dep_verdicts"] = verdicts
 if os.environ.get("STUB_CONFIRM_SIBLINGS") == "1":
     for d in (manifest or {}).get("known_defects") or []:
         findings.append({

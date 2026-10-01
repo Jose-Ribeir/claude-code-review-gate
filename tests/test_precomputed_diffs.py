@@ -407,12 +407,14 @@ def test_a_900_line_file_reaches_the_reviewer_untruncated_end_to_end(tmp_path):
 
 
 def test_a_file_over_the_cap_is_flagged_truncated_in_the_record_end_to_end(tmp_path):
+    # Part B's own degradation, which since 0.11.0 is what OCR_SEGMENT=0 restores (and what a
+    # file that cannot be segmented still gets): tests/test_segment_gate.py has the units.
     work = rr._tiny_repo(tmp_path, {"keep.py": "x = 0\n"})
     (work / "huge.py").write_text(_long_file(1600), encoding="utf-8")
     ag._git(["add", "."], cwd=work)
     ag._git(["commit", "-q", "-m", "huge"], cwd=work)
     tip = ag._git(["rev-parse", "HEAD"], cwd=work)
-    decision, reason = rr._hook(work, rr._env(tmp_path), cmd="git push origin main")
+    decision, reason = rr._hook(work, rr._env(tmp_path, OCR_SEGMENT="0"), cmd="git push origin main")
     assert decision == "allow", reason
     st = rr._state(work, tip)
     (call,) = _calls(tmp_path)

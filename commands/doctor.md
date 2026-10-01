@@ -174,7 +174,21 @@ Report any of these that are set, since each changes the verdict: `OCR_MODEL`,
 `OCR_INLINE_BUDGET`, `OCR_INLINE_BUDGET_GIT`, `OCR_FORCE_REVIEW`,
 `OCR_LEGACY_RANGE`, `OCR_UNSET_ENV`, `OCR_LEDGER`, `OCR_LEDGER_TTL`,
 `OCR_LEDGER_MAX_RECORDS`, `OCR_IMPACT`, `OCR_SIBLINGS`, `OCR_TELEMETRY`,
-`OCR_PRECOMPUTED_DIFFS`, `OCR_CHUNK_DIFF_LINES`.
+`OCR_PRECOMPUTED_DIFFS`, `OCR_CHUNK_DIFF_LINES`, `OCR_SEGMENT`.
+
+`OCR_SEGMENT=0` (0.11.0) is the rollback to the 0.10.0 review of a big file: whole-file
+diffs with Part B's limits, no unit cache, no caller checks. Report it as **`warn`** (a
+big file is then truncated again and every edit of it re-reviews all of it), not as a
+fault. `OCR_SEGMENT` has no effect while `OCR_PRECOMPUTED_DIFFS=0`: units are delivered
+through the same manifest items.
+
+**Ledger size.** In the repository's common git dir, count the files under
+`review-gate-ledger/*/` (per-file records), `review-gate-ledger/*/seg/` (unit reviews)
+and `review-gate-ledger/*/dep/` (caller checks), and the directory's total size. Report
+the numbers; `warn` when the unit and caller-check records exceed four times
+`OCR_LEDGER_MAX_RECORDS` (default 5,000) -- the gate prunes them to that cap and to the
+30-day TTL at the start of every run, so a larger count means pruning is not running.
+Never delete any.
 
 `OCR_PRECOMPUTED_DIFFS=0` (0.10.0) is the rollback to the 0.9.x review path:
 the orchestrator retypes every diff into the reviewer's prompt and truncates it
