@@ -6,6 +6,89 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-01
+
+The reviewer reads its diffs from files the gate builds, instead of having the
+orchestrator retype every diff into an Agent prompt (about 20-30k output tokens
+for a 1,500-line diff, and the suspected main cost of a 314 s review call), and
+the size limits go up. Part B of `docs/plans/resume-truncated-chunks.md`.
+
+**Every cached review is invalidated once** (`agents/code-reviewer.md` is part of
+the ledger fingerprint and had to change): one full re-review per active branch.
+`OCR_PRECOMPUTED_DIFFS=0` restores the 0.9.x path exactly, for one release.
+
+### Changed
+- **Python builds each file's diff; the reviewer Reads it.** `git diff` runs once
+  per file with literal pathspecs (`ocr_impact.git_runner`: a file named `[x].py`
+  or `:(exclude)x` is a name, not a pattern), `--no-color --no-ext-diff
+  --no-textconv` and `core.quotePath=false`: full `-M <range> -- <path>` (both
+  paths for a rename), or the blob-to-blob delta with a `# path: ... (delta since
+  last review)` header. Diffs are written as LF text, with generated names, to
+  `.git/review-gate-async/run-<id>/diffs/<chunk>/<nnn>.diff`: **outside the
+  reviewed worktree.** The tip tree is attacker-controlled, so a tracked
+  `.review-gate` directory, file or symlink there can neither redirect a write nor
+  plant a diff, and nothing tracked is excluded from review. They are removed when
+  the run ends, and by the reaper for a run that died.
+- **A manifest is always written** (one `_build_review_manifest` replaces the two
+  duplicated builders): a small first push no longer uses the bare 0.7.0 command
+  line. With the plan unavailable the review is still manifest-less. The manifest
+  keeps `paths`, `renames`, `other_changed`, `files[]` (unchanged shape), `carried`
+  and the impact / known-defect extras, and gains `items[]`
+  (`kind: file_diff | unit_diff | context`; `file_diff` carries `path`, `old_path`,
+  `mode`, `file`, `lines`, `bytes`, `truncated`, `binary`, `level`; only
+  `file_diff` and `context` are used so far) and an empty `tasks[]`, the contract
+  Part S (units, cross-function checks) builds on.
+- **Higher limits, one definition, owned by Python.** A file's diff is delivered
+  in full up to **1,500 changed lines or 64 KB** (was 400 lines / 16 KB); past
+  that without context lines (`-U0`: every change still shown, not flagged), then
+  as hunk headers only (flagged `truncated`). A line over 500 characters is cut
+  and counts as truncated. Chunks are packed by the diff lines they deliver
+  (`OCR_CHUNK_DIFF_LINES`, default 3000, context lines included) instead of by
+  changed lines (`OCR_CHUNK_LINES`, now only for the rollback path); a file whose
+  own diff would not fit degrades first.
+- **Truncation is Python's call.** For a file whose diff the gate delivered, the
+  `truncated` flag of its ledger record and of every verdict is the gate's own;
+  the model's `diff truncated` warnings (named, or naming no file) are ignored for
+  it and still count for a file without a precomputed diff. A diff git could not
+  produce (non-zero exit, or empty output) is never replaced by an empty one: the
+  file goes to the orchestrator's own git path, as before. A reviewable file git
+  treats as binary (NUL bytes, or a `-diff` attribute) is reported in a warning.
+- **The resolver reads files too.** Its manifest keeps `files[]` and `prior_files`
+  and gains `items[]` with `role: active` (this push's diffs, rename paths
+  included) and `role: since` (the since-finding diffs).
+- **SKILL.md and the agents.** The orchestrator no longer runs `git diff`, copies
+  a diff or applies a size cap for an item that has a `file` (the old rules stay
+  for a file without one, and for a manifest without `items`); §2b reads the
+  definitions it needs with one `Grep` over the chunk's diff directory; the
+  `code-filter` still gets the cited files' diffs inline, for block candidates
+  only. `code-reviewer` reads `diff_file`s, labelled untrusted data, in pages of up
+  to 600 lines, outside its Read budget. `code-resolver` accepts diff paths.
+- **Phases.** A `diffs` phase is added to the run's phase timers (0.9.6), with the
+  number of files, lines, bytes, truncated, fallback and binary files.
+
+### Fixed
+- **The reviewer's whole process group is killed.** On POSIX it starts with
+  `start_new_session=True` and `_kill_child` uses `os.killpg`; before, only
+  `claude` died on a timeout or fence and its children outlived it, holding the
+  pipe open. On Windows `taskkill /T` now runs before the parent is killed (it
+  finds the children through the parent's pid, so after the kill it found
+  nothing). Creation flags are unchanged: no console window.
+
+### Operations
+- The reaper removes `run-*` diff directories of runs that died (older than an
+  hour and not owned by a live run). The doctor reports `OCR_PRECOMPUTED_DIFFS`
+  and `OCR_CHUNK_DIFF_LINES`, and checks that the diff directory is writable.
+- Spike: the headless reviewer, with the gate's existing arguments, reads files
+  outside its working directory (from the orchestrator and from the
+  `code-reviewer` subagent; `claude` 2.1.281), so no `--add-dir` is passed and the
+  tool allowlist and `--setting-sources` posture are unchanged.
+
+### Tests
+`tests/test_precomputed_diffs.py` (diff builder, limits, manifest, security with a
+hostile tree, resolver items, reaper), `tests/test_process_groups.py`; the stub
+reviewer traces the text of every diff file its manifest names and the `*.diff`
+files in its own working directory.
+
 ## [0.9.6] - 2026-10-01
 
 Time metrics: every run now records where its minutes went. No change to what a
