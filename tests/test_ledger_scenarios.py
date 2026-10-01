@@ -821,7 +821,9 @@ def test_scenario_13_ocr_ledger_0_uses_golden_argv_no_ledger_dir(tmp_path):
     """OCR_LEDGER=0: every file is full, argv byte-identical to 0.7.0, no ledger dir."""
     work = _tiny_repo(tmp_path, {"x.py": "x = 1\n"})
     tip = _commit(work, "x.py", "x = 2\n")
-    env = _env(tmp_path, OCR_LEDGER="0")
+    # OCR_PRECOMPUTED_DIFFS=0: since 0.10.0 every review gets a manifest (the diffs
+    # reach the reviewer through it); the bare 0.7.0 argv is the rollback path.
+    env = _env(tmp_path, OCR_LEDGER="0", OCR_PRECOMPUTED_DIFFS="0")
     decision, reason, _ = _hook(work, "git push origin main", env)
     assert decision == "allow", reason
     _wait_state(work, tip, {"done"})
@@ -1266,7 +1268,8 @@ def test_finding_about_a_file_outside_the_review_is_kept(tmp_path):
     findings_map = json.dumps({"other.py": {"severity": "high", "content": "api caller broken",
                                             "existing_code": "def api(x): pass"}})
     decision, reason, _ = _hook(work, "git push origin main",
-                                _env(tmp_path, STUB_FINDINGS_FOR=findings_map))
+                                _env(tmp_path, STUB_FINDINGS_FOR=findings_map,
+                                     STUB_FINDINGS_OUTSIDE="1"))
     assert decision == "deny", reason
     _wait_state(work, tip1, {"done"})
 

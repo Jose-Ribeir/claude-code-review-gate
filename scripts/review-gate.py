@@ -212,6 +212,24 @@ try:
     _CHUNK_FILES = max(1, _CHUNK_FILES)
 except ValueError:
     _CHUNK_FILES = 8
+# --- precomputed diffs (0.10.0) ----------------------------------------------
+# Python builds each file's diff and the reviewer READS it (items[] of the
+# manifest) instead of the orchestrator retyping every diff into an Agent
+# prompt. One definition of the limits, owned here, not by SKILL.md: a file's
+# diff is delivered in full up to this many changed lines / bytes, then with no
+# context lines (-U0), then as hunk headers only; no line is longer than
+# _DIFF_LINE_CAP chars. OCR_PRECOMPUTED_DIFFS=0 restores the 0.9.x path.
+_PRECOMPUTED_MAX_LINES = 1500
+_PRECOMPUTED_MAX_BYTES = 64 * 1024
+_DIFF_LINE_CAP = 500
+try:
+    # One budget per chunk, in lines of diff (context lines included). It
+    # replaces _CHUNK_LINES (changed lines) for packing when diffs are
+    # precomputed; a file whose own diff would not fit it degrades first.
+    _CHUNK_DIFF_LINES = int(os.environ.get("OCR_CHUNK_DIFF_LINES", "3000"))
+    _CHUNK_DIFF_LINES = max(200, _CHUNK_DIFF_LINES)
+except ValueError:
+    _CHUNK_DIFF_LINES = 3000
 try:
     _CHUNK_TIMEOUT = int(os.environ.get("OCR_CHUNK_TIMEOUT", "1200"))
     _CHUNK_TIMEOUT = max(60, _CHUNK_TIMEOUT)
@@ -2892,6 +2910,7 @@ def _supervise_run(state_path, run_id):
     chunks_new = 0   # chunks reviewed in this run
     progress = {"new": 0}
     plan_summary = ""
+    diffs = None     # precomputed diffs (_build_diffs); None on the 0.9.x path
     try:
         worktree = _make_worktree(repo_root, tip, run_id)
         if worktree:
@@ -2974,6 +2993,21 @@ def _supervise_run(state_path, run_id):
                 if stuck:
                     raise ReviewUnreviewableError(_unreviewable_message(stuck, _CHUNK_TIMEOUT))
 
+            # Precomputed diffs: Python builds every active file's diff once, here,
+            # so chunks can be packed by what they will really deliver and the
+            # reviewer reads files instead of having diffs retyped into its prompt.
+            diffs = None
+            if active_items and _precomputed_enabled():
+                diffs = _build_diffs(review_root, base, tip, active_items)
+                planner_warnings = list(planner_warnings or []) + _diff_warnings(diffs)
+                _mark_phase(
+                    "diffs", files=len(diffs),
+                    lines=sum(d["lines"] for d in diffs.values()),
+                    bytes=sum(d["bytes"] for d in diffs.values()),
+                    truncated=sum(1 for d in diffs.values() if d["truncated"]),
+                    fallback=sum(1 for d in diffs.values() if d["failed"]),
+                    binary=sum(1 for d in diffs.values() if d["binary"]))
+
             def _single(call):
                 """The single-context review: a timeout there marks its files too."""
                 try:
@@ -3000,7 +3034,7 @@ def _supervise_run(state_path, run_id):
                     state_path, run_id, common_dir, review_root, mode, git_dir,
                     tip, push_range, active_items, planner_warnings, fenced, progress,
                     fp=fp, carry_paths=carry_paths, chunk_extras=_review_extras,
-                    timeout_marks=timeout_marks,
+                    timeout_marks=timeout_marks, diffs=diffs,
                 )
                 n_delta = sum(1 for p in active_items if p["mode"] == "delta")
                 n_full = len(active_items) - n_delta
@@ -3012,8 +3046,10 @@ def _supervise_run(state_path, run_id):
                 # Single-context path.
                 all_full = all(p["mode"] == "full" for p in active_items)
                 extras = _review_extras(0, [p["entry"]["path"] for p in active_items])
-                if all_full and not carry_items and not extras:
+                if diffs is None and all_full and not carry_items and not extras:
                     # Golden argv: byte-identical to 0.7.0 (no --paths-file).
+                    # Only with OCR_PRECOMPUTED_DIFFS=0: otherwise a manifest is
+                    # always written, since the diffs reach the reviewer through it.
                     result, ran, raw_name = _single(
                         lambda: _run_review(review_root, mode, git_dir, tip, push_range)
                     )
@@ -3023,35 +3059,11 @@ def _supervise_run(state_path, run_id):
                     manifest_path = str(
                         _async_dir(common_dir) / f"manifest-{run_id}-sc.json"
                     )
-                    manifest = {
-                        "paths": [item["entry"]["path"] for item in active_items],
-                        "renames": [
-                            [item["entry"]["old_path"], item["entry"]["path"]]
-                            for item in active_items if item["entry"].get("old_path")
-                        ],
-                        "other_changed": [],
-                        "files": [
-                            {
-                                "path": item["entry"]["path"],
-                                "mode": item["mode"],
-                                "from_oid": item.get("from_oid") or "",
-                                "to_oid": item["entry"].get("new_oid") or "",
-                            }
-                            for item in active_items
-                        ],
-                        "carried": carry_paths,
-                    }
-                    manifest.update(extras)
-                    try:
-                        tmp = manifest_path + ".tmp"
-                        Path(tmp).write_text(
-                            json.dumps(manifest, ensure_ascii=False), encoding="utf-8"
-                        )
-                        os.replace(tmp, manifest_path)
-                    except Exception as exc:
-                        raise ReviewGateError(
-                            f"could not write single-context manifest: {exc}"
-                        )
+                    manifest = _build_review_manifest(
+                        common_dir, run_id, None, None, active_items, [], carry_paths,
+                        extras, diffs)
+                    _write_manifest_file(manifest_path, manifest,
+                                         "single-context manifest")
                     try:
                         result, ran, raw_name = _single(
                             lambda: _run_review(
@@ -3064,10 +3076,13 @@ def _supervise_run(state_path, run_id):
                             Path(manifest_path).unlink(missing_ok=True)
                         except Exception:
                             pass
+                        if diffs is not None:
+                            _remove_run_dir(common_dir, run_id, sub=0)
                     chunks_new = 1 if ran else 0
                 if ran and _ledger_enabled():
                     _write_run_records(result, active_items, common_dir, fp, run_id,
-                                       review_root, tip)
+                                       review_root, tip,
+                                       precomputed=_owned_truncation(diffs))
                 n_delta = sum(1 for p in active_items if p["mode"] == "delta")
                 n_full = len(active_items) - n_delta
                 plan_summary = (
@@ -3086,7 +3101,7 @@ def _supervise_run(state_path, run_id):
             if to_resolve:
                 resolver_results, resolver_warnings = _run_resolver(
                     review_root, mode, git_dir, tip, push_range,
-                    to_resolve, active_items, common_dir, fp, run_id,
+                    to_resolve, active_items, common_dir, fp, run_id, diffs=diffs,
                 )
                 tip_cache = {}
 
@@ -3104,6 +3119,7 @@ def _supervise_run(state_path, run_id):
                     again, more = _run_resolver(
                         review_root, mode, git_dir, tip, push_range,
                         recheck, active_items, common_dir, fp, run_id, recheck=True,
+                        diffs=diffs,
                     )
                     resolver_results.update(again)
                     resolver_warnings += more
@@ -3202,7 +3218,8 @@ def _supervise_run(state_path, run_id):
 
                 all_findings = deduped_new + prior_findings + notes
                 result = dict(result, findings=all_findings)
-                result = _surface_truncated(result, plan, common_dir, fp)
+                result = _surface_truncated(result, plan, common_dir, fp,
+                                            set(_owned_truncation(diffs)))
                 if plan_summary:
                     result = dict(result, plan_summary=plan_summary)
 
@@ -3210,6 +3227,7 @@ def _supervise_run(state_path, run_id):
             result.setdefault("plan_summary", plan_summary)
     except _Fenced:
         stop.set()
+        _remove_run_dir(common_dir, run_id)
         if worktree:
             _remove_worktree(repo_root, worktree)
         return 0  # a newer run owns this tip now; say nothing
@@ -3242,6 +3260,7 @@ def _supervise_run(state_path, run_id):
         result, ran, raw_name, chunks_new = None, False, "", progress["new"]
     finally:
         stop.set()
+        _remove_run_dir(common_dir, run_id)
         if worktree:
             _remove_worktree(repo_root, worktree)
 
@@ -3403,6 +3422,7 @@ def _remove_worktree(repo_root, path):
 
 def _reap_async(common_dir):
     """Drop async state/logs older than MARKER_TTL, and the retired chunks/ cache.
+    Also the run-*/ diff directories of runs that died (0.10.0).
 
     The worktree sweep skips any worktree owned by a running state whose
     heartbeat is younger than STALE_S.  The 0.7.0 chunk cache (chunks/) is
@@ -3415,12 +3435,14 @@ def _reap_async(common_dir):
 
         # Collect live-run worktree paths so the sweep below can skip them.
         live_worktrees = set()
+        live_runs = set()
         for p in _async_dir(common_dir).glob("*.json"):
             try:
                 st = _read_state(p) or {}
                 if st.get("state") in ("running", "claimed"):
                     hb = float(st.get("heartbeat_ts") or st.get("claimed_ts") or 0)
                     if now - hb < STALE_S:
+                        live_runs.add(str(st.get("run_id") or ""))
                         wt = st.get("worktree")
                         if wt:
                             live_worktrees.add(os.path.realpath(str(wt)))
@@ -3432,6 +3454,13 @@ def _reap_async(common_dir):
                 if p.is_dir() and p.name == "chunks":
                     # 0.7.0 chunk cache: remove entirely; 0.8.0 uses the ledger.
                     shutil.rmtree(p, ignore_errors=True)
+                    continue
+                if p.is_dir() and p.name.startswith("run-"):
+                    # A run's precomputed diffs (0.10.0). The run removes them itself
+                    # when it ends; what is left here belongs to a run that died.
+                    if (p.name[4:] not in live_runs and p.stat().st_mtime < cutoff
+                            and not p.is_symlink()):
+                        shutil.rmtree(p, ignore_errors=True)
                     continue
                 if p.is_file() and p.stat().st_mtime < cutoff:
                     p.unlink()
@@ -3645,8 +3674,20 @@ def _collect_diff_entries(root, base, tip):
     return list(entries.values()), warnings
 
 
-def _group_into_chunks(entries):
-    """Group by top-level directory, splitting at CHUNK_LINES / CHUNK_FILES."""
+def _group_into_chunks(entries, sizes=None, budget=None):
+    """Group by top-level directory, splitting at CHUNK_LINES / CHUNK_FILES.
+
+    `sizes` ({path: lines}) and `budget` replace each entry's changed-line count
+    and _CHUNK_LINES: the precomputed-diff path packs by the lines of diff it
+    actually delivers (_CHUNK_DIFF_LINES).
+    """
+    limit = budget or _CHUNK_LINES
+
+    def size(e):
+        if sizes and e["path"] in sizes:
+            return sizes[e["path"]]
+        return e["lines"]
+
     by_dir = {}
     for e in entries:
         top = e["path"].split("/")[0] if "/" in e["path"] else ""
@@ -3655,19 +3696,20 @@ def _group_into_chunks(entries):
     chunks, current, current_lines = [], [], 0
     for dir_entries in by_dir.values():
         for e in dir_entries:
-            if e["lines"] > _CHUNK_LINES:
+            n = size(e)
+            if n > limit:
                 # Oversized file: flush, then give it its own chunk.
                 if current:
                     chunks.append(current)
                 current, current_lines = [], 0
                 chunks.append([e])
                 continue
-            if current and (current_lines + e["lines"] > _CHUNK_LINES
+            if current and (current_lines + n > limit
                             or len(current) >= _CHUNK_FILES):
                 chunks.append(current)
                 current, current_lines = [], 0
             current.append(e)
-            current_lines += e["lines"]
+            current_lines += n
     if current:
         chunks.append(current)
     return chunks if chunks else [[]]
@@ -4356,9 +4398,34 @@ def _since_finding_specs(review_root, tip, to_resolve):
     return specs
 
 
+def _resolver_diff_items(repo_root, common_dir, run_id, tag, active_plan_items,
+                         prior_specs, diffs):
+    """items[] for the resolver: the active files' diffs (built for the review,
+    `diffs`) and, for each prior whose file changed since it was raised, the
+    since-finding diff -- all written under diffs/res<tag>/ for the agent to Read."""
+    directory = _run_dir(common_dir, run_id) / "diffs" / f"res{tag}"
+    entries = [({"path": it["entry"]["path"], "old_path": it["entry"].get("old_path"),
+                 "mode": it["mode"]}, diffs.get(it["entry"]["path"]))
+               for it in active_plan_items]
+    items = _diff_items(directory, entries, role="active", mark_owned=False)
+    run = ocr_impact.git_runner(repo_root)
+    since = []
+    for n, spec in enumerate(prior_specs):
+        try:
+            d = _build_item_diff(run, {
+                "path": spec["path"], "blobs": (spec["from_oid"], spec["to_oid"]),
+                "header": f"# path: {spec['path']} (changes since the finding was raised)"})
+        except Exception:
+            d = _failed_diff()
+        since.append(({"path": spec["path"], "mode": "since"}, d))
+    items += _diff_items(directory / "since", since, role="since", mark_owned=False)
+    return items
+
+
 def _run_resolver(repo_root, mode, git_dir, tip, push_range, to_resolve,
-                  active_plan_items, common_dir, fp, run_id, recheck=False):
-    """Invoke the resolver agent once.
+                  active_plan_items, common_dir, fp, run_id, recheck=False, diffs=None):
+    """Invoke the resolver agent once. `diffs` ({path: diff result}, see
+    _build_diffs) adds items[] with the diff files it should Read.
 
     Returns ({id: {status, evidence_path, evidence_quote}}, [warning]); every id
     in `to_resolve` is present. On failure every id is an evidence-free
@@ -4376,24 +4443,27 @@ def _run_resolver(repo_root, mode, git_dir, tip, push_range, to_resolve,
     tag = "-recheck" if recheck else ""
     manifest_path = str(_async_dir(common_dir) / f"resolver-{run_id}{tag}.json")
     try:
+        prior_specs = _since_finding_specs(repo_root, tip, to_resolve)
+        manifest = {
+            "resolve": prior_data,
+            "active_paths": [item["entry"]["path"] for item in active_plan_items],
+            "files": [
+                {"path": item["entry"]["path"], "mode": item["mode"],
+                 "from_oid": item.get("from_oid") or "",
+                 "to_oid": item["entry"].get("new_oid") or ""}
+                for item in active_plan_items
+            ],
+            "prior_files": prior_specs,
+            "recheck": bool(recheck),
+        }
+        if diffs is not None:
+            manifest["items"] = _resolver_diff_items(
+                repo_root, common_dir, run_id, tag, active_plan_items, prior_specs, diffs)
         _tmp = manifest_path + ".tmp"
-        Path(_tmp).write_text(
-            json.dumps({
-                "resolve": prior_data,
-                "active_paths": [item["entry"]["path"] for item in active_plan_items],
-                "files": [
-                    {"path": item["entry"]["path"], "mode": item["mode"],
-                     "from_oid": item.get("from_oid") or "",
-                     "to_oid": item["entry"].get("new_oid") or ""}
-                    for item in active_plan_items
-                ],
-                "prior_files": _since_finding_specs(repo_root, tip, to_resolve),
-                "recheck": bool(recheck),
-            }, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        Path(_tmp).write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
         os.replace(_tmp, manifest_path)
     except Exception as exc:
+        _remove_run_dir(common_dir, run_id, sub=f"res{tag}")
         _warn(f"review-gate: could not write resolver manifest: {exc}")
         return fallback, [f"resolver: could not write manifest ({exc})"]
     try:
@@ -4413,6 +4483,8 @@ def _run_resolver(repo_root, mode, git_dir, tip, push_range, to_resolve,
             Path(manifest_path).unlink(missing_ok=True)
         except Exception:
             pass
+        if diffs is not None:
+            _remove_run_dir(common_dir, run_id, sub=f"res{tag}")
 
 
 def _norm_ws(text):
@@ -4706,7 +4778,7 @@ def _timeout_failure(exc, common_dir, fp, items, timeout_s, label):
         "them in smaller chunks")
 
 
-def _plan_to_chunks(active_items, marks=None):
+def _plan_to_chunks(active_items, marks=None, sizes=None, budget=None):
     """Group active (delta/full) plan items into chunks for _run_chunked.
 
     Returns a list of lists of plan_item dicts (each item has 'entry', 'mode',
@@ -4716,7 +4788,7 @@ def _plan_to_chunks(active_items, marks=None):
     """
     entries = [item["entry"] for item in active_items]
     path_to_item = {item["entry"]["path"]: item for item in active_items}
-    grouped_entries = _group_into_chunks(entries)
+    grouped_entries = _group_into_chunks(entries, sizes, budget)
     chunks = [
         [path_to_item[e["path"]] for e in chunk_entries]
         for chunk_entries in grouped_entries
@@ -4737,25 +4809,320 @@ def _plan_to_chunks(active_items, marks=None):
     return out
 
 
-def _truncated_paths(result):
+# --- precomputed diffs (0.10.0) ----------------------------------------------
+# Python writes each file's diff to disk, in the gate's OWN run directory, and
+# the reviewer reads it (manifest items[]). The directory is
+# `<git common dir>/review-gate-async/run-<run_id>/diffs/<k>/<nnn>.diff`:
+# never inside the reviewed worktree. The tip tree is attacker-controlled, so a
+# tracked or symlinked `.review-gate` there could redirect a write or plant a
+# fake diff, and excluding such a path from review would be a way to hide a
+# change. File names are generated here, never taken from the tree.
+
+def _precomputed_enabled():
+    return os.environ.get("OCR_PRECOMPUTED_DIFFS", "1").strip().lower() not in ("0", "false", "no")
+
+
+def _run_dir(common_dir, run_id):
+    return _async_dir(common_dir) / f"run-{run_id}"
+
+
+def _remove_run_dir(common_dir, run_id, sub=None):
+    """Delete a run's diff directory (or one `diffs/<sub>` of it). Refuses
+    anything that is not under this repository's review-gate-async/run-*."""
+    try:
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", str(run_id or "")):
+            return
+        target = _run_dir(common_dir, run_id)
+        if sub is not None:
+            target = target / "diffs" / str(sub)
+        base = os.path.realpath(str(_async_dir(common_dir)))
+        real = os.path.realpath(str(target))
+        if real.startswith(base + os.sep) and os.path.isdir(real):
+            shutil.rmtree(real, ignore_errors=True)
+    except Exception:
+        pass
+
+
+# `git diff` arguments shared by every precomputed diff. --no-color: a user's
+# color.ui=always would put escapes in the file; core.quotePath=false keeps a
+# non-ASCII path readable in the headers; --no-ext-diff / --no-textconv: what the
+# reviewer reads is git's own text diff, whatever the config or attributes say.
+_DIFF_ARGS = ["-c", "core.quotePath=false", "diff", "--no-ext-diff",
+              "--no-textconv", "--no-color"]
+_BINARY_DIFF_RE = re.compile(r"^(?:Binary files .* differ|GIT binary patch)$", re.M)
+
+
+def _item_diff_spec(item, base, tip):
+    """What to diff for an active plan item: its delta blobs, or its whole range
+    (both paths of a rename, so git can pair them)."""
+    e = item["entry"]
+    if item.get("mode") == "delta" and item.get("from_oid"):
+        return {"path": e["path"], "blobs": (item["from_oid"], e["new_oid"]),
+                "header": f"# path: {e['path']} (delta since last review)"}
+    return {"path": e["path"], "range": f"{base or _EMPTY_TREE}..{tip}",
+            "paths": [p for p in (e.get("old_path"), e["path"]) if p]}
+
+
+def _diff_command(spec, unified=None):
+    args = list(_DIFF_ARGS)
+    if unified is not None:
+        args.append(f"-U{unified}")
+    if spec.get("blobs"):
+        return args + list(spec["blobs"])
+    return args + ["-M", spec["range"], "--"] + list(spec["paths"])
+
+
+def _cap_diff_lines(text):
+    """(text with no line longer than _DIFF_LINE_CAP chars, how many were cut)."""
+    cut, out = 0, []
+    for line in text.split("\n"):
+        if len(line) > _DIFF_LINE_CAP:
+            cut += 1
+            line = line[:_DIFF_LINE_CAP] + f" ...[cut {len(line) - _DIFF_LINE_CAP} chars]"
+        out.append(line)
+    return "\n".join(out), cut
+
+
+def _count_changed(text):
+    """Added + removed lines of a unified diff. Structural, not by prefix: a
+    removed SQL comment is `--- x` and an added `++ x` is `+++ x`, which must
+    not be mistaken for file headers."""
+    n, in_hunk = 0, False
+    for line in text.split("\n"):
+        if line.startswith("diff --git "):
+            in_hunk = False
+        elif line.startswith("@@"):
+            in_hunk = True
+        elif in_hunk and line[:1] in ("+", "-"):
+            n += 1
+    return n
+
+
+def _hunk_headers_only(text):
+    """The file headers and the `@@` lines of a diff, nothing in between."""
+    out, in_hunk = [], False
+    for line in text.split("\n"):
+        if line.startswith("diff --git "):
+            in_hunk = False
+            out.append(line)
+        elif line.startswith("@@"):
+            in_hunk = True
+            out.append(line)
+        elif not in_hunk:
+            out.append(line)
+    return "\n".join(out)
+
+
+def _build_item_diff(run, spec, budget=None):
+    """One file's diff text, degraded as little as the limits allow.
+
+    Returns {text, lines, bytes, changed, truncated, binary, level, failed}.
+    level: full | u0 (every changed line, no context lines) | stat (hunk headers
+    only; truncated) | none. `failed` -- git failed or said nothing -- means the
+    file gets NO precomputed diff and goes to the orchestrator's own git path:
+    never an empty diff the reviewer would take for "no change".
+    """
+    res = {"text": "", "lines": 0, "bytes": 0, "changed": 0, "truncated": False,
+           "binary": False, "level": "none", "failed": False}
+    full, rc = run(_diff_command(spec))
+    if rc != 0 or not full.strip():
+        res["failed"] = True
+        return res
+    if _BINARY_DIFF_RE.search(full):
+        res["binary"] = True
+        return res
+
+    def measure(text):
+        return (text.count("\n") + 1, len(text.encode("utf-8", "replace")) + 1,
+                _count_changed(text))
+
+    def fits(m):
+        return (m[2] <= _PRECOMPUTED_MAX_LINES and m[1] <= _PRECOMPUTED_MAX_BYTES
+                and (budget is None or m[0] <= budget))
+
+    text, cut = _cap_diff_lines(full)
+    level = "full"
+    if not fits(measure(text)):
+        u0, rc0 = run(_diff_command(spec, 0))
+        u0_text, u0_cut = _cap_diff_lines(u0) if (rc0 == 0 and u0.strip()) else (None, 0)
+        if u0_text is not None and fits(measure(u0_text)):
+            text, cut, level = u0_text, u0_cut, "u0"
+        else:
+            text = _hunk_headers_only(u0_text if u0_text is not None else text)
+            cut, level = 0, "stat"
+    notes = []
+    if spec.get("header"):
+        notes.append(spec["header"])
+    if level == "u0":
+        notes.append("# context lines omitted (-U0); every changed line is shown")
+    elif level == "stat":
+        notes.append("# diff truncated: too large for the review limits; hunk headers "
+                     "only. Read the file at the hunks below.")
+    if notes:
+        text = "\n".join(notes) + "\n" + text
+    lines, size, changed = measure(text)
+    res.update(text=text, lines=lines, bytes=size, changed=changed,
+               truncated=(level == "stat" or cut > 0), level=level)
+    return res
+
+
+def _failed_diff():
+    return {"text": "", "lines": 0, "bytes": 0, "changed": 0, "truncated": False,
+            "binary": False, "level": "none", "failed": True}
+
+
+def _build_diffs(review_root, base, tip, active_items, budget=None):
+    """{path: _build_item_diff result} for the active items. Never raises: a
+    file whose diff could not be built is marked failed (orchestrator fallback)."""
+    run = ocr_impact.git_runner(review_root)
+    out = {}
+    for item in active_items:
+        path = item["entry"]["path"]
+        try:
+            out[path] = _build_item_diff(run, _item_diff_spec(item, base, tip),
+                                         _CHUNK_DIFF_LINES if budget is None else budget)
+        except Exception:
+            out[path] = _failed_diff()
+    return out
+
+
+def _diff_warnings(diffs):
+    """Planner warnings for what the reviewer could not be shown at all."""
+    n_bin = sum(1 for d in (diffs or {}).values() if d.get("binary"))
+    if not n_bin:
+        return []
+    return [f"{n_bin} file(s) with a reviewable extension are binary to git "
+            "(NUL bytes or a `-diff` attribute): their content was not shown to the reviewer"]
+
+
+def _write_diff_file(directory, n, text):
+    """Write one diff as `<nnn>.diff` (bytes, LF) in `directory`; "" on failure.
+    The name is generated here -- never derived from a path in the reviewed tree."""
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        f = directory / f"{n:03d}.diff"
+        f.write_bytes((text + "\n").encode("utf-8", "replace"))
+        return str(f).replace("\\", "/")
+    except OSError:
+        return ""
+
+
+def _diff_items(directory, entries, role=None, mark_owned=True):
+    """file_diff manifest items for `entries` [(meta, diff result)], writing each
+    diff to `directory`. An item without `file` (git failed, or the file could
+    not be written) is the orchestrator's to collect with git. `mark_owned`
+    records on the diff result that Python delivered it to the reviewer."""
+    items = []
+    for n, (meta, d) in enumerate(entries):
+        it = {"kind": "file_diff", "path": meta["path"], "old_path": meta.get("old_path") or "",
+              "mode": meta.get("mode") or "full", "file": "", "lines": 0, "bytes": 0,
+              "truncated": False, "binary": False}
+        if role:
+            it["role"] = role
+        if d and not d["failed"]:
+            it.update(lines=d["lines"], bytes=d["bytes"], truncated=d["truncated"],
+                      binary=d["binary"], level=d["level"])
+            if d["text"]:
+                it["file"] = _write_diff_file(directory, n, d["text"])
+            if mark_owned:
+                d["owned"] = bool(it["file"]) or bool(d["binary"])
+        items.append(it)
+    return items
+
+
+def _build_review_manifest(common_dir, run_id, k, total, chunk_items, other_changed,
+                           carry_paths, extras=None, diffs=None):
+    """The reviewer's manifest for one chunk (k, total) or the single-context
+    review (k None). The one builder for both.
+
+    Keys kept from 0.8/0.9: paths, renames, other_changed, files[] (path, mode,
+    from_oid, to_oid), carried, plus the impact / known_defects extras. With
+    `diffs` (_build_diffs) it adds `items[]` -- one file_diff per file whose diff
+    is written under this run's diffs/<k>/ -- `context` items for the files the
+    reviewer should treat as background, and an (empty for now) `tasks[]`:
+    Part S's unit_diff and dep tasks use the same contract.
+    """
+    manifest = {}
+    if k is not None:
+        manifest.update(chunk_index=k, chunks_total=total)
+    manifest.update({
+        "paths": [item["entry"]["path"] for item in chunk_items],
+        "renames": [
+            [item["entry"]["old_path"], item["entry"]["path"]]
+            for item in chunk_items if item["entry"].get("old_path")
+        ],
+        "other_changed": list(other_changed or []),
+        "files": [
+            {
+                "path": item["entry"]["path"],
+                "mode": item["mode"],
+                "from_oid": item.get("from_oid") or "",
+                "to_oid": item["entry"].get("new_oid") or "",
+            }
+            for item in chunk_items
+        ],
+        "carried": list(carry_paths or []),
+    })
+    if diffs is not None:
+        directory = _run_dir(common_dir, run_id) / "diffs" / str(0 if k is None else k)
+        manifest["items"] = _diff_items(
+            directory,
+            [({"path": it["entry"]["path"], "old_path": it["entry"].get("old_path"),
+               "mode": it["mode"]}, diffs.get(it["entry"]["path"]))
+             for it in chunk_items])
+        manifest["items"] += (
+            [{"kind": "context", "role": "other_changed", "path": p}
+             for p in manifest["other_changed"]]
+            + [{"kind": "context", "role": "carried", "path": p}
+               for p in manifest["carried"]])
+        manifest["tasks"] = []
+    manifest.update(extras or {})
+    return manifest
+
+
+def _write_manifest_file(manifest_path, manifest, what):
+    """Atomically write a manifest; ReviewGateError (fail closed) when it can't be."""
+    try:
+        tmp = manifest_path + ".tmp"
+        Path(tmp).write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, manifest_path)
+    except Exception as exc:
+        raise ReviewGateError(f"could not write {what}: {exc}")
+
+
+def _owned_truncation(diffs):
+    """{path: truncated} for the files whose diff Python delivered (or whose
+    binary-ness it established). For these, Python's flag replaces whatever the
+    model's warnings say."""
+    return {p: bool(d.get("truncated")) for p, d in (diffs or {}).items() if d.get("owned")}
+
+
+def _truncated_paths(result, owned=None):
     """Paths the reviewer saw only partially (skill warning or finding flag).
-    Contains "*" when a diff truncation names no file: which one is unknown."""
+    Contains "*" when a diff truncation names no file: which one is unknown.
+
+    `owned` is the set of files whose diff Python delivered (precomputed): for
+    those, Python's own `truncated` flag is the truth, so the model's warnings
+    and flags about them are ignored. A `"*"` warning is kept only when some file
+    of the call has no precomputed diff (the caller passes `owned=None` then)."""
     out = set()
+    owned = owned or ()
     for w in (result.get("warnings") or []):
         if isinstance(w, dict):
             msg = str(w.get("message") or "").lower()
             diff_trunc = w.get("type") == "diff_truncated" or "diff truncated" in msg
             if w.get("file") and (diff_trunc or "truncat" in msg):
-                out.add(w["file"])
+                if w["file"] not in owned:
+                    out.add(w["file"])
             elif diff_trunc:
                 out.add("*")
     for f in (result.get("findings") or []):
-        if isinstance(f, dict) and f.get("diff_truncated") and f.get("path"):
+        if isinstance(f, dict) and f.get("diff_truncated") and f.get("path")                 and f["path"] not in owned:
             out.add(f["path"])
     return out
 
 
-def _surface_truncated(result, plan, common_dir, fp):
+def _surface_truncated(result, plan, common_dir, fp, owned=None):
     """Keep truncation visible once it is cached.
 
     A truncated review is carried like any other (re-reviewing the same blob
@@ -4780,7 +5147,7 @@ def _surface_truncated(result, plan, common_dir, fp):
                                       fp, key, e["new_oid"])
             if _is_truncated_record(rec):
                 flagged.add(e["path"])
-    flagged |= {w for w in _truncated_paths(result) if w != "*"} & in_push
+    flagged |= {w for w in _truncated_paths(result, owned) if w != "*"} & in_push
     if not flagged:
         return result
     warnings = list(result.get("warnings") or [])
@@ -4855,7 +5222,8 @@ def _diff_exceeds_caps(item, review_root=""):
     return size > _TRUNC_MAX_BYTES
 
 
-def _write_run_records(result, active_items, common_dir, fp, run_id, review_root="", tip=""):
+def _write_run_records(result, active_items, common_dir, fp, run_id, review_root="", tip="",
+                       precomputed=None):
     """Write per-file ledger records after a completed review of `active_items`.
 
     None at all unless the review finished cleanly. A file whose diff the
@@ -4866,13 +5234,24 @@ def _write_run_records(result, active_items, common_dir, fp, run_id, review_root
     state visible (_surface_truncated) and keeps it from being a delta base.
     A flagged write never replaces a valid unflagged record; an unflagged one
     replaces a flagged record. Best-effort. Returns the paths flagged.
+
+    `precomputed` ({path: truncated}, see _owned_truncation) covers the files
+    whose diff Python itself delivered to the reviewer: for those the flag is
+    Python's own and the model's warnings are ignored. For every other file
+    (git failed for it, or the 0.9.x path) the rules above apply.
     """
     flagged_paths = set()
     if not isinstance(result, dict):
         return flagged_paths
     if result.get("status", "") not in ("success", "completed_with_warnings"):
         return flagged_paths
-    truncated = _truncated_paths(result)
+    precomputed = precomputed or {}
+    owned_here = {item["entry"]["path"] for item in active_items} & set(precomputed)
+    truncated = _truncated_paths(result, owned_here)
+    # A "*" names no file: with a precomputed diff for EVERY file of the chunk
+    # there is no file it can be about.
+    if len(owned_here) == len(active_items):
+        truncated.discard("*")
     active_paths = {item["entry"]["path"] for item in active_items}
     findings = [f for f in (result.get("findings") or []) if isinstance(f, dict)]
     oids = _blob_oids_at(review_root, tip, sorted({f.get("path") for f in findings if f.get("path")})) \
@@ -4893,8 +5272,11 @@ def _write_run_records(result, active_items, common_dir, fp, run_id, review_root
         prev = item.get("record")
         chain_depth = (int(prev.get("chain_depth") or 0) + 1) if (prev and item["mode"] == "delta") else 0
         key = _record_key(path, old_path, e["status"], e["old_oid"])
-        flagged = ("*" in truncated or path in truncated
-                   or _diff_exceeds_caps(item, review_root))
+        if path in precomputed:
+            flagged = bool(precomputed[path])
+        else:
+            flagged = ("*" in truncated or path in truncated
+                       or _diff_exceeds_caps(item, review_root))
         if flagged:
             existing = _read_ledger_record(
                 _record_path(common_dir, fp, key, e["new_oid"]), fp, key, e["new_oid"])
@@ -5053,8 +5435,13 @@ def _merge_chunk_results(chunk_results, planner_warnings=None):
 def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
                  tip, push_range, active_items, planner_warnings, fenced,
                  progress=None, fp="", carry_paths=None, chunk_extras=None,
-                 timeout_marks=None):
+                 timeout_marks=None, diffs=None):
     """Run per-chunk reviews with fencing, budget and retry.
+
+    diffs ({path: _build_item_diff result}, see _build_diffs) switches on the
+    precomputed-diff path: chunks are packed by the lines of diff delivered
+    (_CHUNK_DIFF_LINES) and each chunk's manifest carries items[] with the diff
+    files the reviewer reads. None keeps the 0.9.x manifest.
 
     active_items is a list of plan_item dicts (mode delta/full). Chunks are
     computed internally via _plan_to_chunks. carry_paths is the list of
@@ -5071,7 +5458,11 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
     """
     if timeout_marks is None:
         timeout_marks = _timeout_marks(common_dir, fp, active_items)
-    chunks = _plan_to_chunks(active_items, timeout_marks)
+    if diffs is not None:
+        sizes = {p: d["lines"] for p, d in diffs.items() if not d["failed"] and d["lines"]}
+        chunks = _plan_to_chunks(active_items, timeout_marks, sizes, _CHUNK_DIFF_LINES)
+    else:
+        chunks = _plan_to_chunks(active_items, timeout_marks)
     total = len(chunks)
     budget_end = time.monotonic() + _RUN_BUDGET
     chunk_results = []
@@ -5116,37 +5507,12 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
             for i, ch in enumerate(chunks)
             for item in ch if i != k
         ]
-        manifest = {
-            "chunk_index": k, "chunks_total": total,
-            "paths": [item["entry"]["path"] for item in chunk_items],
-            "renames": [
-                [item["entry"]["old_path"], item["entry"]["path"]]
-                for item in chunk_items if item["entry"].get("old_path")
-            ],
-            "other_changed": other_changed,
-            "files": [
-                {
-                    "path": item["entry"]["path"],
-                    "mode": item["mode"],
-                    "from_oid": item.get("from_oid") or "",
-                    "to_oid": item["entry"].get("new_oid") or "",
-                }
-                for item in chunk_items
-            ],
-            "carried": carry_paths or [],
-        }
-        if chunk_extras is not None:
-            manifest.update(chunk_extras(k, manifest["paths"]) or {})
-        try:
-            tmp = manifest_path + ".tmp"
-            Path(tmp).write_text(
-                json.dumps(manifest, ensure_ascii=False), encoding="utf-8"
-            )
-            os.replace(tmp, manifest_path)
-        except Exception as exc:
-            raise ReviewGateError(
-                f"could not write chunk manifest for chunk {k}: {exc}"
-            )
+        manifest = _build_review_manifest(
+            common_dir, run_id, k, total, chunk_items, other_changed, carry_paths,
+            chunk_extras(k, [item["entry"]["path"] for item in chunk_items])
+            if chunk_extras is not None else None,
+            diffs)
+        _write_manifest_file(manifest_path, manifest, f"chunk manifest for chunk {k}")
 
         # Clean worktree so one chunk can't leave state for the next.
         _git(["clean", "-fdxq"], cwd=review_root)
@@ -5197,11 +5563,13 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
                 raise last_exc
             chunk_outcome = "ok"
         finally:
-            # Always clean up the manifest (success or failure).
+            # Always clean up the manifest and the chunk's diff files (success or failure).
             try:
                 Path(manifest_path).unlink(missing_ok=True)
             except Exception:
                 pass
+            if diffs is not None:
+                _remove_run_dir(common_dir, run_id, sub=k)
             chunk_secs = time.monotonic() - chunk_t0
             try:
                 _tele_chunk(k, total, len(chunk_items),
@@ -5224,7 +5592,8 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
 
         # Write ledger records for this chunk (only reached if not fenced).
         if fp and _ledger_enabled():
-            _write_run_records(result, chunk_items, common_dir, fp, run_id, review_root, tip)
+            _write_run_records(result, chunk_items, common_dir, fp, run_id, review_root, tip,
+                               precomputed=_owned_truncation(diffs))
 
         chunk_results.append(result)
         chunks_done += 1

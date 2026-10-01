@@ -19,6 +19,9 @@ environment variables so one command line serves every scenario:
   STUB_RESOLVE_VERDICT pass|fail|garbage  Controls resolver exit for all ids (default pass).
   STUB_SLEEP_FOR     path — sleep STUB_SLEEP_FOR_SECS (default 30) only when the chunk's
                      manifest holds this path (a file that always times out).
+  STUB_FINDINGS_OUTSIDE=1  STUB_FINDINGS_FOR findings are emitted for every path it names,
+                     not only those in the chunk's manifest (a finding about a file the
+                     review did not cover).
   STUB_SPAWN_CHILD   a file: spawn a long-sleeping child that inherits stdout/stderr
                      (as a reviewer's own subprocess would), write its pid there.
   STUB_TRUNCATE_FOR  path, or `*` — answer with the skill's `diff truncated` warning:
@@ -28,6 +31,9 @@ environment variables so one command line serves every scenario:
                      never log), one Agent tool call lasting STUB_STREAM_AGENT_S seconds
                      (default 0.3), then the verdict and a `result` event with turns, API
                      time and cost.
+
+Every call also traces `item_files`: the text of each diff file the manifest's items[]
+name (0.10.0), read at call time.
 
 The last non-flag argument is the range the gate asked to review; it is echoed
 into the trace so a test can assert what was reviewed.
@@ -77,6 +83,33 @@ def _get_file_modes(m):
 
 file_modes = _get_file_modes(manifest)
 
+
+def _cwd_diffs():
+    """`*.diff` files inside the working directory (the reviewed worktree), outside .git.
+    The gate must never write its diff files there."""
+    found = []
+    for root, dirs, files in os.walk(os.getcwd()):
+        dirs[:] = [d for d in dirs if d != ".git"]
+        found += [os.path.join(root, f) for f in files if f.endswith(".diff")]
+    return found
+
+
+def _read_item_files(m):
+    """{role:path: text} for every manifest item that names a diff file (0.10.0),
+    read now, while the gate still has them on disk -- what a reviewer's Read sees."""
+    out = {}
+    for it in ((m or {}).get("items") or []):
+        f = it.get("file") if isinstance(it, dict) else ""
+        if not f:
+            continue
+        key = (it.get("role") or "review") + ":" + it.get("path", "")
+        try:
+            with open(f, "rb") as fh:
+                out[key] = fh.read().decode("utf-8")
+        except OSError as exc:
+            out[key] = "<unreadable: %s>" % exc
+    return out
+
 trace = os.environ.get("STUB_TRACE")
 if trace:
     with open(trace, "a", encoding="utf-8") as fh:
@@ -86,6 +119,8 @@ if trace:
             "resolve_file": resolve_file,
             "resolve_manifest": resolve_input,
             "manifest": manifest,
+            "item_files": _read_item_files(manifest or resolve_input),
+            "cwd_diffs": _cwd_diffs(),
             "file_modes": file_modes,
         }) + "\n")
 
@@ -220,6 +255,8 @@ if findings_for_raw:
         findings_map = json.loads(findings_for_raw)
         # With a manifest use its paths; without (golden argv), apply to all configured paths.
         chunk_paths = (manifest.get("paths") or []) if manifest else list(findings_map.keys())
+        if os.environ.get("STUB_FINDINGS_OUTSIDE") == "1":
+            chunk_paths = list(findings_map.keys())
         for path in chunk_paths:
             if path in findings_map:
                 spec = findings_map[path]

@@ -257,7 +257,7 @@ def test_a_chunked_run_logs_phases_chunks_and_calls_without_paths_or_code(tmp_pa
 
     rec = _tele_record(repo)
     phases = [p["name"] for p in rec["phases"]]
-    assert phases == ["worktree", "plan", "priors", "impact", "review", "finish"], phases
+    assert phases == ["worktree", "plan", "priors", "impact", "diffs", "review", "finish"], phases
     assert all(p["seconds"] >= 0 for p in rec["phases"])
     chunks = rec["chunks"]
     assert [(c["index"], c["of"], c["files"], c["outcome"]) for c in chunks] == [
@@ -279,7 +279,7 @@ def test_a_chunked_run_logs_phases_chunks_and_calls_without_paths_or_code(tmp_pa
     # One line per phase, per chunk and per call, plus the run -- in the always-on log.
     log = _debug_log_text(tmp_path)
     kinds = [ln.split("event=")[1].split()[0] for ln in log.splitlines() if "event=" in ln]
-    assert kinds.count("phase") == 6 and kinds.count("chunk") == 4
+    assert kinds.count("phase") == 7 and kinds.count("chunk") == 4
     assert kinds.count("call") == 4 and kinds.count("run") == 1
     assert "tools=Read:2,Bash:2,Agent:1" in log
 

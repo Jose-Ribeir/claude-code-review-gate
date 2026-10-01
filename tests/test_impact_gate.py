@@ -124,18 +124,30 @@ def test_first_push_sends_callers_in_untouched_files(tmp_path):
 
 
 def test_no_callers_keeps_the_golden_command_line(tmp_path):
+    """0.10.0 writes a manifest for every review (the diffs reach the reviewer
+    through it); the bare 0.7.0 command line is what OCR_PRECOMPUTED_DIFFS=0 keeps."""
+    work = _repo(tmp_path, {"lib.py": _LIB_V1})
+    _commit(work, {"lib.py": _LIB_V2})
+    decision, _ = _push(work, _env(tmp_path, "t.trace", OCR_PRECOMPUTED_DIFFS="0"),
+                        cmd="git push origin main")
+    assert decision == "allow"
+    assert all(c.get("paths_file") is None for c in _calls(tmp_path, "t.trace"))
+
+
+def test_no_callers_means_a_manifest_without_impact(tmp_path):
     work = _repo(tmp_path, {"lib.py": _LIB_V1})
     _commit(work, {"lib.py": _LIB_V2})
     decision, _ = _push(work, _env(tmp_path, "t.trace"), cmd="git push origin main")
     assert decision == "allow"
-    assert all(c.get("paths_file") is None for c in _calls(tmp_path, "t.trace"))
+    manifest = _review_manifest(tmp_path, "t.trace")
+    assert manifest["paths"] == ["lib.py"] and "impact" not in manifest
 
 
 def test_ocr_impact_0_turns_it_off(tmp_path):
     work = _repo(tmp_path, {"lib.py": _LIB_V1, "app.py": _CALLER})
     _commit(work, {"lib.py": _LIB_V2})
     _push(work, _env(tmp_path, "t.trace", OCR_IMPACT="0"), cmd="git push origin main")
-    assert all(c.get("paths_file") is None for c in _calls(tmp_path, "t.trace"))
+    assert "impact" not in _review_manifest(tmp_path, "t.trace")
 
 
 def test_fix_that_breaks_a_carried_caller_blocks_at_the_call_site(tmp_path):

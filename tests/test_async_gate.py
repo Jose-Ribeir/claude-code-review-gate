@@ -924,8 +924,10 @@ def test_a_truncated_file_is_carried_on_resume_and_stays_visible(tmp_path):
     tip = _git(["rev-parse", "HEAD"], cwd=repo)
     findings = json.dumps({"mod0.py": {"severity": "medium", "content": "risky thing",
                                       "existing_code": "x = 0"}})
+    # The model-driven truncation of the 0.9.x path (OCR_PRECOMPUTED_DIFFS=0): with
+    # precomputed diffs Python owns the flag (tests/test_precomputed_diffs.py).
     env = _chunk_env(tmp_path, STUB_SLEEP=6, STUB_TRUNCATE_FOR="mod0.py",
-                     STUB_FINDINGS_FOR=findings)
+                     STUB_FINDINGS_FOR=findings, OCR_PRECOMPUTED_DIFFS="0")
     env["OCR_RUN_BUDGET"] = "5"
     decision, reason, _, _ = _hook(repo, "git push origin main", env, timeout=120)
     assert decision == "deny", reason

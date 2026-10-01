@@ -149,6 +149,23 @@ if a command fails — a failure *is* a result.
   already-installed git hook survive a plugin upgrade, so an absent or stale
   pointer is worth reporting.
 
+**4b. Precomputed diffs (0.10.0)**
+
+The reviewer reads each file's diff from
+`<git common dir>/review-gate-async/run-<id>/diffs/`, written by the gate
+outside the reviewed worktree. Read-only checks, in the current repository
+(`git rev-parse --git-common-dir`):
+
+- `review-gate-async` is a real directory (not a symlink) and is writable by you.
+  Not writable ⇒ **`fail`**: the gate cannot write diffs and every file falls
+  back to the orchestrator's own git path (the slow, truncating one).
+- Leftover `run-*` directories there, older than an hour, are the diffs of a
+  run that died; the next finished review reaps them. Report the count as
+  `warn` only if there are more than a handful.
+- The reviewer needs no extra argument to read that directory (measured with
+  `claude` 2.1.281). If `OCR_CLAUDE_ARGS` is set it replaces the default
+  arguments wholesale and the reviewer may then be unable to Read it: say so.
+
 **5. Environment overrides in effect**
 
 Report any of these that are set, since each changes the verdict: `OCR_MODEL`,
@@ -156,7 +173,13 @@ Report any of these that are set, since each changes the verdict: `OCR_MODEL`,
 `OCR_BLOCK_CONFIDENCE`, `OCR_CLAUDE_ARGS`, `OCR_CLAUDE_EXTRA_ARGS`,
 `OCR_INLINE_BUDGET`, `OCR_INLINE_BUDGET_GIT`, `OCR_FORCE_REVIEW`,
 `OCR_LEGACY_RANGE`, `OCR_UNSET_ENV`, `OCR_LEDGER`, `OCR_LEDGER_TTL`,
-`OCR_LEDGER_MAX_RECORDS`, `OCR_IMPACT`, `OCR_SIBLINGS`, `OCR_TELEMETRY`.
+`OCR_LEDGER_MAX_RECORDS`, `OCR_IMPACT`, `OCR_SIBLINGS`, `OCR_TELEMETRY`,
+`OCR_PRECOMPUTED_DIFFS`, `OCR_CHUNK_DIFF_LINES`.
+
+`OCR_PRECOMPUTED_DIFFS=0` (0.10.0) is the rollback to the 0.9.x review path:
+the orchestrator retypes every diff into the reviewer's prompt and truncates it
+at 400 lines / 16 KB per file. Report it as **`warn`** -- reviews are slower and
+truncate sooner -- not as a fault.
 
 Also read the current repository's `.claude/settings.json` (and
 `settings.local.json`) and flag any `env` entry that sets an `OCR_*` variable:
