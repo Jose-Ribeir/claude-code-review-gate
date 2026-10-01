@@ -429,6 +429,74 @@ def test_scenario_10_deleted_target_auto_resolved(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# 0.9.5: an identical-blob prior replays without the resolver
+# ---------------------------------------------------------------------------
+
+def _identical_blob_plan(tmp_path, finding, record_head, tip_blob, mode="carry"):
+    e = {"path": "app/x.py", "old_path": "", "status": "M",
+         "old_oid": "a" * 40, "new_oid": tip_blob, "lines": 10}
+    fp = "fp16" * 4
+    key = review_gate._record_key(e["path"], "", e["status"], e["old_oid"])
+    review_gate._write_ledger_record(
+        str(tmp_path), fp, key, record_head, e["path"], "", e["status"], e["old_oid"],
+        [finding], 0, "run1")
+    record = review_gate._read_ledger_record(
+        review_gate._record_path(str(tmp_path), fp, key, record_head), fp, key, record_head)
+    return fp, [
+        {"entry": e, "mode": mode, "record": record, "from_oid": record_head,
+         "miss_reason": "none"},
+        # One active item so has_active=True: the old rule sent every
+        # high/medium prior to the resolver here.
+        {"entry": {"path": "new.py", "old_path": "", "status": "A",
+                   "old_oid": "0" * 40, "new_oid": "c" * 40, "lines": 5},
+         "mode": "full", "record": None, "from_oid": "", "miss_reason": "no_record"},
+    ]
+
+
+@pytest.mark.parametrize("severity", ["high", "medium", "low"])
+def test_identical_blob_prior_replays_without_the_resolver(monkeypatch, tmp_path, severity):
+    blob = "b" * 40
+    # existing_code is NOT in the file any more: replay must not depend on finding it.
+    finding = _base_finding(path="app/x.py", severity=severity,
+                            existing_code="this line is long gone", target_oid=blob)
+    fp, plan = _identical_blob_plan(tmp_path, finding, blob, blob)
+    monkeypatch.setattr(review_gate, "_blob_oids_at",
+                        lambda root, tip, paths: {p: blob for p in paths})
+    to_resolve, auto_resolved, carried = review_gate._classify_priors(
+        plan, "tip", str(tmp_path), str(tmp_path), fp, "run2")
+    assert to_resolve == [] and auto_resolved == []
+    assert [f["provenance"] for f in carried] == ["carried"]
+    assert carried[0]["content"] == finding["content"]
+
+
+def test_a_prior_whose_file_changed_since_the_finding_still_goes_to_the_resolver(
+        monkeypatch, tmp_path):
+    blob_then, blob_now = "b" * 40, "d" * 40
+    finding = _base_finding(path="app/x.py", severity="high", target_oid=blob_then)
+    # A delta item: its record is of the older blob.
+    fp, plan = _identical_blob_plan(tmp_path, finding, blob_then, blob_now, mode="delta")
+    monkeypatch.setattr(review_gate, "_blob_oids_at",
+                        lambda root, tip, paths: {p: blob_now for p in paths})
+    to_resolve, _, carried = review_gate._classify_priors(
+        plan, "tip", str(tmp_path), str(tmp_path), fp, "run2")
+    assert len(to_resolve) == 1 and carried == []
+
+
+def test_a_prior_aimed_at_an_older_blob_is_rejudged_even_on_a_carry_record(
+        monkeypatch, tmp_path):
+    # A delta-reviewed record keeps the unjudged-away priors of its base: the
+    # record sits on the current blob but the finding targets the older one.
+    blob_old, blob_now = "b" * 40, "d" * 40
+    finding = _base_finding(path="app/x.py", severity="high", target_oid=blob_old)
+    fp, plan = _identical_blob_plan(tmp_path, finding, blob_now, blob_now)
+    monkeypatch.setattr(review_gate, "_blob_oids_at",
+                        lambda root, tip, paths: {p: blob_now for p in paths})
+    to_resolve, _, carried = review_gate._classify_priors(
+        plan, "tip", str(tmp_path), str(tmp_path), fp, "run2")
+    assert len(to_resolve) == 1 and carried == []
+
+
+# ---------------------------------------------------------------------------
 # Scenario 11: delta chains are not capped; the cost rule picks the range
 # ---------------------------------------------------------------------------
 
@@ -988,7 +1056,8 @@ def test_scenario_5_resolution_reuse_suppresses_finding(tmp_path):
 
 def test_scenario_7_medium_finding_in_a_prior_plus_new_file(tmp_path):
     """Scenario 7: medium finding in A is carried; next push adds B.
-    A is carry → finding goes to resolver; verdict shows (still present) if not resolved.
+    A is carry on an identical blob (0.9.5) → the finding replays as (carried)
+    without a resolver call; nothing in A can have been fixed.
     """
     work = _tiny_repo(tmp_path, {"a.py": "x = 1\n"})
     # T1: commit changing a.py with a medium finding.
@@ -1015,9 +1084,8 @@ def test_scenario_7_medium_finding_in_a_prior_plus_new_file(tmp_path):
     env2 = _env(tmp_path, STUB_VERDICT="pass")
     env2["STUB_TRACE"] = str(tmp_path / "stub2.trace")
     decision2, reason2, _ = _hook(work, "git push origin main", env2)
-    # Decision may be deny (prior finding still present) or allow (resolved).
-    # Key assertions: a.py not in review manifest, resolver call present.
-    _wait_state(work, tip2, {"done"})
+    # Key assertions: a.py not in review manifest, no resolver call, finding replayed.
+    st2 = _wait_state(work, tip2, {"done"})
     calls2 = _trace(tmp_path, "stub2.trace")
     # a.py must NOT be in any review manifest (it's carry).
     for c in calls2:
@@ -1027,9 +1095,11 @@ def test_scenario_7_medium_finding_in_a_prior_plus_new_file(tmp_path):
             assert "a.py" not in active_paths, (
                 f"a.py (carry) must not appear in review manifest; active={active_paths}"
             )
-    # There must be a resolver call (medium finding + has_active).
+    # No resolver call: the blob the finding is about is identical (0.9.5).
     resolver_calls = [c for c in calls2 if c.get("resolve_file") is not None]
-    assert len(resolver_calls) >= 1, f"expected resolver call for prior medium finding; calls={calls2}"
+    assert resolver_calls == [], f"identical-blob prior must not reach the resolver; calls={calls2}"
+    assert "(carried)" in st2["reasons"] and "risky function" in st2["reasons"], st2["reasons"]
+    assert st2["verdict"] == "warn"
 
 
 def test_scenario_9_trust_negatives_failed_chunk_writes_no_record(monkeypatch, tmp_path):

@@ -3833,7 +3833,8 @@ def _classify_priors(plan_items, tip, review_root, common_dir, fp, run_id):
     Returns (to_resolve, auto_resolved, carried_findings):
       to_resolve   — list of {id, finding, record} for the resolver
       auto_resolved — findings where the target file no longer exists
-      carried_findings — findings replayed as-is (low/info, blob unchanged)
+      carried_findings — findings replayed as-is: any severity on an identical
+                         blob, or low/info with nothing to re-judge
     """
     has_active = any(item["mode"] in ("delta", "full") for item in plan_items)
     to_resolve, auto_resolved, carried_findings = [], [], []
@@ -3860,6 +3861,14 @@ def _classify_priors(plan_items, tip, review_root, common_dir, fp, run_id):
             if _find_valid_resolution(common_dir, fp, fid, target_oid,
                                       review_root, tip) is not None:
                 continue  # suppressed by existing resolution
+            # Identical blob: the record was written at the file's current content and
+            # the finding is about exactly that content, so nothing in the file can
+            # have been fixed since. Every severity replays as-is -- no resolver call
+            # (it only ever finds a fix in some OTHER file for such a prior), and no
+            # dependence on the flagged code still being locatable.
+            if blob == target_oid and record.get("head_oid") == blob:
+                carried_findings.append(dict(f, provenance="carried"))
+                continue
             # A file that changed since the finding is re-judged even when nothing
             # else is under review: the fix may sit in a push whose resolver run
             # never got recorded, and replaying the finding would block on it forever.
