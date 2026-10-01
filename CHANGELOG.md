@@ -6,6 +6,43 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.6] - 2026-10-01
+
+Time metrics: every run now records where its minutes went. No change to what a
+review decides, reads or caches. Part B0 of `docs/plans/resume-truncated-chunks.md`:
+a review of a large push averages 314 s per call and the cause (the reviewer
+retyping diffs into its Agent prompt, or the review itself) was a guess until now.
+
+### Added
+- **Per model call**, parsed from the stream-json the gate already captures (also
+  from the partial stream of a call that timed out): turns, API time, cost, time to
+  the first event, tool calls and input bytes by tool, the Agent tool's input bytes,
+  and its wall time (`tool_use` to `tool_result`, overlapping calls counted once)
+  against the orchestrator's own time. Added to each `calls[]` entry of the
+  telemetry line; `_SCHEMA` stays 1.
+- **Per run phase and per chunk**: `phases[]` (worktree, plan, priors, impact,
+  review, resolve, recheck, finish; `failed` for the time a failing run died in)
+  and `chunks[]` (index, files, changed lines, outcome, seconds) in the telemetry
+  line.
+- **An always-on log**: one line per phase, chunk, call and run in
+  `review-gate-debug.log`, which now rotates at 1 MiB (three older files kept).
+  `OCR_DEBUG=1` still adds its verbose lines to it.
+- **`--telemetry-report`**: average and p90 seconds, turns, cost, Agent-input KB and
+  first-event time per kind of call; the orchestrator vs reviewer-agent split; the
+  per-phase breakdown with its share of run time; chunk counts by outcome.
+- **"Still running"** shows the average time per finished chunk of the run
+  (`chunk 3/10, avg 6m12s per chunk`).
+
+### Privacy
+The new telemetry keys and every log line hold counts, bytes and timings only,
+never a path or code. A log line is built by `ocr_telemetry.metric_line`, which
+writes only numbers and short `[A-Za-z0-9_.:+-]` tokens and turns anything else
+into `?`.
+
+### Tests
+`tests/stub_reviewer.py` can answer in stream-json (`STUB_STREAM`); `tests/conftest.py`
+points every test's plugin data dir at a temp dir, since the log is always on.
+
 ## [0.9.5] - 2026-10-01
 
 Large pushes now converge. A push of 40 big files used to restart at the first
