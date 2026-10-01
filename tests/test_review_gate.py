@@ -1642,13 +1642,18 @@ def test_ocr_debug_logs_safe_values_from_the_original_env_even_when_scrubbed(
     assert "'CLAUDE_CODE_ENTRYPOINT': 'claude-desktop'" in log
 
 
-def test_ocr_debug_off_by_default_writes_nothing(monkeypatch, tmp_path):
+def test_ocr_debug_off_writes_no_forensic_breadcrumb_only_metric_lines(monkeypatch, tmp_path):
+    # 0.9.6: the log is always on for the time metrics (one `call` line per model
+    # call: counts and timings), but the verbose spawn/exit breadcrumb -- pids,
+    # cwd, env names -- is still OCR_DEBUG's alone.
     monkeypatch.delenv("OCR_DEBUG", raising=False)
     monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(tmp_path / "gate-data"))
     monkeypatch.setattr(review_gate.subprocess, "Popen", _fake_popen({}))
     monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
     review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40)
-    assert not (tmp_path / "gate-data" / "review-gate-debug.log").exists()
+    lines = (tmp_path / "gate-data" / "review-gate-debug.log").read_text(encoding="utf-8").splitlines()
+    assert lines and all("event=call" in line for line in lines)
+    assert not any(line.startswith(("start ", "end ")) or "cwd=" in line for line in lines)
 
 
 def test_git_subprocess_decodes_as_utf8(monkeypatch):

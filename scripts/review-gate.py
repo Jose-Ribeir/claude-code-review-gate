@@ -2010,16 +2010,31 @@ def _debug_enabled():
     return os.environ.get("OCR_DEBUG", "").strip().lower() in ("1", "true", "yes")
 
 
+# The debug log is always on for the metric lines below and rotates by size:
+# 1 MiB, three older files kept as review-gate-debug.log.1 .. .3.
+_DEBUG_LOG_BYTES = 1024 * 1024
+_DEBUG_LOG_KEEP = 3
+
+
 def _debug_log(line):
-    """Append one line to the OCR_DEBUG forensic log. Best-effort and silent on
+    """Append one line to the forensic log. Best-effort and silent on
     failure -- a diagnostic aid must never be able to break the gate it exists
     to help debug. Lives beside _park_pending's data, outside .git, so it
-    survives whatever state the repo itself is in."""
+    survives whatever state the repo itself is in. Rotates (see above)."""
     try:
-        data = _gate_data_dir()
-        data.mkdir(parents=True, exist_ok=True)
-        with (data / "review-gate-debug.log").open("a", encoding="utf-8") as fh:
-            fh.write(line + "\n")
+        ocr_telemetry.rotating_append(
+            _gate_data_dir() / "review-gate-debug.log", line,
+            max_bytes=_DEBUG_LOG_BYTES, keep=_DEBUG_LOG_KEEP)
+    except Exception:
+        pass
+
+
+def _metric_log(event, **fields):
+    """One always-on log line of counts, bytes and timings (never a path or
+    code: ocr_telemetry.metric_line turns anything else into `?`)."""
+    try:
+        run = str(_TELE.get("run_id") or "")
+        _debug_log(ocr_telemetry.metric_line(event, run=run[:16] or None, **fields))
     except Exception:
         pass
 
@@ -2117,14 +2132,62 @@ def _test_reviewer_cmd():
 _TELE = {}
 
 
-def _tele_call(kind, seconds, outcome, manifest=None):
+# Time metrics of the model call in flight (ocr_telemetry.stream_stats of its
+# stream-json stdout), set by _run_review_once and read by _run_review right
+# after it returns or raises. Counts, bytes and timings only. One reviewer runs
+# at a time per supervisor, so a module global is enough (as with _TELE).
+_LAST_CALL_STATS = {}
+
+# Per-call keys copied into the telemetry entry and the log line.
+_CALL_SCALARS = ("turns", "api_s", "cost_usd", "first_event_s", "agent_calls",
+                 "agent_input_bytes", "agent_wall_s", "orchestrator_s")
+
+
+def _tele_call(kind, seconds, outcome, manifest=None, stats=None):
     entry = {"kind": kind, "seconds": round(seconds, 2), "outcome": outcome}
     if manifest:
         try:
             entry["manifest_bytes"] = os.path.getsize(manifest)
         except OSError:
             pass
+    for key in _CALL_SCALARS:
+        if stats and stats.get(key) is not None:
+            entry[key] = stats[key]
+    if stats and stats.get("tools"):
+        entry["tools"] = {k: list(v) for k, v in stats["tools"].items()}
     _TELE.setdefault("calls", []).append(entry)
+    _metric_log("call", kind=kind, outcome=outcome, s=entry["seconds"],
+                manifest_bytes=entry.get("manifest_bytes"),
+                tools={k: v[0] for k, v in (entry.get("tools") or {}).items()},
+                **{k: entry.get(k) for k in _CALL_SCALARS})
+    return entry
+
+
+_PHASE_CLOCK = {"t": None}
+
+
+def _mark_phase(name, **counts):
+    """Close the run phase that began at the previous mark (or at the start of
+    the supervised run) and name it. The supervisor's phases run one after the
+    other, so a mark per boundary is the whole timer."""
+    now = time.monotonic()
+    began = _PHASE_CLOCK["t"]
+    _PHASE_CLOCK["t"] = now
+    if began is None:
+        return
+    entry = dict({"name": name, "seconds": round(now - began, 2)},
+                 **{k: v for k, v in counts.items() if v is not None})
+    _TELE.setdefault("phases", []).append(entry)
+    _metric_log("phase", name=name, s=entry["seconds"],
+                **{k: v for k, v in counts.items()})
+
+
+def _tele_chunk(index, total, files, lines, outcome, seconds):
+    entry = {"index": index, "of": total, "files": files, "lines": lines,
+             "outcome": outcome, "seconds": round(seconds, 2)}
+    _TELE.setdefault("chunks", []).append(entry)
+    _metric_log("chunk", index=index, of=total, files=files, lines=lines,
+                outcome=outcome, s=entry["seconds"])
 
 
 def _run_review(repo_root, mode, git_dir=None, head_sha="", push_range="",
@@ -2133,6 +2196,7 @@ def _run_review(repo_root, mode, git_dir=None, head_sha="", push_range="",
     kind = ("recheck" if "recheck" in raw_tag else "resolve") if resolve_file else "review"
     started = time.monotonic()
     outcome = "error"
+    _LAST_CALL_STATS.clear()
     try:
         out = _run_review_once(repo_root, mode, git_dir, head_sha, push_range,
                                paths_file=paths_file, timeout=timeout,
@@ -2146,7 +2210,18 @@ def _run_review(repo_root, mode, git_dir=None, head_sha="", push_range="",
         outcome = "timeout" if getattr(exc, "is_timeout", False) else "error"
         raise
     finally:
-        _tele_call(kind, time.monotonic() - started, outcome, resolve_file or paths_file)
+        _tele_call(kind, time.monotonic() - started, outcome, resolve_file or paths_file,
+                   stats=dict(_LAST_CALL_STATS))
+
+
+def _note_call_stats(out_text, started_at):
+    """Parse the reviewer's stream-json into _LAST_CALL_STATS. Never raises and
+    never changes what the call returns: this only reads what it already captured."""
+    try:
+        _LAST_CALL_STATS.clear()
+        _LAST_CALL_STATS.update(ocr_telemetry.stream_stats(out_text, started_at))
+    except Exception:
+        pass
 
 
 def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
@@ -2312,7 +2387,11 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
                 out_text, err_text = proc.communicate(timeout=_run_timeout)
             except subprocess.TimeoutExpired:
                 _kill_child(proc)
-                proc.communicate()
+                partial = proc.communicate()
+                # What the reviewer had done before it was cut off is the most
+                # useful timing there is: where did the timeout go.
+                _note_call_stats(partial[0] if isinstance(partial, tuple) and partial else "",
+                                 started_at)
                 if debug:
                     _debug_log(
                         f"end child_pid={proc.pid} outcome=timeout "
@@ -2327,6 +2406,7 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
                         f"duration_s={time.monotonic()-started_mono:.1f}"
                     )
                 raise
+            _note_call_stats(out_text, started_at)
             if debug:
                 _debug_log(
                     f"end child_pid={proc.pid} outcome=rc{proc.returncode} "
@@ -2692,11 +2772,21 @@ def _supervise(state_path, run_id):
     """_supervise_run, then one line in the local run log (best-effort)."""
     _TELE.clear()
     _TELE.update({"ts": time.time(), "run_id": run_id})
+    _PHASE_CLOCK["t"] = time.monotonic()
     rc = 1
     try:
         rc = _supervise_run(state_path, run_id)
         return rc
     finally:
+        # Everything after the last named phase: merging, dedup, the verdict
+        # and state writes -- or, when the run failed, the time it died in.
+        try:
+            _mark_phase("finish" if rc == 0 else "failed")
+            _metric_log("run", s=round(time.time() - _TELE["ts"], 1), rc=rc,
+                        calls=len(_TELE.get("calls") or []),
+                        chunks=len(_TELE.get("chunks") or []))
+        except Exception:
+            pass
         try:
             _write_telemetry(state_path, run_id)
         except Exception:
@@ -2812,6 +2902,7 @@ def _supervise_run(state_path, run_id):
                 "reviewer read the LIVE working tree; findings may describe files as they "
                 "were during the review rather than at the pushed commit."
             )
+        _mark_phase("worktree", ok=bool(worktree))
 
         force_review = os.environ.get("OCR_FORCE_REVIEW", "").strip().lower() in ("1", "true", "yes")
         fp = _compute_fingerprint(review_root, tip)
@@ -2825,6 +2916,7 @@ def _supervise_run(state_path, run_id):
              "chain_depth": (p.get("record") or {}).get("chain_depth")}
             for p in (plan or [])
         ]
+        _mark_phase("plan", files=len(plan or []))
 
         if plan is None or plan == []:
             # git diff failed OR no allowed files: fall back to single-context (0.7.0 path).
@@ -2832,6 +2924,7 @@ def _supervise_run(state_path, run_id):
                 lambda: _run_review(review_root, mode, git_dir, tip, push_range)
             )
             chunks_new = 1 if ran else 0
+            _mark_phase("review", chunks=chunks_new)
             if planner_warnings and isinstance(result, dict):
                 result = dict(result)
                 result["warnings"] = (_planner_warning_objs(planner_warnings)
@@ -2847,12 +2940,14 @@ def _supervise_run(state_path, run_id):
             to_resolve, auto_resolved, carried_findings = _classify_priors(
                 plan, tip, review_root, common_dir, fp, run_id
             )
+            _mark_phase("priors", priors=len(to_resolve) + len(carried_findings))
             impact = _compute_impact(review_root, tip, active_items)
             if impact and impact.get("warnings"):
                 _TELE["impact_warnings"] = impact["warnings"][:50]
             defects, defect_notes = _known_defects(
                 review_root, tip, [p["finding"] for p in to_resolve] + carried_findings,
                 push_paths)
+            _mark_phase("impact", sites=len((_TELE.get("impact") or {}).get("sites") or []))
 
             def _review_extras(k, chunk_paths):
                 extras = {}
@@ -2973,6 +3068,7 @@ def _supervise_run(state_path, run_id):
                     + (f", carried {len(carry_items)}" if carry_items else "")
                 )
 
+            _mark_phase("review", chunks=chunks_new)
             if planner_warnings and isinstance(result, dict):
                 result = dict(result)
                 result["warnings"] = (_planner_warning_objs(planner_warnings)
@@ -2994,6 +3090,7 @@ def _supervise_run(state_path, run_id):
                             review_root, tip, tip_cache)
 
                 _judge_all(to_resolve)
+                _mark_phase("resolve", priors=len(to_resolve))
                 # An answer nothing backs gets one more look, told to read the tip.
                 recheck = [p for p in to_resolve if judged[p["id"]] == "unverified"]
                 if recheck:
@@ -3004,6 +3101,7 @@ def _supervise_run(state_path, run_id):
                     resolver_results.update(again)
                     resolver_warnings += more
                     _judge_all(recheck)
+                    _mark_phase("recheck", priors=len(recheck))
                 _TELE["resolver"] = {
                     "sent": len(to_resolve), "recheck": len(recheck),
                     "warnings": list(resolver_warnings), "judged": dict(judged),
@@ -4972,6 +5070,7 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
     chunk_results = []
     chunks_done = 0
     chunks_new = 0
+    chunk_secs_total = 0.0   # wall time of this run's finished chunks (for the average)
 
     for k, chunk_items in enumerate(chunks):
         if fenced["hit"]:
@@ -5049,9 +5148,12 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
         # Run the review (retry once on non-timeout errors).
         result = None
         last_exc = None
+        chunk_t0 = time.monotonic()
+        chunk_outcome = "error"
         try:
             for attempt in range(2):
                 if fenced["hit"]:
+                    chunk_outcome = "fenced"
                     raise _Fenced()
                 try:
                     result, _, _ = _run_review(
@@ -5063,13 +5165,16 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
                     last_exc = None
                     break
                 except ReviewLimitError:
+                    chunk_outcome = "limit"
                     raise  # propagate immediately; do not retry limits
                 except ReviewGateError as exc:
                     last_exc = exc
                     if exc.is_timeout:
                         # Not retried: it would time out again. Mark the files so
                         # the next push splits the chunk (or gives up on one file).
+                        chunk_outcome = "timeout"
                         if fenced["hit"]:
+                            chunk_outcome = "fenced"
                             raise _Fenced()
                         err = _timeout_failure(
                             exc, common_dir, fp, chunk_items, _CHUNK_TIMEOUT,
@@ -5083,12 +5188,21 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
                     continue
             if last_exc is not None:
                 raise last_exc
+            chunk_outcome = "ok"
         finally:
             # Always clean up the manifest (success or failure).
             try:
                 Path(manifest_path).unlink(missing_ok=True)
             except Exception:
                 pass
+            chunk_secs = time.monotonic() - chunk_t0
+            try:
+                _tele_chunk(k, total, len(chunk_items),
+                            sum(int(it["entry"].get("lines") or 0) for it in chunk_items),
+                            chunk_outcome, chunk_secs)
+            except Exception:
+                pass
+        chunk_secs_total += chunk_secs
 
         # Fence-check before persisting: if another run claimed the state while
         # the reviewer was running, do not write records.
@@ -5096,6 +5210,7 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
             _update_state_owned(
                 state_path, run_id,
                 chunks_done=chunks_done + 1, chunk_index=k, chunks_total=total,
+                chunk_avg_s=round(chunk_secs_total / (chunks_new + 1), 1),
             )
         except _Fenced:
             raise
@@ -5142,6 +5257,9 @@ def _still_running_reason(st, budget, mode):
     cd, ct = st.get("chunks_done"), st.get("chunks_total")
     if cd is not None and ct:
         count += f", chunk {int(cd) + 1}/{int(ct)}"
+        avg = st.get("chunk_avg_s")
+        if isinstance(avg, (int, float)) and avg > 0:
+            count += f", avg {int(avg) // 60}m{int(avg) % 60:02d}s per chunk"
     retry = "re-run this exact `git push` command" if mode == "hook" else "run the push again"
     return (
         f"review-gate: the review of {branch} ({tip}{count}) is still running "

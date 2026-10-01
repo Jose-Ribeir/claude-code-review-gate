@@ -14,10 +14,18 @@
 # and holds file paths, line numbers and finding text from the reviewed code.
 # OCR_TELEMETRY=0 turns it off. Writing is best-effort and never affects a
 # review's outcome.
+#
+# 0.9.6 adds time metrics (where a run's minutes went): per model call (turns,
+# API time, cost, tool use, orchestrator vs reviewer-agent wall time), per run
+# phase and per chunk. Those keys, and the always-on rotating log lines written
+# next to them (metric_line / rotating_append), carry COUNTS, BYTES AND TIMINGS
+# ONLY -- never a path or any code. metric_line enforces that by construction.
 import json
 import os
+import re
 import time
 from collections import Counter, defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 
 TELEMETRY_DIR = "review-gate-telemetry"
@@ -51,6 +59,188 @@ def append(common_dir, record):
         return path
     except Exception:
         return None
+
+
+# --- time metrics (0.9.6) ----------------------------------------------------
+
+# The reviewer's orchestrator hands the diff to a sub-agent through the Agent
+# tool ("Task" in older CLIs); its wall time is the reviewer-side share of a call.
+_AGENT_TOOLS = ("Agent", "Task")
+
+_SAFE_VALUE = re.compile(r"^[A-Za-z0-9_.:+-]{1,40}$")
+
+
+def _event_ts(event):
+    """Epoch seconds of a stream-json event's `timestamp`, or None."""
+    raw = event.get("timestamp")
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        return float(raw) / (1000.0 if raw > 1e11 else 1.0)
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw[:-1] + "+00:00" if raw.endswith("Z") else raw)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def _union_seconds(intervals):
+    """Total length of the union of (start, end) intervals (parallel agents overlap)."""
+    total, cur_s, cur_e = 0.0, None, None
+    for s, e in sorted(intervals):
+        if cur_e is None or s > cur_e:
+            if cur_e is not None:
+                total += cur_e - cur_s
+            cur_s, cur_e = s, e
+        else:
+            cur_e = max(cur_e, e)
+    if cur_e is not None:
+        total += cur_e - cur_s
+    return total
+
+
+def stream_stats(text, started_at=None):
+    """Time metrics out of a reviewer's stream-json stdout (never raises).
+
+    Counts, bytes and timings only. Keys, when known: turns, api_s, cost_usd,
+    duration_s (from the result event); events; first_event_s (the first event's
+    timestamp minus `started_at`, the epoch the process started; else the result
+    event's own first-frame time); tools ({name: [calls, input_bytes]});
+    agent_calls, agent_input_bytes, agent_wall_s (tool_use -> tool_result of the
+    Agent tool, overlapping calls counted once); orchestrator_s (the call's own
+    duration minus agent_wall_s). A reply that is not stream-json gives {}.
+    """
+    out = {}
+    try:
+        tools, agent_open, agent_spans = {}, {}, []
+        first_ts, n_events = None, 0
+        result = None
+        for line in (text or "").splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(ev, dict) or not ev.get("type"):
+                continue
+            n_events += 1
+            ts = _event_ts(ev)
+            if ts is not None and first_ts is None:
+                first_ts = ts
+            kind = ev.get("type")
+            if kind == "result":
+                result = ev
+                continue
+            msg = ev.get("message")
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if kind == "assistant" and block.get("type") == "tool_use":
+                    name = str(block.get("name") or "?")
+                    size = len(json.dumps(block.get("input"), ensure_ascii=False,
+                                          default=str).encode("utf-8"))
+                    entry = tools.setdefault(name, [0, 0])
+                    entry[0] += 1
+                    entry[1] += size
+                    if name in _AGENT_TOOLS and ts is not None and block.get("id"):
+                        agent_open[block["id"]] = ts
+                elif kind == "user" and block.get("type") == "tool_result":
+                    began = agent_open.pop(block.get("tool_use_id"), None)
+                    if began is not None and ts is not None and ts >= began:
+                        agent_spans.append((began, ts))
+        if not n_events:
+            return {}
+        out["events"] = n_events
+        if first_ts is not None and started_at:
+            out["first_event_s"] = round(max(0.0, first_ts - started_at), 2)
+        if tools:
+            out["tools"] = tools
+            agent = [v for k, v in tools.items() if k in _AGENT_TOOLS]
+            if agent:
+                out["agent_calls"] = sum(v[0] for v in agent)
+                out["agent_input_bytes"] = sum(v[1] for v in agent)
+        agent_wall = _union_seconds(agent_spans)
+        if agent_spans:
+            out["agent_wall_s"] = round(agent_wall, 2)
+        if isinstance(result, dict):
+            if isinstance(result.get("num_turns"), (int, float)):
+                out["turns"] = int(result["num_turns"])
+            if isinstance(result.get("duration_api_ms"), (int, float)):
+                out["api_s"] = round(result["duration_api_ms"] / 1000.0, 2)
+            if isinstance(result.get("total_cost_usd"), (int, float)):
+                out["cost_usd"] = round(float(result["total_cost_usd"]), 4)
+            ttft = result.get("first_content_frame_ms", result.get("ttft_ms"))
+            if isinstance(ttft, (int, float)) and "first_event_s" not in out:
+                out["first_event_s"] = round(ttft / 1000.0, 2)
+            if isinstance(result.get("duration_ms"), (int, float)):
+                out["duration_s"] = round(result["duration_ms"] / 1000.0, 2)
+                if agent_spans:
+                    out["orchestrator_s"] = round(max(0.0, out["duration_s"] - agent_wall), 2)
+    except Exception:
+        return {}
+    return out
+
+
+def metric_line(event, **fields):
+    """One log line `ts=<UTC> event=<name> k=v ...` that cannot carry paths or code.
+
+    A value is written only when it is a number/bool, or a short token of
+    [A-Za-z0-9_.:+-] (tool names, outcomes, run ids); anything else -- a path, a
+    sentence, a code fragment -- becomes "?". A dict is flattened as
+    `name=key:count,key:count` under the same rule.
+    """
+    def safe(v):
+        if isinstance(v, bool):
+            return "1" if v else "0"
+        if isinstance(v, (int, float)):
+            return str(v)
+        s = str(v)
+        return s if _SAFE_VALUE.match(s) else "?"
+
+    parts = [f"ts={time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}", f"event={safe(event)}"]
+    for key, val in fields.items():
+        if val is None:
+            continue
+        if isinstance(val, dict):
+            val = ",".join(f"{safe(k)}:{safe(v[0] if isinstance(v, (list, tuple)) else v)}"
+                           for k, v in val.items())
+            if not val:
+                continue
+            parts.append(f"{safe(key)}={val}")
+        else:
+            parts.append(f"{safe(key)}={safe(val)}")
+    return " ".join(parts)
+
+
+def rotating_append(path, line, max_bytes=1024 * 1024, keep=3):
+    """Append `line` to `path`; past `max_bytes` shift path -> path.1 -> ... path.<keep>.
+
+    Best-effort: a rotation another process (or an open handle on Windows)
+    refuses is skipped and the line is still appended. Returns True if written.
+    """
+    path = Path(path)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if path.stat().st_size >= max_bytes:
+                for i in range(keep, 0, -1):
+                    src = path if i == 1 else path.with_name(f"{path.name}.{i - 1}")
+                    if src.exists():
+                        os.replace(str(src), str(path.with_name(f"{path.name}.{i}")))
+        except OSError:
+            pass
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+        return True
+    except Exception:
+        return False
 
 
 def load(common_dir, days=7):
@@ -91,6 +281,67 @@ def _site_keys(sites):
     return {(s.get("path"), s.get("line")) for s in sites or [] if isinstance(s, dict)}
 
 
+def _avg(vals):
+    return sum(vals) / len(vals) if vals else None
+
+
+def _p90(vals):
+    if not vals:
+        return None
+    vals = sorted(vals)
+    return vals[min(len(vals) - 1, int(0.9 * len(vals)))]
+
+
+def _fmt(v, spec=".1f"):
+    return "-" if v is None else format(v, spec)
+
+
+def _time_metrics(calls, records, add):
+    """The 0.9.6 additions to report(): where the time went. Old records, which
+    lack these keys, simply contribute nothing."""
+    stat_kinds = {k: cs for k, cs in calls.items() if any("turns" in c or "api_s" in c for c in cs)}
+    if stat_kinds:
+        add("\nModel call time (n with stats, avg s, p90 s, turns, cost $, agent-input KB,"
+            " first event s):")
+        for kind, cs in sorted(stat_kinds.items()):
+            secs = [c.get("seconds") or 0 for c in cs]
+            turns = [c["turns"] for c in cs if "turns" in c]
+            cost = [c["cost_usd"] for c in cs if "cost_usd" in c]
+            kb = [c["agent_input_bytes"] / 1024.0 for c in cs if "agent_input_bytes" in c]
+            ttfe = [c["first_event_s"] for c in cs if "first_event_s" in c]
+            add(f"  {kind:<10} {len(turns):>5}  {_fmt(_avg(secs)):>7}  {_fmt(_p90(secs)):>7}"
+                f"  {_fmt(_avg(turns)):>6}  {_fmt(_avg(cost), '.3f'):>7}  {_fmt(_avg(kb)):>8}"
+                f"  {_fmt(_avg(ttfe)):>6}")
+    orch = sum(c["orchestrator_s"] for cs in calls.values() for c in cs if "orchestrator_s" in c)
+    agent = sum(c["agent_wall_s"] for cs in calls.values() for c in cs if "orchestrator_s" in c)
+    if orch + agent > 0:
+        add(f"  orchestrator vs reviewer agent: {orch:.0f}s ({_pct(orch, orch + agent)}) vs "
+            f"{agent:.0f}s ({_pct(agent, orch + agent)})"
+            "  (orchestrator = the call's time outside its Agent tool calls)")
+
+    phases = defaultdict(list)
+    for r in records:
+        for ph in r.get("phases") or []:
+            if isinstance(ph, dict) and ph.get("name"):
+                phases[ph["name"]].append(ph.get("seconds") or 0)
+    if phases:
+        totals = [r.get("seconds") or 0 for r in records if r.get("phases")]
+        grand = sum(totals)
+        add("\nRun phases (runs, avg s, p90 s, share of run time):")
+        for name, vals in sorted(phases.items(), key=lambda kv: -sum(kv[1])):
+            add(f"  {name:<10} {len(vals):>5}  {_fmt(_avg(vals)):>7}  {_fmt(_p90(vals)):>7}"
+                f"  {_pct(sum(vals), grand):>5}")
+
+    chunks = [c for r in records for c in (r.get("chunks") or []) if isinstance(c, dict)]
+    if chunks:
+        by_outcome = Counter(c.get("outcome") or "?" for c in chunks)
+        secs = [c.get("seconds") or 0 for c in chunks]
+        add(f"\nChunks: {len(chunks)}  avg {_fmt(_avg(secs))}s  p90 {_fmt(_p90(secs))}s"
+            f"  avg files {_fmt(_avg([c.get('files') or 0 for c in chunks]))}"
+            f"  avg lines {_fmt(_avg([c.get('lines') or 0 for c in chunks]), '.0f')}  "
+            + "  ".join(f"{k}={v}" for k, v in by_outcome.most_common()))
+
+
 def report(records):
     """Plain-text summary of `records` (see load)."""
     if not records:
@@ -112,6 +363,7 @@ def report(records):
             secs = [c.get("seconds") or 0 for c in cs]
             fails = sum(1 for c in cs if c.get("outcome") != "ok")
             add(f"  {kind:<10} {len(cs):>5}  {sum(secs) / len(secs):>7.1f}  {fails}")
+    _time_metrics(calls, records, add)
 
     # Planner.
     modes, reasons = Counter(), Counter()

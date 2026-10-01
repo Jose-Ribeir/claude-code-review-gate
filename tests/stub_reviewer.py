@@ -21,6 +21,11 @@ environment variables so one command line serves every scenario:
                      manifest holds this path (a file that always times out).
   STUB_TRUNCATE_FOR  path, or `*` — answer with the skill's `diff truncated` warning:
                      for that file, or naming no file at all for `*`.
+  STUB_STREAM        N -- answer as `claude --output-format stream-json` does: N Read/Bash
+                     tool events (inputs carry a path and code, which the time metrics must
+                     never log), one Agent tool call lasting STUB_STREAM_AGENT_S seconds
+                     (default 0.3), then the verdict and a `result` event with turns, API
+                     time and cost.
 
 The last non-flag argument is the range the gate asked to review; it is echoed
 into the trace so a test can assert what was reviewed.
@@ -100,6 +105,46 @@ sleep_for = os.environ.get("STUB_SLEEP_FOR", "")
 if sleep_for and sleep_for in ((manifest or {}).get("paths") or []):
     time.sleep(float(os.environ.get("STUB_SLEEP_FOR_SECS", "30") or 30))
 
+def emit(payload):
+    """Write the reply: bare JSON, or a stream-json transcript when STUB_STREAM is set."""
+    n = os.environ.get("STUB_STREAM", "")
+    if not n:
+        sys.stdout.write(payload)
+        return
+
+    def stamp():
+        return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + ".%03dZ" % (int(time.time() * 1000) % 1000)
+
+    def line(**ev):
+        sys.stdout.write(json.dumps(ev) + "\n")
+        sys.stdout.flush()
+
+    t0 = time.time()
+    line(type="system", subtype="init", session_id="stub")
+
+    def tool(name, tool_input, tid, sleep=0.0):
+        line(type="assistant", timestamp=stamp(), session_id="stub",
+             message={"role": "assistant", "content": [
+                 {"type": "tool_use", "id": tid, "name": name, "input": tool_input}]})
+        time.sleep(sleep)
+        line(type="user", timestamp=stamp(), session_id="stub",
+             message={"role": "user", "content": [
+                 {"type": "tool_result", "tool_use_id": tid, "content": "ok"}]})
+
+    for i in range(int(n)):
+        if i % 2:
+            tool("Bash", {"command": "git diff -- /secret/dir/app.py"}, f"b{i}")
+        else:
+            tool("Read", {"file_path": "/secret/dir/app.py"}, f"r{i}")
+    tool("Agent", {"prompt": "review SECRET_CODE_TOKEN = 'hunter2' in /secret/dir/app.py"},
+         "agent1", float(os.environ.get("STUB_STREAM_AGENT_S", "0.3")))
+    line(type="assistant", timestamp=stamp(), session_id="stub",
+         message={"role": "assistant", "content": [{"type": "text", "text": payload}]})
+    line(type="result", subtype="success", is_error=False, result=payload,
+         num_turns=int(n) + 2, duration_ms=int((time.time() - t0) * 1000),
+         duration_api_ms=1234, total_cost_usd=0.0421, session_id="stub")
+
+
 # --- resolve mode -------------------------------------------------------
 if resolve_file is not None:
     rv = os.environ.get("STUB_RESOLVE_VERDICT", "pass").strip().lower()
@@ -127,7 +172,7 @@ if resolve_file is not None:
             resolutions[fid] = scripted[fid]
         else:
             resolutions[fid] = {"status": "still_present", "evidence_path": "", "evidence_quote": ""}
-    sys.stdout.write(json.dumps({"resolutions": resolutions}))
+    emit(json.dumps({"resolutions": resolutions}))
     sys.exit(0)
 
 # --- review mode --------------------------------------------------------
@@ -218,4 +263,4 @@ if os.environ.get("STUB_CONFIRM_SIBLINGS") == "1":
         })
 if os.environ.get("STUB_CROSS_FILE"):
     out["cross_file_context_summary"] = json.loads(os.environ["STUB_CROSS_FILE"])
-sys.stdout.write(json.dumps(out))
+emit(json.dumps(out))
