@@ -6,7 +6,54 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.5] - 2026-10-01
+
+Large pushes now converge. A push of 40 big files used to restart at the first
+file on every re-push: the skill truncates any per-file diff over 400 lines or
+16 KB, a truncated file got no ledger record, so the files that were most
+expensive to review were the ones that never stuck, and a chunk that timed out
+saved nothing and was retried unchanged. `plugin.json` was also still at 0.9.1
+while this file had reached 0.9.4; both now say 0.9.5.
+
+### Changed
+- **A truncated review is cached, flagged `truncated: true`.** `_write_run_records`
+  writes the record for a file whose diff the reviewer saw only partly: named by
+  a `diff truncated` warning, any file of the chunk when the warning names none
+  (`"*"`), or over the gate's own check of the skill's cap (400 changed lines or
+  16 KB of diff; numeric numstat only, binary files are not its business).
+  A resume carries it instead of reviewing it again. A flagged write never
+  replaces a complete record, a complete write replaces a flagged one, a flagged
+  record is never a delta base (and a cost-rule flip never keeps one), and a
+  changed blob is reviewed in full. No ledger schema bump; an absent flag means
+  complete. 0.9.4 reads a flagged record as an ordinary one.
+- **The truncated state stays visible.** Every flagged record, carried or just
+  written, re-emits the skill's `diff truncated` warning, makes the status
+  `completed_with_warnings` and is counted in the verdict as `N files effectively
+  unreviewed (truncated)` (also in `summary.unreviewed_truncated`, the findings
+  log and the PostToolUse report). The verdict itself is never softened.
+- **Rewriting a record's findings no longer rewrites its provenance.**
+  `_attach_to_carried_records` and `_drop_self_resolved` change only `findings`;
+  `truncated`, `chain_depth`, `run_id` and the timestamps survive.
+- **A prior on an identical blob replays without the resolver.** When a carried
+  record's head blob is the file's current blob and the finding targets that
+  blob, every severity replays as `(carried)`: nothing in an identical file can
+  have been fixed, and it no longer matters whether the flagged code can still
+  be found. Saves a resolver call on every resume. Trade-off: a fix that lives
+  in a *different* file no longer clears a finding on an unchanged carried file
+  (priors on a changed file, and findings aimed at an older blob, are still
+  judged by the resolver).
+
 ### Fixed
+- **A chunk that always timed out looped.** A timeout saved nothing and was not
+  retried differently, so every re-push spent the same chunk timeout on the same
+  chunk. The files of a chunk that times out are now marked (per file and blob,
+  beside the ledger records, 24 h); the next push retries them in halves, down to
+  one file, even when there are too few files for the chunked path. A file that
+  times out alone twice ends the review with a terminal reason that names it
+  (`file X cannot be reviewed within the timeout`), not retried automatically
+  (`OCR_FORCE_REVIEW=1` tries once more; raising `OCR_CHUNK_TIMEOUT` forgets the
+  marks). A timeout whose files are marked is progress, not an attempt, so it no
+  longer burns the restart cap.
 - **Non-ASCII paths silently skipped by the push gate.** `_collect_diff_entries`
   parsed `git diff --raw` / `--numstat` without `-z`, so under git's default
   `core.quotePath=true` a path like `café.py` arrived C-quoted as
@@ -25,6 +72,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `git ls-tree` without `-z`, so a quoted path like `café.py` mapped to `""`
   and its prior findings were dropped as if the file had been deleted. It now
   uses `-z`.
+
+### Removed
+- **`OCR_CHECKPOINT_TTL`.** It governed the 0.7.0 `chunks/` cache, which 0.8.0
+  stopped writing and the reaper deletes outright; resume has been per-file ledger
+  records ever since (`OCR_LEDGER_TTL`). The README rows for the chunk cache and
+  the run budget now say so, and the `_reap_async` docstring no longer claims a
+  chunk TTL.
 
 ## [0.9.4] - 2026-09-25
 
