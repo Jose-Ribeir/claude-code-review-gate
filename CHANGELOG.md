@@ -14,6 +14,17 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   file, letting it through unreviewed. Both calls now use `-z` and parse
   NUL-separated records, which also replaces the fragile `{a => b}` numstat
   rename regex.
+- **Abbreviated blob OIDs in diff entries.** `--full-index` does not affect
+  `--raw` output, so entry `old_oid`/`new_oid` were 7-char abbreviations. They
+  were stamped as a finding's `target_oid` and compared with the full OIDs from
+  `_blob_oids_at`, so every carried finding looked changed and was re-sent to
+  the resolver. The raw diff now uses `--no-abbrev`. Ledger records and
+  resolutions written under short OIDs no longer match their keys and are
+  ignored, costing one full re-review per file.
+- **Findings on non-ASCII paths auto-resolved.** `_blob_oids_at` parsed
+  `git ls-tree` without `-z`, so a quoted path like `café.py` mapped to `""`
+  and its prior findings were dropped as if the file had been deleted. It now
+  uses `-z`.
 
 ## [0.9.4] - 2026-09-25
 

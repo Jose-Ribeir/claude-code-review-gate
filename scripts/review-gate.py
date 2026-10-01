@@ -3331,19 +3331,23 @@ def _is_allowed_path(path):
 
 
 def _blob_oids_at(root, tip, paths):
-    """Return {path: oid} for the given paths at tip. Missing paths map to ''."""
+    """Return {path: oid} for the given paths at tip. Missing paths map to ''.
+
+    -z for the same reason as in _collect_diff_entries: a C-quoted non-ASCII
+    path never matched its key, so the file looked deleted at tip.
+    """
     if not paths or not tip:
         return {p: "" for p in paths}
     out, rc = _git(
-        ["ls-tree", "-r", "--full-tree", tip, "--"] + list(paths), cwd=root
+        ["ls-tree", "-r", "-z", "--full-tree", tip, "--"] + list(paths), cwd=root
     )
     result = {}
     if rc == 0:
-        for line in out.splitlines():
-            tab = line.find("\t")
+        for rec in out.split("\0"):
+            tab = rec.find("\t")
             if tab == -1:
                 continue
-            meta, fpath = line[:tab].split(), line[tab + 1:]
+            meta, fpath = rec[:tab].split(), rec[tab + 1:]
             if len(meta) >= 3:
                 result[fpath] = meta[2]
     for p in paths:
@@ -3381,9 +3385,13 @@ def _collect_diff_entries(root, base, tip):
     rejects on its extension -- an unreviewed file passing the gate. -z
     output is never quoted, and renames arrive as separate fields rather than
     numstat's ambiguous `{a => b}` shorthand.
+
+    --no-abbrev, not --full-index (which only widens patch `index` lines):
+    --raw OIDs are otherwise abbreviated, yet they key ledger records and are
+    compared with the full blob OIDs from _blob_oids_at.
     """
     raw_out, rc = _git(
-        ["diff", "--raw", "-z", "-M", "--full-index", f"{base}..{tip}"], cwd=root
+        ["diff", "--raw", "-z", "-M", "--no-abbrev", f"{base}..{tip}"], cwd=root
     )
     if rc != 0:
         return None, ["could not run git diff --raw; skipping chunking"]

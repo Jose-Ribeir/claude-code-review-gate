@@ -823,3 +823,60 @@ def test_collect_diff_entries_non_ascii_paths(repo):
     assert e["status"].startswith("R")
     assert e["old_path"] == "naïve dir/módulo.py"
     assert e["lines"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Full OIDs from `git diff --raw` and `git ls-tree`
+# ---------------------------------------------------------------------------
+# --full-index only widens patch `index` lines; --raw output stays abbreviated
+# unless --no-abbrev is given. Entry OIDs feed ledger keys and are compared with
+# the full blob OIDs _blob_oids_at returns, so a short OID made every carried
+# finding look "changed". _blob_oids_at itself parsed ls-tree without -z, so a
+# C-quoted non-ASCII path never matched and the file looked deleted at tip.
+
+def test_collect_diff_entries_full_oids(repo):
+    base = _git(["rev-parse", "HEAD"], cwd=repo)
+    (repo / "a.txt").write_text("one\ntwo\n")
+    (repo / "new.py").write_text("x = 1\n")
+    _git(["add", "."], cwd=repo)
+    _git(["commit", "-q", "-m", "change"], cwd=repo)
+    tip = _git(["rev-parse", "HEAD"], cwd=repo)
+
+    entries, _ = review_gate._collect_diff_entries(str(repo), base, tip)
+    by_path = {e["path"]: e for e in entries}
+    a = by_path["a.txt"]
+    assert a["old_oid"] == _git(["rev-parse", f"{base}:a.txt"], cwd=repo)
+    assert a["new_oid"] == _git(["rev-parse", f"{tip}:a.txt"], cwd=repo)
+    n = by_path["new.py"]
+    assert n["new_oid"] == _git(["rev-parse", f"{tip}:new.py"], cwd=repo)
+    assert review_gate._is_null_oid(n["old_oid"])
+    assert len(n["old_oid"]) == len(n["new_oid"])
+
+
+def test_blob_oids_at_non_ascii_paths(repo):
+    (repo / "café.py").write_text("x = 1\n", encoding="utf-8")
+    (repo / "naïve dir").mkdir()
+    (repo / "naïve dir" / "módulo.py").write_text("y = 2\n", encoding="utf-8")
+    _git(["add", "."], cwd=repo)
+    _git(["commit", "-q", "-m", "non-ascii"], cwd=repo)
+    tip = _git(["rev-parse", "HEAD"], cwd=repo)
+
+    paths = ["café.py", "naïve dir/módulo.py", "a.txt", "gone.py"]
+    oids = review_gate._blob_oids_at(str(repo), tip, paths)
+    for p in paths[:3]:
+        assert oids[p] == _git(["rev-parse", f"{tip}:{p}"], cwd=repo), (p, oids)
+    assert oids["gone.py"] == ""
+
+
+def test_entry_oids_match_blob_oids_at(repo):
+    """The comparison the ledger relies on: an entry's new_oid is the tip blob."""
+    base = _git(["rev-parse", "HEAD"], cwd=repo)
+    (repo / "café.py").write_text("x = 1\n", encoding="utf-8")
+    (repo / "a.txt").write_text("changed\n")
+    _git(["add", "."], cwd=repo)
+    _git(["commit", "-q", "-m", "c"], cwd=repo)
+    tip = _git(["rev-parse", "HEAD"], cwd=repo)
+
+    entries, _ = review_gate._collect_diff_entries(str(repo), base, tip)
+    oids = review_gate._blob_oids_at(str(repo), tip, [e["path"] for e in entries])
+    assert {e["path"]: e["new_oid"] for e in entries} == oids
