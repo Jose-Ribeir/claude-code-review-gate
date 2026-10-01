@@ -8,6 +8,9 @@ environment variables so one command line serves every scenario:
   STUB_VERDICT       pass | warn | block | exit1 | garbage | limit  (default pass)
   STUB_TRACE         a file to append one line per invocation to (optional)
   STUB_FAIL_ON_CALL  N — exit1 on the Nth call (1-based, counted via STUB_TRACE)
+                     (racy when chunks run in parallel: use STUB_CHUNK_VERDICT)
+  STUB_CHUNK_VERDICT JSON {chunk_index: verdict} -- STUB_VERDICT for that chunk only
+  STUB_CHUNK_SLEEP   JSON {chunk_index: seconds} -- sleep that long in that chunk only
   STUB_VERDICT_FOR   path — the chunk containing this path returns block
   STUB_FINDINGS_FOR  JSON mapping path → {severity, content} for path-scripted verdicts
   STUB_RESOLVE       JSON mapping finding_id → {status, evidence_path, evidence_quote}
@@ -164,6 +167,21 @@ sleep_for = os.environ.get("STUB_SLEEP_FOR", "")
 if sleep_for and sleep_for in ((manifest or {}).get("paths") or []):
     time.sleep(float(os.environ.get("STUB_SLEEP_FOR_SECS", "30") or 30))
 
+
+def _by_chunk(var):
+    """STUB_CHUNK_*: a JSON {chunk_index: value} looked up by the manifest's own
+    chunk_index, so a scripted chunk is the same one at any concurrency (0.12.0)."""
+    try:
+        table = json.loads(os.environ.get(var, "") or "{}")
+        return table.get(str((manifest or {}).get("chunk_index")))
+    except Exception:
+        return None
+
+
+_chunk_sleep = _by_chunk("STUB_CHUNK_SLEEP")
+if _chunk_sleep:
+    time.sleep(float(_chunk_sleep))
+
 def emit(payload):
     """Write the reply: bare JSON, or a stream-json transcript when STUB_STREAM is set."""
     n = os.environ.get("STUB_STREAM", "")
@@ -241,6 +259,7 @@ if verdict_for and manifest:
     chunk_paths = manifest.get("paths") or []
     if verdict_for in chunk_paths:
         verdict = "block"
+verdict = _by_chunk("STUB_CHUNK_VERDICT") or verdict
 
 if verdict == "exit1":
     sys.stdout.write("Not logged in. Please run /login\n")

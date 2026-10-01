@@ -180,6 +180,7 @@ def test_a_run_killed_after_chunk_one_resumes_with_only_the_rest(tmp_path, gate_
     # the run budget runs out after the first chunk (as a usage limit or a sleep would end it)
     gate_env.setattr(review_gate, "_RUN_BUDGET", 1)
     gate_env.setenv("STUB_SLEEP", "1.3")
+    gate_env.setenv("OCR_CHUNK_CONCURRENCY", "1")  # a sequence (Part C)
     st, calls1 = run(work, tip, tmp_path, gate_env)
     assert st["state"] == "failed" and st["reason"] == "budget" and len(reviews(calls1)) == 1
     done = {i["unit"] for i in kinds(calls1[0], "unit_diff")}

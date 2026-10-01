@@ -456,7 +456,7 @@ def test_budget_exhausted_deterministic(tmp_path):
     repo = _big_repo(tmp_path, n_files=4)
     tip = _git(["rev-parse", "HEAD"], cwd=repo)
 
-    env = _chunk_env(tmp_path, STUB_SLEEP=6)
+    env = _chunk_env(tmp_path, STUB_SLEEP=6, OCR_CHUNK_CONCURRENCY=1)  # a sequence (Part C)
     env["OCR_RUN_BUDGET"] = "5"   # chunk 0 takes 6s > budget → fails after chunk 0
 
     decision, reason, elapsed, _ = _hook(repo, "git push origin main", env, timeout=120)
@@ -558,7 +558,7 @@ def test_kill_and_resume(tmp_path):
     # STUB_SLEEP=5 per chunk: chunks 0+1 take 10s; we kill during chunk 2.
     # Inline budget = 30s so the hook returns "still running" while chunk 2
     # is mid-execution, rather than completing all 4 chunks.
-    env = _chunk_env(tmp_path, STUB_SLEEP=5)
+    env = _chunk_env(tmp_path, STUB_SLEEP=5, OCR_CHUNK_CONCURRENCY=1)  # a sequence (Part C)
 
     # Launch the hook asynchronously.
     payload = json.dumps({"session_id": "s1", "tool_name": "Bash",
@@ -927,7 +927,8 @@ def test_a_truncated_file_is_carried_on_resume_and_stays_visible(tmp_path):
     # The model-driven truncation of the 0.9.x path (OCR_PRECOMPUTED_DIFFS=0): with
     # precomputed diffs Python owns the flag (tests/test_precomputed_diffs.py).
     env = _chunk_env(tmp_path, STUB_SLEEP=6, STUB_TRUNCATE_FOR="mod0.py",
-                     STUB_FINDINGS_FOR=findings, OCR_PRECOMPUTED_DIFFS="0")
+                     STUB_FINDINGS_FOR=findings, OCR_PRECOMPUTED_DIFFS="0",
+                     OCR_CHUNK_CONCURRENCY=1)  # a sequence (Part C)
     env["OCR_RUN_BUDGET"] = "5"
     decision, reason, _, _ = _hook(repo, "git push origin main", env, timeout=120)
     assert decision == "deny", reason
@@ -1148,6 +1149,7 @@ def test_a_chunk_that_always_times_out_is_split_and_then_fails_naming_the_file(
               "STUB_SLEEP_FOR_SECS"):
         monkeypatch.setenv(k, env[k])
     monkeypatch.delenv("OCR_FORCE_REVIEW", raising=False)
+    monkeypatch.setenv("OCR_CHUNK_CONCURRENCY", "1")  # a sequence (Part C)
     monkeypatch.setattr(review_gate, "_CHUNK_TIMEOUT", 2)
     monkeypatch.setattr(review_gate, "_CHUNK_THRESHOLD", 3)
     monkeypatch.setattr(review_gate, "_CHUNK_FILES", 2)

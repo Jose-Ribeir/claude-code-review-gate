@@ -50,6 +50,8 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
+from concurrent import futures as _futures
 import shlex
 import time
 from pathlib import Path
@@ -2033,6 +2035,7 @@ def _debug_enabled():
 # 1 MiB, three older files kept as review-gate-debug.log.1 .. .3.
 _DEBUG_LOG_BYTES = 1024 * 1024
 _DEBUG_LOG_KEEP = 3
+_DEBUG_LOG_LOCK = threading.Lock()
 
 
 def _debug_log(line):
@@ -2041,9 +2044,10 @@ def _debug_log(line):
     to help debug. Lives beside _park_pending's data, outside .git, so it
     survives whatever state the repo itself is in. Rotates (see above)."""
     try:
-        ocr_telemetry.rotating_append(
-            _gate_data_dir() / "review-gate-debug.log", line,
-            max_bytes=_DEBUG_LOG_BYTES, keep=_DEBUG_LOG_KEEP)
+        with _DEBUG_LOG_LOCK:      # parallel chunks (0.12.0) log from worker threads
+            ocr_telemetry.rotating_append(
+                _gate_data_dir() / "review-gate-debug.log", line,
+                max_bytes=_DEBUG_LOG_BYTES, keep=_DEBUG_LOG_KEEP)
     except Exception:
         pass
 
@@ -2153,9 +2157,16 @@ _TELE = {}
 
 # Time metrics of the model call in flight (ocr_telemetry.stream_stats of its
 # stream-json stdout), set by _run_review_once and read by _run_review right
-# after it returns or raises. Counts, bytes and timings only. One reviewer runs
-# at a time per supervisor, so a module global is enough (as with _TELE).
-_LAST_CALL_STATS = {}
+# after it returns or raises. Counts, bytes and timings only. Per thread: since
+# 0.12.0 several chunks' reviewers run at once, one per worker thread.
+_CALL_STATS_TLS = threading.local()
+
+
+def _last_call_stats():
+    d = getattr(_CALL_STATS_TLS, "stats", None)
+    if d is None:
+        d = _CALL_STATS_TLS.stats = {}
+    return d
 
 # Per-call keys copied into the telemetry entry and the log line.
 _CALL_SCALARS = ("turns", "api_s", "cost_usd", "first_event_s", "agent_calls",
@@ -2215,7 +2226,7 @@ def _run_review(repo_root, mode, git_dir=None, head_sha="", push_range="",
     kind = ("recheck" if "recheck" in raw_tag else "resolve") if resolve_file else "review"
     started = time.monotonic()
     outcome = "error"
-    _LAST_CALL_STATS.clear()
+    _last_call_stats().clear()
     try:
         out = _run_review_once(repo_root, mode, git_dir, head_sha, push_range,
                                paths_file=paths_file, timeout=timeout,
@@ -2230,15 +2241,16 @@ def _run_review(repo_root, mode, git_dir=None, head_sha="", push_range="",
         raise
     finally:
         _tele_call(kind, time.monotonic() - started, outcome, resolve_file or paths_file,
-                   stats=dict(_LAST_CALL_STATS))
+                   stats=dict(_last_call_stats()))
 
 
 def _note_call_stats(out_text, started_at):
-    """Parse the reviewer's stream-json into _LAST_CALL_STATS. Never raises and
-    never changes what the call returns: this only reads what it already captured."""
+    """Parse the reviewer's stream-json into this thread's call stats. Never raises
+    and never changes what the call returns: this only reads what it already captured."""
     try:
-        _LAST_CALL_STATS.clear()
-        _LAST_CALL_STATS.update(ocr_telemetry.stream_stats(out_text, started_at))
+        stats = _last_call_stats()
+        stats.clear()
+        stats.update(ocr_telemetry.stream_stats(out_text, started_at))
     except Exception:
         pass
 
@@ -2405,8 +2417,7 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
             # group elsewhere) scoped to this one known pid: the claude.exe on
             # PATH may be a launcher whose real node child would otherwise
             # survive. Never a kill-by-name.
-            global _ACTIVE_CHILD
-            _ACTIVE_CHILD = proc
+            _register_child(proc)
             try:
                 out_text, err_text = proc.communicate(timeout=_run_timeout)
             except subprocess.TimeoutExpired:
@@ -2430,13 +2441,14 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
                         f"duration_s={time.monotonic()-started_mono:.1f}"
                     )
                 raise
+            finally:
+                _unregister_child(proc)
             _note_call_stats(out_text, started_at)
             if debug:
                 _debug_log(
                     f"end child_pid={proc.pid} outcome=rc{proc.returncode} "
                     f"duration_s={time.monotonic()-started_mono:.1f}"
                 )
-            _ACTIVE_CHILD = None
     except subprocess.TimeoutExpired:
         if mode == "hook":
             # This process is the detached supervisor, which inherits Claude
@@ -2519,9 +2531,32 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
 
 
 # --- the review runs elsewhere: state file, supervisor, inline join ----------
-# The reviewer child currently being waited on by _run_review, so the
-# supervisor's heartbeat thread can kill it on a fence break or deadline.
-_ACTIVE_CHILD = None
+# The reviewer children currently being waited on by _run_review (one per
+# chunk in flight since 0.12.0), so the supervisor's heartbeat thread can kill
+# them all on a fence break, and a failing chunk can stop its siblings.
+_ACTIVE_CHILDREN = set()
+_ACTIVE_CHILDREN_LOCK = threading.Lock()
+
+
+def _register_child(proc):
+    with _ACTIVE_CHILDREN_LOCK:
+        _ACTIVE_CHILDREN.add(proc)
+
+
+def _unregister_child(proc):
+    with _ACTIVE_CHILDREN_LOCK:
+        _ACTIVE_CHILDREN.discard(proc)
+
+
+def _active_children():
+    """The children in flight, lowest pid first (a stable order for the state file)."""
+    with _ACTIVE_CHILDREN_LOCK:
+        return sorted(_ACTIVE_CHILDREN, key=lambda c: getattr(c, "pid", 0) or 0)
+
+
+def _kill_active_children():
+    for child in _active_children():
+        _kill_child(child)
 # The genuine class, captured at import: tests substitute subprocess.Popen
 # with stand-ins carrying made-up pids, and those must never reach taskkill.
 _REAL_POPEN = subprocess.Popen
@@ -2762,7 +2797,10 @@ def _drive_review(common_dir, repo_root, meta, mode, budget):
                     continue  # someone else moved it; re-evaluate
             stale_pids = ()
             if st2.get("state") in ("running", "claimed"):
-                stale_pids = (st2.get("reviewer_pid"), st2.get("supervisor_pid"))
+                pids = st2.get("reviewer_pids")
+                stale_pids = tuple(dict.fromkeys(
+                    (list(pids) if isinstance(pids, list) else [])
+                    + [st2.get("reviewer_pid"), st2.get("supervisor_pid")]))
             attempts = int(st2.get("attempts") or 0) if st2.get("state") == "failed" else 0
             if force:
                 attempts = 0
@@ -2887,15 +2925,15 @@ def _supervise_run(state_path, run_id):
     def _beat():
         while not stop.wait(HEARTBEAT_S):
             fields = {"heartbeat_ts": time.time()}
-            child = _ACTIVE_CHILD
-            if child is not None:
-                fields["reviewer_pid"] = child.pid
+            children = _active_children()
+            if children:
+                fields["reviewer_pid"] = children[0].pid     # pre-0.12.0 readers
+                fields["reviewer_pids"] = [c.pid for c in children]
             try:
                 _update_state_owned(state_path, run_id, **fields)
             except _Fenced:
                 fenced["hit"] = True
-                if child is not None:
-                    _kill_child(child)
+                _kill_active_children()
                 return
             except Exception:
                 pass
@@ -3481,9 +3519,10 @@ def _reap_async(common_dir):
                     hb = float(st.get("heartbeat_ts") or st.get("claimed_ts") or 0)
                     if now - hb < STALE_S:
                         live_runs.add(str(st.get("run_id") or ""))
-                        wt = st.get("worktree")
-                        if wt:
-                            live_worktrees.add(os.path.realpath(str(wt)))
+                        wts = st.get("worktrees")
+                        for wt in [st.get("worktree")] + (wts if isinstance(wts, list) else []):
+                            if wt:
+                                live_worktrees.add(os.path.realpath(str(wt)))
             except Exception:
                 continue
 
@@ -4889,6 +4928,16 @@ def _plan_to_chunks(active_items, marks=None, sizes=None, budget=None):
 
 def _precomputed_enabled():
     return os.environ.get("OCR_PRECOMPUTED_DIFFS", "1").strip().lower() not in ("0", "false", "no")
+
+
+def _chunk_concurrency():
+    """OCR_CHUNK_CONCURRENCY: chunks reviewed at once (0.12.0), default 2, clamped
+    to 1-4. 1 is the sequential review of 0.11.0, exactly."""
+    try:
+        n = int(os.environ.get("OCR_CHUNK_CONCURRENCY", "2"))
+    except ValueError:
+        n = 2
+    return min(4, max(1, n))
 
 
 def _run_dir(common_dir, run_id):
@@ -6723,66 +6772,37 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
         chunks = _plan_to_chunks(active_items, timeout_marks)
     total = len(chunks)
     budget_end = time.monotonic() + _RUN_BUDGET
-    chunk_results = []
-    chunks_done = 0
-    chunks_new = 0
-    chunk_secs_total = 0.0   # wall time of this run's finished chunks (for the average)
+    results_by_k = {}
+    progress_n = {"done": 0, "new": 0, "secs": 0.0}
 
-    def _chunk_stream():
-        k, retried = 0, False
-        while True:
-            if k < len(chunks):
-                yield k, chunks[k]
-                k += 1
-            elif seg is not None and not retried:
-                retried = True              # caller checks that were unsure: once more
-                more = seg.retry_chunks()
-                if not more:
-                    return
-                chunks.extend(more)
-            else:
-                return
-
-    for k, chunk_items in _chunk_stream():
-        total = len(chunks)
-        if fenced["hit"]:
-            raise _Fenced()
-
-        # Progress update (fence-checked).
-        try:
-            _update_state_owned(
-                state_path, run_id,
-                chunk_index=k, chunks_total=total, chunks_done=chunks_done,
-            )
-        except _Fenced:
-            raise
-
-        # Check run budget before starting a new chunk.
-        if time.monotonic() > budget_end:
+    conc = _chunk_concurrency() if len(chunks) > 1 else 1
+    slots = [review_root]
+    extra_worktrees = []
+    if conc > 1:
+        extra_worktrees = _make_slot_worktrees(review_root, tip, run_id, conc - 1)
+        if extra_worktrees:
             try:
-                _update_state_owned(
-                    state_path, run_id,
-                    chunks_done=chunks_done, chunks_total=total,
-                )
+                _update_state_owned(state_path, run_id,
+                                    worktrees=[review_root] + extra_worktrees)
             except _Fenced:
+                for wt in extra_worktrees:
+                    _remove_worktree(review_root, wt)
                 raise
-            raise ReviewBudgetError(
-                f"run budget ({_RUN_BUDGET}s) exhausted after "
-                f"{chunks_done}/{total} chunks; re-push to resume"
-            )
+        slots += extra_worktrees
+        conc = len(slots)
+    stop_evt = threading.Event()   # a sibling failed hard: no more attempts
 
-        # Write manifest for this chunk atomically; fail closed on error.
-        manifest_path = str(
-            _async_dir(common_dir) / f"manifest-{run_id}-{k}.json"
-        )
+    def _prepare(k, chunk_items):
+        """Write chunk k's manifest (main thread: the impact bundle touches _TELE)."""
+        manifest_path = str(_async_dir(common_dir) / f"manifest-{run_id}-{k}.json")
         # other_changed: paths in OTHER chunks that are also being reviewed
         chunk_paths = [item["entry"]["path"] for item in chunk_items if not _context_only(item)]
+        own = {it["entry"]["path"] for it in chunk_items}
         other_changed = [
             item["entry"]["path"]
             for i, ch in enumerate(chunks)
             for item in ch
-            if i != k and not _context_only(item)
-            and item["entry"]["path"] not in {it["entry"]["path"] for it in chunk_items}
+            if i != k and not _context_only(item) and item["entry"]["path"] not in own
         ]
         if chunk_extras is None:
             extras = None
@@ -6791,27 +6811,33 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
         else:
             extras = chunk_extras(k, chunk_paths)
         manifest = _build_review_manifest(
-            common_dir, run_id, k, total, chunk_items, other_changed, carry_paths,
+            common_dir, run_id, k, len(chunks), chunk_items, other_changed, carry_paths,
             extras, diffs)
         _write_manifest_file(manifest_path, manifest, f"chunk manifest for chunk {k}")
+        return manifest, manifest_path
 
-        # Clean worktree so one chunk can't leave state for the next.
-        _git(["clean", "-fdxq"], cwd=review_root)
-        _git(["checkout", "-q", "--", "."], cwd=review_root)
-
-        # Run the review (retry once on non-timeout errors).
+    def _execute(slot_root, k, total_now, chunk_items, manifest_path):
+        """Review one chunk in its slot's worktree (a worker thread, or inline at
+        concurrency 1). Returns (result, seconds); raises what the review raised."""
         result = None
         last_exc = None
         chunk_t0 = time.monotonic()
         chunk_outcome = "error"
         try:
+            # Clean worktree so one chunk can't leave state for the next.
+            _git(["clean", "-fdxq"], cwd=slot_root)
+            _git(["checkout", "-q", "--", "."], cwd=slot_root)
+            # Run the review (retry once on non-timeout errors).
             for attempt in range(2):
                 if fenced["hit"]:
                     chunk_outcome = "fenced"
                     raise _Fenced()
+                if stop_evt.is_set():
+                    chunk_outcome = "stopped"
+                    raise _ChunkStopped()
                 try:
                     result, _, _ = _run_review(
-                        review_root, mode, git_dir, tip, push_range,
+                        slot_root, mode, git_dir, tip, push_range,
                         paths_file=manifest_path,
                         timeout=_CHUNK_TIMEOUT,
                         raw_tag=f"-c{k}",
@@ -6823,16 +6849,20 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
                     raise  # propagate immediately; do not retry limits
                 except ReviewGateError as exc:
                     last_exc = exc
+                    if fenced["hit"]:
+                        chunk_outcome = "fenced"
+                        raise _Fenced()
+                    if stop_evt.is_set():
+                        # killed by the gate because a sibling failed: not this chunk's fault
+                        chunk_outcome = "stopped"
+                        raise _ChunkStopped() from exc
                     if exc.is_timeout:
                         # Not retried: it would time out again. Mark the files so
                         # the next push splits the chunk (or gives up on one file).
                         chunk_outcome = "timeout"
-                        if fenced["hit"]:
-                            chunk_outcome = "fenced"
-                            raise _Fenced()
                         err = _timeout_failure(
                             exc, common_dir, fp, chunk_items, _CHUNK_TIMEOUT,
-                            f"chunk {k + 1}/{total}")
+                            f"chunk {k + 1}/{total_now}")
                         if err is exc:
                             raise
                         raise err from exc
@@ -6853,24 +6883,24 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
                 _remove_run_dir(common_dir, run_id, sub=k)
             chunk_secs = time.monotonic() - chunk_t0
             try:
-                _tele_chunk(k, total, len(chunk_items),
+                _tele_chunk(k, total_now, len(chunk_items),
                             sum(int(it["entry"].get("lines") or 0) for it in chunk_items),
                             chunk_outcome, chunk_secs)
             except Exception:
                 pass
-        chunk_secs_total += chunk_secs
+        return result, chunk_secs
 
+    def _persist(k, chunk_items, manifest, result, chunk_secs, running):
+        """Record a finished chunk (main thread: it owns the state file and the ledger)."""
+        progress_n["secs"] += chunk_secs
         # Fence-check before persisting: if another run claimed the state while
         # the reviewer was running, do not write records.
-        try:
-            _update_state_owned(
-                state_path, run_id,
-                chunks_done=chunks_done + 1, chunk_index=k, chunks_total=total,
-                chunk_avg_s=round(chunk_secs_total / (chunks_new + 1), 1),
-            )
-        except _Fenced:
-            raise
-
+        _update_state_owned(
+            state_path, run_id,
+            chunks_done=progress_n["done"] + 1, chunk_index=k, chunks_total=len(chunks),
+            chunks_running=running,
+            chunk_avg_s=round(progress_n["secs"] / (progress_n["new"] + 1), 1),
+        )
         # Write ledger records for this chunk (only reached if not fenced).
         if seg is not None:
             result = _seg_check_impact_verdicts(result, manifest)
@@ -6884,20 +6914,148 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
             except Exception as exc:    # the chunk's findings stay; nothing is recorded for its units
                 _metric_log("seg_apply_error", kind=type(exc).__name__[:30])
                 _debug_log(f"seg apply failed: {type(exc).__name__}: {exc}")
-
-        chunk_results.append(result)
-        chunks_done += 1
-        chunks_new += 1
+        results_by_k[k] = result
+        progress_n["done"] += 1
+        progress_n["new"] += 1
         if progress is not None:
-            progress["new"] = chunks_new
+            progress["new"] = progress_n["new"]
 
-    merged = _merge_chunk_results(chunk_results, planner_warnings)
+    # Failure policy (Part C): a fence or a usage limit stops everything now; any
+    # other failure lets the chunks in flight finish and record, then raises. When
+    # several fail, the strongest wins: fence > limit > gate error > budget.
+    failure = {"rank": 0, "exc": None}
+
+    def _fail(rank, exc):
+        if rank > failure["rank"]:
+            failure.update(rank=rank, exc=exc)
+
+    pool = _futures.ThreadPoolExecutor(max_workers=conc) if conc > 1 else _InlineExecutor()
+    inflight = {}      # future -> (k, chunk_items, manifest, slot)
+    free_slots = list(reversed(slots))
+    next_k, retried = 0, False
+    try:
+        while True:
+            # Dispatch while there is a free slot, work left and nothing has failed.
+            while free_slots and failure["exc"] is None and next_k < len(chunks):
+                if fenced["hit"]:
+                    raise _Fenced()
+                k, chunk_items = next_k, chunks[next_k]
+                total = len(chunks)
+                # Progress update (fence-checked).
+                _update_state_owned(
+                    state_path, run_id,
+                    chunk_index=k, chunks_total=total, chunks_done=progress_n["done"],
+                    chunks_running=len(inflight) + 1,
+                )
+                # Check run budget before starting a new chunk.
+                if time.monotonic() > budget_end:
+                    _update_state_owned(
+                        state_path, run_id,
+                        chunks_done=progress_n["done"], chunks_total=total,
+                        chunks_running=len(inflight),
+                    )
+                    _fail(1, ReviewBudgetError(
+                        f"run budget ({_RUN_BUDGET}s) exhausted after "
+                        f"{progress_n['done']}/{total} chunks; re-push to resume"))
+                    break
+                # Write manifest for this chunk atomically; fail closed on error.
+                manifest, manifest_path = _prepare(k, chunk_items)
+                slot = free_slots.pop()
+                fut = pool.submit(_execute, slot, k, total, chunk_items, manifest_path)
+                inflight[fut] = (k, chunk_items, manifest, slot)
+                next_k += 1
+
+            if not inflight:
+                if failure["exc"] is not None:
+                    raise failure["exc"]
+                if next_k < len(chunks):
+                    continue
+                if seg is not None and not retried:
+                    retried = True              # caller checks that were unsure: once more
+                    more = seg.retry_chunks()
+                    if more:
+                        chunks.extend(more)
+                        continue
+                break
+
+            done, _ = _futures.wait(list(inflight), return_when=_futures.FIRST_COMPLETED)
+            for fut in sorted(done, key=lambda f: inflight[f][0]):
+                k, chunk_items, manifest, slot = inflight.pop(fut)
+                free_slots.append(slot)
+                try:
+                    result, chunk_secs = fut.result()
+                except _Fenced:
+                    raise
+                except _ChunkStopped:
+                    continue                    # a sibling's failure is the one reported
+                except ReviewLimitError as exc:
+                    _fail(3, exc)
+                    stop_evt.set()
+                    _kill_active_children()
+                    continue
+                except ReviewGateError as exc:
+                    _fail(2, exc)
+                    continue
+                except Exception as exc:        # noqa: BLE001 -- a worker's crash is a gate error
+                    _fail(2, exc)
+                    continue
+                _persist(k, chunk_items, manifest, result, chunk_secs, len(inflight))
+    except BaseException:
+        # Whatever leaves (a fence above all): no child outlives the run.
+        stop_evt.set()
+        _kill_active_children()
+        raise
+    finally:
+        pool.shutdown(wait=True)
+        for wt in extra_worktrees:
+            _remove_worktree(review_root, wt)
+
+    merged = _merge_chunk_results([results_by_k[k] for k in sorted(results_by_k)],
+                                  planner_warnings)
     # The per-chunk snapshots each hold one chunk; the run's record and the
     # stable last-output path must show all of them.
     raw_name = _save_raw_output(
         git_dir, json.dumps(merged, ensure_ascii=False, indent=2), tip, "-merged"
     )
-    return merged, True, raw_name, chunks_new
+    return merged, True, raw_name, progress_n["new"]
+
+
+class _ChunkStopped(Exception):
+    """A chunk's reviewer was stopped because a sibling chunk failed (Part C)."""
+
+
+class _InlineExecutor:
+    """Concurrency 1: run each chunk on the calling thread, at submit time, so the
+    review is exactly the sequential one. Returns completed futures."""
+
+    def submit(self, fn, *args):
+        fut = _futures.Future()
+        try:
+            fut.set_result(fn(*args))
+        except BaseException as exc:    # noqa: BLE001 -- handed back through the future
+            fut.set_exception(exc)
+        return fut
+
+    def shutdown(self, wait=True):
+        pass
+
+
+def _make_slot_worktrees(review_root, tip, run_id, n):
+    """Up to n more worktrees at `tip` for parallel chunks (Part C), named after the
+    run's own with an `-s<i>` suffix. Only beside a gate-made worktree: a review
+    reading the live tree runs one chunk at a time, and a slot is never the live
+    tree. A slot that cannot be made just means fewer slots."""
+    base = os.path.realpath(str(_gate_data_dir() / "worktrees"))
+    if not os.path.realpath(str(review_root)).startswith(base + os.sep):
+        return []
+    made = []
+    for i in range(1, n + 1):
+        wt = _make_worktree(review_root, tip, f"{run_id}-s{i}")
+        if not wt:
+            _metric_log("slot_worktree_failed", slot=i)
+            break
+        made.append(wt)
+    return made
 
 
 def _mode_supervise(argv):
@@ -6911,6 +7069,19 @@ def _mode_supervise(argv):
     return _supervise(state_path, run_id)
 
 
+def _chunk_progress(st):
+    """", chunk 3/10" for one chunk at a time; ", chunks 2/10 done, 2 running" when
+    several run at once (Part C)."""
+    cd, ct = int(st.get("chunks_done") or 0), int(st.get("chunks_total") or 0)
+    try:
+        running = int(st.get("chunks_running") or 0)
+    except (TypeError, ValueError):
+        running = 0
+    if running > 1:
+        return f", chunks {cd}/{ct} done, {running} running"
+    return f", chunk {cd + 1}/{ct}"
+
+
 def _still_running_reason(st, budget, mode):
     tip = _sanitize(str(st.get("tip") or ""), 40)[:7]
     branch = _sanitize(str(st.get("branch") or "?"), 80)
@@ -6922,7 +7093,7 @@ def _still_running_reason(st, budget, mode):
     # Show chunk progress when the chunked reviewer is running.
     cd, ct = st.get("chunks_done"), st.get("chunks_total")
     if cd is not None and ct:
-        count += f", chunk {int(cd) + 1}/{int(ct)}"
+        count += _chunk_progress(st)
         avg = st.get("chunk_avg_s")
         if isinstance(avg, (int, float)) and avg > 0:
             count += f", avg {int(avg) // 60}m{int(avg) % 60:02d}s per chunk"
@@ -7534,7 +7705,7 @@ def _mode_resume(argv):
         if s in ("running", "claimed"):
             alive = time.time() - float(st.get("heartbeat_ts") or st.get("claimed_ts") or 0) < STALE_S
             cd, ct = st.get("chunks_done"), st.get("chunks_total")
-            chunk_note = f", chunk {int(cd) + 1}/{int(ct)}" if cd is not None and ct else ""
+            chunk_note = _chunk_progress(st) if cd is not None and ct else ""
             what = ("is still running" + chunk_note) if alive else "was interrupted"
         elif s == "done":
             what = "finished: " + ("BLOCKED" if st.get("blocked") else

@@ -2880,6 +2880,7 @@ def test_attempts_increments_when_no_new_chunks_reviewed(monkeypatch, tmp_path):
     monkeypatch.setattr(review_gate, "_CHUNK_FILES", 1)
     monkeypatch.setattr(review_gate, "_CHUNK_LINES", 99999)
     monkeypatch.setattr(review_gate, "_RUN_BUDGET", 9999)
+    monkeypatch.setenv("OCR_CHUNK_CONCURRENCY", "1")  # a sequence (Part C)
     monkeypatch.setattr(review_gate, "_git", lambda args, cwd=None: ("", 0))
 
     # Build active_items (plan_item dicts) from entries.
