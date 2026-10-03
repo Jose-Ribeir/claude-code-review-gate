@@ -19,6 +19,7 @@ _GATE = os.path.join(_SCRIPTS, "review-gate.py")
 _STUB = os.path.join(_HERE, "stub_reviewer.py")
 
 sys.path.insert(0, _SCRIPTS)
+from hook_output import parse_pretooluse  # noqa: E402
 _spec = importlib.util.spec_from_file_location("review_gate_ig", _GATE)
 review_gate = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(review_gate)
@@ -76,8 +77,7 @@ def _push(work, env, cmd="git push -f origin main"):
     proc = subprocess.run([sys.executable, _GATE, "--mode", "hook"], input=payload,
                           capture_output=True, text=True, cwd=str(work), env=env, timeout=90)
     assert proc.returncode == 0, proc.stderr
-    out = json.loads(proc.stdout)["hookSpecificOutput"]
-    return out["permissionDecision"], out.get("permissionDecisionReason", "")
+    return parse_pretooluse(proc.stdout)
 
 
 def _state(work, tip, timeout=60):
@@ -114,7 +114,7 @@ def test_first_push_sends_callers_in_untouched_files(tmp_path):
     work = _repo(tmp_path, {"lib.py": _LIB_V1, "app.py": _CALLER})
     tip = _commit(work, {"lib.py": _LIB_V2})
     decision, reason = _push(work, _env(tmp_path, "t.trace"), cmd="git push origin main")
-    assert decision == "allow", reason
+    assert decision == "pass", reason
     impact = _review_manifest(tmp_path, "t.trace").get("impact") or {}
     # Both uses in app.py: the import (line 1) and the call (line 5).
     assert sorted((s["path"], s["line"]) for s in impact.get("sites") or []) == [
@@ -130,7 +130,7 @@ def test_no_callers_keeps_the_golden_command_line(tmp_path):
     _commit(work, {"lib.py": _LIB_V2})
     decision, _ = _push(work, _env(tmp_path, "t.trace", OCR_PRECOMPUTED_DIFFS="0"),
                         cmd="git push origin main")
-    assert decision == "allow"
+    assert decision == "pass"
     assert all(c.get("paths_file") is None for c in _calls(tmp_path, "t.trace"))
 
 
@@ -138,7 +138,7 @@ def test_no_callers_means_a_manifest_without_impact(tmp_path):
     work = _repo(tmp_path, {"lib.py": _LIB_V1})
     _commit(work, {"lib.py": _LIB_V2})
     decision, _ = _push(work, _env(tmp_path, "t.trace"), cmd="git push origin main")
-    assert decision == "allow"
+    assert decision == "pass"
     manifest = _review_manifest(tmp_path, "t.trace")
     assert manifest["paths"] == ["lib.py"] and "impact" not in manifest
 
@@ -234,7 +234,7 @@ def test_a_new_findings_twin_in_an_untouched_file_is_only_a_note(tmp_path):
     decision, reason = _push(work, _env(tmp_path, "t.trace", STUB_FINDINGS_FOR=json.dumps(finding)),
                              cmd="git push origin main")
     st = _state(work, tip)
-    assert decision == "allow", reason
+    assert decision == "pass", reason
     assert st.get("verdict") == "warn"  # the note did not raise it
     assert "(note) old.py:2" in st.get("reasons", ""), st.get("reasons")
 

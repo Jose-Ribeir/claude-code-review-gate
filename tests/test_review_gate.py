@@ -8,6 +8,7 @@ _SCRIPTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _STUB_PATH = os.path.join(_HERE, "stub_reviewer.py")
 sys.path.insert(0, _SCRIPTS)  # so review-gate.py's own `from ocr_verdict import ...` resolves
+from hook_output import parse_pretooluse  # noqa: E402
 
 _spec = importlib.util.spec_from_file_location("review_gate", os.path.join(_SCRIPTS, "review-gate.py"))
 review_gate = importlib.util.module_from_spec(_spec)
@@ -897,14 +898,16 @@ def test_passing_review_persists_its_findings_and_reports_them(tmp_path, monkeyp
     _stub_gate(monkeypatch, tmp_path)
     _run_hook(monkeypatch)
 
-    payload = json.loads(capsys.readouterr().out)["hookSpecificOutput"]
-    assert payload["permissionDecision"] == "allow"
-    # The findings are attached to the allow decision. NOTE: this reaches the
-    # hook's own record (visible UI-side, useful when debugging) and NOT the
-    # model -- verified 2026-09, an allow produces no `hook_additional_context`
-    # companion. Model delivery is --mode post; see the tests at the end of
-    # this file. This assertion pins the debugging aid, not a delivery channel.
-    assert "unchecked index" in payload["permissionDecisionReason"]
+    out = capsys.readouterr().out
+    assert "permissionDecision" not in out  # never "allow": that would auto-approve the call
+    decision, reason = parse_pretooluse(out)
+    assert decision == "pass"
+    # The findings ride along as a `systemMessage`, shown to the user. NOTE: this
+    # does NOT reach the model -- verified 2026-09, a PreToolUse hook's message
+    # produces no `hook_additional_context` companion. Model delivery is --mode
+    # post; see the tests at the end of this file. This assertion pins the
+    # user-visible aid, not a delivery channel.
+    assert "unchecked index" in reason
 
     entry = _read_history(str(tmp_path))[0]
     assert entry["verdict"] == "warn" and entry["blocked"] is False
@@ -920,11 +923,11 @@ def test_the_paired_adapters_short_circuit_replays_instead_of_silencing(tmp_path
 
     # Second adapter, same HEAD, marker still fresh: no second review...
     _run_hook(monkeypatch)
-    payload = json.loads(capsys.readouterr().out)["hookSpecificOutput"]
+    _, reason = parse_pretooluse(capsys.readouterr().out)
     assert calls == ["a" * 40]
     # ...but the first run's findings are shown again rather than swallowed.
-    assert "already reviewed at this HEAD" in payload["permissionDecisionReason"]
-    assert "unchecked index" in payload["permissionDecisionReason"]
+    assert "already reviewed at this HEAD" in reason
+    assert "unchecked index" in reason
 
 
 # --- the review runs elsewhere: state file, supervisor, inline join -----------
@@ -1017,8 +1020,7 @@ def test_a_review_whose_supervisor_went_silent_is_restarted(tmp_path, monkeypatc
         "started_ts": time.time() - 900, "heartbeat_ts": time.time() - 600, "supervisor_pid": 0,
     })
     _run_hook(monkeypatch)
-    payload = json.loads(capsys.readouterr().out)["hookSpecificOutput"]
-    assert payload["permissionDecision"] == "allow"
+    assert parse_pretooluse(capsys.readouterr().out)[0] == "pass"
     assert calls == ["a" * 40]
     st = _state_of(tmp_path)
     assert st["state"] == "done" and st["run_id"] != "dead"
@@ -1106,9 +1108,8 @@ def test_post_reminds_about_a_running_review_at_most_every_five_minutes(tmp_path
 def test_a_clean_run_records_a_pass_and_says_nothing(tmp_path, monkeypatch, capsys):
     _stub_gate(monkeypatch, tmp_path, result={"findings": []})
     _run_hook(monkeypatch)
-    payload = json.loads(capsys.readouterr().out)["hookSpecificOutput"]
-    assert payload["permissionDecision"] == "allow"
-    assert "permissionDecisionReason" not in payload  # no findings, no noise
+    out = capsys.readouterr().out
+    assert out.strip() == ""  # a pass-through says nothing: no findings, no noise, no decision
     assert _read_history(str(tmp_path))[0]["verdict"] == "pass"
 
 

@@ -5,7 +5,8 @@
 # Runs the review skill headlessly via the official `claude` CLI (the compliant,
 # subscription-friendly path — no token leaves Claude Code, no third-party tool),
 # parses the JSON verdict, and converts it into either:
-#   --mode hook : a Claude Code PreToolUse permissionDecision (deny/allow) on stdout
+#   --mode hook : a Claude Code PreToolUse permissionDecision on stdout -- "deny"
+#                 to block; to let a call through it prints NOTHING (see _pass_through)
 #   --mode git  : a process exit code (1 = block, 0 = allow)
 #
 # A third mode reports rather than decides:
@@ -7911,10 +7912,32 @@ def _mode_guard(argv):
     why = _guard_reviewer_command(cmd) if cmd else ""
     if why:
         _emit_hook("deny", why)
-    _emit_hook("allow")
+    _pass_through()
+
+
+def _pass_through(message=""):
+    """Take no part in the permission decision: exit 0, no permissionDecision.
+
+    Every NON-blocking outcome of a PreToolUse hook goes through here. It used
+    to emit a `permissionDecision` of allow, and that is not "no objection": an
+    allow from a hook auto-approves the tool call and skips the user's own
+    permission prompt, so this gate was silently approving every Bash command
+    it was merely asked to look at. Staying silent hands the call back to the
+    normal permission flow (rules, prompts, --allowedTools) untouched. Only a
+    deny (or ask) is ever worth saying out loud.
+
+    `message`, when given, goes in `systemMessage`: a universal hook field that
+    is shown to the user and grants nothing.
+    """
+    if message:
+        sys.stdout.write(json.dumps({"systemMessage": message}))
+    sys.exit(0)
 
 
 def _emit_hook(decision, reason=""):
+    if decision == "allow":
+        # Defence in depth: nothing in this file may grant permission.
+        _pass_through(reason)
     out = {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
@@ -8042,7 +8065,7 @@ def _main_inner(argv, mode):
             # a push (the adapters route it here since 0.6.0), and a command
             # that merely mentions one is not.
             if not _looks_like_real_push(cmd):
-                _emit_hook("allow")
+                _pass_through()
         except Exception:
             payload = {}  # if we can't read it, fall through and review anyway
 
@@ -8058,7 +8081,7 @@ def _main_inner(argv, mode):
     if mode == "hook":
         cmd = (payload.get("tool_input") or {}).get("command", "") if isinstance(payload, dict) else ""
         if not _looks_like_real_push(cmd):
-            _emit_hook("allow")  # mentions a push; does not perform one
+            _pass_through()  # mentions a push; does not perform one
         _resolved, _ambiguous = _gate_repo(payload)
         if _ambiguous:
             # There is a `cd` we cannot follow, so we do not know what these
@@ -8066,7 +8089,7 @@ def _main_inner(argv, mode):
             # applies to every other "cannot run" case: a gate that does not
             # know what it is looking at must not wave a push through.
             if _fail_open_requested():
-                _emit_hook("allow")
+                _pass_through()
             _fail_closed(
                 mode,
                 "review-gate: could not determine which repository this push targets, so it "
@@ -8114,7 +8137,7 @@ def _main_inner(argv, mode):
     # (--mode post). The reason string below is kept because it costs nothing
     # and is genuinely useful in the hook record; it is not a delivery channel.
     allow = (
-        (lambda reason="": _emit_hook("allow", reason))
+        (lambda reason="": _pass_through(reason))
         if mode == "hook"
         else (lambda reason="": sys.exit(0))
     )

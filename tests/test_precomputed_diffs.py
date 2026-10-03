@@ -316,7 +316,7 @@ def _calls(tmp_path, trace="stub.trace"):
 
 def _push_ok(work, env, cmd="git push origin main"):
     decision, reason, _, _ = ag._hook(work, cmd, env, timeout=120)
-    assert decision == "allow", reason
+    assert decision == "pass", reason
 
 
 def test_a_small_push_always_gets_a_manifest_and_the_reviewer_reads_the_diff(tmp_path):
@@ -390,7 +390,7 @@ def test_a_900_line_file_reaches_the_reviewer_untruncated_end_to_end(tmp_path):
     ag._git(["commit", "-q", "-m", "big"], cwd=work)
     tip = ag._git(["rev-parse", "HEAD"], cwd=work)
     decision, reason = rr._hook(work, rr._env(tmp_path), cmd="git push origin main")
-    assert decision == "allow", reason
+    assert decision == "pass", reason
     st = rr._state(work, tip)
     (call,) = _calls(tmp_path)
     (item,) = [i for i in call["manifest"]["items"] if i["kind"] == "file_diff"]
@@ -415,7 +415,7 @@ def test_a_file_over_the_cap_is_flagged_truncated_in_the_record_end_to_end(tmp_p
     ag._git(["commit", "-q", "-m", "huge"], cwd=work)
     tip = ag._git(["rev-parse", "HEAD"], cwd=work)
     decision, reason = rr._hook(work, rr._env(tmp_path, OCR_SEGMENT="0"), cmd="git push origin main")
-    assert decision == "allow", reason
+    assert decision == "pass", reason
     st = rr._state(work, tip)
     (call,) = _calls(tmp_path)
     (item,) = [i for i in call["manifest"]["items"] if i["kind"] == "file_diff"]
@@ -438,7 +438,7 @@ def test_a_model_truncation_warning_about_a_precomputed_file_is_ignored(tmp_path
     tip = ag._git(["rev-parse", "HEAD"], cwd=work)
     decision, reason = rr._hook(work, rr._env(tmp_path, STUB_TRUNCATE_FOR="*"),
                                 cmd="git push origin main")
-    assert decision == "allow", reason
+    assert decision == "pass", reason
     st = rr._state(work, tip)
     assert st["state"] == "done" and not st.get("unreviewed_truncated")
 
@@ -457,7 +457,7 @@ def _hostile_push(tmp_path, files, symlink_to=None):
     ag._git(["commit", "-q", "-m", "hostile"], cwd=work)
     tip = ag._git(["rev-parse", "HEAD"], cwd=work)
     decision, reason = rr._hook(work, rr._env(tmp_path), cmd="git push origin main")
-    assert decision == "allow", reason
+    assert decision == "pass", reason
     rr._state(work, tip)
     return work, _calls(tmp_path)
 

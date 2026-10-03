@@ -41,6 +41,7 @@ _GATE = os.path.join(_SCRIPTS, "review-gate.py")
 _STUB = os.path.join(_HERE, "stub_reviewer.py")
 
 sys.path.insert(0, _SCRIPTS)
+from hook_output import parse_pretooluse  # noqa: E402
 _spec = importlib.util.spec_from_file_location("review_gate_ls", _GATE)
 review_gate = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(review_gate)
@@ -114,8 +115,8 @@ def _hook(work, cmd, env, session="s1", timeout=60):
         cwd=str(work), env=env, timeout=timeout,
     )
     assert proc.returncode == 0, proc.stderr
-    out = json.loads(proc.stdout)["hookSpecificOutput"]
-    return out["permissionDecision"], out.get("permissionDecisionReason", ""), proc.stderr
+    decision, reason = parse_pretooluse(proc.stdout)
+    return decision, reason, proc.stderr
 
 
 def _trace(tmp_path, name="stub.trace"):
@@ -802,7 +803,7 @@ def test_scenario_6_no_change_repush_replays_with_zero_calls(tmp_path):
     # First push: pass (records written for both files).
     env = _env(tmp_path)
     decision, reason, _ = _hook(work, "git push origin main", env)
-    assert decision == "allow", reason
+    assert decision == "pass", reason
     _wait_state(work, tip, {"done"})
     calls1 = _trace(tmp_path)
     assert len(calls1) >= 1
@@ -811,7 +812,7 @@ def test_scenario_6_no_change_repush_replays_with_zero_calls(tmp_path):
     env2 = _env(tmp_path)
     env2["STUB_TRACE"] = str(tmp_path / "stub2.trace")
     decision2, reason2, _ = _hook(work, "git push origin main", env2)
-    assert decision2 == "allow", reason2
+    assert decision2 == "pass", reason2
     _wait_state(work, tip, {"done"})
     calls2 = _trace(tmp_path, "stub2.trace")
     assert calls2 == [], f"expected 0 reviewer calls on re-push, got {calls2}"
@@ -825,7 +826,7 @@ def test_scenario_13_ocr_ledger_0_uses_golden_argv_no_ledger_dir(tmp_path):
     # reach the reviewer through it); the bare 0.7.0 argv is the rollback path.
     env = _env(tmp_path, OCR_LEDGER="0", OCR_PRECOMPUTED_DIFFS="0")
     decision, reason, _ = _hook(work, "git push origin main", env)
-    assert decision == "allow", reason
+    assert decision == "pass", reason
     _wait_state(work, tip, {"done"})
     calls = _trace(tmp_path)
     assert len(calls) == 1
@@ -846,7 +847,7 @@ def test_scenario_13_ocr_force_review_skips_reads_but_writes_records(tmp_path):
     # First pass: normal push, records written.
     env1 = _env(tmp_path)
     decision1, reason1, _ = _hook(work, "git push origin main", env1)
-    assert decision1 == "allow", reason1
+    assert decision1 == "pass", reason1
     _wait_state(work, tip, {"done"})
     calls1 = _trace(tmp_path)
     assert len(calls1) == 1
@@ -855,7 +856,7 @@ def test_scenario_13_ocr_force_review_skips_reads_but_writes_records(tmp_path):
     env2 = _env(tmp_path, OCR_FORCE_REVIEW="1")
     env2["STUB_TRACE"] = str(tmp_path / "stub2.trace")
     decision2, reason2, _ = _hook(work, "git push origin main", env2)
-    assert decision2 == "allow", reason2
+    assert decision2 == "pass", reason2
     _wait_state(work, tip, {"done"})
     calls2 = _trace(tmp_path, "stub2.trace")
     assert len(calls2) == 1, "OCR_FORCE_REVIEW=1 must review even when records exist"
@@ -864,7 +865,7 @@ def test_scenario_13_ocr_force_review_skips_reads_but_writes_records(tmp_path):
     env3 = _env(tmp_path)
     env3["STUB_TRACE"] = str(tmp_path / "stub3.trace")
     decision3, reason3, _ = _hook(work, "git push origin main", env3)
-    assert decision3 == "allow", reason3
+    assert decision3 == "pass", reason3
     _wait_state(work, tip, {"done"})
     calls3 = _trace(tmp_path, "stub3.trace")
     assert calls3 == [], f"expected 0 calls after force review, got {calls3}"
@@ -889,7 +890,7 @@ def test_scenario_18_stable_boundaries_only_new_file_reviewed(tmp_path):
 
     env1 = _env(tmp_path)
     decision1, reason1, _ = _hook(work, "git push origin main", env1)
-    assert decision1 == "allow", reason1
+    assert decision1 == "pass", reason1
     _wait_state(work, tip1, {"done"})
     calls1 = _trace(tmp_path)
     assert len(calls1) == 1  # single-context (3 files ≤ threshold)
@@ -899,7 +900,7 @@ def test_scenario_18_stable_boundaries_only_new_file_reviewed(tmp_path):
     env2 = _env(tmp_path)
     env2["STUB_TRACE"] = str(tmp_path / "stub2.trace")
     decision2, reason2, _ = _hook(work, "git push origin main", env2)
-    assert decision2 == "allow", reason2
+    assert decision2 == "pass", reason2
     _wait_state(work, tip2, {"done"})
     calls2 = _trace(tmp_path, "stub2.trace")
     assert len(calls2) == 1, f"expected 1 call (only d.py active), got {calls2}"
@@ -966,7 +967,7 @@ def test_scenario_1_block_x_fix_x_delta_and_resolver_ran(tmp_path):
     env2 = _env(tmp_path, STUB_RESOLVE=resolve_map, STUB_VERDICT="pass")
     env2["STUB_TRACE"] = str(tmp_path / "stub2.trace")
     decision2, reason2, _ = _hook(work, "git push -f origin main", env2)
-    assert decision2 == "allow", reason2
+    assert decision2 == "pass", reason2
     _wait_state(work, tip2, {"done"})
 
     calls2 = _trace(tmp_path, "stub2.trace")
@@ -1038,7 +1039,7 @@ def test_scenario_5_resolution_reuse_suppresses_finding(tmp_path):
     env2 = _env(tmp_path, STUB_RESOLVE=resolve_map, STUB_VERDICT="pass")
     env2["STUB_TRACE"] = str(tmp_path / "stub2.trace")
     decision2, reason2, _ = _hook(work, "git push -f origin main", env2)
-    assert decision2 == "allow", reason2
+    assert decision2 == "pass", reason2
     _wait_state(work, tip2, {"done"})
     # Verify a resolver call was made in T2 (the resolution was written).
     calls2 = _trace(tmp_path, "stub2.trace")
@@ -1049,7 +1050,7 @@ def test_scenario_5_resolution_reuse_suppresses_finding(tmp_path):
     env3 = _env(tmp_path, STUB_VERDICT="pass")
     env3["STUB_TRACE"] = str(tmp_path / "stub3.trace")
     decision3, reason3, _ = _hook(work, "git push -f origin main", env3)
-    assert decision3 == "allow", reason3
+    assert decision3 == "pass", reason3
     _wait_state(work, tip2, {"done"})
     calls3 = _trace(tmp_path, "stub3.trace")
     # All files carry, F suppressed by resolution → zero reviewer calls.
@@ -1075,7 +1076,7 @@ def test_scenario_7_medium_finding_in_a_prior_plus_new_file(tmp_path):
     env1 = _env(tmp_path, STUB_FINDINGS_FOR=findings_map)
     decision1, reason1, _ = _hook(work, "git push origin main", env1)
     # Medium finding → warn verdict → gate allows (not denies).
-    assert decision1 == "allow", reason1
+    assert decision1 == "pass", reason1
     st1 = _wait_state(work, tip1, {"done"})
     assert st1.get("verdict") == "warn", f"expected warn verdict, got {st1.get('verdict')}"
     calls1 = _trace(tmp_path)

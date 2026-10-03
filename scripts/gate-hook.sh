@@ -4,6 +4,12 @@
 # Referenced from hooks/hooks.json. Reads the PreToolUse payload on stdin and
 # lets review-gate.py emit the permissionDecision JSON.
 #
+# NEVER emit permissionDecision "allow". A PreToolUse hook that allows
+# auto-approves the tool call and bypasses the user's own permission prompts, so
+# this hook (which fires on every Bash call) would approve arbitrary commands.
+# Every non-blocking path prints NOTHING and exits 0 -- a pass-through, after
+# which Claude Code's normal permission flow applies. Only "deny" is emitted.
+#
 # Failure policy: FAIL CLOSED. If there is no working Python, or review-gate.py
 # is missing, this denies the push rather than allowing it -- a gate that cannot
 # run must not wave a push through. OCR_FAIL_OPEN=1 is the escape hatch.
@@ -37,7 +43,7 @@ _find_python() {
 # prompt-injected reviewer write files through `git ... --output=<path>` and
 # shell redirections (verified: the host's `Bash(git diff *)` rule admits
 # both). Only commands with a file-writing shape pay the Python spawn; the
-# rest are allowed here, as before.
+# rest pass through here, as before.
 if [ "${OCR_IN_REVIEW:-}" = "1" ]; then
   case "$payload" in
     *--o*|*'>'*)
@@ -49,8 +55,7 @@ if [ "${OCR_IN_REVIEW:-}" = "1" ]; then
       exit 0
       ;;
   esac
-  printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}'
-  exit 0
+  exit 0  # pass through: no decision, normal permission flow applies
 fi
 
 # Short-circuit non-pushes before ever touching Python. hooks.json's
@@ -65,8 +70,7 @@ fi
 case "$payload" in
   *git*push*) ;;
   *)
-    printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}'
-    exit 0
+    exit 0  # pass through: not a push
     ;;
 esac
 
@@ -80,8 +84,7 @@ if [ -z "$PY" ] || [ ! -f "$DIR/review-gate.py" ]; then
   # external binary -- we are here precisely because the environment is broken.
   case "${OCR_FAIL_OPEN:-}" in
     1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss])
-      printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}'
-      exit 0
+      exit 0  # pass through: the escape hatch lets the push go, it does not approve it
       ;;
   esac
   # Built with printf, not python -- this is the branch where Python is the

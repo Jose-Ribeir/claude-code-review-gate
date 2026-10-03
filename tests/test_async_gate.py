@@ -26,6 +26,7 @@ _GATE = os.path.join(_SCRIPTS, "review-gate.py")
 _STUB = os.path.join(_HERE, "stub_reviewer.py")
 
 sys.path.insert(0, _SCRIPTS)
+from hook_output import parse_pretooluse  # noqa: E402
 _spec = importlib.util.spec_from_file_location("review_gate_async", _GATE)
 review_gate = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(review_gate)
@@ -91,8 +92,8 @@ def _hook(work, cmd, env, session="s1", timeout=120):
                           timeout=timeout)
     elapsed = time.monotonic() - t0
     assert proc.returncode == 0, proc.stderr
-    out = json.loads(proc.stdout)["hookSpecificOutput"]
-    return out["permissionDecision"], out.get("permissionDecisionReason", ""), elapsed, proc.stderr
+    decision, reason = parse_pretooluse(proc.stdout)
+    return decision, reason, elapsed, proc.stderr
 
 
 def _trace(tmp_path):
@@ -119,7 +120,7 @@ def _wait_state(work, tip, want, timeout=60):
 def test_a_short_review_answers_inline_and_pushes(repo, tmp_path):
     tip = _commit(repo)
     decision, reason, elapsed, _ = _hook(repo, "git push origin main", _env(tmp_path))
-    assert decision == "allow", reason
+    assert decision == "pass", reason
     assert elapsed < 25
     st = _wait_state(repo, tip, {"done"})
     assert st["verdict"] == "pass" and st["blocked"] is False
@@ -176,7 +177,7 @@ def test_a_long_review_is_denied_past_the_budget_and_joined_by_the_retry(repo, t
     assert st["state"] == "running"
     # The retry joins that same run and gets the verdict without a new review.
     decision, reason, elapsed, _ = _hook(repo, "git push origin main", env, timeout=90)
-    assert decision == "allow", reason
+    assert decision == "pass", reason
     assert elapsed < 30
     assert len(_trace(tmp_path)) == 1
     # A note was parked for --mode post and consumed by the successful retry's
@@ -195,8 +196,8 @@ def test_two_hooks_at_once_share_one_review(repo, tmp_path):
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                               cwd=str(repo), env=env) for _ in range(2)]
     outs = [p.communicate(payload, timeout=120)[0] for p in procs]
-    decisions = [json.loads(o)["hookSpecificOutput"]["permissionDecision"] for o in outs]
-    assert decisions == ["allow", "allow"]
+    decisions = [parse_pretooluse(o)[0] for o in outs]
+    assert decisions == ["pass", "pass"]
     assert len(_trace(tmp_path)) == 1
     _wait_state(repo, tip, {"done"})
 
@@ -211,7 +212,7 @@ def test_the_named_branch_is_reviewed_not_the_checked_out_one(repo, tmp_path):
     _git(["switch", "-q", "main"], cwd=repo)
     (repo / "dirty.txt").write_text("uncommitted\n")
     decision, reason, _, _ = _hook(repo, "git push -u origin feat/x", _env(tmp_path))
-    assert decision == "allow", reason
+    assert decision == "pass", reason
     (trace,) = _trace(tmp_path)
     assert trace["range"] == f"{main_tip}..{feat_tip}"
     st = _wait_state(repo, feat_tip, {"done"})
@@ -220,7 +221,7 @@ def test_the_named_branch_is_reviewed_not_the_checked_out_one(repo, tmp_path):
 
 def test_a_push_of_commits_the_remote_already_has_is_allowed_without_review(repo, tmp_path):
     decision, _, _, _ = _hook(repo, "git push origin main", _env(tmp_path))
-    assert decision == "allow"
+    assert decision == "pass"
     assert _trace(tmp_path) == []
 
 
@@ -250,7 +251,7 @@ def test_tags_pointing_at_unpushed_commits_are_refused(repo, tmp_path):
     assert decision == "deny" and "tags" in reason.lower()
     _git(["push", "-q", "origin", "main"], cwd=repo)
     decision, _, _, _ = _hook(repo, "git push --tags origin", _env(tmp_path))
-    assert decision == "allow"
+    assert decision == "pass"
 
 
 def test_git_C_is_honoured_as_the_push_directory(repo, tmp_path):
@@ -261,7 +262,7 @@ def test_git_C_is_honoured_as_the_push_directory(repo, tmp_path):
                           "tool_input": {"command": f'git -C "{repo}" push origin main'}})
     proc = subprocess.run([sys.executable, _GATE, "--mode", "hook"], input=payload,
                           capture_output=True, text=True, cwd=str(elsewhere), env=_env(tmp_path))
-    assert json.loads(proc.stdout)["hookSpecificOutput"]["permissionDecision"] == "allow", proc.stderr
+    assert parse_pretooluse(proc.stdout)[0] == "pass", proc.stderr
     _wait_state(repo, tip, {"done"})
 
 
@@ -275,11 +276,11 @@ def test_the_guard_refuses_output_and_escaping_redirections(tmp_path):
         payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": cmd}})
         proc = subprocess.run([sys.executable, _GATE, "--mode", "hook"], input=payload,
                               capture_output=True, text=True, env=env, cwd=str(tmp_path))
-        return json.loads(proc.stdout)["hookSpecificOutput"]["permissionDecision"]
+        return parse_pretooluse(proc.stdout)[0]
 
-    assert guard("git diff HEAD~1") == "allow"
-    assert guard("git diff HEAD~1 > .review_hunks.txt") == "allow"
-    assert guard("git diff HEAD~1 > sub/scratch.txt") == "allow"
+    assert guard("git diff HEAD~1") == "pass"
+    assert guard("git diff HEAD~1 > .review_hunks.txt") == "pass"
+    assert guard("git diff HEAD~1 > sub/scratch.txt") == "pass"
     assert guard("git diff --output=x.txt HEAD~1") == "deny"
     assert guard("git log -1 --format=x --output out.txt") == "deny"
     assert guard("git diff > .git/scr-push-reviewed-abc") == "deny"
@@ -400,7 +401,7 @@ def test_ledger_records_are_carried_on_resume(tmp_path):
     # Only files 2-3 are active (2 ≤ threshold=3) → single-context → 1 call.
     env = _chunk_env(tmp_path)
     decision, reason, _, _ = _hook(repo, "git push origin main", env)
-    assert decision == "allow", reason
+    assert decision == "pass", reason
     _wait_state(repo, tip, {"done"})
     calls = _trace(tmp_path)
     assert len(calls) == 1, (
@@ -473,7 +474,7 @@ def test_budget_exhausted_deterministic(tmp_path):
     # Use a fresh trace file so we don't count the first run's single call.
     env2["STUB_TRACE"] = str(tmp_path / "stub2.trace")
     decision2, reason2, _, _ = _hook(repo, "git push origin main", env2, timeout=60)
-    assert decision2 == "allow", reason2
+    assert decision2 == "pass", reason2
     _wait_state(repo, tip, {"done"})
     calls2 = [json.loads(line) for line in
               (tmp_path / "stub2.trace").read_text().splitlines() if line.strip()]
@@ -605,7 +606,7 @@ def test_kill_and_resume(tmp_path):
     env2 = _chunk_env(tmp_path, STUB_SLEEP=0)
     env2["STUB_TRACE"] = str(tmp_path / "stub2.trace")  # fresh trace
     decision, reason, _, _ = _hook(repo, "git push origin main", env2, timeout=60)
-    assert decision == "allow", reason
+    assert decision == "pass", reason
     _wait_state(repo, tip, {"done"})
     calls2 = [json.loads(line) for line in
               (tmp_path / "stub2.trace").read_text().splitlines() if line.strip()]
@@ -625,7 +626,7 @@ def test_cross_tip_ledger_carry_and_delta(tmp_path):
     tip1 = _git(["rev-parse", "HEAD"], cwd=repo)
     env = _chunk_env(tmp_path)
     decision, reason, _, _ = _hook(repo, "git push origin main", env)
-    assert decision == "allow", reason
+    assert decision == "pass", reason
     _wait_state(repo, tip1, {"done"})
     calls1 = _trace(tmp_path)
     assert len(calls1) == 4, f"expected 4 calls at tip1, got {len(calls1)}"
@@ -648,7 +649,7 @@ def test_cross_tip_ledger_carry_and_delta(tmp_path):
     env2["STUB_TRACE"] = str(tmp_path / "stub2.trace")
     # Force push because the amended tip2 has diverged from origin/main (=tip1).
     decision2, reason2, _, _ = _hook(repo, "git push -f origin main", env2)
-    assert decision2 == "allow", reason2
+    assert decision2 == "pass", reason2
     _wait_state(repo, tip2, {"done"})
     calls2 = [json.loads(line) for line in
               (tmp_path / "stub2.trace").read_text().splitlines() if line.strip()]
@@ -944,7 +945,7 @@ def test_a_truncated_file_is_carried_on_resume_and_stays_visible(tmp_path):
     env2 = _chunk_env(tmp_path, STUB_FINDINGS_FOR=findings, OCR_PRECOMPUTED_DIFFS="0")
     env2["STUB_TRACE"] = str(tmp_path / "stub2.trace")
     decision2, reason2, _, _ = _hook(repo, "git push origin main", env2, timeout=60)
-    assert decision2 == "allow", reason2  # a medium finding warns, never blocks
+    assert decision2 == "pass", reason2  # a medium finding warns, never blocks
     st2 = _wait_state(repo, tip, {"done"})
     calls2 = [json.loads(line) for line in
               (tmp_path / "stub2.trace").read_text().splitlines() if line.strip()]

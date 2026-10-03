@@ -24,6 +24,7 @@ _GATE = os.path.join(_SCRIPTS, "review-gate.py")
 _STUB = os.path.join(_HERE, "stub_reviewer.py")
 
 sys.path.insert(0, _SCRIPTS)
+from hook_output import parse_pretooluse  # noqa: E402
 _spec = importlib.util.spec_from_file_location("review_gate_rr", _GATE)
 review_gate = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(review_gate)
@@ -83,8 +84,7 @@ def _hook(work, env, cmd="git push -f origin main"):
                           capture_output=True, text=True, cwd=str(work), env=env,
                           timeout=90)
     assert proc.returncode == 0, proc.stderr
-    out = json.loads(proc.stdout)["hookSpecificOutput"]
-    return out["permissionDecision"], out.get("permissionDecisionReason", "")
+    return parse_pretooluse(proc.stdout)
 
 
 def _trace(tmp_path, name):
@@ -352,7 +352,7 @@ def test_fix_whose_resolver_run_failed_is_resolved_on_the_next_push(tmp_path):
     resolve = json.dumps({_FID: {"status": "resolved", "evidence_path": "x.py",
                                  "evidence_quote": "def good(): pass"}})
     decision, reason = _hook(work, _env(tmp_path, "t3.trace", STUB_RESOLVE=resolve))
-    assert decision == "allow", reason
+    assert decision == "pass", reason
     assert _state(work, tip3).get("state") == "done"
     calls = _trace(tmp_path, "t3.trace")
     review = next(c for c in calls if not c.get("resolve_file"))
@@ -380,7 +380,7 @@ def test_evidence_free_still_present_is_rechecked_not_silently_blocking(tmp_path
                                  "evidence_quote": "def good(): pass"}})
     decision, reason = _hook(work2, _env(tmp_path / "second", "t2.trace",
                                          STUB_RESOLVE_RECHECK=recheck))
-    assert decision == "allow", reason
+    assert decision == "pass", reason
 
 
 def test_carried_file_changed_since_the_finding_goes_to_the_resolver(tmp_path):
@@ -395,7 +395,7 @@ def test_carried_file_changed_since_the_finding_goes_to_the_resolver(tmp_path):
     resolve = json.dumps({_FID: {"status": "resolved", "evidence_path": "x.py",
                                  "evidence_quote": "def good(): pass"}})
     decision, reason = _hook(work, _env(tmp_path, "t3.trace", STUB_RESOLVE=resolve))
-    assert decision == "allow", reason
+    assert decision == "pass", reason
 
 
 def test_unchanged_flagged_code_still_blocks_as_still_present(tmp_path):

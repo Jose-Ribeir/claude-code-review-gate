@@ -251,7 +251,7 @@ def test_a_chunked_run_logs_phases_chunks_and_calls_without_paths_or_code(tmp_pa
     env = ag._chunk_env(tmp_path, STUB_STREAM=4, STUB_STREAM_AGENT_S=0.3)
 
     decision, reason, _, _ = ag._hook(repo, "git push origin main", env, timeout=120)
-    assert decision == "allow", reason
+    assert decision == "pass", reason
     st = ag._wait_state(repo, tip, {"done"})
     assert st["verdict"] == "pass"
 
@@ -309,7 +309,7 @@ def test_a_long_stream_is_fully_drained_and_parsed(tmp_path):
     tip = ag._git(["rev-parse", "HEAD"], cwd=work)
     env = ag._env(tmp_path, STUB_STREAM=3000, STUB_STREAM_AGENT_S=0.1)
     decision, reason, _, _ = ag._hook(work, "git push origin main", env, timeout=120)
-    assert decision == "allow", reason
+    assert decision == "pass", reason
     ag._wait_state(work, tip, {"done"})
     call = _tele_record(work)["calls"][0]
     assert call["outcome"] == "ok" and call["turns"] == 3002

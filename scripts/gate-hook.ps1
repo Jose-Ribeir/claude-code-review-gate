@@ -12,8 +12,13 @@
 
 $ErrorActionPreference = 'Stop'
 
+# Emits a BLOCKING decision. There is deliberately no way to emit "allow": a
+# PreToolUse hook that says allow auto-approves the tool call and skips the
+# user's own permission prompt, so letting a call through means printing
+# nothing and exiting 0 (a pass-through). Every non-blocking path below does so.
 function Write-Decision {
     param([string]$Decision, [string]$Reason = '')
+    if ($Decision -eq 'allow') { return }
     $payload = @{
         hookSpecificOutput = @{
             hookEventName        = 'PreToolUse'
@@ -52,13 +57,13 @@ if ($env:OCR_IN_REVIEW -eq '1') {
     if ($payloadText -like '*--o*' -or $payloadText -like '*>*') {
         $script:GuardMode = $true
     } else {
-        Write-Decision 'allow'; exit 0
+        exit 0  # pass through: no decision, normal permission flow applies
     }
 }
 
 # Loose on purpose: `git -C <dir> push` is a push too. review-gate.py applies
 # the strict command-position test once it is running.
-if (-not $script:GuardMode -and $payloadText -notlike '*git*push*') { Write-Decision 'allow'; exit 0 }
+if (-not $script:GuardMode -and $payloadText -notlike '*git*push*') { exit 0 }
 
 # --- Should this adapter run at all? ------------------------------------------
 # Deliberately biased toward RUNNING. Deferring when gate-hook.sh cannot
@@ -120,7 +125,7 @@ if (-not $py -or -not (Test-Path $core)) {
     # FAIL CLOSED. A gate that cannot run is not a reason to wave a push
     # through -- that is the whole premise of this project. The one escape
     # hatch has to be named here, because the failure is silent otherwise.
-    if (Test-Truthy "$($env:OCR_FAIL_OPEN)") { Write-Decision 'allow'; exit 0 }
+    if (Test-Truthy "$($env:OCR_FAIL_OPEN)") { exit 0 }
     $why = if (-not $py) {
         'no working Python 3 interpreter found'
     } else {
@@ -169,9 +174,14 @@ if ($stdout.Trim()) {
     exit $proc.ExitCode
 }
 
-# review-gate.py produced no decision. It is built to always emit one, so
-# reaching here means it died in a way its own fail-closed wrapper did not
-# catch. Block rather than let the silence read as approval.
-if (Test-Truthy "$($env:OCR_FAIL_OPEN)") { Write-Decision 'allow'; exit 0 }
+# No output AND a clean exit is review-gate.py's pass-through: it has nothing to
+# say about this call (not a push, nothing unpushed, review passed), so we say
+# nothing either and the normal permission flow applies.
+if ($proc.ExitCode -eq 0) { exit 0 }
+
+# No output and a NON-zero exit: review-gate.py died in a way its own
+# fail-closed wrapper did not catch. Block rather than let the silence read as
+# approval.
+if (Test-Truthy "$($env:OCR_FAIL_OPEN)") { exit 0 }
 Write-Decision 'deny' "review-gate: the reviewer exited $($proc.ExitCode) without returning a verdict, so the push was not reviewed. Set OCR_FAIL_OPEN=1 in the environment Claude Code was launched from to bypass."
 exit 0

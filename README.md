@@ -65,7 +65,7 @@ This plugin gives you the **same review methodology the compliant way**: Claude 
    dedup → verdict: block | warn | pass → text, or JSON for the gate
 ```
 
-The push gate runs `claude -p "/review-gate:review --unpushed --json"` headlessly and maps the verdict to a decision: a Claude Code **PreToolUse** hook returns allow/deny (default wiring), or a **git pre-push** hook returns an exit code (the optional "everywhere" wiring).
+The push gate runs `claude -p "/review-gate:review --unpushed --json"` headlessly and maps the verdict to a decision: a Claude Code **PreToolUse** hook returns a deny, or nothing at all to let the call through (default wiring; it never answers "allow", which would auto-approve the call and skip your permission prompts), or a **git pre-push** hook returns an exit code (the optional "everywhere" wiring).
 
 That headless session is deliberately isolated from your interactive one — pinned model, no user-level settings or hooks, no MCP servers. See [Cost](#cost) for why that matters.
 
@@ -177,7 +177,7 @@ Since 0.6.0 the review runs under a **detached supervisor** that outlives the ho
 The `git push` waits for it inline for up to `OCR_INLINE_BUDGET` (600 s) and then:
 
 - **finished** -> the verdict is delivered exactly as before (deny with findings, or
-  allow);
+  nothing, i.e. the push goes through your normal permission flow);
 - **still running** -> the push is **denied** (never allowed unreviewed) with
   *"review still running, re-run this exact `git push`"*. The retry joins the same
   review and answers as soon as it finishes; nothing is reviewed twice. A
@@ -219,10 +219,10 @@ cat .git/review-gate-findings.jsonl | tail -1
 | Full reviewer stdout for one run | `.git/review-gate-history/<UTC>-<sha7>.json` | newest `OCR_HISTORY_LIMIT` (default 50) |
 | Full reviewer stdout for the *latest* run | `.git/review-gate-last-output.json` | overwritten every run (unchanged) |
 
-Non-blocking findings are also **reported** rather than swallowed: in hook mode they come
-back in the push's `permissionDecisionReason`, so the calling Claude Code session sees them,
-and the "already reviewed this HEAD" short-circuit replays the other adapter's findings
-instead of allowing silently.
+Non-blocking findings are also **reported** rather than swallowed: in hook mode they are
+shown to you as a hook `systemMessage` (the model gets them from the PostToolUse hook), and
+the "already reviewed this HEAD" short-circuit replays the other adapter's findings instead
+of passing silently.
 
 All of this lives in `.git/`, so it is per-clone, never committed, and never pushed.
 
@@ -365,7 +365,7 @@ installed (see [CONTRIBUTING.md](CONTRIBUTING.md#hook-wiring)).
 
 | Event | Matcher | Script | When it fires | What it does |
 |---|---|---|---|---|
-| `PreToolUse` | `Bash`, `if: Bash(git *)` | `scripts/gate-hook.sh` / `.ps1` | before a Bash tool call that runs a git command | Reads the call; anything that is not a `git push` is allowed straight away without starting Python. For a push it runs `review-gate.py --mode hook`, which reviews the unpushed commits and answers allow or deny (timeout 900 s) |
+| `PreToolUse` | `Bash`, `if: Bash(git *)` | `scripts/gate-hook.sh` / `.ps1` | before a Bash tool call that runs a git command | Reads the call; anything that is not a `git push` is passed through (no decision, so your normal permission prompts apply) without starting Python. For a push it runs `review-gate.py --mode hook`, which reviews the unpushed commits and answers deny, or stays silent to pass the push through (timeout 900 s) |
 | `PostToolUse` | `Bash` | `scripts/post-hook.sh` / `.ps1` | after any Bash tool call | Not a push and nothing waiting: exits at once. Otherwise runs `review-gate.py --mode post` to hand the recorded findings of a finished review back to the session (timeout 30 s). Never blocks |
 | `SessionStart` | all | `scripts/session-start-check.sh` / `.ps1` | when a Claude Code session starts or resumes | Checks that a working Python 3.7+ exists and warns if not; also runs `review-gate.py --mode resume`, which reports a review that was cut off when the previous session died (timeout 15 s) |
 
