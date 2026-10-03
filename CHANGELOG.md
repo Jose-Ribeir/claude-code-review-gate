@@ -6,6 +6,26 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-10-03
+
+Documentation and directory-listing metadata only. No review code, prompt or default
+changed: the review cache stays valid.
+
+### Added
+- **README: "What this plugin runs, sends and changes".** The hooks and when they fire, the
+  headless `claude` reviewer and what it is sent, the git worktrees, the optional global
+  `core.hooksPath` hook and how to undo it, why the PowerShell hooks use
+  `-ExecutionPolicy Bypass`, what `ocr_telemetry.py` writes (a local file under `.git`, no
+  network), and every file the plugin writes. It also records a known issue: when no worktree
+  can be created, a chunked review runs `git clean -fdxq` and `git checkout -- .` in the live
+  working tree.
+- `PRIVACY.md` and `SUPPORT.md`; `assets/icon.svg`.
+- `plugin.json`: `icon`, `documentationUrl`, `supportUrl`, `privacyPolicyUrl`.
+
+### Changed
+- `scripts/sync-local-install.py` ships `assets/`, `PRIVACY.md` and `SUPPORT.md` in the local
+  snapshot, so the icon referenced by `plugin.json` is present there.
+
 ## [0.12.0] - 2026-10-01
 
 Chunks are reviewed **in parallel**. Part C of `docs/plans/resume-truncated-chunks.md`.
