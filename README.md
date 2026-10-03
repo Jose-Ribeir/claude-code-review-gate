@@ -352,6 +352,137 @@ The gate runs the review in a **separate headless `claude -p` session**. That se
 
 **Is it affiliated with Alibaba or Anthropic?** No.
 
+## What this plugin runs, sends and changes
+
+Everything below was checked against the source in `hooks/`, `scripts/` and `bin/`. See also
+[PRIVACY.md](PRIVACY.md).
+
+### Hooks it registers (`hooks/hooks.json`)
+
+Each hook is registered twice, a bash form and a PowerShell form, because Claude Code hooks have
+no platform condition; the PowerShell adapter defers to the bash one whenever Git Bash is
+installed (see [CONTRIBUTING.md](CONTRIBUTING.md#hook-wiring)).
+
+| Event | Matcher | Script | When it fires | What it does |
+|---|---|---|---|---|
+| `PreToolUse` | `Bash`, `if: Bash(git *)` | `scripts/gate-hook.sh` / `.ps1` | before a Bash tool call that runs a git command | Reads the call; anything that is not a `git push` is allowed straight away without starting Python. For a push it runs `review-gate.py --mode hook`, which reviews the unpushed commits and answers allow or deny (timeout 900 s) |
+| `PostToolUse` | `Bash` | `scripts/post-hook.sh` / `.ps1` | after any Bash tool call | Not a push and nothing waiting: exits at once. Otherwise runs `review-gate.py --mode post` to hand the recorded findings of a finished review back to the session (timeout 30 s). Never blocks |
+| `SessionStart` | all | `scripts/session-start-check.sh` / `.ps1` | when a Claude Code session starts or resumes | Checks that a working Python 3.7+ exists and warns if not; also runs `review-gate.py --mode resume`, which reports a review that was cut off when the previous session died (timeout 15 s) |
+
+The review does not run inside the hook. The hook starts a **detached supervisor process**
+(`review-gate.py --mode supervise`) that outlives it and does the review; the hook waits for it up
+to a budget and otherwise denies with "still running, re-run the push" (see
+[Long reviews](#long-reviews-and-the-desktop-app)). Inside the headless review session the same
+hooks are inert (`OCR_IN_REVIEW=1`), except that the `PreToolUse` guard refuses file-writing shell
+commands there.
+
+### The `claude` subprocess, and what it sees
+
+To review, the gate runs the Claude Code CLI you already have, headless:
+`claude -p "/review-gate:review ..." --model sonnet --output-format stream-json ...`. That uses
+**your own Claude Code login and plan**, like any other Claude Code session. The plugin has no
+API key, no server and no account of its own.
+
+- **What is sent to Anthropic:** the diffs of the reviewable source files in the commits being
+  pushed, plus whatever other files of those commits the reviewer opens for context with its
+  `Read`/`Grep`/`Glob` tools. A secret committed in a reviewed file is part of that. Nothing is
+  sent to the plugin author, to open-code-review, or to any other third party.
+- **How the session is restricted:** pre-approved tools are `Read`, `Grep`, `Glob`, `Task` and
+  read-only git (`git diff|ls-files|log|show|rev-parse|status`); `Write`, `Edit`,
+  `NotebookEdit`, `WebFetch` and `WebSearch` are removed; no MCP servers
+  (`--strict-mcp-config`); no user or project settings (`--setting-sources ""`, so the repository
+  under review cannot inject hooks or settings); `CLAUDE.md` files are not loaded. The model is
+  pinned (`OCR_MODEL`, default `sonnet`). The session inherits your environment, minus the
+  desktop-app session-bridge variables (`CLAUDE_CODE_MESSAGING_*` and similar), and has
+  `OCR_IN_REVIEW=1` set. The `Read`/`Grep`/`Glob` allowance is not path-limited, and the diff is
+  untrusted input to a model: this is a mitigation, not a sandbox.
+- **Process control:** on timeout or abort the gate kills the reviewer's process tree
+  (`taskkill /T` on Windows, the process group elsewhere), only for the pid it started.
+
+### Git worktrees it creates
+
+To keep a long review consistent while you keep working, the reviewer reads a **detached
+worktree** of the pushed tip, created with `git worktree add --detach` under the plugin data
+directory (`${CLAUDE_PLUGIN_DATA}/worktrees/<tip>-<run>`). With parallel chunks
+(`OCR_CHUNK_CONCURRENCY`, default 2) there is one more per extra slot (`-s<i>`). They are removed
+when the run ends (`git worktree remove --force`, then `git worktree prune`), and leftovers of
+dead runs are swept on later runs. The gate only ever deletes directories under its own
+`worktrees/` folder. Before each chunk of a chunked review (more than 15 reviewable files, a file that timed
+out earlier, or a very large file reviewed in units) it runs `git clean -fdxq` and
+`git checkout -q -- .` in the directory the reviewer reads, to reset it. That is the review
+worktree. **Known issue:** if a worktree cannot be created, the reviewer reads the live working
+tree instead (the review says so), and in that case these two commands run there too and discard
+uncommitted changes and untracked or ignored files. Keep your work committed or stashed while a
+chunked review is running if `git worktree` is unavailable in your environment.
+
+### Optional global git pre-push hook (`scripts/install-git-hook.sh`)
+
+Not installed by default; run only if you want terminal and IDE pushes gated too. It:
+
+- writes `~/.config/review-gate/hooks/pre-push` (override the directory with `SCR_HOOKS_DIR`);
+- runs `git config --global core.hooksPath <that directory>`, which applies to **all** your
+  repositories. A previous global `core.hooksPath` is saved in the git config key
+  `reviewGate.prevHooksPath`;
+- removes a stale `pre-commit` hook from that directory if it recognises it as this plugin's.
+
+The installed hook still runs a repository's own `.git/hooks/pre-push` if there is one.
+**Uninstall:** `bash scripts/uninstall-git-hook.sh` restores the previous `core.hooksPath` (or
+unsets it), unsets `reviewGate.prevHooksPath`, and deletes the hook files it wrote.
+`install-git-hook.sh --chain-into <repo>` only prints a snippet; it edits nothing.
+`git push --no-verify` bypasses this hook.
+
+### PowerShell hooks run with `-ExecutionPolicy Bypass`
+
+On Windows the PowerShell form of each hook is started as
+`powershell -NoProfile -ExecutionPolicy Bypass -File ${CLAUDE_PLUGIN_ROOT}/scripts/<name>.ps1`.
+The scripts are unsigned and live in the plugin cache, and a default Windows PowerShell policy
+refuses to run unsigned `.ps1` files, which would leave the gate silently absent. The flag applies
+to that one process and only to the three scripts the plugin ships
+(`gate-hook.ps1`, `post-hook.ps1`, `session-start-check.ps1`); it does not change your machine or
+user execution policy. Those scripts only read the hook payload, look for Git Bash and Python,
+and run `review-gate.py`; they download nothing and change no system settings. The exec form
+(`command` plus `args`) is used so no shell is involved.
+
+### Telemetry and network traffic
+
+- **The plugin makes no network requests of its own.** The scripts have no HTTP or socket code.
+  The only traffic is `claude -p` talking to Anthropic through Claude Code (above), and your own
+  `git push`.
+- **`scripts/ocr_telemetry.py` is local only.** It appends one JSON line per review run to
+  `<git-dir>/review-gate-telemetry/<UTC date>.jsonl` and nothing else; it imports no network
+  module. The records contain file paths, line numbers and finding text from the reviewed code, how
+  files were classified, and timings. It is **on by default**; `OCR_TELEMETRY=0` turns it off.
+  Nothing deletes these files (past 50 MB a day's log continues in a new file); `review-gate.py
+  --telemetry-report` summarises them. Separately, a plugin-data log
+  (`review-gate-debug.log`, rotated at 1 MiB, three old files kept) always records counts, bytes
+  and timings with no paths or code.
+
+### Files it writes
+
+| Where | What |
+|---|---|
+| `<git-dir>/review-gate-findings.jsonl`, `review-gate-last-output.json`, `review-gate-history/` | findings, verdicts and the reviewer's raw output (see [Where findings go](#where-findings-go)) |
+| `<git-dir>/review-gate-ledger/` | per-file review records for incremental re-review (30 days; `OCR_LEDGER=0` disables) |
+| `<git-dir>/review-gate-async/` | state, logs and the prepared per-file diffs of a running review; removed when it ends or after an hour |
+| `<git-dir>/review-gate-telemetry/` | the local run log above |
+| `<git-dir>/scr-*` | small markers so a result is reported once |
+| `${CLAUDE_PLUGIN_DATA}` (default `~/.claude/plugins/data/review-gate-local/`) | `gate-dir` (where the scripts live, read by the optional git hook), `pending-*` notes, `worktrees/`, `review-gate-debug.log` |
+| `~/.config/review-gate/hooks/`, global git config | only if you run `install-git-hook.sh` |
+
+The gate reads `.ocr/config.json`, `.ocr/rule.json` and `~/.ocr/rule.json` if present. It does not
+create commits or rewrite refs, and (apart from the known issue above) does not touch your working
+tree. All of it stays on your machine.
+
+Two more things worth knowing: `bin/review-gate.py` is a small compatibility shim for pre-0.3.0
+git-hook installs, and a plugin's `bin/` is added to the Bash tool's `PATH`, so it is available as
+a bare command while the plugin is enabled. `scripts/sync-local-install.py` is a developer tool,
+never run by a hook; it copies the working tree into `~/.claude/plugins/cache/` and updates
+`installed_plugins.json` for a local directory install.
+
+Credit: the review methodology, prompts and rubric are adapted from
+[open-code-review](https://github.com/alibaba/open-code-review) (Apache-2.0); the `ocr` binary is
+never run and no token is passed to it. See [NOTICE](NOTICE).
+
 ## Safety & limitations
 
 - **Fails closed** by design — a timeout, crash, unparseable review, missing Python 3, or an unlocatable reviewer **blocks** the push. Bypass with `OCR_FAIL_OPEN=1`, or downgrade permanently with `OCR_ADVISORY=1`.

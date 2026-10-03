@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-label="Review Gate">
+  <title>Review Gate</title>
+  <rect width="128" height="128" rx="24" fill="#1f2937"/>
+  <path d="M64 16 L100 30 V62 C100 84 85 100 64 112 C43 100 28 84 28 62 V30 Z" fill="#7c3aed"/>
+  <path d="M48 64 L60 76 L82 50" fill="none" stroke="#ffffff" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

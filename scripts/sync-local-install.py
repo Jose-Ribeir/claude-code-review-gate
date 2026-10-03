@@ -43,6 +43,7 @@ PLUGIN_KEY = f"{PLUGIN}@{MARKETPLACE}"
 PAYLOAD = [
     ".claude-plugin",
     "agents",
+    "assets",
     "commands",
     # bin/ holds one compatibility shim, kept so pre-0.3.0 git-hook installs
     # (which baked an absolute path to it) keep resolving. Removal target:
@@ -58,7 +59,9 @@ PAYLOAD = [
     "CHANGELOG.md",
     "LICENSE",
     "NOTICE",
+    "PRIVACY.md",
     "README.md",
+    "SUPPORT.md",
 ]
 
 # Never copy generated/local junk even when it sits inside a payload directory.
