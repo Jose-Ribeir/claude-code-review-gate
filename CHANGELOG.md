@@ -6,6 +6,20 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-10-03
+
+A fix for the known issue recorded in 0.12.1. The review prompt and defaults are unchanged:
+the review cache stays valid.
+
+### Fixed
+- **Data loss in the live working tree.** When no detached worktree could be created (the review
+  then reads the live tree), a chunked review (more than 15 reviewable files, a file that timed
+  out earlier, or a big file reviewed in units) still ran `git clean -fdxq` and
+  `git checkout -q -- .` before each chunk in that tree, discarding uncommitted changes and
+  untracked or ignored files. The reset now runs only in a worktree the gate made (under its own
+  `worktrees/` dir and a linked worktree, checked by `_is_gate_worktree`); anywhere else it is
+  skipped and logged as `slot_reset_skipped`. Parallel slots were already never the live tree.
+
 ## [0.12.1] - 2026-10-03
 
 Documentation and directory-listing metadata only. No review code, prompt or default
@@ -16,9 +30,9 @@ changed: the review cache stays valid.
   headless `claude` reviewer and what it is sent, the git worktrees, the optional global
   `core.hooksPath` hook and how to undo it, why the PowerShell hooks use
   `-ExecutionPolicy Bypass`, what `ocr_telemetry.py` writes (a local file under `.git`, no
-  network), and every file the plugin writes. It also records a known issue: when no worktree
-  can be created, a chunked review runs `git clean -fdxq` and `git checkout -- .` in the live
-  working tree.
+  network), and every file the plugin writes. It also recorded a known issue (fixed in 0.12.2): when no
+  worktree could be created, a chunked review ran `git clean -fdxq` and `git checkout -- .` in
+  the live working tree.
 - `PRIVACY.md` and `SUPPORT.md`; `assets/icon.svg`.
 - `plugin.json`: `icon`, `documentationUrl`, `supportUrl`, `privacyPolicyUrl`.
 

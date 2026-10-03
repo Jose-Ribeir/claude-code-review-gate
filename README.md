@@ -410,10 +410,11 @@ dead runs are swept on later runs. The gate only ever deletes directories under 
 `worktrees/` folder. Before each chunk of a chunked review (more than 15 reviewable files, a file that timed
 out earlier, or a very large file reviewed in units) it runs `git clean -fdxq` and
 `git checkout -q -- .` in the directory the reviewer reads, to reset it. That is the review
-worktree. **Known issue:** if a worktree cannot be created, the reviewer reads the live working
-tree instead (the review says so), and in that case these two commands run there too and discard
-uncommitted changes and untracked or ignored files. Keep your work committed or stashed while a
-chunked review is running if `git worktree` is unavailable in your environment.
+worktree, and the reset runs only in a worktree the gate made (a linked worktree under its own
+`worktrees/` folder). If a worktree cannot be created, the reviewer reads the live working tree
+instead (the review says so), and the reset is skipped there: your uncommitted changes and
+untracked or ignored files are left alone. (Before 0.12.2 these two commands did run in the
+live tree in that case; fixed in 0.12.2.)
 
 ### Optional global git pre-push hook (`scripts/install-git-hook.sh`)
 
@@ -470,7 +471,7 @@ and run `review-gate.py`; they download nothing and change no system settings. T
 | `~/.config/review-gate/hooks/`, global git config | only if you run `install-git-hook.sh` |
 
 The gate reads `.ocr/config.json`, `.ocr/rule.json` and `~/.ocr/rule.json` if present. It does not
-create commits or rewrite refs, and (apart from the known issue above) does not touch your working
+create commits or rewrite refs, and does not touch your working
 tree. All of it stays on your machine.
 
 Two more things worth knowing: `bin/review-gate.py` is a small compatibility shim for pre-0.3.0
