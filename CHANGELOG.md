@@ -6,6 +6,36 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.12.4] - 2026-10-03
+
+A security fix found by the Claude plugin directory's validation. The review prompt, verdicts and
+defaults are unchanged, so the review cache stays valid.
+
+### Security
+- **The PreToolUse hook no longer auto-approves Bash commands.** `gate-hook.sh`, `gate-hook.ps1`
+  and `review-gate.py --mode hook` answered `permissionDecision: "allow"` for every command that
+  was not a push (the hook fires on every Bash call), for a push that passed review, and under
+  `OCR_FAIL_OPEN`. A hook's allow is not "no objection": it approves the tool call and skips the
+  user's own permission prompt, so installing the plugin silently turned off permission prompts
+  for Bash. Every non-blocking path is now a pass-through: exit 0 with no `permissionDecision`
+  (empty stdout), so Claude Code's normal permission flow applies. **Deny is unchanged** and the
+  gate still fails closed; `OCR_FAIL_OPEN=1` still lets a push the gate cannot review go, it just
+  no longer approves it. Non-blocking findings that used to ride on the allow's
+  `permissionDecisionReason` are now a plain `systemMessage` (shown to you, grants nothing);
+  the model still gets them from the PostToolUse hook.
+- `gate-hook.ps1` used to read "the gate printed nothing" as "it crashed" and deny; it now treats
+  empty output with a zero exit as the pass-through and denies only on a non-zero exit.
+- Inside the headless review, the in-review guard also passes through instead of allowing, so the
+  reviewer's `--allowedTools` list is enforced rather than overridden by the hook.
+- `commands/doctor.md` no longer asks for blanket `Bash`: `allowed-tools` is narrowed to the
+  read-only probes the command runs (`--version` checks, `command -v`, `git config --get`,
+  `git rev-parse`, `ls`, `du`, `printenv OCR_*`, the telemetry report), plus `Read` and `Glob`.
+  The Python probe is now `python3 --version` rather than `python3 -c ...`.
+
+### Changed
+- Tests read hook output through `tests/hook_output.py`, which fails if a hook ever emits an allow;
+  `tests/test_hook_passthrough.py` pins the pass-through on each adapter and path.
+
 ## [0.12.3] - 2026-10-03
 
 Fewer git subprocesses per review; the gate's verdicts, prompt and defaults are unchanged, so the
