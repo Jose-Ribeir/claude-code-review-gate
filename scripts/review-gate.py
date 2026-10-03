@@ -3479,6 +3479,21 @@ def _make_worktree(repo_root, tip, run_id):
     return ""
 
 
+def _is_gate_worktree(path):
+    """True only for a directory this gate made with _make_worktree: under its own
+    worktrees/ dir and a linked worktree (a `.git` FILE, never the `.git` directory
+    of a real checkout). Anything doubtful is False -- callers use this to decide
+    whether a destructive reset (git clean / checkout) may run there."""
+    try:
+        base = os.path.normcase(os.path.realpath(str(_gate_data_dir() / "worktrees")))
+        real = os.path.realpath(str(path))
+        if not os.path.normcase(real).startswith(base + os.sep):
+            return False
+        return os.path.isfile(os.path.join(real, ".git"))
+    except Exception:
+        return False
+
+
 def _remove_worktree(repo_root, path):
     """Tear down a worktree _make_worktree created. Refuses anything else:
     the only directory this gate ever deletes is one under its own
@@ -6824,9 +6839,14 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
         chunk_t0 = time.monotonic()
         chunk_outcome = "error"
         try:
-            # Clean worktree so one chunk can't leave state for the next.
-            _git(["clean", "-fdxq"], cwd=slot_root)
-            _git(["checkout", "-q", "--", "."], cwd=slot_root)
+            # Clean worktree so one chunk can't leave state for the next. Only a
+            # worktree the gate made: with no worktree the slot is the user's live
+            # tree, and these commands would discard their uncommitted work.
+            if _is_gate_worktree(slot_root):
+                _git(["clean", "-fdxq"], cwd=slot_root)
+                _git(["checkout", "-q", "--", "."], cwd=slot_root)
+            else:
+                _metric_log("slot_reset_skipped")
             # Run the review (retry once on non-timeout errors).
             for attempt in range(2):
                 if fenced["hit"]:

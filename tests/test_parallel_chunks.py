@@ -291,6 +291,51 @@ def test_no_slot_worktree_beside_the_live_tree(tmp_path, monkeypatch):
     assert review_gate._make_slot_worktrees(str(tmp_path), "a" * 40, "r", 3) == []
 
 
+
+def test_chunked_review_without_a_worktree_never_wipes_the_live_tree(tmp_path):
+    """No detached worktree can be made (the gate's worktrees/ path is a file), so the
+    reviewer reads the live tree. The per-chunk reset (git clean -fdxq, git checkout --)
+    must not run there: uncommitted edits and untracked or ignored files survive."""
+    work = ag._big_repo(tmp_path, n_files=4)
+    tip = ag._git(["rev-parse", "HEAD"], cwd=work)
+    (tmp_path / "gate-data").mkdir(exist_ok=True)
+    (tmp_path / "gate-data" / "worktrees").write_text("not a directory")
+    (work / "base.py").write_text("# base\n# uncommitted edit\n")
+    (work / "scratch.txt").write_text("untracked\n")
+    (work / "secret.env").write_text("ignored\n")
+    with open(work / ".git" / "info" / "exclude", "a", encoding="utf-8") as fh:
+        fh.write("secret.env\n")
+    (work / "notes").mkdir()
+    (work / "notes" / "todo.md").write_text("untracked dir\n")
+    _push(work, _env(tmp_path, STUB_SLEEP=1))
+    st = ag._wait_state(work, tip, {"done"}, timeout=90)
+    assert st["verdict"] == "pass", st
+    calls = _reviews(tmp_path)
+    assert len(calls) == 4   # chunked: the reset path was reached
+    assert {os.path.realpath(c["cwd"]) for c in calls} == {os.path.realpath(str(work))}
+    assert (work / "base.py").read_text() == "# base\n# uncommitted edit\n"
+    assert (work / "scratch.txt").read_text() == "untracked\n"
+    assert (work / "secret.env").read_text() == "ignored\n"
+    assert (work / "notes" / "todo.md").read_text() == "untracked dir\n"
+
+
+def test_only_a_gate_made_worktree_is_reset(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(tmp_path / "data"))
+    live = tmp_path / "live"
+    (live / ".git").mkdir(parents=True)
+    assert not review_gate._is_gate_worktree(str(live))
+    assert not review_gate._is_gate_worktree(str(tmp_path / "missing"))
+    wts = tmp_path / "data" / "worktrees"
+    fake = wts / "t-r"          # under worktrees/ but a real checkout (.git directory)
+    (fake / ".git").mkdir(parents=True)
+    assert not review_gate._is_gate_worktree(str(fake))
+    linked = wts / "t-r-s1"     # a linked worktree has a .git file
+    linked.mkdir()
+    (linked / ".git").write_text("gitdir: elsewhere\n")
+    assert review_gate._is_gate_worktree(str(linked))
+    assert not review_gate._is_gate_worktree(str(wts))
+
+
 def test_kill_active_children_kills_every_registered_reviewer():
     procs = [subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
