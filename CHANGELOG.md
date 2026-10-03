@@ -6,6 +6,23 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.12.3] - 2026-10-03
+
+Fewer git subprocesses per review; the gate's verdicts, prompt and defaults are unchanged, so the
+review cache stays valid.
+
+### Changed
+- **Blob lookups are batched.** Two N+1 patterns the gate's own review flagged on the 0.12.1 push
+  now use one `git ls-tree` for the whole set of paths: `_seg_classify_foreign` (one lookup per
+  foreign finding) and `_SegState.finalize_ready` (one per finished file). The same pattern in
+  `_classify_priors` (one per prior finding) and in the resolver-evidence check is batched too, and
+  `_find_valid_resolution` takes an optional memo so a path is looked up once per pass.
+
+### Fixed
+- A test (`test_a_chunked_run_logs_phases_chunks_and_calls_without_paths_or_code`) assumed the
+  parallel chunks' telemetry records arrive in index order; they arrive as each chunk finishes.
+  It now checks the records by chunk index.
+
 ## [0.12.2] - 2026-10-03
 
 A fix for the known issue recorded in 0.12.1. The review prompt and defaults are unchanged:

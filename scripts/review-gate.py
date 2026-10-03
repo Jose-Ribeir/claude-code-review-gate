@@ -3216,14 +3216,16 @@ def _supervise_run(state_path, run_id):
             # after the reviewer dedup check (scenario: reviewer overrides resolver).
             provisional_resolved = []  # (p, res, ev_path, ev_blob)
             still_present = []
+            ev_oids = _blob_oids_at(review_root, tip, sorted({
+                r.get("evidence_path") for r in map(resolver_results.get, [p["id"] for p in to_resolve])
+                if isinstance(r, dict) and r.get("evidence_path")}))
             for p in to_resolve:
                 fid = p["id"]
                 res = resolver_results.get(fid)
                 if not isinstance(res, dict):
                     res = _no_evidence()
                 ev_path = res.get("evidence_path") or ""
-                ev_blob = (_blob_oids_at(review_root, tip, [ev_path]).get(ev_path, "")
-                           if ev_path else "")
+                ev_blob = ev_oids.get(ev_path, "") if ev_path else ""
                 verdict_p = judged.get(fid, "unverified")
                 if verdict_p == "resolved":
                     provisional_resolved.append((p, res, ev_path, ev_blob))
@@ -4036,8 +4038,11 @@ def _read_resolution(common_dir, fp, res_id, target_oid, evidence_path, evidence
     return data
 
 
-def _find_valid_resolution(common_dir, fp, fid, target_oid, review_root, tip):
+def _find_valid_resolution(common_dir, fp, fid, target_oid, review_root, tip, blobs=None):
     """Return the first valid resolution for finding `fid`, or None.
+
+    `blobs` is an optional {path: oid at tip} memo shared across calls, so an
+    evidence path is looked up once per run, not once per finding.
 
     A resolution is valid when target_oid matches AND the evidence_path blob
     at the current tip equals the recorded evidence_blob_oid (fix not reverted).
@@ -4059,7 +4064,12 @@ def _find_valid_resolution(common_dir, fp, fid, target_oid, review_root, tip):
         ev_blob = data.get("evidence_blob_oid") or ""
         if not ev_path or not ev_blob:
             continue
-        current = _blob_oids_at(review_root, tip, [ev_path]).get(ev_path, "")
+        if blobs is not None and ev_path in blobs:
+            current = blobs[ev_path]
+        else:
+            current = _blob_oids_at(review_root, tip, [ev_path]).get(ev_path, "")
+            if blobs is not None:
+                blobs[ev_path] = current
         if current != ev_blob:
             continue
         return data
@@ -4177,6 +4187,11 @@ def _classify_priors(plan_items, tip, review_root, common_dir, fp, run_id):
     has_active = any(item["mode"] in ("delta", "full") for item in plan_items)
     to_resolve, auto_resolved, carried_findings = [], [], []
     seen = set()
+    # One ls-tree for every path the priors name, not one per prior.
+    blobs = _blob_oids_at(review_root, tip, sorted({
+        f.get("path") or item["entry"]["path"]
+        for item in plan_items if item.get("record") is not None
+        for f in item["record"].get("findings") or []}))
 
     for item in plan_items:
         record = item.get("record")
@@ -4191,13 +4206,13 @@ def _classify_priors(plan_items, tip, review_root, common_dir, fp, run_id):
             seen.add(fid)
             fpath = f.get("path") or item["entry"]["path"]
             sev = (f.get("severity") or "").lower()
-            blob = _blob_oids_at(review_root, tip, [fpath]).get(fpath, "")
+            blob = blobs.get(fpath, "")
             if not blob:
                 auto_resolved.append(f)
                 continue
             target_oid = f.get("target_oid") or record.get("head_oid") or ""
             if _find_valid_resolution(common_dir, fp, fid, target_oid,
-                                      review_root, tip) is not None:
+                                      review_root, tip, blobs) is not None:
                 continue  # suppressed by existing resolution
             # Identical blob: the record was written at the file's current content and
             # the finding is about exactly that content, so nothing in the file can
@@ -6630,10 +6645,19 @@ class _SegState:
     # --- finishing a file -----------------------------------------------------------
 
     def finalize_ready(self):
-        for sf in list(self.files.values()):
-            self.finalize(sf)
+        files = list(self.files.values())
+        # One ls-tree for every file that will write a record, not one per file.
+        paths = sorted({sf.path for sf in files if self._owes_blob_lookup(sf)})
+        oids = _blob_oids_at(self.review_root, self.tip, paths) if paths else None
+        for sf in files:
+            self.finalize(sf, oids)
 
-    def finalize(self, sf):
+    def _owes_blob_lookup(self, sf):
+        """True when finalize(sf) will go on to stamp a plain (non-delta) record."""
+        return (not sf.written and self.write and sf.ready() and not sf.delta
+                and all(d["status"] == "final" for d in sf.deps))
+
+    def finalize(self, sf, oids=None):
         """Write the file's own per-file record once nothing is owed on it: every unit
         reviewed (or cached) and every caller check final. That record is what makes
         the next push of this same file state a plain carry."""
@@ -6656,7 +6680,8 @@ class _SegState:
         for d in sf.deps:
             own += d["findings"]
         own += sf.extra
-        oids = _blob_oids_at(self.review_root, self.tip, [sf.path])
+        if oids is None or sf.path not in oids:
+            oids = _blob_oids_at(self.review_root, self.tip, [sf.path])
         stamped_own = [dict(f, target_oid=f.get("target_oid") or oids.get(sf.path, "")) for f in own]
         orphans = sf.orphans + self.replayed_foreign
         key = _record_key(sf.path, sf.old_path, e["status"], e["old_oid"])
@@ -6680,15 +6705,17 @@ def _seg_classify_foreign(findings, review_root, tip, common_dir, fp, seen):
     when it did not, dropped when the file is gone or a resolution already covers
     them. `seen` (finding ids) is extended."""
     to_resolve, carried = [], []
+    blobs = _blob_oids_at(review_root, tip, sorted({f.get("path") for f in findings if f.get("path")}))
     for f in findings:
         fid = f.get("id") or _finding_id(f)
         if fid in seen:
             continue
         seen.add(fid)
         fpath = f.get("path") or ""
-        blob = _blob_oids_at(review_root, tip, [fpath]).get(fpath, "") if fpath else ""
+        blob = blobs.get(fpath, "") if fpath else ""
         target = f.get("target_oid") or ""
-        if not blob or _find_valid_resolution(common_dir, fp, fid, target, review_root, tip) is not None:
+        if not blob or _find_valid_resolution(common_dir, fp, fid, target, review_root, tip,
+                                              blobs) is not None:
             continue
         if target and blob != target:
             to_resolve.append({"id": fid, "finding": f, "target_oid": target,
