@@ -6,6 +6,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.12.5] - 2026-10-03
+
+Follow-up to 0.12.4 from the Claude plugin directory's validation. No change to review behaviour.
+
+### Changed
+- **`gate-hook.ps1` can only print a deny.** `Write-Decision` took the decision as a parameter
+  (and silently dropped "allow"); it is now `Write-Deny`, which hardcodes `"deny"`, so a static
+  reader can see the hook never grants permission.
+- **`/review-gate:doctor` version probes are exact matches.** `Bash(python3 --version:*)` and the
+  other `--version` rules were prefix rules that matched any command starting with that program;
+  they are now exact `Bash(<program> --version)`.
+
 ## [0.12.4] - 2026-10-03
 
 A security fix found by the Claude plugin directory's validation. The review prompt, verdicts and

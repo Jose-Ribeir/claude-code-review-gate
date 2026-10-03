@@ -1,7 +1,7 @@
 ---
 name: doctor
 description: Check that the review-gate push gate is actually wired up and able to run. Reports which adapters are active, whether the reviewer can be located, and any version skew between the plugin and the global git hook. Use when a push was not reviewed, when a gate error told you to run the doctor, or after installing or upgrading the plugin.
-allowed-tools: Read, Glob, Bash(claude --version:*), Bash(git --version:*), Bash(bash --version:*), Bash(python3 --version:*), Bash(python --version:*), Bash(py --version:*), Bash(command -v:*), Bash(git config --global --get:*), Bash(git config --local --get:*), Bash(git rev-parse:*), Bash(ls:*), Bash(du:*), Bash(printenv OCR_:*), Bash(python3 ${CLAUDE_PLUGIN_ROOT}/scripts/review-gate.py --telemetry-report:*)
+allowed-tools: Read, Glob, Bash(claude --version), Bash(git --version), Bash(bash --version), Bash(python3 --version), Bash(python --version), Bash(py --version), Bash(command -v:*), Bash(git config --global --get:*), Bash(git config --local --get:*), Bash(git rev-parse:*), Bash(ls:*), Bash(du:*), Bash(printenv OCR_:*), Bash(python3 ${CLAUDE_PLUGIN_ROOT}/scripts/review-gate.py --telemetry-report:*)
 ---
 
 # review-gate — doctor

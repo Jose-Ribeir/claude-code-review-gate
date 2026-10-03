@@ -12,17 +12,17 @@
 
 $ErrorActionPreference = 'Stop'
 
-# Emits a BLOCKING decision. There is deliberately no way to emit "allow": a
-# PreToolUse hook that says allow auto-approves the tool call and skips the
-# user's own permission prompt, so letting a call through means printing
-# nothing and exiting 0 (a pass-through). Every non-blocking path below does so.
-function Write-Decision {
-    param([string]$Decision, [string]$Reason = '')
-    if ($Decision -eq 'allow') { return }
+# Emits a BLOCKING (deny) decision -- the only decision this hook ever prints.
+# There is deliberately no way to emit "allow": a PreToolUse hook that says
+# allow auto-approves the tool call and skips the user's own permission prompt,
+# so letting a call through means printing nothing and exiting 0 (a
+# pass-through). Every non-blocking path below does so.
+function Write-Deny {
+    param([string]$Reason = '')
     $payload = @{
         hookSpecificOutput = @{
             hookEventName        = 'PreToolUse'
-            permissionDecision   = $Decision
+            permissionDecision   = 'deny'
         }
     }
     if ($Reason) { $payload.hookSpecificOutput.permissionDecisionReason = $Reason }
@@ -131,7 +131,7 @@ if (-not $py -or -not (Test-Path $core)) {
     } else {
         "review-gate.py missing at $core (broken install)"
     }
-    Write-Decision 'deny' (@(
+    Write-Deny (@(
         "review-gate: $why, so the push could not be reviewed. Blocking, because a gate that cannot run must not wave a push through.",
         '',
         'Fix it:',
@@ -183,5 +183,5 @@ if ($proc.ExitCode -eq 0) { exit 0 }
 # fail-closed wrapper did not catch. Block rather than let the silence read as
 # approval.
 if (Test-Truthy "$($env:OCR_FAIL_OPEN)") { exit 0 }
-Write-Decision 'deny' "review-gate: the reviewer exited $($proc.ExitCode) without returning a verdict, so the push was not reviewed. Set OCR_FAIL_OPEN=1 in the environment Claude Code was launched from to bypass."
+Write-Deny "review-gate: the reviewer exited $($proc.ExitCode) without returning a verdict, so the push was not reviewed. Set OCR_FAIL_OPEN=1 in the environment Claude Code was launched from to bypass."
 exit 0
