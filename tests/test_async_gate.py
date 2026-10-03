@@ -1238,3 +1238,115 @@ def test_a_split_chunk_is_halved_down_to_one_file(monkeypatch):
     assert sizes({"f3.py": {"chunk_size": 4}}) == [2, 2, 2, 2]
     assert sizes({"f3.py": {"chunk_size": 2}}) == [1] * 8
     assert sizes({"f3.py": {"chunk_size": 1}}) == [1] * 8
+
+
+# ---------------------------------------------------------------------------
+# 0.12.3: blob lookups are batched -- one ls-tree per pass, not one per path.
+# Behaviour is unchanged; only the number of git subprocesses is.
+# ---------------------------------------------------------------------------
+
+def _count_ls_tree(monkeypatch):
+    calls = []
+    real = review_gate._git
+
+    def spy(args, cwd=None):
+        if args and args[0] == "ls-tree":
+            calls.append(list(args))
+        return real(args, cwd=cwd)
+
+    monkeypatch.setattr(review_gate, "_git", spy)
+    return calls
+
+
+def _commit_files(work, names):
+    for n in names:
+        (work / n).write_text(n + "\n")
+    _git(["add", "."], cwd=work)
+    _git(["commit", "-q", "-m", "files"], cwd=work)
+    return _git(["rev-parse", "HEAD"], cwd=work)
+
+
+def test_seg_classify_foreign_resolves_blobs_in_one_lookup(repo, monkeypatch, tmp_path):
+    tip = _commit_files(repo, ["f0.py", "f1.py", "f2.py"])
+    blob = {n: _git(["rev-parse", f"{tip}:{n}"], cwd=repo) for n in ("f0.py", "f1.py", "f2.py")}
+
+    def mk(path, target, text):
+        return {"path": path, "severity": "high", "start_line": 1, "end_line": 1,
+                "content": text, "target_oid": target}
+
+    findings = [
+        mk("f0.py", blob["f0.py"], "same blob"),        # unchanged since: replayed
+        mk("f1.py", "0" * 40, "older blob"),            # changed since: re-judged
+        mk("f1.py", blob["f1.py"], "second on f1"),
+        mk("gone.py", "1" * 40, "file is gone"),        # missing at tip: dropped
+        mk("f2.py", blob["f2.py"], "same blob again"),
+        mk("", blob["f0.py"], "no path"),               # no path: dropped
+    ]
+    calls = _count_ls_tree(monkeypatch)
+    to_resolve, carried = review_gate._seg_classify_foreign(
+        findings, str(repo), tip, str(tmp_path / "common"), "fp" * 8, set())
+    assert len(calls) == 1, calls
+    assert [f["content"] for f in carried] == ["same blob", "second on f1", "same blob again"]
+    assert [p["finding"]["content"] for p in to_resolve] == ["older blob"]
+    assert to_resolve[0]["target_oid"] == "0" * 40
+
+
+def test_classify_priors_resolves_blobs_in_one_lookup(repo, monkeypatch, tmp_path):
+    tip = _commit_files(repo, ["p0.py", "p1.py", "p2.py"])
+    blob = {n: _git(["rev-parse", f"{tip}:{n}"], cwd=repo) for n in ("p0.py", "p1.py", "p2.py")}
+
+    def mk(path, text):
+        return {"path": path, "severity": "low", "start_line": 1, "end_line": 1,
+                "content": text, "target_oid": blob.get(path, "2" * 40)}
+
+    items = []
+    for n in ("p0.py", "p1.py", "p2.py", "gone.py"):
+        e = {"path": n, "old_path": "", "status": "M", "old_oid": "a" * 40,
+             "new_oid": blob.get(n, "2" * 40), "lines": 1}
+        items.append({"entry": e, "mode": "carry", "from_oid": e["new_oid"], "miss_reason": "none",
+                      "record": {"head_oid": e["new_oid"], "findings": [mk(n, "prior " + n)]}})
+    calls = _count_ls_tree(monkeypatch)
+    to_resolve, auto_resolved, carried = review_gate._classify_priors(
+        items, tip, str(repo), str(tmp_path / "common"), "fp" * 8, "run")
+    assert len(calls) == 1, calls
+    assert [f["content"] for f in auto_resolved] == ["prior gone.py"]
+    assert sorted(f["content"] for f in carried) == ["prior p0.py", "prior p1.py", "prior p2.py"]
+    assert to_resolve == []
+
+
+def test_find_valid_resolution_memoises_evidence_blob_lookups(repo, monkeypatch, tmp_path):
+    tip = _commit_files(repo, ["ev.py"])
+    ev_blob = _git(["rev-parse", f"{tip}:ev.py"], cwd=repo)
+    common, fp = str(tmp_path / "common"), "fp" * 8
+    fids = [f"{i:016x}" for i in range(3)]
+    for fid in fids:
+        review_gate._write_resolution(common, fp, fid, "t" * 40, "ev.py", ev_blob, "q", "run")
+    calls = _count_ls_tree(monkeypatch)
+    memo = {}
+    for fid in fids:
+        assert review_gate._find_valid_resolution(
+            common, fp, fid, "t" * 40, str(repo), tip, memo) is not None
+    assert len(calls) == 1, calls
+    assert memo == {"ev.py": ev_blob}
+
+
+def test_finalize_ready_looks_up_every_ready_file_in_one_call(repo, monkeypatch):
+    from types import SimpleNamespace as NS
+    tip = _commit_files(repo, ["s0.py", "s1.py", "s2.py"])
+
+    def mk(path, written=False, delta=False, ready=True):
+        return NS(path=path, written=written, delta=delta, deps=[], ready=lambda: ready)
+
+    files = {n: mk(n) for n in ("s0.py", "s1.py")}
+    files["done.py"] = mk("done.py", written=True)
+    files["wait.py"] = mk("wait.py", ready=False)
+    files["delta.py"] = mk("delta.py", delta=True)
+    state = review_gate._SegState.__new__(review_gate._SegState)
+    state.files, state.write, state.review_root, state.tip = files, True, str(repo), tip
+    seen = []
+    state.finalize = lambda sf, oids=None: seen.append((sf.path, oids))
+    calls = _count_ls_tree(monkeypatch)
+    state.finalize_ready()
+    assert len(calls) == 1 and calls[0][-2:] == ["s0.py", "s1.py"], calls
+    assert [p for p, _ in seen] == list(files)
+    assert all(o is not None and set(o) == {"s0.py", "s1.py"} for _, o in seen)

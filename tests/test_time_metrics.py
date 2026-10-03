@@ -259,7 +259,10 @@ def test_a_chunked_run_logs_phases_chunks_and_calls_without_paths_or_code(tmp_pa
     phases = [p["name"] for p in rec["phases"]]
     assert phases == ["worktree", "plan", "priors", "impact", "diffs", "review", "finish"], phases
     assert all(p["seconds"] >= 0 for p in rec["phases"])
-    chunks = rec["chunks"]
+    # Chunks run in parallel and are logged as each one finishes, so the records
+    # arrive in completion order, not index order: the contract is one record per
+    # chunk, each carrying its own index.
+    chunks = sorted(rec["chunks"], key=lambda c: c["index"])
     assert [(c["index"], c["of"], c["files"], c["outcome"]) for c in chunks] == [
         (i, 4, 1, "ok") for i in range(4)]
     assert all(c["lines"] == 1 and c["seconds"] > 0.2 for c in chunks)
