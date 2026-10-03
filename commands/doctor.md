@@ -1,7 +1,7 @@
 ---
 name: doctor
 description: Check that the review-gate push gate is actually wired up and able to run. Reports which adapters are active, whether the reviewer can be located, and any version skew between the plugin and the global git hook. Use when a push was not reviewed, when a gate error told you to run the doctor, or after installing or upgrading the plugin.
-allowed-tools: Bash, Read
+allowed-tools: Read, Glob, Bash(claude --version:*), Bash(git --version:*), Bash(bash --version:*), Bash(python3 --version:*), Bash(python --version:*), Bash(py --version:*), Bash(command -v:*), Bash(git config --global --get:*), Bash(git config --local --get:*), Bash(git rev-parse:*), Bash(ls:*), Bash(du:*), Bash(printenv OCR_:*), Bash(python3 ${CLAUDE_PLUGIN_ROOT}/scripts/review-gate.py --telemetry-report:*)
 ---
 
 # review-gate — doctor
@@ -19,18 +19,22 @@ checkable on demand. That is this command.
 ## What to check
 
 Run these and collect the results. Prefer one `Bash` call per group; keep going
-if a command fails — a failure *is* a result.
+if a command fails — a failure *is* a result. This command is only granted the
+read-only probes it names (`--version` checks, `command -v`, `git config --get`,
+`git rev-parse`, `ls`, `du`, `printenv OCR_*`, and the telemetry report). Read
+files with `Read` and list or count them with `Glob` or `ls` — do not reach for
+anything else.
 
 **1. Prerequisites**
 
 - `claude --version` — the reviewer shells out to this. Missing ⇒ the gate
   **fails open by design** (there is no gate without the tool).
-- A working Python 3: try `python3 -c "import sys; print(sys.version)"`, then
-  `python`, then `py`. Ignore any interpreter whose path contains
+- A working Python 3: try `python3 --version`, then `python --version`, then
+  `py --version`. Ignore any interpreter whose path contains
   `WindowsApps` — those are Store alias stubs that resolve but cannot execute.
   Missing ⇒ the gate now **fails closed** (blocks pushes) as of 0.3.0.
 - `git --version`.
-- On Windows only: is Git Bash present? Check `bash --version`, and note the
+- On Windows only: is Git Bash present? Check `bash --version` (and `command -v bash`), and note the
   path — a `bash.exe` under `System32` is WSL, **not** Git Bash. Also look for
   `bin\bash.exe` or `usr\bin\bash.exe` next to `git.exe`'s install root, since
   Git for Windows' "command line only" option keeps bash off `PATH` while
@@ -103,8 +107,8 @@ if a command fails — a failure *is* a result.
 - Note the configured TTL (`OCR_LEDGER_TTL`, default 30 days) and whether any
   records appear older than it.
 - Report the local run log (0.9.0): whether `.git/review-gate-telemetry/`
-  exists, its size, and the date of the newest line. `python
-  scripts/review-gate.py --telemetry-report` prints the summary; if
+  exists, its size, and the date of the newest line. `python3
+  ${CLAUDE_PLUGIN_ROOT}/scripts/review-gate.py --telemetry-report` prints the summary; if
   `OCR_TELEMETRY=0` is set, say the log is off.
 - If `OCR_LEDGER=0` is set in the environment or in a project settings file,
   report it as **warn**: the incremental review is disabled and every push is
@@ -168,7 +172,8 @@ outside the reviewed worktree. Read-only checks, in the current repository
 
 **5. Environment overrides in effect**
 
-Report any of these that are set, since each changes the verdict: `OCR_MODEL`,
+Read them with `printenv <NAME>` (one call per name or a few at once). Report any of
+these that are set, since each changes the verdict: `OCR_MODEL`,
 `OCR_TIMEOUT`, `OCR_ADVISORY`, `OCR_FAIL_OPEN`, `OCR_BLOCK_SEVERITY`,
 `OCR_BLOCK_CONFIDENCE`, `OCR_CLAUDE_ARGS`, `OCR_CLAUDE_EXTRA_ARGS`,
 `OCR_INLINE_BUDGET`, `OCR_INLINE_BUDGET_GIT`, `OCR_FORCE_REVIEW`,
