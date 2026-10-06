@@ -42,7 +42,8 @@ def commit(work, files, msg="c"):
     for name, content in files.items():
         p = work / name
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content, encoding="utf-8", newline="")
+        with open(p, "w", encoding="utf-8", newline="") as fh:  # write_text(newline=) is 3.10+
+            fh.write(content)
     ag._git(["add", "-A"], cwd=work)
     ag._git(["commit", "-q", "-m", msg], cwd=work)
     return ag._git(["rev-parse", "HEAD"], cwd=work)

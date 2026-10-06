@@ -43,7 +43,8 @@ def _commit_files(work, files, msg="c", binary=()):
         if isinstance(content, bytes):
             p.write_bytes(content)
         else:
-            p.write_text(content, encoding="utf-8", newline="")
+            with open(p, "w", encoding="utf-8", newline="") as fh:  # write_text(newline=) is 3.10+
+                fh.write(content)
     _git(["add", "-A"], cwd=work)
     _git(["commit", "-q", "-m", msg], cwd=work)
     return _git(["rev-parse", "HEAD"], cwd=work)

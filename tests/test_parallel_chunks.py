@@ -195,6 +195,7 @@ def test_progress_fields_stay_consistent(tmp_path):
                             env=_env(tmp_path, STUB_SLEEP=2))
     proc.stdin.write(payload)
     proc.stdin.close()
+    proc.stdin = None  # else POSIX communicate() flushes the closed pipe and raises
     seen = []
     deadline = time.monotonic() + 60
     while time.monotonic() < deadline:
@@ -238,6 +239,7 @@ def test_a_fence_kills_every_child(tmp_path):
                             env=_env(tmp_path, STUB_SLEEP=60))
     proc.stdin.write(payload)
     proc.stdin.close()
+    proc.stdin = None  # else POSIX communicate() flushes the closed pipe and raises
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline and len(_reviews(tmp_path)) < 2:
         time.sleep(0.2)
