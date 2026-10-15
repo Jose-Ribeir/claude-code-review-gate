@@ -576,9 +576,13 @@ _ZERO_SHA = "0" * 40
 _MULTI_REF = "\x00multi-ref"
 
 
-def _read_push_updates_from(lines):
+def _read_push_updates_from(lines, with_ref=False):
     """Parse pre-push ref-update lines into (branches, others), each a list of
     (local sha, remote sha).
+
+    with_ref=True appends the remote ref name (`refs/heads/feat`) to each
+    BRANCH entry as a third element; the ledger scopes delta priors with it.
+    `others` keeps its two-element shape.
 
     `branches` are updates of refs/heads/*; `others` are tags and any other
     non-branch ref. They are kept apart on purpose: a `--follow-tags` push
@@ -601,11 +605,12 @@ def _read_push_updates_from(lines):
         if remote_ref and not remote_ref.startswith("refs/heads/"):
             others.append((local_sha, remote_sha))
         else:
-            branches.append((local_sha, remote_sha))
+            branches.append((local_sha, remote_sha, remote_ref) if with_ref
+                            else (local_sha, remote_sha))
     return branches, others
 
 
-def _read_push_updates():
+def _read_push_updates(with_ref=False):
     """The ref updates git feeds a pre-push hook on stdin: (branches, others).
 
     Format per line: `<local ref> <local sha> <remote ref> <remote sha>`.
@@ -625,12 +630,21 @@ def _read_push_updates():
         raw = sys.stdin.read()
     except Exception:
         return [], []
-    return _read_push_updates_from((raw or "").splitlines())
+    return _read_push_updates_from((raw or "").splitlines(), with_ref)
 
 
 def _read_push_refs():
     """The branch updates of the push, as (local sha, remote sha)."""
     return _read_push_updates()[0]
+
+
+def _norm_push_ref(ref):
+    """A pushed branch as `refs/heads/<name>`, whichever form the caller had
+    (git mode reports the full ref, hook mode a bare branch name). "" stays ""."""
+    ref = (ref or "").strip()
+    if not ref:
+        return ""
+    return ref if ref.startswith("refs/") else "refs/heads/" + ref
 
 
 class ReviewBase(NamedTuple):
@@ -3168,6 +3182,7 @@ def _supervise_run(state_path, run_id):
     branch = st.get("branch") or ""
     push_range = st.get("range") or ""
     base = st.get("base") or ""
+    push_ref = st.get("push_ref") or ""
     git_dir = st.get("git_dir") or _git_dir(repo_root)
     mode = st.get("mode") or "hook"
     common_dir = common_dir_of(state_path)
@@ -3233,7 +3248,7 @@ def _supervise_run(state_path, run_id):
         fp = _compute_fingerprint(review_root, tip)
         _TELE.update(fp=fp, fp_parts=_fingerprint_parts(review_root, tip))
         _prune_ledger(common_dir)
-        plan, planner_warnings = _plan_review(review_root, base, tip, common_dir, fp)
+        plan, planner_warnings = _plan_review(review_root, base, tip, common_dir, fp, push_ref=push_ref)
         _TELE["plan"] = [
             {"path": p["entry"]["path"], "mode": p["mode"],
              "miss_reason": p.get("miss_reason") or "",
@@ -3260,7 +3275,8 @@ def _supervise_run(state_path, run_id):
             seg = None
             if _seg_enabled():
                 seg = _SegState(review_root, base, tip, common_dir, fp,
-                                run_id, _ledger_enabled() and not force_review)
+                                run_id, _ledger_enabled() and not force_review,
+                                push_ref=push_ref)
                 seg.convert_truncated_carries(plan)
             active_items = [p for p in plan if p["mode"] in ("delta", "full")]
             carry_items = [p for p in plan if p["mode"] == "carry"]
@@ -3449,7 +3465,7 @@ def _supervise_run(state_path, run_id):
                     tip, push_range, active_items, planner_warnings, fenced, progress,
                     fp=fp, carry_paths=carry_paths, chunk_extras=_review_extras,
                     timeout_marks=timeout_marks, diffs=diffs, seg=seg, impact=impact,
-                    own_items=plan,
+                    own_items=plan, push_ref=push_ref,
                 )
                 n_delta = sum(1 for p in active_items if p["mode"] == "delta")
                 n_full = len(active_items) - n_delta
@@ -3498,7 +3514,7 @@ def _supervise_run(state_path, run_id):
                     _write_run_records(result, active_items, common_dir, fp, run_id,
                                        review_root, tip,
                                        precomputed=_owned_truncation(diffs),
-                                       own_items=plan)
+                                       own_items=plan, push_ref=push_ref)
                 n_delta = sum(1 for p in active_items if p["mode"] == "delta")
                 n_full = len(active_items) - n_delta
                 plan_summary = (
@@ -4230,11 +4246,18 @@ def _read_ledger_record(record_path, fp, key, head_oid):
 
 
 def _write_ledger_record(common_dir, fp, key, head_oid, path, old_path,
-                         status, base_oid, findings, chain_depth, run_id, truncated=False):
+                         status, base_oid, findings, chain_depth, run_id, truncated=False,
+                         source_tip="", source_ref=""):
     """Write one per-file ledger record. Best-effort: never breaks the gate.
 
     truncated=True marks a review that saw only part of the diff. It is stored
-    only when set, so every other record stays byte-identical to 0.9.4's."""
+    only when set, so every other record stays byte-identical to 0.9.4's.
+    source_tip is the full sha of the tip whose review wrote the record; it lets
+    _find_delta_record refuse priors from a branch the current tip does not
+    contain. source_ref is the ref that push targeted (e.g. refs/heads/feat): a
+    rewrite of the SAME ref (amend + force push) leaves source_tip a non-ancestor
+    yet is still the same line of work, so the ref decides whether a non-ancestor
+    record may be skipped. Both optional: stored only when given."""
     try:
         rpath = _record_path(common_dir, fp, key, head_oid)
         rpath.parent.mkdir(parents=True, exist_ok=True)
@@ -4248,6 +4271,10 @@ def _write_ledger_record(common_dir, fp, key, head_oid, path, old_path,
         }
         if truncated:
             data["truncated"] = True
+        if source_tip:
+            data["source_tip"] = source_tip
+        if source_ref:
+            data["source_ref"] = source_ref
         _write_state(rpath, data)
         try:
             rpath.touch(exist_ok=True)  # refresh mtime for TTL
@@ -4257,12 +4284,41 @@ def _write_ledger_record(common_dir, fp, key, head_oid, path, old_path,
         pass
 
 
-def _find_delta_record(common_dir, fp, key, head_oid):
+def _tip_is_ancestor(root, source_tip, tip, cache):
+    """True when `source_tip` is `tip` or reachable from it. One `git merge-base
+    --is-ancestor` per distinct source_tip (memoised in `cache`). Anything git
+    cannot answer -- an object missing locally, a failed call -- is False: the
+    record is skipped, which over-reviews rather than replays a stranger's priors."""
+    if not isinstance(source_tip, str) or not source_tip:
+        return False  # a corrupt record field: skip it, never crash the plan
+    if source_tip == tip:
+        return True
+    if source_tip in cache:
+        return cache[source_tip]
+    ok = False
+    if isinstance(source_tip, str) and source_tip and not source_tip.startswith("-"):
+        _out, rc = _git(["merge-base", "--is-ancestor", source_tip, tip], cwd=root)
+        ok = rc == 0
+    cache[source_tip] = ok
+    return ok
+
+
+def _find_delta_record(common_dir, fp, key, head_oid, tip="", root=None, ancestry_cache=None,
+                       ref=""):
     """Find the newest valid ledger record for `key` with a *different* head OID.
 
     Used to identify a delta base: the file was reviewed at X, now at head_oid,
     so we review only X→head_oid. Returns (record, from_oid) or (None, '').
     A truncated record is never a base: its review did not cover all of X.
+
+    With `tip` given, a record is skipped only when BOTH hold: its `source_tip`
+    is not an ancestor of `tip` (its findings came from a branch this tip does
+    not contain), and its `source_ref` and the current push's `ref` are both
+    known and differ. A same-ref rewrite (amend/rebase + force push) is the same
+    line of work and stays eligible; so does a record or push of unknown ref, and
+    a record without `source_tip` (written before 0.13). `root` is the
+    repo/worktree to ask git in; `ancestry_cache` is a dict shared across one
+    run's calls so each distinct source_tip costs one subprocess.
     """
     fp_d = _fp_dir(common_dir, fp)
     if not fp_d.is_dir():
@@ -4287,6 +4343,13 @@ def _find_delta_record(common_dir, fp, key, head_oid):
                 continue
         except OSError:
             continue
+        src = data.get("source_tip")
+        src_ref = data.get("source_ref")
+        if tip and src and ref and src_ref and src_ref != ref:
+            if ancestry_cache is None:
+                ancestry_cache = {}
+            if not _tip_is_ancestor(root, src, tip, ancestry_cache):
+                continue
         candidates.append((data.get("reviewed_ts") or 0, data))
     if not candidates:
         return None, ""
@@ -4508,7 +4571,7 @@ def _write_resolution(common_dir, fp, res_id, target_oid, evidence_path,
         pass
 
 
-def _plan_review(root, base, tip, common_dir, fp):
+def _plan_review(root, base, tip, common_dir, fp, push_ref=""):
     """Classify every diff entry as carry, delta, or full.
 
     Returns (plan_items, warnings) where each item is a dict:
@@ -4539,6 +4602,7 @@ def _plan_review(root, base, tip, common_dir, fp):
     use_ledger = _ledger_enabled() and not force
 
     plan = []
+    ancestry_cache = {}
     for e in allowed:
         if not use_ledger:
             plan.append({"entry": e, "mode": "full", "record": None,
@@ -4554,7 +4618,9 @@ def _plan_review(root, base, tip, common_dir, fp):
             plan.append({"entry": e, "mode": "carry", "record": record,
                          "from_oid": head_oid, "miss_reason": "none"})
             continue
-        delta_record, from_oid = _find_delta_record(common_dir, fp, key, head_oid)
+        delta_record, from_oid = _find_delta_record(
+            common_dir, fp, key, head_oid, tip=tip, root=root, ancestry_cache=ancestry_cache,
+            ref=push_ref)
         if delta_record is not None:
             if _is_truncated_record(delta_record):  # _find_delta_record skips these; belt and braces
                 plan.append({"entry": e, "mode": "full", "record": None,
@@ -5928,7 +5994,7 @@ def _orphan_homes(own_items, active_paths):
 
 
 def _write_run_records(result, active_items, common_dir, fp, run_id, review_root="", tip="",
-                       precomputed=None, own_items=None):
+                       precomputed=None, own_items=None, push_ref=""):
     """Write per-file ledger records after a completed review of `active_items`.
 
     None at all unless the review finished cleanly. A file whose diff the
@@ -6005,7 +6071,7 @@ def _write_run_records(result, active_items, common_dir, fp, run_id, review_root
         _write_ledger_record(
             common_dir, fp, key, e["new_oid"], path, old_path, e["status"], e["old_oid"],
             _record_findings_for(item, new_by_path, orphans, active_paths, suppressed),
-            chain_depth, run_id, truncated=flagged,
+            chain_depth, run_id, truncated=flagged, source_tip=tip, source_ref=push_ref,
         )
         _clear_timeout_mark(common_dir, fp, key, e["new_oid"])
     return flagged_paths
@@ -6386,8 +6452,9 @@ class _SegState:
     # Every plan item of the run (set by _run_chunked): where an orphan can go.
     own_items = None
 
-    def __init__(self, review_root, base, tip, common_dir, fp, run_id, use_cache):
+    def __init__(self, review_root, base, tip, common_dir, fp, run_id, use_cache, push_ref=""):
         self.review_root, self.base, self.tip = review_root, base, tip
+        self.push_ref = push_ref
         self.common_dir, self.fp, self.run_id = common_dir, fp, run_id
         self.use_cache = bool(use_cache and common_dir and fp)
         self.write = bool(common_dir and fp and _ledger_enabled())
@@ -7263,7 +7330,8 @@ class _SegState:
                 return False
             _write_run_records(sf.result, [item], self.common_dir, self.fp, self.run_id,
                                self.review_root, self.tip,
-                               precomputed={sf.path: bool((self.diffs.get(sf.path) or {}).get("truncated"))})
+                               precomputed={sf.path: bool((self.diffs.get(sf.path) or {}).get("truncated"))},
+                               push_ref=self.push_ref)
             sf.written = True
             return True
         own = []
@@ -7294,7 +7362,7 @@ class _SegState:
                                  _resolution_suppressor(self.common_dir, self.fp,
                                                         self.review_root, self.tip)),
             0, self.run_id,
-            truncated=False)
+            truncated=False, source_tip=self.tip, source_ref=self.push_ref)
         _clear_timeout_mark(self.common_dir, self.fp, key, e["new_oid"])
         sf.written = True
         return True
@@ -7368,7 +7436,8 @@ def _seg_check_impact_verdicts(result, manifest):
 def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
                  tip, push_range, active_items, planner_warnings, fenced,
                  progress=None, fp="", carry_paths=None, chunk_extras=None,
-                 timeout_marks=None, diffs=None, seg=None, impact=None, own_items=None):
+                 timeout_marks=None, diffs=None, seg=None, impact=None, own_items=None,
+                 push_ref=""):
     """Run per-chunk reviews with fencing, budget and retry.
 
     diffs ({path: _build_item_diff result}, see _build_diffs) switches on the
@@ -7562,7 +7631,8 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
         if fp and _ledger_enabled():
             _write_run_records(result, [it for it in chunk_items if it.get("seg_file") is None],
                                common_dir, fp, run_id, review_root, tip,
-                               precomputed=_owned_truncation(diffs), own_items=own_items)
+                               precomputed=_owned_truncation(diffs), own_items=own_items,
+                               push_ref=push_ref)
         if seg is not None:
             try:
                 seg.apply([it for it in chunk_items if it.get("seg_file") is not None], result)
@@ -8785,9 +8855,10 @@ def _main_inner(argv, mode):
     # WHAT is being pushed. Git mode: the refs git feeds a pre-push hook on
     # stdin are authoritative. Hook mode runs BEFORE git, so the command line
     # is all there is -- and since 0.6.0 it is read rather than ignored.
-    push_range, tip, branch, base = "", "", "", ""
+    push_range, tip, branch, base, push_ref = "", "", "", "", ""
     if mode == "git":
-        refs, other_refs = _read_push_updates()
+        refs3, other_refs = _read_push_updates(with_ref=True)
+        refs = [r[:2] for r in refs3]
         push_range = _range_for_refs(refs, repo_root, _pushed_remote_arg(argv, repo_root),
                                      extra=other_refs)
         if push_range == _MULTI_REF:
@@ -8816,6 +8887,10 @@ def _main_inner(argv, mode):
         else:
             tip = _head_sha(repo_root)
         branch = _branch(repo_root)
+        # The remote ref this tip is being pushed to; the one ref when only one
+        # is in play, "" when it cannot be told apart.
+        _hit = [r[2] for r in refs3 if r[0] == tip] or ([refs3[0][2]] if len(refs3) == 1 else [])
+        push_ref = _norm_push_ref(_hit[0]) if _hit else ""
     else:
         decision, info = _hook_target(repo_root, cmd)
         if decision == "allow":
@@ -8825,6 +8900,7 @@ def _main_inner(argv, mode):
                 allow()
             _fail_closed(mode, str(info.get("why") or "review-gate: refused."))
         tip, branch = info["tip"], info.get("branch") or ""
+        push_ref = _norm_push_ref(info.get("dst"))
         base, push_range = info.get("base") or "", info.get("range") or ""
         if not push_range and not _has_unpushed_commits(repo_root, ""):
             allow()
@@ -8861,6 +8937,7 @@ def _main_inner(argv, mode):
     meta = {
         "tip": tip, "branch": branch, "base": base, "range": push_range,
         "repo_root": repo_root, "git_dir": git_dir, "commit_count": count,
+        "push_ref": push_ref,
     }
     budget = _inline_budget(mode)
     try:
