@@ -213,13 +213,11 @@ def test_known_defect_in_the_push_goes_to_the_reviewer_and_blocks_once_confirmed
     assert decision == "deny"
     _state(work, tip1)
 
-    # T2 fixes x.py only. y.py is carried with the same line.
-    tip2 = _commit(work, {"x.py": _LIB + "def handle(req):\n    return safe(req)\n"}, amend=True)
-    fid = review_gate._finding_id({"path": "x.py", **finding["x.py"]})
-    resolve = json.dumps({fid: {"status": "resolved", "evidence_path": "x.py",
-                                "evidence_quote": "return safe(req)"}})
-    decision, reason = _push(work, _env(tmp_path, "t2.trace", STUB_RESOLVE=resolve,
-                                        STUB_CONFIRM_SIBLINGS="1"))
+    # T2 touches x.py without fixing it (the resolver keeps the prior), so the
+    # prior is still owed and y.py, carried with the same line, is its sibling.
+    # A FIXED finding is not searched for siblings (see test_orphans_siblings_dedup).
+    tip2 = _commit(work, {"x.py": _LIB + _EVAL + "# touched\n"}, amend=True)
+    decision, reason = _push(work, _env(tmp_path, "t2.trace", STUB_CONFIRM_SIBLINGS="1"))
     _state(work, tip2)
     defects = _review_manifest(tmp_path, "t2.trace").get("known_defects") or []
     assert [(d["path"], d["line"]) for d in defects] == [("y.py", 32)]

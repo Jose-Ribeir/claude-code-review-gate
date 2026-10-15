@@ -646,3 +646,79 @@ def test_a_crash_while_recording_a_chunk_keeps_its_findings_and_records_nothing(
     st, calls = run(work, tip, tmp_path, gate_env)
     assert st["state"] == "done" and st["verdict"] == "block" and "f2 bad" in st["reasons"]
     assert seg_recs(work, tip) == [] and file_record(work, tip, "big.py") is None   # re-reviewed next time
+
+
+# --- orphans: a finding about another file goes to that file's own record ---------------------------
+
+def _orphan_state(tmp_path, with_other_record):
+    """big.py (reviewed in units, all of them final) beside other.py, a carried file."""
+    work = rr._tiny_repo(tmp_path, {"keep.py": "x = 0\n", "other.py": "y = 0\n"})
+    tip = commit(work, {"big.py": module(14), "other.py": "y = 1\n"})
+    base = ag._git(["rev-parse", "origin/main"], cwd=work)
+    entries, _ = review_gate._collect_diff_entries(str(work), base, tip)
+    by_path = {e["path"]: e for e in entries}
+    common, fp = common_of(work), "f" * 64
+    state = review_gate._SegState(str(work), base, tip, common, fp, "r", False)
+    big = {"entry": by_path["big.py"], "mode": "full", "record": None, "from_oid": "", "miss_reason": "x"}
+    other = {"entry": by_path["other.py"], "mode": "carry", "record": None, "from_oid": "", "miss_reason": ""}
+    sf = state.build(big)
+    assert sf is not None, state.declined
+    for ch in sf.changes:
+        ch["final"] = True
+    if with_other_record:
+        e = by_path["other.py"]
+        key = review_gate._record_key(e["path"], "", e["status"], e["old_oid"])
+        review_gate._write_ledger_record(common, fp, key, e["new_oid"], e["path"], "", e["status"],
+                                         e["old_oid"], [], 0, "run-A")
+    state.own_items = [big, other]
+    return state, sf, by_path, common, fp
+
+
+def _orphan(path, content):
+    return {"path": path, "severity": "high", "content": content, "existing_code": "y = 1",
+            "start_line": 1, "end_line": 1, "confidence": 0.9}
+
+
+def test_an_orphan_of_a_unit_reviewed_file_goes_only_to_its_own_files_record(tmp_path):
+    state, sf, by_path, common, fp = _orphan_state(tmp_path, with_other_record=True)
+    sf.orphans = [_orphan("other.py", "about other")]
+    assert state.finalize(sf) is True
+    assert [f["content"] for f in ag._record(common, fp, by_path["other.py"])["findings"]] == ["about other"]
+    assert ag._record(common, fp, by_path["big.py"])["findings"] == []
+
+
+def test_an_orphan_with_no_record_of_its_own_stays_on_the_unit_files_record(tmp_path):
+    state, sf, by_path, common, fp = _orphan_state(tmp_path, with_other_record=False)
+    sf.orphans = [_orphan("other.py", "about other"), _orphan("elsewhere.py", "outside")]
+    assert state.finalize(sf) is True
+    assert sorted(f["content"] for f in ag._record(common, fp, by_path["big.py"])["findings"]) == [
+        "about other", "outside"]
+    assert ag._record(common, fp, by_path["other.py"]) is None   # nothing written for it, nothing lost
+
+
+def test_unit_records_do_not_carry_an_orphan_that_has_a_record_of_its_own(tmp_path):
+    """apply() writes one record per unit; a finding about a carried file with a record
+    goes to that record, not into every unit's too. One with no record stays in them."""
+    state, sf, by_path, common, fp = _orphan_state(tmp_path, with_other_record=True)
+    state.write = True
+    work_items = []
+    for ch in sf.changes:
+        ch["final"] = False
+        ch["done"] = set()
+        work_items += [{"kind": "unit", "ch": ch, "part": i} for i in range(len(sf.parts(ch)))]
+    vitems = [{"seg_file": sf, "seg_work": work_items}]
+    result = {"status": "success", "warnings": [], "findings": [
+        _orphan("other.py", "about other"), _orphan("elsewhere.py", "outside")]}
+
+    state.apply(vitems, result)
+
+    units = [r for r in seg_recs_at(common, fp) if r.get("kind") == "seg"]
+    assert units
+    for rec in units:
+        assert [f["content"] for f in rec["findings"]] == ["outside"]
+    assert [f["content"] for f in ag._record(common, fp, by_path["other.py"])["findings"]] == ["about other"]
+
+
+def seg_recs_at(common, fp, sub="seg"):
+    d = review_gate._fp_dir(common, fp) / sub
+    return [json.loads(p.read_text(encoding="utf-8")) for p in sorted(d.glob("*.json"))]

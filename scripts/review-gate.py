@@ -3276,9 +3276,7 @@ def _supervise_run(state_path, run_id):
             impact = _compute_impact(review_root, tip, active_items)
             if impact and impact.get("warnings"):
                 _TELE["impact_warnings"] = impact["warnings"][:50]
-            defects, defect_notes = _known_defects(
-                review_root, tip, [p["finding"] for p in to_resolve] + carried_findings,
-                push_paths)
+            defects, defect_notes = [], []   # sought after the resolver (below)
             _mark_phase("impact", sites=len((_TELE.get("impact") or {}).get("sites") or []))
 
             def _review_extras(k, chunk_paths, chunk_items=None):
@@ -3334,100 +3332,6 @@ def _supervise_run(state_path, run_id):
                 carried_findings += more_carried
                 seg_local = _seg_suppress_resolved(seg_local, prior_ids, review_root, tip, common_dir, fp)
 
-            def _single(call):
-                """The single-context review: a timeout there marks its files too."""
-                try:
-                    return _run_review_with_retry(call)
-                except ReviewGateError as exc:
-                    if not exc.is_timeout:
-                        raise
-                    if fenced["hit"]:
-                        raise _Fenced()
-                    err = _timeout_failure(exc, common_dir, fp, active_items, TIMEOUT, "review")
-                    if err is exc:
-                        raise
-                    raise err from exc
-
-            if not active_items:
-                # All files already reviewed in a prior run: replay from ledger.
-                ran = True  # got a valid result (from records)
-                result = {"status": "replayed", "findings": [], "warnings": []}
-                chunks_new = 0
-                plan_summary = f"carried {len(carry_items)} file(s), 0 reviewed"
-            elif (len(active_items) > _CHUNK_THRESHOLD or timeout_marks
-                  or (seg is not None and seg.files)):
-                # Multi-chunk path.
-                result, ran, raw_name, chunks_new = _run_chunked(
-                    state_path, run_id, common_dir, review_root, mode, git_dir,
-                    tip, push_range, active_items, planner_warnings, fenced, progress,
-                    fp=fp, carry_paths=carry_paths, chunk_extras=_review_extras,
-                    timeout_marks=timeout_marks, diffs=diffs, seg=seg, impact=impact,
-                )
-                n_delta = sum(1 for p in active_items if p["mode"] == "delta")
-                n_full = len(active_items) - n_delta
-                plan_summary = (
-                    f"reviewed {len(active_items)} file(s) ({n_delta} delta, {n_full} full)"
-                    + (f", carried {len(carry_items)}" if carry_items else "")
-                )
-            else:
-                # Single-context path.
-                all_full = all(p["mode"] == "full" for p in active_items)
-                extras = _review_extras(0, [p["entry"]["path"] for p in active_items])
-                if diffs is None and all_full and not carry_items and not extras:
-                    # Golden argv: byte-identical to 0.7.0 (no --paths-file).
-                    # Only with OCR_PRECOMPUTED_DIFFS=0: otherwise a manifest is
-                    # always written, since the diffs reach the reviewer through it.
-                    result, ran, raw_name = _single(
-                        lambda: _run_review(review_root, mode, git_dir, tip, push_range)
-                    )
-                    chunks_new = 1 if ran else 0
-                else:
-                    # Single context with paths-file (some delta or some carry).
-                    manifest_path = str(
-                        _async_dir(common_dir) / f"manifest-{run_id}-sc.json"
-                    )
-                    manifest = _build_review_manifest(
-                        common_dir, run_id, None, None, active_items, [], carry_paths,
-                        extras, diffs)
-                    _write_manifest_file(manifest_path, manifest,
-                                         "single-context manifest")
-                    try:
-                        result, ran, raw_name = _single(
-                            lambda: _run_review(
-                                review_root, mode, git_dir, tip, push_range,
-                                paths_file=manifest_path,
-                            )
-                        )
-                    finally:
-                        try:
-                            Path(manifest_path).unlink(missing_ok=True)
-                        except Exception:
-                            pass
-                        if diffs is not None:
-                            _remove_run_dir(common_dir, run_id, sub=0)
-                    chunks_new = 1 if ran else 0
-                if ran and _ledger_enabled():
-                    _write_run_records(result, active_items, common_dir, fp, run_id,
-                                       review_root, tip,
-                                       precomputed=_owned_truncation(diffs))
-                n_delta = sum(1 for p in active_items if p["mode"] == "delta")
-                n_full = len(active_items) - n_delta
-                plan_summary = (
-                    f"reviewed {len(active_items)} file(s) ({n_delta} delta, {n_full} full)"
-                    + (f", carried {len(carry_items)}" if carry_items else "")
-                )
-
-            _mark_phase("review", chunks=chunks_new)
-            if seg is not None:
-                seg_unverified = seg.report()[2]       # includes the checks that stayed unsure just now
-                if seg.segmented_paths():
-                    plan_summary += (f"; {len(seg.segmented_paths())} big file(s) in units "
-                                     f"({seg.stats['hits']} of {seg.stats['units']} cached)")
-            if planner_warnings and isinstance(result, dict):
-                result = dict(result)
-                result["warnings"] = (_planner_warning_objs(planner_warnings)
-                                      + list(result.get("warnings") or []))
-
             # Handle prior findings from carry/delta records (classified above).
             resolver_results, resolver_warnings, judged = {}, [], {}
             if to_resolve:
@@ -3478,15 +3382,12 @@ def _supervise_run(state_path, run_id):
                         f"resolver: {n_unverified} prior finding(s) unverified - no evidence "
                         "they were fixed, and the flagged code is no longer at the tip; "
                         "kept as blocking until a resolver run can back a verdict")
-                if resolver_warnings and isinstance(result, dict):
-                    result = dict(result)
-                    result["warnings"] = (list(result.get("warnings") or [])
-                                          + _planner_warning_objs(resolver_warnings))
 
             # Process resolver output: guard check, defer writing resolutions until
             # after the reviewer dedup check (scenario: reviewer overrides resolver).
             provisional_resolved = []  # (p, res, ev_path, ev_blob)
             still_present = []
+            sibling_priors = []        # the priors still owed, with their target blob
             ev_oids = _blob_oids_at(review_root, tip, sorted({
                 r.get("evidence_path") for r in map(resolver_results.get, [p["id"] for p in to_resolve])
                 if isinstance(r, dict) and r.get("evidence_path")}))
@@ -3505,12 +3406,121 @@ def _supervise_run(state_path, run_id):
                     f, _ = _reanchor_finding(f, review_root, tip)
                     still_present.append(dict(f, provenance=(
                         "resolver_unavailable" if verdict_p == "failed" else verdict_p)))
+                    sibling_priors.append(dict(f, target_oid=p.get("target_oid") or ""))
 
             # Re-anchor carried findings and mark provenance.
             anchored_carried = []
             for f in carried_findings:
                 f2, _ = _reanchor_finding(f, review_root, tip)
                 anchored_carried.append(f2)
+
+            # Siblings are sought only now, from the priors still owed (never a
+            # resolved one) at the lines the code has at the tip, so the search
+            # cannot hand the reviewer the very line a fix just changed.
+            sibling_priors += anchored_carried
+            defects, defect_notes = _known_defects(
+                review_root, tip, sibling_priors, push_paths)
+
+            def _single(call):
+                """The single-context review: a timeout there marks its files too."""
+                try:
+                    return _run_review_with_retry(call)
+                except ReviewGateError as exc:
+                    if not exc.is_timeout:
+                        raise
+                    if fenced["hit"]:
+                        raise _Fenced()
+                    err = _timeout_failure(exc, common_dir, fp, active_items, TIMEOUT, "review")
+                    if err is exc:
+                        raise
+                    raise err from exc
+
+            if not active_items:
+                # All files already reviewed in a prior run: replay from ledger.
+                ran = True  # got a valid result (from records)
+                result = {"status": "replayed", "findings": [], "warnings": []}
+                chunks_new = 0
+                plan_summary = f"carried {len(carry_items)} file(s), 0 reviewed"
+            elif (len(active_items) > _CHUNK_THRESHOLD or timeout_marks
+                  or (seg is not None and seg.files)):
+                # Multi-chunk path.
+                result, ran, raw_name, chunks_new = _run_chunked(
+                    state_path, run_id, common_dir, review_root, mode, git_dir,
+                    tip, push_range, active_items, planner_warnings, fenced, progress,
+                    fp=fp, carry_paths=carry_paths, chunk_extras=_review_extras,
+                    timeout_marks=timeout_marks, diffs=diffs, seg=seg, impact=impact,
+                    own_items=plan,
+                )
+                n_delta = sum(1 for p in active_items if p["mode"] == "delta")
+                n_full = len(active_items) - n_delta
+                plan_summary = (
+                    f"reviewed {len(active_items)} file(s) ({n_delta} delta, {n_full} full)"
+                    + (f", carried {len(carry_items)}" if carry_items else "")
+                )
+            else:
+                # Single-context path.
+                all_full = all(p["mode"] == "full" for p in active_items)
+                extras = _review_extras(0, [p["entry"]["path"] for p in active_items])
+                if diffs is None and all_full and not carry_items and not extras:
+                    # Golden argv: byte-identical to 0.7.0 (no --paths-file).
+                    # Only with OCR_PRECOMPUTED_DIFFS=0: otherwise a manifest is
+                    # always written, since the diffs reach the reviewer through it.
+                    result, ran, raw_name = _single(
+                        lambda: _run_review(review_root, mode, git_dir, tip, push_range)
+                    )
+                    chunks_new = 1 if ran else 0
+                else:
+                    # Single context with paths-file (some delta or some carry).
+                    manifest_path = str(
+                        _async_dir(common_dir) / f"manifest-{run_id}-sc.json"
+                    )
+                    manifest = _build_review_manifest(
+                        common_dir, run_id, None, None, active_items, [], carry_paths,
+                        extras, diffs)
+                    _write_manifest_file(manifest_path, manifest,
+                                         "single-context manifest")
+                    try:
+                        result, ran, raw_name = _single(
+                            lambda: _run_review(
+                                review_root, mode, git_dir, tip, push_range,
+                                paths_file=manifest_path,
+                            )
+                        )
+                    finally:
+                        try:
+                            Path(manifest_path).unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                        if diffs is not None:
+                            _remove_run_dir(common_dir, run_id, sub=0)
+                    chunks_new = 1 if ran else 0
+                if ran and _ledger_enabled():
+                    _write_run_records(result, active_items, common_dir, fp, run_id,
+                                       review_root, tip,
+                                       precomputed=_owned_truncation(diffs),
+                                       own_items=plan)
+                n_delta = sum(1 for p in active_items if p["mode"] == "delta")
+                n_full = len(active_items) - n_delta
+                plan_summary = (
+                    f"reviewed {len(active_items)} file(s) ({n_delta} delta, {n_full} full)"
+                    + (f", carried {len(carry_items)}" if carry_items else "")
+                )
+
+            _mark_phase("review", chunks=chunks_new)
+            if seg is not None:
+                seg_unverified = seg.report()[2]       # includes the checks that stayed unsure just now
+                if seg.segmented_paths():
+                    plan_summary += (f"; {len(seg.segmented_paths())} big file(s) in units "
+                                     f"({seg.stats['hits']} of {seg.stats['units']} cached)")
+            if planner_warnings and isinstance(result, dict):
+                result = dict(result)
+                result["warnings"] = (_planner_warning_objs(planner_warnings)
+                                      + list(result.get("warnings") or []))
+
+            if resolver_warnings and isinstance(result, dict):
+                result = dict(result)
+                result["warnings"] = (list(result.get("warnings") or [])
+                                      + _planner_warning_objs(resolver_warnings))
 
             # Merge new findings (from reviewer) with priors.
             prior_findings = still_present + anchored_carried + seg_local
@@ -3526,19 +3536,11 @@ def _supervise_run(state_path, run_id):
                     nf.setdefault("provenance", "new")
                 # Python dedup: drop new findings that nearly duplicate a still_present.
                 # Detect if the reviewer re-confirms a provisionally-resolved finding.
-                reviewer_override = set()
-                deduped_new = []
-                # A flagged-truncated record Part S re-reviews still carries what the partial
-                # review found: the proper review must not report the same defect again.
-                reviewed_again = set(seg.trials) if seg is not None else set()
-                held = still_present + [f for f in anchored_carried if f.get("path") in reviewed_again]
-                for nf in new_findings:
-                    if any(_findings_similar(nf, sp) for sp in held):
-                        continue
-                    deduped_new.append(nf)
-                    for prov_p, _, _, _ in provisional_resolved:
-                        if _findings_similar(nf, prov_p["finding"]):
-                            reviewer_override.add(prov_p["id"])
+                # A carried finding is printed from its record: a reviewer that reports
+                # the same defect again (a flagged-truncated record Part S re-reviews,
+                # or any file it read through a caller) must not make it print twice.
+                deduped_new, reviewer_override = _dedup_new_findings(
+                    new_findings, still_present + anchored_carried, provisional_resolved)
 
                 # Write resolutions only for findings NOT overridden by the reviewer.
                 self_resolved = {}
@@ -4753,6 +4755,36 @@ def _impact_bundle(review_root, tip, impact, chunk_paths, seg=None, k=None, chun
     return b
 
 
+_HUNK_ADDED = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+
+
+def _fix_added_lines(review_root, tip, priors):
+    """{(path, target_oid): lines at the tip} that were added since each prior
+    finding's blob: what a fix wrote, where a sibling hit is no twin of the
+    defect. Empty for a prior with no target blob or an unchanged file."""
+    specs = {(f.get("path") or "", f.get("target_oid") or "") for f in priors}
+    specs = {k for k in specs if k[0] and k[1]}
+    if not specs:
+        return {}
+    tips = _blob_oids_at(review_root, tip, sorted({path for path, _ in specs}))
+    out = {}
+    for path, target in specs:
+        to = tips.get(path, "")
+        if not to or to == target:
+            continue
+        diff, rc = _git(["diff", "--no-ext-diff", "-U0", target, to], cwd=review_root)
+        if rc != 0:
+            continue
+        lines = set()
+        for ln in diff.splitlines():
+            m = _HUNK_ADDED.match(ln)
+            if m:
+                start, n = int(m.group(1)), int(m.group(2) if m.group(2) is not None else 1)
+                lines.update(range(start, start + n))
+        out[(path, target)] = lines
+    return out
+
+
 def _known_defects(review_root, tip, prior_findings, push_paths):
     """Places matching a prior high/medium finding's code.
 
@@ -4764,6 +4796,7 @@ def _known_defects(review_root, tip, prior_findings, push_paths):
         return [], []
     run = ocr_impact.git_runner(review_root)
     for_reviewer, notes, seen = [], [], set()
+    fixed = _fix_added_lines(review_root, tip, prior_findings)
     for f in prior_findings:
         if (f.get("severity") or "").lower() not in ("high", "medium", "critical"):
             continue
@@ -4772,9 +4805,12 @@ def _known_defects(review_root, tip, prior_findings, push_paths):
                                            push_paths=push_paths, is_allowed=_is_allowed_path)
         except Exception:
             continue
+        added = fixed.get((f.get("path") or "", f.get("target_oid") or ""), set())
         for s in got.get("siblings") or []:
             if s.get("sid") in seen:
                 continue
+            if s.get("path") == f.get("path") and s.get("line") in added:
+                continue  # a line the fix itself wrote: the defect's own place, not a twin
             seen.add(s.get("sid"))
             if s.get("in_push"):
                 entry = {k: s.get(k) for k in ("sid", "of", "of_content", "path", "line")}
@@ -4836,9 +4872,12 @@ def _rewrite_record_findings(common_dir, fp, key, rec, findings):
 
 def _attach_to_carried_records(findings, carry_items, common_dir, fp, run_id, review_root, tip):
     """Also keep a finding about a carried file on THAT file's record, so it
-    stays owed however the files that revealed it change later."""
+    stays owed however the files that revealed it change later.
+
+    Returns the findings that now sit on a record of their own file, whether
+    they were added or already there; the others have no record to go on."""
     by_path = {item["entry"]["path"]: item for item in carry_items}
-    grouped = {}
+    grouped, placed = {}, []
     for f in findings:
         if f.get("path") in by_path and (f.get("severity") or "").lower() != "info":
             grouped.setdefault(f["path"], []).append(f)
@@ -4853,6 +4892,8 @@ def _attach_to_carried_records(findings, carry_items, common_dir, fp, run_id, re
         merged = _dedup_by_id(list(rec.get("findings") or []) + stamped)
         if len(merged) != len(rec.get("findings") or []):
             _rewrite_record_findings(common_dir, fp, key, rec, merged)
+        placed += fs
+    return placed
 
 
 _RESOLVER_STATUSES = ("resolved", "still_present")
@@ -5877,8 +5918,17 @@ def _diff_exceeds_caps(item, review_root=""):
     return size > _TRUNC_MAX_BYTES
 
 
+def _orphan_homes(own_items, active_paths):
+    """The plan items whose record may take an orphan: carried files only. A file
+    that is reviewed in this run, in another chunk, has its record rewritten from
+    that chunk's own findings (a truncated record at the same blob is replaced), so
+    a finding put there could be lost. Those stay on the records written here."""
+    return [it for it in own_items
+            if it.get("mode") == "carry" and it["entry"]["path"] not in active_paths]
+
+
 def _write_run_records(result, active_items, common_dir, fp, run_id, review_root="", tip="",
-                       precomputed=None):
+                       precomputed=None, own_items=None):
     """Write per-file ledger records after a completed review of `active_items`.
 
     None at all unless the review finished cleanly. A file whose diff the
@@ -5894,6 +5944,12 @@ def _write_run_records(result, active_items, common_dir, fp, run_id, review_root
     whose diff Python itself delivered to the reviewer: for those the flag is
     Python's own and the model's warnings are ignored. For every other file
     (git failed for it, or the 0.9.x path) the rules above apply.
+
+    `own_items` (every plan item of the run) lets a finding about a file outside
+    this context go to THAT file's own record when one exists, instead of into
+    every record written here. One about a file with no record yet (outside the
+    push, or reviewed in a later chunk) stays in this context's records: the
+    conservative route, so it is never lost.
     """
     flagged_paths = set()
     if not isinstance(result, dict):
@@ -5920,6 +5976,13 @@ def _write_run_records(result, active_items, common_dir, fp, run_id, review_root
             new_by_path.setdefault(p, []).append(f)
         else:
             orphans.append(f)
+    if orphans and own_items and _ledger_enabled():
+        mine = _orphan_homes(own_items, active_paths)
+        placed = _attach_to_carried_records(orphans, mine, common_dir, fp, run_id,
+                                            review_root, tip)
+        if placed:
+            placed_ids = {id(f) for f in placed}
+            orphans = [f for f in orphans if id(f) not in placed_ids]
     suppressed = _resolution_suppressor(common_dir, fp, review_root, tip)
     for item in active_items:
         e = item["entry"]
@@ -5982,6 +6045,22 @@ def _update_state_owned(state_path, run_id, **fields):
     return st
 
 
+def _dedup_new_findings(new_findings, held, provisional_resolved):
+    """(new findings not already held, ids of provisionally resolved priors the
+    reviewer reported again). The override does not depend on `held`: a report that
+    only matches a held finding is dropped as a duplicate, but it still re-reports
+    any resolved prior it resembles, and that prior's resolution must be withheld."""
+    override, deduped = set(), []
+    for nf in new_findings:
+        for prov_p, _, _, _ in provisional_resolved:
+            if _findings_similar(nf, prov_p["finding"]):
+                override.add(prov_p["id"])
+        if any(_findings_similar(nf, sp) for sp in held):
+            continue
+        deduped.append(nf)
+    return deduped, override
+
+
 def _findings_overlap(f1, f2):
     """True when two findings' line ranges overlap."""
     try:
@@ -5994,13 +6073,26 @@ def _findings_overlap(f1, f2):
         return False
 
 
+def _has_lines(f):
+    try:
+        return int(f.get("start_line") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def _findings_similar(f1, f2):
-    """True when two findings have the same path, severity, and overlapping title."""
+    """True when two findings have the same path, severity, and overlapping title.
+    With line numbers on both sides they must overlap. With none on either side
+    the lines cannot be compared, and the same path, severity and normalised
+    content prefix count as the same finding. With numbers on one side only, the
+    findings are not the same: a defect at a known line is never folded into one
+    that has no place."""
     if f1.get("path") != f2.get("path"):
         return False
     if f1.get("severity") != f2.get("severity"):
         return False
-    if not _findings_overlap(f1, f2):
+    h1, h2 = _has_lines(f1), _has_lines(f2)
+    if h1 != h2 or (h1 and not _findings_overlap(f1, f2)):
         return False
     def _norm(f):
         c = re.sub(r'\s+', ' ', str(f.get("content") or "").lower().strip())
@@ -6290,6 +6382,9 @@ class _SegFile:
 class _SegState:
     """Everything Part S knows about one run: the segmented files, their cached
     and pending work, the chunk plan, and what to write after each chunk."""
+
+    # Every plan item of the run (set by _run_chunked): where an orphan can go.
+    own_items = None
 
     def __init__(self, review_root, base, tip, common_dir, fp, run_id, use_cache):
         self.review_root, self.base, self.tip = review_root, base, tip
@@ -7039,6 +7134,15 @@ class _SegState:
             {f.get("path") for f in orphans if f.get("path")})) if orphans else {}
         stamped = [dict(f, target_oid=f.get("target_oid") or oids.get(f.get("path") or "", ""))
                    for f in orphans]
+        if stamped and self.own_items and self.write:
+            # Same rule as _write_run_records: a finding about a carried file goes to
+            # THAT file's record, not into every unit record too.
+            placed = _attach_to_carried_records(stamped, _orphan_homes(self.own_items, set(chunk)),
+                                                self.common_dir, self.fp, self.run_id,
+                                                self.review_root, self.tip)
+            if placed:
+                placed_ids = {id(f) for f in placed}
+                stamped = [f for f in stamped if id(f) not in placed_ids]
         # unit records
         for vi in vitems:
             sf = vi.get("seg_file")
@@ -7171,7 +7275,18 @@ class _SegState:
         if oids is None or sf.path not in oids:
             oids = _blob_oids_at(self.review_root, self.tip, [sf.path])
         stamped_own = [dict(f, target_oid=f.get("target_oid") or oids.get(sf.path, "")) for f in own]
-        orphans = sf.orphans + self.replayed_foreign
+        orphans = list(sf.orphans)
+        if orphans and self.own_items:
+            # Same rule as _write_run_records: a finding about another file goes
+            # to THAT file's record when it has one, not into this file's too.
+            # One with no record yet stays here (conservative: never lost).
+            mine = _orphan_homes(self.own_items, {sf.path})
+            placed = _attach_to_carried_records(orphans, mine, self.common_dir, self.fp,
+                                                self.run_id, self.review_root, self.tip)
+            if placed:
+                placed_ids = {id(f) for f in placed}
+                orphans = [f for f in orphans if id(f) not in placed_ids]
+        orphans += self.replayed_foreign
         key = _record_key(sf.path, sf.old_path, e["status"], e["old_oid"])
         _write_ledger_record(
             self.common_dir, self.fp, key, e["new_oid"], sf.path, sf.old_path, e["status"], e["old_oid"],
@@ -7253,7 +7368,7 @@ def _seg_check_impact_verdicts(result, manifest):
 def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
                  tip, push_range, active_items, planner_warnings, fenced,
                  progress=None, fp="", carry_paths=None, chunk_extras=None,
-                 timeout_marks=None, diffs=None, seg=None, impact=None):
+                 timeout_marks=None, diffs=None, seg=None, impact=None, own_items=None):
     """Run per-chunk reviews with fencing, budget and retry.
 
     diffs ({path: _build_item_diff result}, see _build_diffs) switches on the
@@ -7283,6 +7398,8 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
     if timeout_marks is None:
         timeout_marks = _timeout_marks(common_dir, fp, active_items)
     chunks = None
+    if seg is not None:
+        seg.own_items = own_items
     if seg is not None and seg.files:
         try:
             sizes = {p: d["lines"] for p, d in (diffs or {}).items() if not d["failed"] and d["lines"]}
@@ -7445,7 +7562,7 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
         if fp and _ledger_enabled():
             _write_run_records(result, [it for it in chunk_items if it.get("seg_file") is None],
                                common_dir, fp, run_id, review_root, tip,
-                               precomputed=_owned_truncation(diffs))
+                               precomputed=_owned_truncation(diffs), own_items=own_items)
         if seg is not None:
             try:
                 seg.apply([it for it in chunk_items if it.get("seg_file") is not None], result)

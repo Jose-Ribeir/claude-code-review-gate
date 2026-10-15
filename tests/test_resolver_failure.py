@@ -199,8 +199,9 @@ def test_resolver_failing_twice_blocks_with_a_distinct_message_and_does_not_poll
 def test_a_half_batch_retry_that_succeeds_resolves_end_to_end(tmp_path):
     work, _ = _blocked_on_x(tmp_path)
     tip2 = _amend(work, {"x.py": "x = 1\ndef good(): pass\n"})
-    # Call 1 is the review, call 2 the resolver (made to fail), call 3 its retry.
-    env = _env(tmp_path, "t2.trace", STUB_FAIL_ON_CALL=2,
+    # The resolver runs before the review (siblings need its verdicts): call 1 is the
+    # resolver (made to fail), call 2 its retry, call 3 the review.
+    env = _env(tmp_path, "t2.trace", STUB_FAIL_ON_CALL=1,
                STUB_RESOLVE=json.dumps({_FID: _RESOLVED}))
     decision, reason = _hook(work, env)
     assert _state(work, tip2).get("state") == "done"
