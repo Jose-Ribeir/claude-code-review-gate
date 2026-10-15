@@ -97,7 +97,7 @@ Worth doing once after install or upgrade. A hook that fails to *launch* is trea
 
 > **Upgrading from a pre-0.3 install?** Re-run `bash scripts/install-git-hook.sh` if you use the global git hook. The executables moved from `bin/` to `scripts/`; existing hooks self-heal (they now resolve the reviewer at runtime, and a compatibility shim is kept at the old path until 0.5.0), but re-running gives you a clean install. `/review-gate:doctor` reports whether yours is stale.
 
-> **Upgrading from a pre-0.2 install?** Earlier versions installed a **`pre-commit`** hook. It fires on every commit, and since the gate now reviews `@{u}..HEAD` it would review the wrong state at commit time (during a pre-commit hook the new commit does not exist yet, so `HEAD` is still its parent). Re-run `bash scripts/install-git-hook.sh` — it removes the stale `pre-commit` and installs `pre-push` in its place.
+> **Upgrading from a pre-0.2 install?** Earlier versions installed a **`pre-commit`** hook. It fires on every commit, and since the gate now reviews the commits being pushed it would review the wrong state at commit time (during a pre-commit hook the new commit does not exist yet, so `HEAD` is still its parent). Re-run `bash scripts/install-git-hook.sh` — it removes the stale `pre-commit` and installs `pre-push` in its place.
 
 **Requirements:** Claude Code with an authenticated Claude subscription; Python 3 and Git. No API key.
 
@@ -124,6 +124,13 @@ Worth doing once after install or upgrade. A hook that fails to *launch* is trea
 /review-gate:review --unpushed --rule ./.ocr/rule.json --json
 ```
 
+`--unpushed` asks the script which commits those are, so the skill and the push gate agree. You can ask it yourself:
+```bash
+# Print the range the gate would review for HEAD, as <base-sha>..<tip>
+python scripts/review-gate.py --print-range
+```
+The base is always a commit sha that is an ancestor of the tip (see [Stacked branches](#stacked-branches)); the skill no longer derives `@{u}..HEAD` on its own.
+
 **The push gate in action:** push a branch containing a confident high-severity bug and the push is blocked with the findings listed. Fix it, or bypass once:
 ```bash
 git push --no-verify
@@ -141,6 +148,7 @@ git push --no-verify
 | Inline wait, git hook | `300`s (full `OCR_TIMEOUT` at a terminal) | `OCR_INLINE_BUDGET_GIT` | same, for the pre-push adapter under Claude's Bash tool (whose ceiling is 600 s) |
 | Re-review a recorded tip | -- | `OCR_FORCE_REVIEW=1` | ignore a verdict recorded for these exact commits within the last hour |
 | Legacy range | -- | `OCR_LEGACY_RANGE=1` | review the checked-out branch against its upstream when the push command cannot be parsed (0.5.x behaviour) |
+| Old review base | -- | `OCR_BASE_V1=1` | 0.13.0: restore the pre-0.13 base selection in both modes (a new branch is diffed against `origin/HEAD`, else `origin/main`/`master`, instead of the ancestor sha [described below](#stacked-branches)). Escape hatch for one release; `OCR_LEGACY_RANGE=1` is separate and unchanged |
 | Per-file rules | built-in rubric + per-language rules | `.ocr/rule.json` (project), `~/.ocr/rule.json` (global), `--rule <path>` | the review checklist per file |
 | Review model | `sonnet` | `OCR_MODEL` (`haiku` / `sonnet` / `opus`) | **cost lever.** The review runs in its own headless session; without a pin it would inherit the parent session's model and pay its cache-read rate on a workload that re-reads context every tool call |
 | Extra `claude` flags | — | `OCR_CLAUDE_EXTRA_ARGS` | appended to the defaults |
@@ -226,6 +234,19 @@ of passing silently.
 
 All of this lives in `.git/`, so it is per-clone, never committed, and never pushed.
 
+### Stacked branches
+
+The gate reviews the commits a push adds, measured from a **base that is always a commit sha and an ancestor of the pushed tip**:
+
+- **Existing remote branch, fast-forward:** the base is the remote's current sha.
+- **New branch, a remote sha you do not have, or a non-fast-forward push:** the base is the boundary of `git rev-list <tip> --not --remotes=<remote>`. A remote sha that is not an ancestor of the tip is excluded as a set of commits, never used as a diff base, so it cannot show up as reverts of other people's work.
+
+**Policy: commits reachable from `refs/remotes/<remote>/*` are treated as already reviewed.** On a chain of stacked branches (B cut from A, A pushed), pushing B reviews only B's own commits, and main's later commits no longer appear as deletions. If the parent branch is not pushed yet, it is part of the review. Known residual risk: a stale remote-tracking ref after the remote was rewound; run `git fetch --prune` when in doubt. Pushes made with `--no-verify`, or by colleagues, were already outside the guarantee. A tag or other non-branch ref that carries unpushed commits is reviewed too (or refused as a multi-ref push if it travels beside a branch), and git mode reviews against the remote git is actually pushing to.
+
+> **Upgrading with the global git hook?** Re-run `bash scripts/install-git-hook.sh` once. The installed hook now passes `--remote` to the gate, so a push to a remote other than `origin` is reviewed against that remote. The hook copy written by an earlier install does not pass it.
+
+The base change re-keys the ledger: expect a one-time full review per file per branch after upgrading. `OCR_BASE_V1=1` restores the old selection.
+
 ### Incremental re-review (0.8.0)
 
 After a block, the typical cycle is: fix the flagged file, re-push, wait for a full review again. 0.8.0 cuts that wait by keeping a **review ledger** — a content-addressed per-file record of findings stored at `.git/review-gate-ledger/`.
@@ -242,7 +263,7 @@ Only delta and full files are sent to the reviewer. A no-change re-push (same bl
 
 **Resolver pass.** After the reviewer finishes, one targeted `--resolve` call re-judges every high/medium prior finding from carried/delta records. A finding the resolver clears is suppressed from the verdict; if the reviewer independently re-reports the same finding, the resolution is discarded and the reviewer wins. A later push where the resolving evidence has been reverted brings the finding back.
 
-The resolver is judged against the tip, not trusted. A `resolved` verdict must quote the fix from the added side of either this push's diff or the finding's *since-raised* diff (the file as it was when the finding was made, compared with the tip), so a fix made in an earlier push whose resolver run failed still counts. A `still_present` verdict must quote the offending code as it exists at the tip; failing that, the gate checks the finding's own `existing_code` at the tip. A verdict that neither check backs, including a malformed one such as `{"<id>": true}`, is sent back to the resolver once with a re-check flag. If it is still unbacked, the finding keeps blocking and is labelled `(unverified: ...)` in the block reason, and the next push checks it again. Priors in a file that changed since the finding are re-judged even on a push where nothing else is reviewed. A prior on an unchanged carried file (the record and the finding are both of the file's current blob) replays as `(carried)` without a resolver call (0.9.5): nothing in an identical file can have been fixed since.
+The resolver is judged against the tip, not trusted. A `resolved` verdict must quote the fix from the added side of either this push's diff or the finding's *since-raised* diff (the file as it was when the finding was made, compared with the tip), so a fix made in an earlier push whose resolver run failed still counts. A `still_present` verdict must quote the offending code as it exists at the tip; failing that, the gate checks the finding's own `existing_code` at the tip. A verdict that neither check backs, including a malformed one such as `{"<id>": true}`, is sent back to the resolver once with a re-check flag. If it is still unbacked, the finding keeps blocking and is labelled `(unverified: ...)` in the block reason, and the next push checks it again. A resolver that crashed, timed out or printed nothing parseable is a different case (0.13.x): it is retried once on half the batch, and if it still fails the push blocks with `resolver unavailable: <reason>`; that does not use up the re-check and writes nothing into the ledger records. A stored resolution outlives later edits to its evidence file for as long as the quoted evidence (12 or more non-whitespace characters) is still present there, and, if the flagged code had already gone when it was written, the flagged code is still gone. Priors in a file that changed since the finding are re-judged even on a push where nothing else is reviewed. A prior on an unchanged carried file (the record and the finding are both of the file's current blob) replays as `(carried)` without a resolver call (0.9.5): nothing in an identical file can have been fixed since.
 
 **Truncated reviews carry too (0.9.5).** With `OCR_PRECOMPUTED_DIFFS=0` the skill degrades a file's diff to stat + hunk headers past 400 lines or 16 KB, and the gate checks the same cap itself (since 0.10.0 the limits below apply, and the gate's own flag is the truth). Such a file's record is flagged `truncated`, and a resume carries it instead of reviewing it again (it would be truncated the same way, and a big push never converged). It is never a delta base, a changed blob is reviewed in full, and each verdict says `N files effectively unreviewed (truncated)` and re-emits the skill's `diff truncated` warning, so the state stays visible however many pushes it is carried through.
 

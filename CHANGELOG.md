@@ -6,6 +6,71 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+Stacked branches get the right review base, and a finding that was fixed stays fixed. Built from
+`docs/plans/stacked-branch-review-base.md`, one entry per area. **The base change re-keys ledger
+records: expect a one-time full review per file per branch after upgrading.** There is no
+fingerprint change and no schema migration; the 30-day TTL cleans up the old records.
+
+### Changed
+- **The review base is always a commit sha that is an ancestor of the pushed tip.**
+  `resolve_review_base` is now the one place that picks it, for git mode, hook mode and the skill.
+  A fast-forward of an existing remote ref still uses the remote's sha (the 0.5.1 behaviour). A
+  new ref, a remote sha the client does not have, or a non-fast-forward push uses the boundary of
+  `git rev-list <tip> --not --remotes=<remote>`, so a stacked branch reviews only its own commits
+  and what main gained after the fork no longer shows up as deletions (a tree diff against
+  `origin/main` used to do that; the old hook-mode merge-base re-reviewed the whole unmerged
+  parent chain instead). With several boundaries (main merged into the child) the base is their
+  octopus merge-base, falling back to the first commit's parent, which can over-review but never
+  hides commits; with none (root commit, shallow clone) it is the empty tree. An empty review set
+  is allowed and the reason is logged.
+  **Policy: commits reachable from `refs/remotes/<remote>/*` are treated as already reviewed.**
+  Existing-ref pushes already relied on this, since the remote sha was the base. Residual risk: a
+  stale remote-tracking ref after a remote rewind.
+- **A non-fast-forward remote sha is an exclusion, not a diff base.** It used to be used raw as a
+  tree base, so the diff contained reverts of other people's commits.
+- **The state and marker cache is keyed by `(base, tip)`.** A tip recorded as `done` under one base
+  no longer replays its verdict under another.
+- **The skill's `--unpushed` asks the gate.** SKILL.md calls the new
+  `review-gate.py --print-range` instead of re-deriving `@{u}..HEAD`.
+- **`OCR_BASE_V1=1` restores the old base selection** in both modes and in `--print-range`.
+  `OCR_LEGACY_RANGE=1` is unchanged.
+
+### Fixed
+- **Fail-open paths in push range selection.** A range whose `git log` failed is treated as
+  carrying commits (the 0.5.2 rule) instead of as empty. Tags and other non-branch refs that carry
+  unpushed commits are now reviewed, or refused as a multi-ref push when they travel beside a
+  branch; they used to be filtered out before counting. Git mode reviews against the remote git
+  is actually pushing to: `scripts/pre-push` passes `--remote`.
+  **Existing installs must re-run `bash scripts/install-git-hook.sh`** to get the new hook.
+- **A resolver failure is its own status, `failed`, not a permanent block.** A resolver crash,
+  timeout (the machine low on RAM was the usual cause) or unparseable output used to become
+  `unverified`, spend the one re-check, and keep blocking with nothing persisted, so the same
+  thing happened on the next push. It is now retried once with the batch split in half; if it
+  still fails the push blocks with `resolver unavailable: <reason>` instead of the unverified
+  text. It does not consume the re-check and is not written into any record. A usage-limit or
+  budget error still stops the run. Telemetry gains `failed`.
+- **A stored resolution survives later edits to its evidence file.** It used to be valid only
+  while the evidence file's blob was unchanged, which in a stack is almost never. It now holds
+  while the evidence quote (12 or more non-whitespace characters, matched on token boundaries) is
+  still present at the tip. If the flagged code was already gone when the resolution was written,
+  it must also still be gone. A missing target file falls back to the exact-blob rule. Resolved
+  priors are suppressed at read time, whichever record carried them, and are never re-emitted
+  into new records. Other records are not touched: they are content-addressed and shared by other
+  tips.
+- **Orphan findings go to their own file's record.** They were copied into every active file's
+  record, including on the segmented path, and each copy became the next delta base. They stay on
+  the current records when their file has no carried record or is active in another chunk.
+- **The sibling search runs after the resolver.** It uses only unresolved, re-anchored priors and
+  ignores the fix's added lines, so it can no longer re-raise the line that was just fixed.
+- **Dedup gaps.** Carried findings no longer print twice. A line-less finding is deduplicated by
+  content only against other line-less findings. Reviewer override (a re-confirmed finding gets no
+  resolution) is independent of dedup.
+- **Sibling branches no longer share stale findings.** Records store `source_tip` and
+  `source_ref`. A delta prior from a commit that is not an ancestor of the current tip, written for
+  a different pushed ref, is ignored (one `is-ancestor` check per distinct tip). A same-branch
+  amend or force-push keeps its history, an identical-blob carry stays unscoped, and records
+  written before this change stay eligible until their TTL.
+
 ## [0.12.5] - 2026-10-03
 
 Follow-up to 0.12.4 from the Claude plugin directory's validation. No change to review behaviour.
