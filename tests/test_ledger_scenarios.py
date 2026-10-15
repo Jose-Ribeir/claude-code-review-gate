@@ -281,9 +281,9 @@ def test_scenario_3_guard_rejects_evidence_in_inactive_file(tmp_path):
     ) is False
 
 
-def test_scenario_3_garbage_output_becomes_all_still_present(monkeypatch, tmp_path):
+def test_scenario_3_garbage_output_becomes_all_failed(monkeypatch, tmp_path):
     """When the resolver stub exits with non-zero or returns garbage,
-    _run_resolver returns all still_present (fail closed)."""
+    _run_resolver returns every id as a failed status (fail closed)."""
     monkeypatch.setenv("STUB_RESOLVE_VERDICT", "fail")
     monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(tmp_path / "gate-data"))
     monkeypatch.setenv("OCR_REVIEWER_CMD", f'"{sys.executable}" "{_STUB}"')
@@ -309,8 +309,9 @@ def test_scenario_3_garbage_output_becomes_all_still_present(monkeypatch, tmp_pa
         ".", "hook", ".", "tip", "base..tip",
         to_resolve, active_items, str(tmp_path), "fp" * 8, "run1",
     )
-    assert result.get(fid, {}).get("status") == "still_present"
-    assert result[fid]["evidence_quote"] == ""  # evidence-free: the caller re-checks it
+    # A failed call is its own status, not an answer: the caller keeps the prior blocking.
+    assert result.get(fid, {}).get("status") == "failed"
+    assert result[fid]["reason"] == "resolver exited 1"
     assert any("failed" in w for w in warnings)
 
 

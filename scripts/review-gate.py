@@ -3457,10 +3457,21 @@ def _supervise_run(state_path, run_id):
                     resolver_warnings += more
                     _judge_all(recheck)
                     _mark_phase("recheck", priors=len(recheck))
+                failed_ids = [i for i, v in judged.items() if v == "failed"]
+                failed_reason = next(
+                    (resolver_results[i].get("reason") for i in failed_ids), "")
                 _TELE["resolver"] = {
                     "sent": len(to_resolve), "recheck": len(recheck),
+                    "failed": len(failed_ids),
                     "warnings": list(resolver_warnings), "judged": dict(judged),
                 }
+                if failed_ids:
+                    _TELE["resolver"]["failed_reason"] = failed_reason
+                    resolver_warnings.append(
+                        f"resolver unavailable: {failed_reason} - {len(failed_ids)} prior "
+                        "finding(s) could not be re-checked and stay blocking; nothing was "
+                        "judged fixed or still present. Push again once the resolver works, "
+                        "or override as the reviewer")
                 n_unverified = sum(1 for v in judged.values() if v == "unverified")
                 if n_unverified:
                     resolver_warnings.append(
@@ -3492,7 +3503,8 @@ def _supervise_run(state_path, run_id):
                 else:
                     f = dict(p["finding"])
                     f, _ = _reanchor_finding(f, review_root, tip)
-                    still_present.append(dict(f, provenance=verdict_p))
+                    still_present.append(dict(f, provenance=(
+                        "resolver_unavailable" if verdict_p == "failed" else verdict_p)))
 
             # Re-anchor carried findings and mark provenance.
             anchored_carried = []
@@ -4712,6 +4724,16 @@ def _no_evidence():
     return {"status": "still_present", "evidence_path": "", "evidence_quote": ""}
 
 
+def _failed(reason):
+    """A resolver FAILURE (timeout, non-zero exit, unparseable output, crash).
+
+    Not an answer: unlike _no_evidence() there is nothing to judge against the
+    tip and nothing to re-ask the same way. The prior keeps blocking, labelled
+    "resolver unavailable", and is neither re-checked nor written anew."""
+    return {"status": "failed", "reason": str(reason or "unknown"),
+            "evidence_path": "", "evidence_quote": ""}
+
+
 def _normalize_resolutions(raw, to_resolve):
     """Validate the resolver's `resolutions` map, one value at a time.
 
@@ -4801,23 +4823,50 @@ def _resolver_diff_items(repo_root, common_dir, run_id, tag, active_plan_items,
 
 def _run_resolver(repo_root, mode, git_dir, tip, push_range, to_resolve,
                   active_plan_items, common_dir, fp, run_id, recheck=False, diffs=None):
-    """Invoke the resolver agent once. `diffs` ({path: diff result}, see
+    """Invoke the resolver agent. `diffs` ({path: diff result}, see
     _build_diffs) adds items[] with the diff files it should Read.
 
     Returns ({id: {status, evidence_path, evidence_quote}}, [warning]); every id
-    in `to_resolve` is present. On failure every id is an evidence-free
-    still_present, which the caller re-checks against the tip (fail closed).
+    in `to_resolve` is present. A call that FAILS (see _failed) is retried once
+    with half the batch -- each half its own call; ids still failing come back as
+    status "failed" and the caller keeps them blocking. An answer that merely has
+    no evidence is an evidence-free still_present, which the caller re-checks.
     """
     if not to_resolve:
         return {}, []
-    fallback = {p["id"]: _no_evidence() for p in to_resolve}
+    args = (repo_root, mode, git_dir, tip, push_range)
+    rest = (active_plan_items, common_dir, fp, run_id, recheck, diffs)
+    out, warnings = _resolver_attempt(*args, to_resolve, *rest, suffix="")
+    failed = [p for p in to_resolve if out[p["id"]].get("status") == "failed"]
+    if not failed:
+        return out, warnings
+    first_reason = out[failed[0]["id"]]["reason"]
+    mid = (len(failed) + 1) // 2
+    halves = [failed[:mid], failed[mid:]] if len(failed) > 1 else [failed]
+    warnings = []
+    for n, half in enumerate(h for h in halves if h):
+        got, more = _resolver_attempt(*args, half, *rest, suffix=f"-retry{n + 1}")
+        out.update(got)
+        warnings += more
+    if not any(v.get("status") == "failed" for v in out.values()):
+        warnings.append(f"resolver: first call failed ({first_reason}); "
+                        "retried with half the batch")
+    return out, warnings
+
+
+def _resolver_attempt(repo_root, mode, git_dir, tip, push_range, to_resolve,
+                      active_plan_items, common_dir, fp, run_id, recheck, diffs,
+                      suffix=""):
+    """One resolver call over `to_resolve`. A failed call makes every id
+    status "failed" (see _failed)."""
+    fallback_for = lambda reason: {p["id"]: _failed(reason) for p in to_resolve}  # noqa: E731
     # Priors are reviewer output about an untrusted diff; cap what goes back into a prompt.
     prior_data = [
         {**{k: (v[:2000] if isinstance(v, str) else v) for k, v in p["finding"].items()},
          "id": p["id"]}
         for p in to_resolve
     ]
-    tag = "-recheck" if recheck else ""
+    tag = ("-recheck" if recheck else "") + suffix
     manifest_path = str(_async_dir(common_dir) / f"resolver-{run_id}{tag}.json")
     try:
         prior_specs = _since_finding_specs(repo_root, tip, to_resolve)
@@ -4842,7 +4891,8 @@ def _run_resolver(repo_root, mode, git_dir, tip, push_range, to_resolve,
     except Exception as exc:
         _remove_run_dir(common_dir, run_id, sub=f"res{tag}")
         _warn(f"review-gate: could not write resolver manifest: {exc}")
-        return fallback, [f"resolver: could not write manifest ({exc})"]
+        reason = f"could not write manifest ({_sanitize(str(exc), 200)})"
+        return fallback_for(reason), [f"resolver: {reason}"]
     try:
         result, _, _ = _run_review(
             repo_root, mode, git_dir, tip, push_range,
@@ -4853,8 +4903,14 @@ def _run_resolver(repo_root, mode, git_dir, tip, push_range, to_resolve,
         if not isinstance(result, dict):
             raise ReviewGateError("resolver returned non-dict")
         return _normalize_resolutions(result.get("resolutions"), to_resolve)
-    except (ReviewGateError, ReviewLimitError) as exc:
-        return fallback, [f"resolver: failed ({_sanitize(str(exc), 200)})"]
+    except (_Fenced, ReviewLimitError, ReviewBudgetError):
+        # Not a verdict: the outer handler records a limit/budget stop without an
+        # attempt. A ReviewChunkTimeout is never raised for a resolver call (only
+        # chunked reviews mark files for splitting), so a timeout here stays failed.
+        raise
+    except Exception as exc:      # ReviewGateError and kin, or a crash: a failure, not an answer
+        reason = _sanitize(str(exc), 200) or type(exc).__name__
+        return fallback_for(reason), [f"resolver: failed ({reason})"]
     finally:
         try:
             Path(manifest_path).unlink(missing_ok=True)
@@ -4946,8 +5002,10 @@ def _tip_text(review_root, tip, path, cache):
 
 def _judge_resolution(prior, res, active_plan_items, push_range, review_root, tip,
                       _cache=None):
-    """'resolved' | 'still_present' | 'unverified' for one normalized verdict.
+    """'resolved' | 'still_present' | 'unverified' | 'failed' for one normalized verdict.
 
+    failed        -- the resolver call itself failed (see _failed): no answer to
+                     judge at all, so the prior keeps blocking, unjudged.
     resolved      -- the guard found the fix on an added side (see _guard_resolution).
     still_present -- backed by the tip: the resolver's still_present quote, or
                      failing that the finding's own existing_code, is in the
@@ -4957,6 +5015,8 @@ def _judge_resolution(prior, res, active_plan_items, push_range, review_root, ti
                      nothing in a diff supports "resolved".
     """
     cache = {} if _cache is None else _cache
+    if res.get("status") == "failed":
+        return "failed"
     if res.get("status") == "resolved" and _guard_resolution(
             res, active_plan_items, push_range, review_root, prior=prior, tip=tip):
         return "resolved"
@@ -5613,6 +5673,10 @@ def _record_findings_for(item, new_by_path, orphans, active_paths):
         for f in prev.get("findings") or []:
             if any(_findings_similar(f, n) for n in own):
                 continue
+            # Pin where the finding was raised: the next push re-judges it from
+            # that blob, not from this record's (a failed resolver leaves it owed).
+            if not f.get("target_oid") and prev.get("head_oid"):
+                f = dict(f, target_oid=prev["head_oid"])
             carried.append(f)
     return _dedup_by_id(own + list(orphans) + carried)
 
@@ -7506,6 +7570,9 @@ def _format_reasons(result, limit=20):
             prefix = "(same defect as an earlier finding) "
         elif prov == "sibling_note":
             prefix = "(note) "
+        elif prov == "resolver_unavailable":
+            prefix = ("(resolver unavailable: this prior finding could not be re-checked "
+                      "and stays blocking - check by hand) ")
         elif prov == "unverified":
             prefix = ("(unverified: the resolver gave no evidence either way and the "
                       "flagged code is no longer at the tip - check by hand) ")

@@ -346,7 +346,7 @@ def test_fix_whose_resolver_run_failed_is_resolved_on_the_next_push(tmp_path):
     tip2 = _amend(work, {"x.py": "x = 1\ndef good(): pass\n"})
     decision, reason = _hook(work, _env(tmp_path, "t2.trace", STUB_RESOLVE_VERDICT="fail"))
     assert _state(work, tip2).get("state") == "done"
-    assert decision == "deny" and "unverified" in reason, reason
+    assert decision == "deny" and "resolver unavailable" in reason, reason
 
     tip3 = _amend(work, {"x.py": "x = 1\ndef good(): pass\ny = 2\n"})
     resolve = json.dumps({_FID: {"status": "resolved", "evidence_path": "x.py",
