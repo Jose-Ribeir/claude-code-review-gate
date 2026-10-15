@@ -146,7 +146,7 @@ fi
 
 # Versions of this plugin before the commit->push migration installed a
 # pre-commit hook here. Left in place it still fires on every commit, and
-# because the gate now reviews `@{u}..HEAD` it would review the WRONG state at
+# because the gate now reviews the commits being pushed it would review the WRONG state at
 # commit time (HEAD is the parent; the staged changes are invisible). Remove
 # ours if we recognize it; leave anything unrecognized alone and warn.
 STALE="$HOOKS_DIR/pre-commit"

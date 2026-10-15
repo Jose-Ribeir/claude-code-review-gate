@@ -508,7 +508,8 @@ def test_fenced_supervisor_writes_no_ledger_records(tmp_path):
     proc.stdin.close()
 
     # Wait until the supervisor transitions to "running" with a chunk in progress.
-    state_path = review_gate._state_path(common, tip)
+    # The state file is keyed by (base, tip); the base here is origin/main.
+    state_path = review_gate._state_path(common, tip, _git(["rev-parse", "origin/main"], cwd=repo))
     deadline = time.monotonic() + 30
     st = {}
     while time.monotonic() < deadline:
@@ -554,7 +555,8 @@ def test_kill_and_resume(tmp_path):
     repo = _big_repo(tmp_path, n_files=4)
     tip = _git(["rev-parse", "HEAD"], cwd=repo)
     common = review_gate._git_common_dir(str(repo))
-    state_path = review_gate._state_path(common, tip)
+    # The state file is keyed by (base, tip); the base here is origin/main.
+    state_path = review_gate._state_path(common, tip, _git(["rev-parse", "origin/main"], cwd=repo))
 
     # STUB_SLEEP=5 per chunk: chunks 0+1 take 10s; we kill during chunk 2.
     # Inline budget = 30s so the hook returns "still running" while chunk 2

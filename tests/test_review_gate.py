@@ -964,12 +964,12 @@ def test_a_blocked_verdict_is_replayed_without_a_second_review(tmp_path, monkeyp
     first = json.loads(capsys.readouterr().out)["hookSpecificOutput"]
     assert first["permissionDecision"] == "deny" and "sql injection" in first["permissionDecisionReason"]
     # No pass marker for a block: an older git hook reads that marker as pass.
-    assert not review_gate._marker_path(str(tmp_path), "a" * 40).exists()
+    assert not review_gate._marker_path(str(tmp_path), "a" * 40, "b" * 40).exists()
 
     # Retry within the TTL, same tip: answered from the state file, no review.
     st = _state_of(tmp_path)
     st["done_ts"] = time.time() - 120  # long enough ago to read as a replay
-    review_gate._write_state(review_gate._state_path(str(tmp_path), "a" * 40), st)
+    review_gate._write_state(review_gate._state_path(str(tmp_path), "a" * 40, "b" * 40), st)
     _run_hook(monkeypatch)
     second = json.loads(capsys.readouterr().out)["hookSpecificOutput"]
     assert calls == ["a" * 40]
@@ -993,7 +993,7 @@ def test_a_running_review_past_the_budget_is_denied_not_allowed(tmp_path, monkey
     _stub_gate(monkeypatch, tmp_path, calls=calls)
     _budget_exhausted(monkeypatch)
     # Another process's review, alive: fresh heartbeat.
-    path = review_gate._state_path(str(tmp_path), "a" * 40)
+    path = review_gate._state_path(str(tmp_path), "a" * 40, "b" * 40)
     review_gate._write_state(path, {
         "state": "running", "run_id": "other", "tip": "a" * 40, "branch": "feat/x",
         "started_ts": time.time() - 700, "heartbeat_ts": time.time(), "supervisor_pid": 0,
@@ -1014,7 +1014,7 @@ def test_a_running_review_past_the_budget_is_denied_not_allowed(tmp_path, monkey
 def test_a_review_whose_supervisor_went_silent_is_restarted(tmp_path, monkeypatch, capsys):
     calls = []
     _stub_gate(monkeypatch, tmp_path, calls=calls)
-    path = review_gate._state_path(str(tmp_path), "a" * 40)
+    path = review_gate._state_path(str(tmp_path), "a" * 40, "b" * 40)
     review_gate._write_state(path, {
         "state": "running", "run_id": "dead", "tip": "a" * 40, "branch": "feat/x",
         "started_ts": time.time() - 900, "heartbeat_ts": time.time() - 600, "supervisor_pid": 0,
@@ -1056,7 +1056,7 @@ def test_a_stale_run_id_fences_the_old_supervisor(tmp_path, monkeypatch):
     # The supervisor re-reads its state file; if a newer run has claimed the
     # tip, it must not write a verdict over the newer run's state.
     _stub_gate(monkeypatch, tmp_path)
-    path = review_gate._state_path(str(tmp_path), "a" * 40)
+    path = review_gate._state_path(str(tmp_path), "a" * 40, "b" * 40)
     review_gate._write_state(path, {"state": "claimed", "run_id": "old", "tip": "a" * 40,
                                     "repo_root": str(tmp_path), "git_dir": str(tmp_path)})
     orig = review_gate._run_review
@@ -1076,7 +1076,7 @@ def test_a_stale_run_id_fences_the_old_supervisor(tmp_path, monkeypatch):
 def test_post_announces_an_async_verdict_once(tmp_path, monkeypatch, capsys):
     _stub_gate(monkeypatch, tmp_path)
     _seed_record(tmp_path)
-    path = review_gate._state_path(str(tmp_path), "a" * 40)
+    path = review_gate._state_path(str(tmp_path), "a" * 40, "b" * 40)
     review_gate._write_state(path, {"state": "done", "run_id": "r", "tip": "a" * 40,
                                     "branch": "feat/x", "verdict": "warn", "blocked": False,
                                     "done_ts": time.time()})
@@ -1092,7 +1092,7 @@ def test_post_announces_an_async_verdict_once(tmp_path, monkeypatch, capsys):
 
 def test_post_reminds_about_a_running_review_at_most_every_five_minutes(tmp_path, monkeypatch, capsys):
     _stub_gate(monkeypatch, tmp_path)
-    path = review_gate._state_path(str(tmp_path), "a" * 40)
+    path = review_gate._state_path(str(tmp_path), "a" * 40, "b" * 40)
     review_gate._write_state(path, {"state": "running", "run_id": "r", "tip": "a" * 40,
                                     "branch": "feat/x", "started_ts": time.time() - 200,
                                     "heartbeat_ts": time.time()})
@@ -2223,39 +2223,49 @@ def test_malformed_and_empty_stdin_fall_back_rather_than_fail(monkeypatch):
     assert review_gate._read_push_refs() == []
 
 
+def _fake_ff_git(commits):
+    """A fake `_git` for a fast-forward push: the remote sha is present locally,
+    is an ancestor of the tip, and `commits` commits lie between them."""
+    def _fake(args, cwd=None):
+        if args[:1] == ["cat-file"]:
+            return "", 0
+        if args[:2] == ["merge-base", "--is-ancestor"]:
+            return "", 0
+        if args[:2] == ["rev-list", "--count"]:
+            return str(commits), 0
+        return "", 1
+    return _fake
+
+
 def test_the_range_is_what_the_remote_gains(monkeypatch):
     # Not @{u}..HEAD -- the remote sha of the ref actually being written.
-    monkeypatch.setattr(
-        review_gate, "_git",
-        lambda args, cwd=None: ("commit1", 0) if args[:1] in (["log"], ["cat-file"]) else ("", 1),
-    )
+    monkeypatch.setattr(review_gate, "_git", _fake_ff_git(1))
     rng = review_gate._range_for_refs([("a" * 40, "b" * 40)])
     assert rng == "b" * 40 + ".." + "a" * 40
 
 
 def test_a_range_with_no_commits_is_not_offered(monkeypatch):
-    monkeypatch.setattr(
-        review_gate, "_git",
-        lambda args, cwd=None: ("", 0) if args[:1] in (["log"], ["cat-file"]) else ("", 1),
-    )
+    monkeypatch.setattr(review_gate, "_git", _fake_ff_git(0))
     assert review_gate._range_for_refs([("a" * 40, "b" * 40)]) == ""
 
 
-def test_a_brand_new_remote_ref_falls_back_to_the_default_branch(monkeypatch):
-    seen = {}
+def test_a_brand_new_remote_ref_is_based_at_its_boundary_not_the_default_branch(monkeypatch):
+    # A new ref has no remote sha. The base is the newest commit the remote-
+    # tracking refs already hold (the boundary of what is left), which is an
+    # ancestor of the tip -- never the literal name `origin/main`.
+    seen = []
 
     def _fake_git(args, cwd=None):
-        if args[:2] == ["rev-parse", "--verify"]:
-            return ("origin/main", 0) if args[-1] == "origin/main" else ("", 1)
-        if args[:1] == ["log"]:
-            seen["range"] = args[1]
-            return "commit1", 0
+        seen.append(args)
+        if args[:1] == ["rev-list"] and "--boundary" in args:
+            return "c" * 40 + "\n-" + "d" * 40, 0
         return "", 1
 
     monkeypatch.setattr(review_gate, "_git", _fake_git)
-    rng = review_gate._range_for_refs([("a" * 40, _ZERO)])
-    assert rng == "origin/main.." + "a" * 40
-    assert seen["range"] == rng
+    rng = review_gate._range_for_refs([("a" * 40, _ZERO)], remote="origin")
+    assert rng == "d" * 40 + ".." + "a" * 40
+    assert "--remotes=origin" in next(a for a in seen if "--boundary" in a)
+    assert all("origin/main" not in " ".join(a) for a in seen)
 
 
 def test_the_push_range_decides_whether_there_is_anything_to_review(monkeypatch):
@@ -2263,12 +2273,13 @@ def test_the_push_range_decides_whether_there_is_anything_to_review(monkeypatch)
     # the old question answers "nothing unpushed" -- but the range being sent
     # to main carries commits, so there is plenty to review.
     def _fake_git(args, cwd=None):
-        if args[:1] != ["log"]:
-            return "", 1
-        rng = args[1]
-        if rng.startswith("@{u}"):
-            return "", 0          # level with upstream
-        return "deadbee some commit", 0   # but the push carries commits
+        if args[:2] == ["rev-parse", "HEAD"]:
+            return "a" * 40, 0
+        if args[:1] == ["rev-list"] and "--boundary" in args:
+            return "", 0          # level with upstream: nothing left after --not
+        if args[:1] == ["log"]:
+            return "deadbee some commit", 0   # but the push carries commits
+        return "", 1
 
     monkeypatch.setattr(review_gate, "_git", _fake_git)
     assert review_gate._has_unpushed_commits("/repo") is False
@@ -2331,9 +2342,11 @@ def test_a_second_ref_carrying_nothing_does_not_trigger_the_refusal(monkeypatch)
     def _fake_git(args, cwd=None):
         if args[:1] == ["cat-file"]:
             return "", 0
-        if args[:1] != ["log"]:
+        if args[:2] == ["merge-base", "--is-ancestor"]:
+            return "", 0
+        if args[:2] != ["rev-list", "--count"]:
             return "", 1
-        return ("commit1", 0) if args[1].startswith("b" * 40) else ("", 0)
+        return ("1", 0) if args[2].startswith("b" * 40) else ("0", 0)
 
     monkeypatch.setattr(review_gate, "_git", _fake_git)
     rng = review_gate._range_for_refs([("a" * 40, "b" * 40), ("c" * 40, "d" * 40)])
@@ -2357,30 +2370,35 @@ def test_a_remote_sha_the_client_does_not_have_falls_back_rather_than_skipping(m
     # needs the objects it must send, so that commit may be absent locally.
     # `git log <missing>..<local>` then fails, and treating that as "no
     # commits" would skip the review exactly when we are least sure.
+    seen = []
+
     def _fake_git(args, cwd=None):
+        seen.append(args)
         if args[:1] == ["cat-file"]:
             return "", 1                     # remote tip not present locally
-        if args[:2] == ["rev-parse", "--verify"]:
-            return ("origin/main", 0) if args[-1] == "origin/main" else ("", 1)
-        if args[:1] == ["log"]:
-            return "commit1", 0
+        if args[:1] == ["rev-list"] and "--boundary" in args:
+            return "c" * 40 + "\n-" + "d" * 40, 0
         return "", 1
 
     monkeypatch.setattr(review_gate, "_git", _fake_git)
-    assert review_gate._range_for_refs([("a" * 40, "b" * 40)]) == "origin/main.." + "a" * 40
+    assert review_gate._range_for_refs([("a" * 40, "b" * 40)], remote="origin") == "d" * 40 + ".." + "a" * 40
+    # The missing sha is not handed to rev-list (it would be an unknown revision).
+    assert all("b" * 40 not in a for a in seen if "--boundary" in a)
 
 
 def test_an_unevaluable_range_is_assumed_to_carry_commits(monkeypatch):
-    # Over-reviewing costs a review; under-reviewing costs the gate.
+    # Over-reviewing costs a review; under-reviewing costs the gate. With no
+    # way to bound the range the base is the empty tree: everything is reviewed.
     def _fake_git(args, cwd=None):
         if args[:1] == ["cat-file"]:
             return "", 0
-        if args[:1] == ["log"]:
+        if args[:1] == ["rev-list"]:
             return "", 128                   # unknown revision
-        return "", 1
+        return "", 1                         # also: not a fast-forward
 
     monkeypatch.setattr(review_gate, "_git", _fake_git)
-    assert review_gate._range_for_refs([("a" * 40, "b" * 40)]) == "b" * 40 + ".." + "a" * 40
+    assert (review_gate._range_for_refs([("a" * 40, "b" * 40)], remote="origin")
+            == review_gate._EMPTY_TREE + ".." + "a" * 40)
 
 
 # --- what the push command sends (0.6.0) --------------------------------------

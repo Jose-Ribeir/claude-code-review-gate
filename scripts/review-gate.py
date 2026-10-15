@@ -47,6 +47,7 @@ import hashlib
 import json
 import os
 from collections import deque
+from typing import NamedTuple, Optional
 import re
 import shutil
 import subprocess
@@ -575,8 +576,37 @@ _ZERO_SHA = "0" * 40
 _MULTI_REF = "\x00multi-ref"
 
 
-def _read_push_refs():
-    """The ref updates git feeds a pre-push hook on stdin, as (local, remote).
+def _read_push_updates_from(lines):
+    """Parse pre-push ref-update lines into (branches, others), each a list of
+    (local sha, remote sha).
+
+    `branches` are updates of refs/heads/*; `others` are tags and any other
+    non-branch ref. They are kept apart on purpose: a `--follow-tags` push
+    carries tags alongside the branch, and counting them as refs would turn an
+    ordinary push into a refused multi-ref one -- but dropping them outright
+    let `git push origin v1` (or `feature:refs/review/x`) send unreviewed
+    commits past the gate. _range_for_refs reviews an `others` entry only when
+    it carries commits the pushed branches do not.
+
+    Deletions (local sha all-zero) are skipped: there is no content to review.
+    """
+    branches, others = [], []
+    for line in lines:
+        parts = line.split()
+        if len(parts) != 4:
+            continue
+        local_ref, local_sha, remote_ref, remote_sha = parts
+        if local_sha == _ZERO_SHA:
+            continue  # branch deletion: no content to review
+        if remote_ref and not remote_ref.startswith("refs/heads/"):
+            others.append((local_sha, remote_sha))
+        else:
+            branches.append((local_sha, remote_sha))
+    return branches, others
+
+
+def _read_push_updates():
+    """The ref updates git feeds a pre-push hook on stdin: (branches, others).
 
     Format per line: `<local ref> <local sha> <remote ref> <remote sha>`.
     This is the AUTHORITATIVE answer to "what is being sent, and where" -- and
@@ -586,71 +616,238 @@ def _read_push_refs():
     unpushed commits, so the gate allowed five commits onto main having
     reviewed none of them. Observed in a real repo, not hypothesised.
 
-    Deletions (local sha all-zero) are skipped: there is no content to review.
-    Returns [] when stdin is empty or unreadable, which puts callers back on
-    the old heuristic rather than failing.
+    Returns ([], []) when stdin is empty or unreadable, which puts callers back
+    on the old heuristic rather than failing.
     """
     try:
         if sys.stdin is None or sys.stdin.isatty():
-            return []
+            return [], []
         raw = sys.stdin.read()
     except Exception:
-        return []
-    refs = []
-    for line in (raw or "").splitlines():
-        parts = line.split()
-        if len(parts) != 4:
-            continue
-        local_ref, local_sha, remote_ref, remote_sha = parts
-        if local_sha == _ZERO_SHA:
-            continue  # branch deletion: no content to review
-        if remote_ref and not remote_ref.startswith("refs/heads/"):
-            # Tags and other non-branch refs. A `--follow-tags` push carries
-            # them alongside the branch, and their commits are already covered
-            # by it; counting them would turn ordinary pushes into multi-ref
-            # ones for no gain.
-            continue
-        refs.append((local_sha, remote_sha))
-    return refs
+        return [], []
+    return _read_push_updates_from((raw or "").splitlines())
 
 
-def _range_for_refs(refs, repo_root=None):
+def _read_push_refs():
+    """The branch updates of the push, as (local sha, remote sha)."""
+    return _read_push_updates()[0]
+
+
+class ReviewBase(NamedTuple):
+    """What resolve_review_base decided.
+
+    base_sha  a 40-hex commit sha, or _EMPTY_TREE; ALWAYS an ancestor of the tip
+              (the tip itself when there is nothing to review).
+    commits   how many commits the review covers; 0 means nothing to review;
+              None means unknown (the range could not be evaluated, so it is
+              assumed to carry commits -- fail closed).
+    reason    one line saying how the base was chosen, for logs and telemetry.
+    """
+    base_sha: str
+    commits: Optional[int]
+    reason: str
+
+    @property
+    def has_commits(self):
+        return self.commits is None or self.commits > 0
+
+
+def _base_v1():
+    """OCR_BASE_V1=1: the pre-0.13.0 base selection, in git and hook mode."""
+    return os.environ.get("OCR_BASE_V1", "").strip().lower() in ("1", "true", "yes")
+
+
+_SHA40 = re.compile(r"[0-9a-f]{40}")
+
+
+def resolve_review_base(remote, tip, remote_sha=None, repo_root=None):
+    """The commit a push is reviewed against: ReviewBase(base_sha, commits, reason).
+
+    One answer for git mode, hook mode and the skill's --unpushed. The base is
+    always a 40-hex sha (or _EMPTY_TREE) and always an ANCESTOR of `tip`, so
+    `<base>..<tip>` is exactly the net change the push carries -- and every
+    consumer that splits the range on ".." or runs a tree diff keeps working.
+
+    1. A fast-forward of an existing remote ref (remote_sha present locally and
+       an ancestor of tip): the base is remote_sha itself.
+    2. Anything else -- a new ref, a sha the client does not have, a non-fast-
+       forward -- reviews what no `refs/remotes/<remote>/*` ref already holds:
+       `rev-list tip --boundary --not --remotes=<remote> [remote_sha]`. A
+       non-fast-forward remote_sha is only a set EXCLUSION here, never a tree
+       base: diffing against a commit that is not an ancestor reverts whatever
+       the other side gained, which is how phantom deletions got reviewed.
+       The boundary commit(s) of that set are the base: one -> it; several
+       (main merged into the child, criss-cross) -> their octopus merge-base,
+       else the parent of the oldest commit; none (root commit, shallow graft)
+       -> _EMPTY_TREE.
+    3. A rev-list error means the range is unevaluable: assume it carries
+       commits and review everything (_EMPTY_TREE). Over-reviewing costs a
+       review; under-reviewing costs the gate.
+
+    Policy: commits reachable from refs/remotes/<remote>/* count as already
+    reviewed -- existing-ref pushes already rely on it.
+    """
+    if not _SHA40.fullmatch(tip or ""):
+        full, rc = _git(["rev-parse", "--verify", "--quiet", (tip or "HEAD") + "^{commit}"],
+                        cwd=repo_root)
+        if rc != 0 or not full:
+            return ReviewBase(_EMPTY_TREE, None, "tip does not name a commit")
+        tip = full
+    remote_ok = ""
+    if remote_sha and remote_sha != _ZERO_SHA:
+        _o, rc = _git(["cat-file", "-e", remote_sha + "^{commit}"], cwd=repo_root)
+        if rc == 0:
+            remote_ok = remote_sha
+    if remote_ok:
+        _o, rc = _git(["merge-base", "--is-ancestor", remote_ok, tip], cwd=repo_root)
+        if rc == 0:
+            out, rc = _git(["rev-list", "--count", f"{remote_ok}..{tip}"], cwd=repo_root)
+            n = int(out) if rc == 0 and out.isdigit() else None
+            return ReviewBase(remote_ok, n, "fast-forward of the remote ref")
+    args = ["rev-list", tip, "--topo-order", "--reverse", "--boundary",
+            "--not", "--remotes=" + (remote or "origin")]
+    if remote_ok:
+        args.append(remote_ok)
+    out, rc = _git(args, cwd=repo_root)
+    if rc != 0:
+        return ReviewBase(_EMPTY_TREE, None, "rev-list failed; reviewing everything")
+    commits, boundaries = [], []
+    for line in out.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("-"):
+            if line[1:] not in boundaries:
+                boundaries.append(line[1:])
+        elif line not in commits:
+            commits.append(line)
+    if not commits:
+        return ReviewBase(tip, 0, "every commit is already on " + (remote or "origin"))
+    if len(boundaries) == 1:
+        return ReviewBase(boundaries[0], len(commits), "boundary of the commits no remote ref holds")
+    if len(boundaries) > 1:
+        mb, rc = _git(["merge-base", "--octopus"] + boundaries, cwd=repo_root)
+        if rc == 0 and _SHA40.fullmatch(mb or ""):
+            return ReviewBase(mb, len(commits), "merge-base of several boundaries")
+        par, rc = _git(["rev-parse", "--verify", "--quiet", commits[0] + "^"], cwd=repo_root)
+        if rc == 0 and _SHA40.fullmatch(par or ""):
+            return ReviewBase(par, len(commits), "parent of the first unpublished commit")
+        return ReviewBase(_EMPTY_TREE, len(commits), "no usable boundary")
+    return ReviewBase(_EMPTY_TREE, len(commits), "no boundary: root or shallow history")
+
+
+def _push_remote(repo_root=None):
+    """(remote name, tracking sha or "") for the checked-out branch's upstream.
+
+    Falls back to "origin" with no sha. Only for callers that were not told
+    which remote is being pushed to (a pre-push hook is not).
+    """
+    full, rc = _git(["rev-parse", "--symbolic-full-name", "@{u}"], cwd=repo_root)
+    if rc == 0 and full.startswith("refs/remotes/"):
+        remote = full[len("refs/remotes/"):].partition("/")[0]
+        sha, rc = _git(["rev-parse", "--verify", "--quiet", full + "^{commit}"], cwd=repo_root)
+        return remote or "origin", (sha if rc == 0 else "")
+    b = _branch(repo_root)
+    if b:
+        rem, rc = _git(["config", "--get", f"branch.{b}.remote"], cwd=repo_root)
+        if rc == 0 and rem and rem != ".":
+            return rem, ""
+    return "origin", ""
+
+
+def _head_range(repo_root=None):
+    """(range, ReviewBase) for what HEAD would send to its own upstream.
+
+    The range is "<base>..<HEAD>", with an ancestor base; "" when HEAD is
+    unresolvable. Used where no ref list is available: --print-range, and the
+    git adapter when git handed it nothing to read.
+    """
+    tip = _head_sha(repo_root)
+    if not tip:
+        return "", ReviewBase(_EMPTY_TREE, None, "no HEAD")
+    remote, rsha = _push_remote(repo_root)
+    rb = resolve_review_base(remote, tip, rsha or None, repo_root)
+    return f"{rb.base_sha}..{tip}", rb
+
+
+def _extra_ref_carries(local_sha, remote, branch_tips, repo_root=None):
+    """(peeled commit sha or "", carries) for a non-branch ref update.
+
+    carries is True when the ref holds commits that no remote-tracking ref and
+    none of the branches pushed alongside holds -- the same exclusion the branch
+    review set uses. A git error counts as carrying (fail closed). A tag of a
+    tree or blob has no commits to review.
+    """
+    kind, rc = _git(["cat-file", "-t", local_sha], cwd=repo_root)
+    if rc == 0 and kind in ("tree", "blob"):
+        return "", False
+    tip, rc = _git(["rev-parse", "--verify", "--quiet", local_sha + "^{commit}"], cwd=repo_root)
+    if rc != 0 or not _SHA40.fullmatch(tip or ""):
+        return local_sha, True
+    out, rc = _git(["rev-list", "--count", tip, "--not", "--remotes=" + (remote or "origin")]
+                   + list(branch_tips), cwd=repo_root)
+    if rc != 0 or not out.isdigit():
+        return tip, True
+    return tip, int(out) > 0
+
+
+def _pushed_remote_arg(argv, repo_root=None):
+    """The remote git is pushing to, from `--remote <name>` (scripts/pre-push
+    forwards the hook's own argv[1]); "" when absent or not a configured remote.
+
+    Git passes the remote's NAME when the push named one, or its URL otherwise;
+    only a name can scope `--remotes=`, so anything else falls back to the
+    upstream-derived remote.
+    """
+    try:
+        name = argv[argv.index("--remote") + 1] if "--remote" in argv else ""
+    except IndexError:
+        return ""
+    if not name or name.startswith("-"):
+        return ""
+    _o, rc = _git(["config", "--get", f"remote.{name}.url"], cwd=repo_root)
+    return name if rc == 0 else ""
+
+
+def _range_for_refs(refs, repo_root=None, remote="", extra=()):
     """The revision range actually being pushed, or "" when nothing is.
 
-    `<remote sha>..<local sha>` per ref update -- exactly what the remote is
-    about to gain. A brand-new remote ref has an all-zero remote sha and no
-    such base, so it falls back to the same default-branch heuristic the skill
-    uses; that is a guess, but a guess about a NEW branch, not a silent skip.
+    `<base>..<local sha>` per ref update, where base comes from
+    resolve_review_base: the remote sha for a fast-forward, otherwise the
+    boundary of the commits no remote-tracking ref already holds. Never a
+    default-branch name: that was a guess that put everything main gained since
+    the fork into the diff, reversed.
+
+    The remote sha is whatever the REMOTE reported during negotiation, and the
+    client only needs the objects it must send -- so that commit may not exist
+    locally at all. The helper confirms it is present before using it, and an
+    unevaluable range counts as carrying commits (never a silent skip).
+    OCR_BASE_V1=1 restores the pre-0.13.0 selection.
     """
     found = []
+    v1 = _base_v1()
+    if not remote and not v1:
+        remote = _push_remote(repo_root)[0]
     for local_sha, remote_sha in refs:
-        # The remote sha is whatever the REMOTE reported during negotiation,
-        # and the client only needs the objects it must send -- so that commit
-        # may not exist locally at all. `git log <missing>..<local>` then fails
-        # with "unknown revision", and treating a failure as "no commits" would
-        # skip the review exactly when we are least sure. Confirm the base is
-        # present before using it, and fall back when it is not.
-        base = ""
-        if remote_sha != _ZERO_SHA:
-            _o, _rc = _git(["cat-file", "-e", remote_sha + "^{commit}"], cwd=repo_root)
-            if _rc == 0:
-                base = remote_sha
-        if not base:
-            for cand in ("origin/HEAD", "origin/main", "origin/master"):
-                out, rc = _git(["rev-parse", "--verify", "--quiet", cand], cwd=repo_root)
-                if rc == 0 and out:
-                    base = cand
-                    break
-        if not base:
+        if v1:
+            rng = _range_for_ref_v1(local_sha, remote_sha, repo_root)
+            if rng:
+                found.append(rng)
             continue
-        rng = base + ".." + local_sha
-        out, rc = _git(["log", rng, "--oneline"], cwd=repo_root)
-        if rc != 0:
-            # Still unevaluable. Assume it carries commits: over-reviewing
-            # costs a review, under-reviewing costs the gate.
-            found.append(rng)
-        elif out.strip():
-            found.append(rng)
+        rb = resolve_review_base(remote, local_sha, remote_sha, repo_root)
+        if rb.has_commits:
+            found.append(f"{rb.base_sha}..{local_sha}")
+    # Tags and other non-branch refs: reviewed only for commits the pushed
+    # branches (and the remote) do not already hold, so `--follow-tags` stays an
+    # ordinary single-range push while `git push origin v1` is no longer waved
+    # through. A second range makes the push multi-ref, which the caller refuses.
+    branch_tips = [r[0] for r in refs]
+    for local_sha, remote_sha in (extra if not v1 else ()):
+        tip, carries = _extra_ref_carries(local_sha, remote, branch_tips, repo_root)
+        if not carries:
+            continue
+        rb = resolve_review_base(remote, tip or local_sha, None, repo_root)
+        found.append(f"{rb.base_sha}..{tip or local_sha}")
     if not found:
         return ""
     if len(found) > 1:
@@ -662,22 +859,52 @@ def _range_for_refs(refs, repo_root=None):
     return found[0]
 
 
+def _range_for_ref_v1(local_sha, remote_sha, repo_root=None):
+    """OCR_BASE_V1: the pre-0.13.0 range for one ref update, or "" when empty."""
+    base = ""
+    if remote_sha != _ZERO_SHA:
+        _o, _rc = _git(["cat-file", "-e", remote_sha + "^{commit}"], cwd=repo_root)
+        if _rc == 0:
+            base = remote_sha
+    if not base:
+        for cand in ("origin/HEAD", "origin/main", "origin/master"):
+            out, rc = _git(["rev-parse", "--verify", "--quiet", cand], cwd=repo_root)
+            if rc == 0 and out:
+                base = cand
+                break
+    if not base:
+        return ""
+    rng = base + ".." + local_sha
+    out, rc = _git(["log", rng, "--oneline"], cwd=repo_root)
+    if rc != 0 or out.strip():
+        return rng  # unevaluable: assume it carries commits
+    return ""
+
+
 def _has_unpushed_commits(repo_root=None, push_range=None):
     """Is there anything to review for this push?
 
     When the caller knows the range being pushed (git mode, from the pre-push
     refs), that is the answer -- it describes what the REMOTE is about to gain.
-    Only without it does this fall back to asking whether HEAD is ahead of its
-    own upstream, which is a different question and answers "no" for a
-    `branch:main` push whose branch was already pushed.
+    Only without it does this ask what HEAD holds that its remote lacks, through
+    the same resolve_review_base every other path uses -- a different question,
+    and one that answers "no" for a `branch:main` push whose branch was already
+    pushed.
 
     repo_root is not optional in spirit either: without it this asked the
     PROCESS cwd, which in hook mode is wherever Claude Code was launched from.
     """
     if push_range and push_range != _MULTI_REF:
         out, rc = _git(["log", push_range, "--oneline"], cwd=repo_root)
-        if rc == 0:
-            return bool(out.strip())
+        if rc != 0:
+            # A failed (or timed-out) log is an unevaluable range, not an empty
+            # one. Falling through to the HEAD-based check answered a different
+            # question and let unreviewed commits through; unknown carries.
+            return True
+        return bool(out.strip())
+    if not _base_v1():
+        _rng, rb = _head_range(repo_root)
+        return rb.has_commits  # unknown (None) -> let the reviewer decide
     for ref in ("@{u}", "origin/main", "origin/master", "origin/HEAD"):
         out, rc = _git(["log", f"{ref}..HEAD", "--oneline"], cwd=repo_root)
         if rc == 0:
@@ -962,16 +1189,22 @@ def _read_history(git_dir, limit=10):
     return entries[-limit:] if limit else entries
 
 
-def _marker_path(git_dir, head_sha):
+def _marker_path(git_dir, head_sha, base=""):
     """Path of the "this push was already reviewed" marker.
 
-    Keyed on HEAD sha alone, which is narrower than it looks: it identifies the
-    COMMITS, not the push. Reviewing HEAD and then pushing a different ref that
+    Keyed on (base[:16], HEAD sha): the tip says WHAT was reviewed and the base
+    says against what -- a tip reviewed against a different base is a different
+    review and must not replay this verdict. It still identifies the COMMITS,
+    not the push. Reviewing HEAD and then pushing a different ref that
     resolves to the same HEAD within MARKER_TTL skips the second review. That is
     the intended behaviour -- the same commits do not need reviewing twice, and
     it is what lets the two adapters avoid double-reviewing one push -- but it
     does mean the marker is not a per-remote or per-ref record.
     """
+    if base:
+        # The base is part of the key: the same tip reviewed against another
+        # base is a different review, and must not replay this one's verdict.
+        return Path(git_dir) / f"{MARKER_PREFIX}{base[:16]}-{head_sha}"
     return Path(git_dir) / f"{MARKER_PREFIX}{head_sha}"
 
 
@@ -1668,22 +1901,32 @@ def _hook_target(repo_root, cmd):
     if rc != 0 or not tip:
         return "deny", {"why": f"review-gate: `{_sanitize(src, 80)}` does not name a commit "
                                "in this repository, so nothing could be reviewed."}
-    base = ""
-    for cand in (f"refs/remotes/{remote}/{dst}", "origin/HEAD", "origin/main", "origin/master"):
-        ref, rc = _git(["rev-parse", "--verify", "--quiet", cand + "^{commit}"], cwd=repo_root)
-        if rc != 0 or not ref:
-            continue
-        mb, rc = _git(["merge-base", ref, tip], cwd=repo_root)
-        if rc == 0 and mb:
-            base = mb
-            break
-    if not base:
-        base = _EMPTY_TREE  # brand-new repository: everything is new
-    rng = base + ".." + tip
-    if base != _EMPTY_TREE:
-        out, rc = _git(["log", rng, "--oneline", "--max-count=1"], cwd=repo_root)
-        if rc == 0 and not out.strip():
+    if _base_v1():
+        base = ""
+        for cand in (f"refs/remotes/{remote}/{dst}", "origin/HEAD", "origin/main", "origin/master"):
+            ref, rc = _git(["rev-parse", "--verify", "--quiet", cand + "^{commit}"], cwd=repo_root)
+            if rc != 0 or not ref:
+                continue
+            mb, rc = _git(["merge-base", ref, tip], cwd=repo_root)
+            if rc == 0 and mb:
+                base = mb
+                break
+        if not base:
+            base = _EMPTY_TREE  # brand-new repository: everything is new
+        if base != _EMPTY_TREE:
+            out, rc = _git(["log", base + ".." + tip, "--oneline", "--max-count=1"], cwd=repo_root)
+            if rc == 0 and not out.strip():
+                return "allow", {"why": "remote already has these commits"}
+    else:
+        # The same helper the git adapter uses, with the tracking ref standing in
+        # for the remote sha git would have reported.
+        tracked, rc = _git(["rev-parse", "--verify", "--quiet",
+                            f"refs/remotes/{remote}/{dst}^{{commit}}"], cwd=repo_root)
+        rb = resolve_review_base(remote, tip, tracked if rc == 0 and tracked else None, repo_root)
+        base = rb.base_sha
+        if rb.commits == 0:
             return "allow", {"why": "remote already has these commits"}
+    rng = base + ".." + tip
     return "review", {
         "tip": tip, "branch": src_branch or src, "base": base, "range": rng,
         "remote": remote, "dst": dst,
@@ -2610,8 +2853,24 @@ def _async_dir(common_dir):
     return Path(common_dir) / ASYNC_DIR
 
 
-def _state_path(common_dir, tip):
-    return _async_dir(common_dir) / f"{tip}.json"
+def _state_path(common_dir, tip, base=None):
+    """The async state file for one review, keyed by (base[:16], tip).
+
+    The verdict belongs to the range that was reviewed, not to the tip alone: a
+    tip reviewed against one base must not replay its `done` for a push that
+    reviews it against another. base="" is the keyless legacy name `<tip>.json`
+    (OCR_LEGACY_RANGE runs have no base). base=None means "whichever base" --
+    the newest existing state for this tip, for callers that only know the tip.
+    """
+    d = _async_dir(common_dir)
+    if base is None:
+        try:
+            hits = [p for p in d.glob(f"*{tip}.json") if p.name.endswith(f"{tip}.json")]
+            hits.sort(key=lambda p: p.stat().st_mtime)
+        except OSError:
+            hits = []
+        return hits[-1] if hits else d / f"{tip}.json"
+    return d / (f"{base[:16]}-{tip}.json" if base else f"{tip}.json")
 
 
 def _read_state(path):
@@ -2746,7 +3005,7 @@ def _drive_review(common_dir, repo_root, meta, mode, budget):
     a review problem -- those become "failed" states with a reason.
     """
     tip = meta["tip"]
-    state_path = _state_path(common_dir, tip)
+    state_path = _state_path(common_dir, tip, meta.get("base") or "")
     force = os.environ.get("OCR_FORCE_REVIEW", "").strip().lower() in ("1", "true", "yes")
     deadline = _HOOK_T0 + budget
     forced_once = False
@@ -3430,7 +3689,7 @@ def _supervise_run(state_path, run_id):
         # The pass-only legacy marker, unchanged: an older global git hook
         # reads its presence as "reviewed and passed", so a block must never
         # be written under it. Blocks replay from this state file instead.
-        marker = _marker_path(git_dir, tip) if git_dir else None
+        marker = _marker_path(git_dir, tip, base) if git_dir else None
         if marker:
             try:
                 _write_marker(marker, tip, verdict, advisory, reasons)
@@ -7963,6 +8222,34 @@ def _fail_closed(mode, msg):
         sys.exit(1)
 
 
+def _print_range(repo_root=None):
+    """--print-range: the revision range `--unpushed` should review, on stdout.
+
+    The skill used to re-derive `@{u}..HEAD`, which is a different answer from
+    the gate's (it is a tree-diff against a base that need not be an ancestor of
+    HEAD). This prints what the gate itself would review for HEAD: always
+    "<ancestor sha>..<HEAD sha>", empty diff when HEAD adds nothing. Exit 1 when
+    no range can be produced.
+    """
+    repo_root = repo_root or _repo_root()
+    if _base_v1():
+        tip = _head_sha(repo_root)
+        for ref in ("@{u}", "origin/main", "origin/master", "origin/HEAD"):
+            _o, rc = _git(["rev-parse", "--verify", "--quiet", ref], cwd=repo_root)
+            if tip and rc == 0:
+                sys.stdout.write(f"{ref}..{tip}\n")
+                return 0
+        sys.stderr.write("[review-gate] --print-range: no upstream to compare HEAD with\n")
+        return 1
+    rng, rb = _head_range(repo_root)
+    if not rng:
+        sys.stderr.write("[review-gate] --print-range: no HEAD commit in this directory\n")
+        return 1
+    sys.stdout.write(rng + "\n")
+    _warn(f"range base: {rb.reason}")
+    return 0
+
+
 def main(argv):
     # Mode is parsed INSIDE the safety net so an IndexError from a malformed
     # '--mode' flag (e.g. '--mode' with no value) is also caught and fails
@@ -7975,6 +8262,8 @@ def main(argv):
         sys.exit(_print_history(argv))
     if "--telemetry-report" in argv:
         sys.exit(_print_telemetry_report(argv))
+    if "--print-range" in argv:
+        sys.exit(_print_range())
 
     _mode_arg0 = ""
     if "--mode" in argv:
@@ -8147,8 +8436,9 @@ def _main_inner(argv, mode):
     # is all there is -- and since 0.6.0 it is read rather than ignored.
     push_range, tip, branch, base = "", "", "", ""
     if mode == "git":
-        refs = _read_push_refs()
-        push_range = _range_for_refs(refs, repo_root)
+        refs, other_refs = _read_push_updates()
+        push_range = _range_for_refs(refs, repo_root, _pushed_remote_arg(argv, repo_root),
+                                     extra=other_refs)
         if push_range == _MULTI_REF:
             if _fail_open_requested():
                 allow()
@@ -8159,7 +8449,14 @@ def _main_inner(argv, mode):
                 "unreviewed, so it is refused instead.\n\nPush the branches separately, or "
                 "set OCR_FAIL_OPEN=1 for a one-shot bypass.",
             )
-        if not _has_unpushed_commits(repo_root, push_range):
+        if not refs and not other_refs and not _base_v1():
+            # Git told us nothing readable. Ask the same helper what HEAD would
+            # send, so the review still gets an ancestor-based range instead of
+            # falling through to a whole-repo one.
+            push_range = _head_range(repo_root)[0]
+            if not _has_unpushed_commits(repo_root, push_range):
+                allow()
+        elif not _has_unpushed_commits(repo_root, push_range):
             allow()
         if push_range and ".." in push_range:
             base, tip = push_range.split("..", 1)
@@ -8190,7 +8487,7 @@ def _main_inner(argv, mode):
             allow()
         _fail_closed(mode, "review-gate: could not resolve the commit to review - blocking.")
     common_dir = _git_common_dir(repo_root) or git_dir
-    marker = _marker_path(git_dir, tip)
+    marker = _marker_path(git_dir, tip, base)
 
     # The legacy pass marker: the other adapter, or an older gate, already
     # reviewed these exact commits and passed them within the TTL. Replay what
@@ -8204,8 +8501,11 @@ def _main_inner(argv, mode):
 
     session_id = str(payload.get("session_id") or "") if isinstance(payload, dict) else ""
     count = ""
-    if push_range and base != _EMPTY_TREE:
-        out, rc = _git(["rev-list", "--count", push_range], cwd=repo_root)
+    if push_range:
+        # base is an ancestor sha, or _EMPTY_TREE when no commit bounds the
+        # range -- then the commits are everything tip reaches.
+        out, rc = _git(["rev-list", "--count", tip if base == _EMPTY_TREE else push_range],
+                       cwd=repo_root)
         count = out.strip() if rc == 0 else ""
     meta = {
         "tip": tip, "branch": branch, "base": base, "range": push_range,
@@ -8224,9 +8524,9 @@ def _main_inner(argv, mode):
         # Budget spent, review still running. Deny -- an allow would push
         # unreviewed commits -- and say exactly how to collect the verdict.
         # The parked note lets --mode post announce it when it lands.
-        cur = _read_state(_state_path(common_dir, tip)) or meta
+        cur = _read_state(_state_path(common_dir, tip, base)) or meta
         _park_pending(session_id, repo_root, tip, kind="async",
-                      extra={"state": str(_state_path(common_dir, tip))})
+                      extra={"state": str(_state_path(common_dir, tip, base))})
         if _fail_open_requested():
             allow()
         _fail_closed(mode, _still_running_reason(cur, budget, mode))

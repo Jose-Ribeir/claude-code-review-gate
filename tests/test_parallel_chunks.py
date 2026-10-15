@@ -186,7 +186,9 @@ def test_progress_fields_stay_consistent(tmp_path):
     work = ag._big_repo(tmp_path, n_files=4)
     tip = ag._git(["rev-parse", "HEAD"], cwd=work)
     common = review_gate._git_common_dir(str(work))
-    state_path = review_gate._state_path(common, tip)
+    # The state file is keyed by (base, tip); the base here is origin/main.
+    state_path = review_gate._state_path(
+        common, tip, ag._git(["rev-parse", "origin/main"], cwd=work))
     payload = json.dumps({"session_id": "s1", "tool_name": "Bash", "cwd": str(work),
                           "tool_input": {"command": "git push origin main"}})
     proc = subprocess.Popen([sys.executable, ag._GATE, "--mode", "hook"],
@@ -230,7 +232,9 @@ def test_a_fence_kills_every_child(tmp_path):
     work = ag._big_repo(tmp_path, n_files=4)
     tip = ag._git(["rev-parse", "HEAD"], cwd=work)
     common = review_gate._git_common_dir(str(work))
-    state_path = review_gate._state_path(common, tip)
+    # The state file is keyed by (base, tip); the base here is origin/main.
+    state_path = review_gate._state_path(
+        common, tip, ag._git(["rev-parse", "origin/main"], cwd=work))
     payload = json.dumps({"session_id": "s1", "tool_name": "Bash", "cwd": str(work),
                           "tool_input": {"command": "git push origin main"}})
     proc = subprocess.Popen([sys.executable, ag._GATE, "--mode", "hook"],

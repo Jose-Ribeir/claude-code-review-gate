@@ -5,7 +5,9 @@
 # official `claude` CLI and blocks confident high-severity findings.
 #
 # This is a PRE-PUSH hook, not pre-commit, and that is load-bearing: the gate
-# reviews `@{u}..HEAD` (all unpushed commits). During a pre-commit hook the new
+# reviews the commits being pushed (the ref updates git feeds this hook, based
+# on the newest commit already on the remote -- see resolve_review_base in
+# review-gate.py). During a pre-commit hook the new
 # commit does not exist yet, so HEAD still points at its parent — the staged
 # changes being committed would never be reviewed, and the already-reviewed
 # commits behind HEAD would be re-reviewed on every single commit.
@@ -113,7 +115,7 @@ if [ "${OCR_IN_REVIEW:-}" = "1" ]; then
   :
 elif GATE_DIR="$(_resolve_gate_dir)"; then
   if [ -n "$PY" ]; then
-    echo "$REFS" | "$PY" "$GATE_DIR/review-gate.py" --mode git || RC=$?
+    echo "$REFS" | "$PY" "$GATE_DIR/review-gate.py" --mode git --remote "${1:-}" || RC=$?
   elif _fail_open_requested; then
     echo "review-gate: no working Python 3 found; OCR_FAIL_OPEN set, skipping review." >&2
   else

@@ -22,10 +22,10 @@ You are orchestrating an AI code review. Follow these steps exactly.
 ## 0. Parse arguments (`$ARGUMENTS`)
 
 - `--staged` — review staged changes only (`git diff --staged`).
-- `--unpushed` — review all commits not yet pushed to the upstream branch. File
-  list: `git diff -M @{u}..HEAD --name-status`; falls back to
-  `git diff -M origin/main..HEAD --name-status` if no upstream tracking branch is
-  set. Per-file diff: `git diff -M @{u}..HEAD -- <path>` (or the fallback ref).
+- `--unpushed` — review all commits not yet pushed. The range is whatever
+  `review-gate.py --print-range` prints (see "Determine the revision range"
+  below): `<base>..HEAD`, where `<base>` is an ancestor of `HEAD`. File list:
+  `git diff -M <range> --name-status`. Per-file diff: `git diff -M <range> -- <path>`.
 - `--range <A>..<B>` — review exactly that range. **Takes precedence over
   `--unpushed`.** The pre-push gate passes it, because git tells a pre-push hook
   precisely what is being sent and where (`<local ref> <local sha> <remote ref>
@@ -218,11 +218,16 @@ the `--range` argument.
 **Determine the revision range** for `--unpushed`:
 0. If `--range <A>..<B>` was given, use it verbatim as `<range>` and skip the
    rest — the caller knows what is being pushed and this does not.
-1. Try `git rev-parse @{u}` — if it succeeds, use `@{u}..HEAD` as `<range>`.
-2. If it fails (no upstream tracking branch), run
-   `git remote show origin | grep 'HEAD branch'` to get the default branch name,
-   then use `origin/<defaultBranch>..HEAD` as `<range>`.
-3. If both fail, fall back to `origin/main..HEAD`.
+1. Run `python "${CLAUDE_PLUGIN_ROOT}/scripts/review-gate.py" --print-range`
+   (`python3` or `py` if `python` is not on PATH) and use its single line of
+   output as `<range>`. Do NOT re-derive `@{u}..HEAD` or `origin/main..HEAD`
+   yourself: the gate picks an ancestor of `HEAD` as the base (the newest commit
+   already on the remote, or the fork point of a new or stacked branch), where a
+   hand-rolled `origin/main..HEAD` also diffs everything `main` gained since the
+   fork, reversed, as if this branch had deleted it.
+2. Only if that command cannot run at all (no Python, script missing), fall back
+   to `git merge-base HEAD @{u}` (or `origin/HEAD` when there is no upstream) and
+   use `<that sha>..HEAD` as `<range>`.
 
 `--range` alone (without `--unpushed`) behaves the same way: it is a diff review
 over `<range>`, using the same file list and per-file diff commands.
