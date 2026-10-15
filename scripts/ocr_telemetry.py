@@ -453,7 +453,7 @@ def report(records):
     if res:
         add(f"\nResolver: runs={res['runs']} priors={res['priors']} resolved={res['resolved']} "
             f"still_present={res['still_present']} unverified={res['unverified']} "
-            f"rechecks={res['rechecks']} warnings={res['warnings']}")
+            f"failed={res['failed']} rechecks={res['rechecks']} warnings={res['warnings']}")
 
     prov = Counter()
     for r in records:

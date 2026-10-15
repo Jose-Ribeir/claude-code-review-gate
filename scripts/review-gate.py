@@ -3551,6 +3551,8 @@ def _supervise_run(state_path, run_id):
                         ev_path, ev_blob,
                         res.get("evidence_quote") or "",
                         run_id,
+                        extra=_resolution_target_facts(review_root, tip, p["finding"]),
+                        review_root=review_root,
                     )
                     if ev_path and ev_path == (p["finding"].get("path") or ""):
                         self_resolved.setdefault(ev_path, set()).add(p["id"])
@@ -4310,18 +4312,115 @@ def _read_resolution(common_dir, fp, res_id, target_oid, evidence_path, evidence
     return data
 
 
+def _cat_blob_texts(root, oids):
+    """{oid: text} for blob `oids`, read by ONE `git cat-file --batch`.
+
+    A missing or unreadable blob (or any failure) leaves its oid out of the
+    result, so a caller that needs it fails closed.
+    """
+    oids = [o for o in dict.fromkeys(oids) if o]
+    if not oids or not root:
+        return {}
+    try:
+        proc = subprocess.run(
+            ["git", "cat-file", "--batch"], cwd=root,
+            input=("\n".join(oids) + "\n").encode("ascii", "replace"),
+            capture_output=True, timeout=30,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception:
+        return {}
+    if proc.returncode != 0:
+        return {}
+    data, pos, out = proc.stdout, 0, {}
+    for oid in oids:
+        nl = data.find(b"\n", pos)
+        if nl == -1:
+            break
+        header = data[pos:nl].decode("ascii", "replace").split()
+        pos = nl + 1
+        if len(header) < 3 or header[1] != "blob" or not header[2].isdigit():
+            continue  # "<oid> missing", or not a blob
+        size = int(header[2])
+        out[oid] = data[pos:pos + size].decode("utf-8", "replace")
+        pos += size + 1  # the object body is followed by a newline
+    return out
+
+
+_FLAGGED_CODE_CAP = 8000
+
+# A resolution's evidence quote must carry at least this many non-whitespace
+# characters to stand in for the exact-blob rule: a shorter one ("return",
+# "x = 1") also appears in unrelated code once the evidence file is edited.
+_EVIDENCE_QUOTE_MIN_CHARS = 12
+
+
+def _quote_in_text(quote, text):
+    """Whether `quote` is in `text`: whitespace-insensitive, on token
+    boundaries (an edge that is a word character must not touch another one),
+    and only for a quote of _EVIDENCE_QUOTE_MIN_CHARS or more."""
+    q, t = _norm_ws(quote), _norm_ws(text)
+    if len("".join(q.split())) < _EVIDENCE_QUOTE_MIN_CHARS:
+        return False
+    pat = re.escape(q)
+    if re.match(r"\w", q[0]):
+        pat = r"(?<!\w)" + pat
+    if re.match(r"\w", q[-1]):
+        pat += r"(?!\w)"
+    return re.search(pat, t) is not None
+
+
+def _resolution_target_facts(review_root, tip, finding):
+    """Fields a resolution stores so it can be re-validated by content later:
+    the finding's file and flagged code, whether that code was already gone
+    from the file at tip, and the tip blob that was checked. {} when anything
+    is unknown -- the resolution then keeps the exact-blob rule."""
+    try:
+        path = finding.get("path") or ""
+        code = (finding.get("existing_code") or "").strip()
+        if not path or not code or len(code) > _FLAGGED_CODE_CAP:
+            return {}
+        blob = _blob_oids_at(review_root, tip, [path]).get(path, "")
+        if not blob:
+            return {"target_path": path, "flagged_code": code,
+                    "flagged_code_absent": True, "target_blob_oid": ""}
+        text = _cat_blob_texts(review_root, [blob]).get(blob)
+        if text is None:
+            return {}
+        return {"target_path": path, "flagged_code": code,
+                "flagged_code_absent": _norm_ws(code) not in _norm_ws(text),
+                "target_blob_oid": blob}
+    except Exception:
+        return {}
+
+
 def _find_valid_resolution(common_dir, fp, fid, target_oid, review_root, tip, blobs=None):
     """Return the first valid resolution for finding `fid`, or None.
 
-    `blobs` is an optional {path: oid at tip} memo shared across calls, so an
-    evidence path is looked up once per run, not once per finding.
+    `blobs` is an optional {path: oid at tip} memo shared across calls, so a
+    path is looked up once per run, not once per finding.
 
-    A resolution is valid when target_oid matches AND the evidence_path blob
-    at the current tip equals the recorded evidence_blob_oid (fix not reverted).
+    A resolution is valid when target_oid matches AND the fix still holds at tip:
+    - the evidence_path blob at tip equals the recorded evidence_blob_oid (the
+      fast path: nothing about the evidence file changed), or, once that file
+      was edited, the stored evidence_quote is still in it; AND
+    - when the flagged code was gone from the finding's file at resolution
+      time, it is still gone (the fix was not reverted).
+    A resolution missing any of the stored fields (written before this rule)
+    keeps the exact-blob rule only: fail closed.
     """
     res_dir = _fp_dir(common_dir, fp) / "resolutions"
     if not res_dir.is_dir():
         return None
+
+    def at_tip(path):
+        if blobs is not None and path in blobs:
+            return blobs[path]
+        oid = _blob_oids_at(review_root, tip, [path]).get(path, "")
+        if blobs is not None:
+            blobs[path] = oid
+        return oid
+
     prefix = fid[:16] + "-"
     for p in res_dir.glob(f"{prefix}*.json"):
         try:
@@ -4336,22 +4435,60 @@ def _find_valid_resolution(common_dir, fp, fid, target_oid, review_root, tip, bl
         ev_blob = data.get("evidence_blob_oid") or ""
         if not ev_path or not ev_blob:
             continue
-        if blobs is not None and ev_path in blobs:
-            current = blobs[ev_path]
-        else:
-            current = _blob_oids_at(review_root, tip, [ev_path]).get(ev_path, "")
-            if blobs is not None:
-                blobs[ev_path] = current
-        if current != ev_blob:
+        current = at_tip(ev_path)
+        if not current:
+            continue  # the evidence file is gone
+        quote = data.get("evidence_quote") or ""
+        t_path = data.get("target_path") or ""
+        code = _norm_ws(data.get("flagged_code"))
+        absent_then = data.get("flagged_code_absent")
+        by_content = bool(quote and t_path and code and isinstance(absent_then, bool))
+        if not by_content:
+            if current == ev_blob:
+                return data
             continue
+        need_ev = current != ev_blob
+        t_cur, need_target = "", False
+        if absent_then:
+            t_cur = at_tip(t_path)
+            if not t_cur and data.get("target_blob_oid"):
+                # The file existed when the fix was checked and is gone from
+                # tip: it may have moved with the code in it. Unverifiable, so
+                # only the exact-blob rule applies (fail closed).
+                if current == ev_blob:
+                    return data
+                continue
+            need_target = bool(t_cur) and t_cur != (data.get("target_blob_oid") or "")
+        texts = {}
+        if need_ev or need_target:
+            texts = _cat_blob_texts(review_root, [current if need_ev else "",
+                                                  t_cur if need_target else ""])
+        if need_ev and not _quote_in_text(quote, texts.get(current, "")):
+            continue
+        if need_target:
+            t_text = texts.get(t_cur)
+            if t_text is None or code in _norm_ws(t_text):
+                continue  # unreadable (fail closed), or the flagged code is back
         return data
     return None
 
 
 def _write_resolution(common_dir, fp, res_id, target_oid, evidence_path,
-                      evidence_blob_oid, evidence_quote, run_id):
-    """Persist a finding resolution. Best-effort."""
+                      evidence_blob_oid, evidence_quote, run_id, extra=None,
+                      review_root=None):
+    """Persist a finding resolution. Best-effort.
+
+    `extra` (see _resolution_target_facts) adds what _find_valid_resolution
+    needs to keep the resolution valid by content once the evidence file moves on.
+    It is stored only when the quote is usable and really is in the evidence
+    blob right now (read from `review_root`); otherwise it is dropped and the
+    resolution keeps the exact-blob rule (fail closed)."""
     try:
+        if isinstance(extra, dict) and extra:
+            texts = (_cat_blob_texts(review_root, [evidence_blob_oid])
+                     if review_root and evidence_blob_oid else {})
+            if not _quote_in_text(evidence_quote, texts.get(evidence_blob_oid, "")):
+                extra = None
         rpath = _resolution_path(
             common_dir, fp, res_id, target_oid, evidence_path, evidence_blob_oid
         )
@@ -4362,6 +4499,8 @@ def _write_resolution(common_dir, fp, res_id, target_oid, evidence_path,
             "evidence_quote": evidence_quote or "",
             "resolved_ts": time.time(), "run_id": run_id or "",
         }
+        if isinstance(extra, dict):
+            data.update(extra)
         _write_state(rpath, data)
     except Exception:
         pass
@@ -5661,10 +5800,32 @@ def _dedup_by_id(findings):
     return out
 
 
-def _record_findings_for(item, new_by_path, orphans, active_paths):
+def _resolution_suppressor(common_dir, fp, review_root, tip):
+    """finding -> True when a valid resolution already covers it at tip.
+    False for anything unknowable (no repo/tip, any error): never hides a finding."""
+    memo = {}
+
+    def suppressed(f):
+        if not review_root or not tip:
+            return False
+        try:
+            fid = f.get("id") or _finding_id(f)
+            return _find_valid_resolution(common_dir, fp, fid, f.get("target_oid") or "",
+                                          review_root, tip, memo) is not None
+        except Exception:
+            return False
+    return suppressed
+
+
+def _record_findings_for(item, new_by_path, orphans, active_paths, suppressed=None):
     """A record keeps what is still owed on this file state: its new findings,
     findings about files outside this context, and the unjudged-away priors of
-    the state it was delta-reviewed from."""
+    the state it was delta-reviewed from.
+
+    `suppressed(finding)` drops a prior a valid resolution already covers: it
+    is not owed, and re-emitting it would only hand it to the next reader to
+    suppress again. Only this new record's copy is dropped; other records,
+    which other tips share, are never rewritten from cross-file evidence."""
     path = item["entry"]["path"]
     own = list(new_by_path.get(path) or [])
     carried = []
@@ -5677,6 +5838,8 @@ def _record_findings_for(item, new_by_path, orphans, active_paths):
             # that blob, not from this record's (a failed resolver leaves it owed).
             if not f.get("target_oid") and prev.get("head_oid"):
                 f = dict(f, target_oid=prev["head_oid"])
+            if suppressed is not None and suppressed(f):
+                continue
             carried.append(f)
     return _dedup_by_id(own + list(orphans) + carried)
 
@@ -5757,6 +5920,7 @@ def _write_run_records(result, active_items, common_dir, fp, run_id, review_root
             new_by_path.setdefault(p, []).append(f)
         else:
             orphans.append(f)
+    suppressed = _resolution_suppressor(common_dir, fp, review_root, tip)
     for item in active_items:
         e = item["entry"]
         path = e["path"]
@@ -5777,7 +5941,7 @@ def _write_run_records(result, active_items, common_dir, fp, run_id, review_root
             flagged_paths.add(path)
         _write_ledger_record(
             common_dir, fp, key, e["new_oid"], path, old_path, e["status"], e["old_oid"],
-            _record_findings_for(item, new_by_path, orphans, active_paths),
+            _record_findings_for(item, new_by_path, orphans, active_paths, suppressed),
             chain_depth, run_id, truncated=flagged,
         )
         _clear_timeout_mark(common_dir, fp, key, e["new_oid"])
@@ -7011,7 +7175,10 @@ class _SegState:
         key = _record_key(sf.path, sf.old_path, e["status"], e["old_oid"])
         _write_ledger_record(
             self.common_dir, self.fp, key, e["new_oid"], sf.path, sf.old_path, e["status"], e["old_oid"],
-            _record_findings_for(item, {sf.path: stamped_own}, orphans, {sf.path}), 0, self.run_id,
+            _record_findings_for(item, {sf.path: stamped_own}, orphans, {sf.path},
+                                 _resolution_suppressor(self.common_dir, self.fp,
+                                                        self.review_root, self.tip)),
+            0, self.run_id,
             truncated=False)
         _clear_timeout_mark(self.common_dir, self.fp, key, e["new_oid"])
         sf.written = True
