@@ -22,3 +22,5 @@ Thumbs.db
 *.swp
 
 # Note: examples/.ocr/rule.json IS tracked (sample config) — do not ignore it.
+
+.delegate-kit/
