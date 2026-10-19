@@ -220,8 +220,9 @@ def test_flagged_code_that_survived_the_fix_is_left_to_the_quote_check(tmp_path)
                                   _blob(work, t2, "c.py"), GOOD, "r", extra=facts,
                                   review_root=str(work))
     t3 = _commit(work, {"c.py": f"# c edited\n{GOOD}\n"})
-    find = lambda tip: review_gate._find_valid_resolution(
-        common, FP, _FID, target, str(work), tip)
+    def find(tip):
+        return review_gate._find_valid_resolution(
+            common, FP, _FID, target, str(work), tip)
     assert find(t3) is not None
     t4 = _commit(work, {"c.py": "# c, fix removed\n"})
     assert find(t4) is None
@@ -273,8 +274,9 @@ def test_a_quote_absent_from_the_evidence_at_write_time_is_not_stored_as_content
     data = _stored_one(common)
     assert "target_path" not in data and "flagged_code" not in data
     # exact-blob rule: valid while the evidence blob is unchanged, not after.
-    find = lambda tip: review_gate._find_valid_resolution(
-        common, FP, _FID, target, str(work), tip)
+    def find(tip):
+        return review_gate._find_valid_resolution(
+            common, FP, _FID, target, str(work), tip)
     assert find(t2) is not None
     t3 = _commit(work, {"c.py": f"# c edited\n{GOOD}\ndef invented(): pass\n"})
     assert find(t3) is None

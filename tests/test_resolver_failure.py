@@ -13,7 +13,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from test_resolver_robustness import (  # noqa: E402  (also puts scripts/ on sys.path)
-    _FID, _amend, _blocked_on_x, _env, _git, _hook, _prior, _state, _trace,
+    _FID, _amend, _blocked_on_x, _env, _hook, _prior, _state, _trace,
     review_gate,
 )
 import ocr_telemetry  # noqa: E402
