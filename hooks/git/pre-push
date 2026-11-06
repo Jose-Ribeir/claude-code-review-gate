@@ -138,10 +138,10 @@ MSG
 fi
 
 # The installer preserves a pre-existing repo-local pre-push as
-# .git/hooks/pre-push.user; run it too (only if we did not already block),
+# pre-push.user NEXT TO THIS HOOK (wherever it was installed -- .git/hooks or
+# the repo's core.hooksPath); run it too (only if we did not already block),
 # replaying the ref lines we consumed above on its stdin.
-GITDIR="$(git rev-parse --git-dir 2>/dev/null || echo .git)"
-LOCAL_USER="$GITDIR/hooks/pre-push.user"
+LOCAL_USER="$(dirname "$0")/pre-push.user"
 if [ "$RC" -eq 0 ] && [ -x "$LOCAL_USER" ] && [ "$LOCAL_USER" -ef "$0" ] 2>/dev/null; then
   : # guard: never recurse into ourselves
 elif [ "$RC" -eq 0 ] && [ -x "$LOCAL_USER" ]; then

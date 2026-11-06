@@ -21,21 +21,42 @@ GITDIR="$(git -C "$REPO" rev-parse --absolute-git-dir 2>/dev/null)" || {
   exit 2
 }
 HOOKS_DIR="$GITDIR/hooks"
+# A3: the pre-push was installed into core.hooksPath when the repo sets one
+# (install-kimchi-hook.sh honors it); uninstall from wherever git would
+# actually run it. The default $GITDIR/hooks is still swept below for
+# recognizably-ours leftovers from older, mis-placed installs.
+HOOKS_CFG="$(git -C "$REPO" config --get core.hooksPath 2>/dev/null || true)"
+if [ -n "$HOOKS_CFG" ]; then
+  REPO_TOP="$(git -C "$REPO" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$REPO")"
+  case "$HOOKS_CFG" in
+    /*) CFG_HOOKS_DIR="$HOOKS_CFG" ;;
+    *)  CFG_HOOKS_DIR="$REPO_TOP/$HOOKS_CFG" ;;
+  esac
+else
+  CFG_HOOKS_DIR=""
+fi
+
+# (a) repo-level pre-push: restore the preserved user hook if there is one.
+# Runs for the configured hooks dir (when set) and the default one, in that
+# order; only files recognizably ours are ever touched.
+_DIRS=()
+if [ -n "$CFG_HOOKS_DIR" ]; then _DIRS+=("$CFG_HOOKS_DIR"); fi
+if [ "$CFG_HOOKS_DIR" != "$HOOKS_DIR" ]; then _DIRS+=("$HOOKS_DIR"); fi
+for dir in "${_DIRS[@]}"; do
+  if [ -f "$dir/pre-push" ] && grep -q "review-gate.py" "$dir/pre-push" 2>/dev/null; then
+    rm -f "$dir/pre-push"
+    echo "Removed $dir/pre-push"
+  fi
+  if [ -f "$dir/pre-push.user" ]; then
+    mv "$dir/pre-push.user" "$dir/pre-push"
+    chmod +x "$dir/pre-push" 2>/dev/null || true
+    echo "Restored your previous pre-push hook at $dir/pre-push."
+  fi
+done
 KIMCHI_HOOKS_DIR="${KIMCHI_HOOKS_DIR:-$HOME/.config/kimchi/harness/hooks/bash}"
 EXT_DIR="${OCR_EXT_DIR:-$HOME/.config/kimchi/harness/extensions}"
 EXT_FILE="$EXT_DIR/review-gate-deny.ts"
 STATE_DIR="${OCR_STATE_DIR:-$HOME/.local/state/review-gate}"
-
-# (a) repo-level pre-push: restore the preserved user hook if there is one.
-if [ -f "$HOOKS_DIR/pre-push" ] && grep -q "review-gate.py" "$HOOKS_DIR/pre-push" 2>/dev/null; then
-  rm -f "$HOOKS_DIR/pre-push"
-  echo "Removed $HOOKS_DIR/pre-push"
-fi
-if [ -f "$HOOKS_DIR/pre-push.user" ]; then
-  mv "$HOOKS_DIR/pre-push.user" "$HOOKS_DIR/pre-push"
-  chmod +x "$HOOKS_DIR/pre-push" 2>/dev/null || true
-  echo "Restored your previous pre-push hook."
-fi
 
 # (b) the Kimchi bash hook.
 hook="$KIMCHI_HOOKS_DIR/review-gate.sh"
