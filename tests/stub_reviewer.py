@@ -1,0 +1,392 @@
+"""Stand-in for `claude -p /review-gate:review ...` in the end-to-end tests.
+
+Invoked through OCR_REVIEWER_CMD (see review-gate.py's _test_reviewer_cmd),
+which only honours a script under this directory. Behaviour is driven by
+environment variables so one command line serves every scenario:
+
+  STUB_SLEEP         seconds to wait before answering (default 0)
+  STUB_VERDICT       pass | warn | block | exit1 | garbage | limit  (default pass)
+  STUB_TRACE         a file to append one line per invocation to (optional)
+  STUB_FAIL_ON_CALL  N — exit1 on the Nth call (1-based, counted via STUB_TRACE)
+                     (racy when chunks run in parallel: use STUB_CHUNK_VERDICT)
+  STUB_CHUNK_VERDICT JSON {chunk_index: verdict} -- STUB_VERDICT for that chunk only
+  STUB_CHUNK_SLEEP   JSON {chunk_index: seconds} -- sleep that long in that chunk only
+  STUB_VERDICT_FOR   path — the chunk containing this path returns block
+  STUB_FINDINGS_FOR  JSON mapping path → {severity, content} for path-scripted verdicts
+  STUB_RESOLVE       JSON mapping finding_id → {status, evidence_path, evidence_quote}
+                     Used when --resolve <file> is in argv; return resolver output.
+                     Values are passed through verbatim, so a malformed answer
+                     (e.g. `true`) can be scripted too.
+  STUB_RESOLVE_RECHECK like STUB_RESOLVE, but used instead of it when the resolver
+                     manifest has "recheck": true (the gate's second look).
+  STUB_RESOLVE_VERDICT pass|fail|garbage  Controls resolver exit for all ids (default pass).
+  STUB_SLEEP_FOR     path — sleep STUB_SLEEP_FOR_SECS (default 30) only when the chunk's
+                     manifest holds this path (a file that always times out).
+  STUB_FINDINGS_OUTSIDE=1  STUB_FINDINGS_FOR findings are emitted for every path it names,
+                     not only those in the chunk's manifest (a finding about a file the
+                     review did not cover).
+  STUB_SPAWN_CHILD   a file: spawn a long-sleeping child that inherits stdout/stderr
+                     (as a reviewer's own subprocess would), write its pid there.
+  STUB_TRUNCATE_FOR  path, or `*` — answer with the skill's `diff truncated` warning:
+                     for that file, or naming no file at all for `*`.
+  STUB_STREAM        N -- answer as `claude --output-format stream-json` does: N Read/Bash
+                     tool events (inputs carry a path and code, which the time metrics must
+                     never log), one Agent tool call lasting STUB_STREAM_AGENT_S seconds
+                     (default 0.3), then the verdict and a `result` event with turns, API
+                     time and cost.
+
+Every call also traces `item_files`: the text of each diff file the manifest's items[]
+name (0.10.0), read at call time. (A file_diff is keyed `review:<path>`; since 0.11.0 a
+unit_diff is `unit:<path>:<unit>:<part>` and a context item `context:<role>:<path>:<n>`.)
+
+0.11.0 (Part S) knobs:
+  STUB_UNIT_FINDINGS  JSON {unit qualname: {severity, content, offset}} -- a finding anchored
+                      `offset` lines into every unit_diff item of that unit (first part only),
+                      at the unit's tip line numbers, with `existing_code` read from the tree.
+  STUB_DEP_VERDICT    verdict for every dep task: ok (default) | broken | unsure | missing (no
+                      dep_verdicts at all) | garbage (a non-object) | unsure_first (unsure the
+                      first time a task id is seen, ok afterwards). broken also emits a finding
+                      at the caller, with dep_task set.
+
+The last non-flag argument is the range the gate asked to review; it is echoed
+into the trace so a test can assert what was reviewed.
+"""
+import json
+import os
+import sys
+import time
+
+# Parse arguments: range is the last non-flag arg; --paths-file and --resolve are optional.
+paths_file = None
+resolve_file = None
+args = sys.argv[1:]
+i = 0
+while i < len(args):
+    if args[i] == "--paths-file" and i + 1 < len(args):
+        paths_file = args[i + 1]
+        i += 2
+    elif args[i] == "--resolve" and i + 1 < len(args):
+        resolve_file = args[i + 1]
+        i += 2
+    else:
+        i += 1
+rng = args[-1] if args and not args[-1].startswith("--") else ""
+
+manifest = None
+if paths_file:
+    try:
+        manifest = json.loads(open(paths_file, encoding="utf-8").read())
+    except Exception:
+        pass
+
+resolve_input = None
+if resolve_file:
+    try:
+        resolve_input = json.loads(open(resolve_file, encoding="utf-8").read())
+    except Exception:
+        pass
+
+# Determine per-file mode from manifest.
+def _get_file_modes(m):
+    """Return {path: mode} from manifest.files if present."""
+    if not m:
+        return {}
+    files = m.get("files") or []
+    return {f["path"]: f.get("mode", "full") for f in files if isinstance(f, dict)}
+
+file_modes = _get_file_modes(manifest)
+
+
+def _cwd_diffs():
+    """`*.diff` files inside the working directory (the reviewed worktree), outside .git.
+    The gate must never write its diff files there."""
+    found = []
+    for root, dirs, files in os.walk(os.getcwd()):
+        dirs[:] = [d for d in dirs if d != ".git"]
+        found += [os.path.join(root, f) for f in files if f.endswith(".diff")]
+    return found
+
+
+def _read_item_files(m):
+    """{role:path: text} for every manifest item that names a diff file (0.10.0),
+    read now, while the gate still has them on disk -- what a reviewer's Read sees."""
+    out = {}
+    for n, it in enumerate((m or {}).get("items") or []):
+        f = it.get("file") if isinstance(it, dict) else ""
+        if not f:
+            continue
+        if it.get("kind") == "unit_diff":
+            key = "unit:%s:%s:%s" % (it.get("path", ""), it.get("unit", ""), it.get("part", 1))
+        elif it.get("kind") == "context":
+            key = "context:%s:%s:%s" % (it.get("role", ""), it.get("path", ""), n)
+        else:
+            key = (it.get("role") or "review") + ":" + it.get("path", "")
+        try:
+            with open(f, "rb") as fh:
+                out[key] = fh.read().decode("utf-8")
+        except OSError as exc:
+            out[key] = "<unreadable: %s>" % exc
+    return out
+
+trace = os.environ.get("STUB_TRACE")
+if trace:
+    with open(trace, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({
+            "pid": os.getpid(), "cwd": os.getcwd(), "range": rng,
+            "ts": time.time(), "paths_file": paths_file,
+            "resolve_file": resolve_file,
+            "resolve_manifest": resolve_input,
+            "manifest": manifest,
+            "item_files": _read_item_files(manifest or resolve_input),
+            "cwd_diffs": _cwd_diffs(),
+            "file_modes": file_modes,
+        }) + "\n")
+
+# Check STUB_FAIL_ON_CALL: fail on the Nth invocation.
+fail_on = os.environ.get("STUB_FAIL_ON_CALL", "")
+if fail_on and trace:
+    try:
+        n = int(fail_on)
+        with open(trace, encoding="utf-8") as fh:
+            call_count = sum(1 for line in fh if line.strip())
+        if call_count == n:
+            sys.stdout.write("stub: forced failure on call " + str(n) + "\n")
+            sys.exit(1)
+    except Exception:
+        pass
+
+spawn_child = os.environ.get("STUB_SPAWN_CHILD", "")
+if spawn_child:
+    import subprocess
+    _child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"],
+                              stdout=sys.stdout, stderr=sys.stderr)
+    with open(spawn_child, "w", encoding="utf-8") as fh:
+        fh.write(str(_child.pid))
+time.sleep(float(os.environ.get("STUB_SLEEP", "0") or 0))
+sleep_for = os.environ.get("STUB_SLEEP_FOR", "")
+if sleep_for and sleep_for in ((manifest or {}).get("paths") or []):
+    time.sleep(float(os.environ.get("STUB_SLEEP_FOR_SECS", "30") or 30))
+
+
+def _by_chunk(var):
+    """STUB_CHUNK_*: a JSON {chunk_index: value} looked up by the manifest's own
+    chunk_index, so a scripted chunk is the same one at any concurrency (0.12.0)."""
+    try:
+        table = json.loads(os.environ.get(var, "") or "{}")
+        return table.get(str((manifest or {}).get("chunk_index")))
+    except Exception:
+        return None
+
+
+_chunk_sleep = _by_chunk("STUB_CHUNK_SLEEP")
+if _chunk_sleep:
+    time.sleep(float(_chunk_sleep))
+
+def emit(payload):
+    """Write the reply: bare JSON, or a stream-json transcript when STUB_STREAM is set."""
+    n = os.environ.get("STUB_STREAM", "")
+    if not n:
+        sys.stdout.write(payload)
+        return
+
+    def stamp():
+        return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + ".%03dZ" % (int(time.time() * 1000) % 1000)
+
+    def line(**ev):
+        sys.stdout.write(json.dumps(ev) + "\n")
+        sys.stdout.flush()
+
+    t0 = time.time()
+    line(type="system", subtype="init", session_id="stub")
+
+    def tool(name, tool_input, tid, sleep=0.0):
+        line(type="assistant", timestamp=stamp(), session_id="stub",
+             message={"role": "assistant", "content": [
+                 {"type": "tool_use", "id": tid, "name": name, "input": tool_input}]})
+        time.sleep(sleep)
+        line(type="user", timestamp=stamp(), session_id="stub",
+             message={"role": "user", "content": [
+                 {"type": "tool_result", "tool_use_id": tid, "content": "ok"}]})
+
+    for i in range(int(n)):
+        if i % 2:
+            tool("Bash", {"command": "git diff -- /secret/dir/app.py"}, f"b{i}")
+        else:
+            tool("Read", {"file_path": "/secret/dir/app.py"}, f"r{i}")
+    tool("Agent", {"prompt": "review SECRET_CODE_TOKEN = 'hunter2' in /secret/dir/app.py"},
+         "agent1", float(os.environ.get("STUB_STREAM_AGENT_S", "0.3")))
+    line(type="assistant", timestamp=stamp(), session_id="stub",
+         message={"role": "assistant", "content": [{"type": "text", "text": payload}]})
+    line(type="result", subtype="success", is_error=False, result=payload,
+         num_turns=int(n) + 2, duration_ms=int((time.time() - t0) * 1000),
+         duration_api_ms=1234, total_cost_usd=0.0421, session_id="stub")
+
+
+# --- resolve mode -------------------------------------------------------
+if resolve_file is not None:
+    rv = os.environ.get("STUB_RESOLVE_VERDICT", "pass").strip().lower()
+    if rv == "fail":
+        sys.stdout.write("resolver stub: exit1\n")
+        sys.exit(1)
+    if rv == "garbage":
+        sys.stdout.write("I could not resolve this.\n")
+        sys.exit(0)
+    # Build resolutions from STUB_RESOLVE env var or mark all still_present.
+    scripted = {}
+    raw_resolve = os.environ.get("STUB_RESOLVE", "")
+    if (resolve_input or {}).get("recheck") and "STUB_RESOLVE_RECHECK" in os.environ:
+        raw_resolve = os.environ["STUB_RESOLVE_RECHECK"]
+    if raw_resolve:
+        try:
+            scripted = json.loads(raw_resolve)
+        except Exception:
+            pass
+    priors = (resolve_input or {}).get("resolve") or []
+    resolutions = {}
+    for p in priors:
+        fid = p.get("id") or ""
+        if fid in scripted:
+            resolutions[fid] = scripted[fid]
+        else:
+            resolutions[fid] = {"status": "still_present", "evidence_path": "", "evidence_quote": ""}
+    emit(json.dumps({"resolutions": resolutions}))
+    sys.exit(0)
+
+# --- review mode --------------------------------------------------------
+verdict_for = os.environ.get("STUB_VERDICT_FOR", "")
+verdict = os.environ.get("STUB_VERDICT", "pass")
+if verdict_for and manifest:
+    chunk_paths = manifest.get("paths") or []
+    if verdict_for in chunk_paths:
+        verdict = "block"
+verdict = _by_chunk("STUB_CHUNK_VERDICT") or verdict
+
+if verdict == "exit1":
+    sys.stdout.write("Not logged in. Please run /login\n")
+    sys.exit(1)
+if verdict == "garbage":
+    sys.stdout.write("I could not review this.\n")
+    sys.exit(0)
+if verdict == "limit":
+    # Real limit output captured 2026-09-23.
+    sys.stdout.write("You've hit your session limit · resets 3:20pm (Europe/Lisbon)\n")
+    sys.exit(1)
+
+finding = {
+    "path": "app/x.py", "start_line": 1, "end_line": 2, "confidence": 0.95,
+    "category": "correctness", "evidence": "stub",
+}
+findings = []
+if verdict == "warn":
+    findings = [dict(finding, severity="medium", content="stub medium finding")]
+elif verdict == "block":
+    findings = [dict(finding, severity="high", content="stub high finding")]
+
+# STUB_FINDINGS_FOR: per-path scripted findings (path → {severity, content}).
+findings_for_raw = os.environ.get("STUB_FINDINGS_FOR", "")
+if findings_for_raw:
+    try:
+        findings_map = json.loads(findings_for_raw)
+        # With a manifest use its paths; without (golden argv), apply to all configured paths.
+        chunk_paths = (manifest.get("paths") or []) if manifest else list(findings_map.keys())
+        if os.environ.get("STUB_FINDINGS_OUTSIDE") == "1":
+            chunk_paths = list(findings_map.keys())
+        for path in chunk_paths:
+            if path in findings_map:
+                spec = findings_map[path]
+                findings.append({
+                    "path": path,
+                    "start_line": 1, "end_line": 2, "confidence": 0.95,
+                    "category": "correctness", "evidence": "stub",
+                    "severity": spec.get("severity", "high"),
+                    "content": spec.get("content", "stub scripted finding"),
+                    "existing_code": spec.get("existing_code", "stub code"),
+                })
+    except Exception:
+        pass
+
+out = {"status": "success", "verdict": verdict, "findings": findings}
+
+# STUB_TRUNCATE_FOR: the skill's truncation warning, for one file or (`*`) for none in particular.
+truncate_for = os.environ.get("STUB_TRUNCATE_FOR", "")
+if truncate_for:
+    chunk_paths = (manifest or {}).get("paths")
+    if truncate_for == "*" or chunk_paths is None or truncate_for in chunk_paths:
+        out["status"] = "completed_with_warnings"
+        out["warnings"] = [{"file": None if truncate_for == "*" else truncate_for,
+                            "message": "diff truncated; reviewer saw stat + hunk headers only"}]
+
+# 0.9.0 manifest fields. STUB_IMPACT_BREAK=1 reports every impact site as
+# broken (a high finding anchored at the call site); otherwise each is "ok".
+# STUB_CONFIRM_SIBLINGS=1 confirms every known defect as the same defect.
+# STUB_CROSS_FILE is echoed verbatim as the §2b summary.
+impact = (manifest or {}).get("impact") or {}
+if impact.get("sites"):
+    broken = os.environ.get("STUB_IMPACT_BREAK") == "1"
+    out["impact_verdicts"] = {s["id"]: ("broken" if broken else "ok") for s in impact["sites"]}
+    if broken:
+        for s in impact["sites"]:
+            findings.append({
+                "path": s["path"], "start_line": s["line"], "end_line": s["line"],
+                "severity": "high", "confidence": 0.95, "category": "correctness",
+                "content": f"caller broken by the change to {s['name']}",
+                "existing_code": s.get("text") or "", "evidence": "impact_sites",
+                "impact_site": s["id"],
+            })
+
+# 0.11.0: findings inside units under review, and verdicts for caller checks.
+unit_findings = os.environ.get("STUB_UNIT_FINDINGS", "")
+if unit_findings and manifest:
+    spec_map = json.loads(unit_findings)
+    for it in manifest.get("items") or []:
+        if it.get("kind") != "unit_diff" or it.get("unit") not in spec_map or it.get("part", 1) != 1:
+            continue
+        spec = spec_map[it["unit"]]
+        line = it["start_line"] + int(spec.get("offset", 0))
+        try:
+            with open(it["path"], encoding="utf-8") as fh:
+                code = fh.read().split(chr(10))[line - 1].rstrip(chr(13))
+        except Exception:
+            code = ""
+        findings.append({
+            "path": it["path"], "start_line": line, "end_line": line, "confidence": 0.95,
+            "category": "correctness", "evidence": "stub", "severity": spec.get("severity", "high"),
+            "content": spec.get("content", "stub unit finding"), "existing_code": code.strip()})
+tasks = (manifest or {}).get("tasks") or []
+dep_mode = os.environ.get("STUB_DEP_VERDICT", "ok")
+if tasks and dep_mode != "missing":
+    if dep_mode == "garbage":
+        out["dep_verdicts"] = ["ok"]
+    else:
+        verdicts = {}
+        seen_path = os.path.join(os.path.dirname(trace), "stub.depseen") if trace else None
+        seen = set()
+        if seen_path and os.path.exists(seen_path):
+            seen = set(open(seen_path, encoding="utf-8").read().split())
+        for t in tasks:
+            v = dep_mode
+            if dep_mode == "unsure_first":
+                v = "ok" if t["id"] in seen else "unsure"
+                seen.add(t["id"])
+            verdicts[t["id"]] = v
+            if v == "broken":
+                findings.append({
+                    "path": t["caller"]["path"], "start_line": t["caller"]["start_line"],
+                    "end_line": t["caller"]["start_line"], "severity": "high", "confidence": 0.95,
+                    "category": "correctness", "content": "caller broken by the change to " + str(t["callee"]["unit"]),
+                    "existing_code": "", "evidence": "dep_check", "dep_task": t["id"]})
+        if seen_path:
+            with open(seen_path, "w", encoding="utf-8") as fh:
+                fh.write(" ".join(sorted(seen)))
+        out["dep_verdicts"] = verdicts
+if os.environ.get("STUB_CONFIRM_SIBLINGS") == "1":
+    for d in (manifest or {}).get("known_defects") or []:
+        findings.append({
+            "path": d["path"], "start_line": d["line"], "end_line": d["line"],
+            "severity": "high", "confidence": 0.95, "category": "security",
+            "content": "same defect as the earlier finding", "existing_code": d.get("text") or "",
+            "evidence": "known_defects", "sibling_of": d["sid"],
+        })
+if os.environ.get("STUB_CROSS_FILE"):
+    out["cross_file_context_summary"] = json.loads(os.environ["STUB_CROSS_FILE"])
+emit(json.dumps(out))

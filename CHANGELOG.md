@@ -1,0 +1,1612 @@
+# Changelog
+
+All notable changes to this project are documented here. The format is based on
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
+to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.13.0] - 2026-10-15
+
+Stacked branches get the right review base, and a finding that was fixed stays fixed. Built from
+`docs/plans/stacked-branch-review-base.md`, one entry per area. **The base change re-keys ledger
+records: expect a one-time full review per file per branch after upgrading.** There is no
+fingerprint change and no schema migration; the 30-day TTL cleans up the old records.
+
+### Changed
+- **The review base is always a commit sha that is an ancestor of the pushed tip.**
+  `resolve_review_base` is now the one place that picks it, for git mode, hook mode and the skill.
+  A fast-forward of an existing remote ref still uses the remote's sha (the 0.5.1 behaviour). A
+  new ref, a remote sha the client does not have, or a non-fast-forward push uses the boundary of
+  `git rev-list <tip> --not --remotes=<remote>`, so a stacked branch reviews only its own commits
+  and what main gained after the fork no longer shows up as deletions (a tree diff against
+  `origin/main` used to do that; the old hook-mode merge-base re-reviewed the whole unmerged
+  parent chain instead). With several boundaries (main merged into the child) the base is their
+  octopus merge-base, falling back to the first commit's parent, which can over-review but never
+  hides commits; with none (root commit, shallow clone) it is the empty tree. An empty review set
+  is allowed and the reason is logged.
+  **Policy: commits reachable from `refs/remotes/<remote>/*` are treated as already reviewed.**
+  Existing-ref pushes already relied on this, since the remote sha was the base. Residual risk: a
+  stale remote-tracking ref after a remote rewind.
+- **A non-fast-forward remote sha is an exclusion, not a diff base.** It used to be used raw as a
+  tree base, so the diff contained reverts of other people's commits.
+- **The state and marker cache is keyed by `(base, tip)`.** A tip recorded as `done` under one base
+  no longer replays its verdict under another.
+- **The skill's `--unpushed` asks the gate.** SKILL.md calls the new
+  `review-gate.py --print-range` instead of re-deriving `@{u}..HEAD`.
+- **`OCR_BASE_V1=1` restores the old base selection** in both modes and in `--print-range`.
+  `OCR_LEGACY_RANGE=1` is unchanged.
+
+### Fixed
+- **Fail-open paths in push range selection.** A range whose `git log` failed is treated as
+  carrying commits (the 0.5.2 rule) instead of as empty. Tags and other non-branch refs that carry
+  unpushed commits are now reviewed, or refused as a multi-ref push when they travel beside a
+  branch; they used to be filtered out before counting. Git mode reviews against the remote git
+  is actually pushing to: `scripts/pre-push` passes `--remote`.
+  **Existing installs must re-run `bash scripts/install-git-hook.sh`** to get the new hook.
+- **A resolver failure is its own status, `failed`, not a permanent block.** A resolver crash,
+  timeout (the machine low on RAM was the usual cause) or unparseable output used to become
+  `unverified`, spend the one re-check, and keep blocking with nothing persisted, so the same
+  thing happened on the next push. It is now retried once with the batch split in half; if it
+  still fails the push blocks with `resolver unavailable: <reason>` instead of the unverified
+  text. It does not consume the re-check and is not written into any record. A usage-limit or
+  budget error still stops the run. Telemetry gains `failed`.
+- **A stored resolution survives later edits to its evidence file.** It used to be valid only
+  while the evidence file's blob was unchanged, which in a stack is almost never. It now holds
+  while the evidence quote (12 or more non-whitespace characters, matched on token boundaries) is
+  still present at the tip. If the flagged code was already gone when the resolution was written,
+  it must also still be gone. A missing target file falls back to the exact-blob rule. Resolved
+  priors are suppressed at read time, whichever record carried them, and are never re-emitted
+  into new records. Other records are not touched: they are content-addressed and shared by other
+  tips.
+- **Orphan findings go to their own file's record.** They were copied into every active file's
+  record, including on the segmented path, and each copy became the next delta base. They stay on
+  the current records when their file has no carried record or is active in another chunk.
+- **The sibling search runs after the resolver.** It uses only unresolved, re-anchored priors and
+  ignores the fix's added lines, so it can no longer re-raise the line that was just fixed.
+- **Dedup gaps.** Carried findings no longer print twice. A line-less finding is deduplicated by
+  content only against other line-less findings. Reviewer override (a re-confirmed finding gets no
+  resolution) is independent of dedup.
+- **Sibling branches no longer share stale findings.** Records store `source_tip` and
+  `source_ref`. A delta prior from a commit that is not an ancestor of the current tip, written for
+  a different pushed ref, is ignored (one `is-ancestor` check per distinct tip). A same-branch
+  amend or force-push keeps its history, an identical-blob carry stays unscoped, and records
+  written before this change stay eligible until their TTL.
+
+## [0.12.5] - 2026-10-03
+
+Follow-up to 0.12.4 from the Claude plugin directory's validation. No change to review behaviour.
+
+### Changed
+- **`gate-hook.ps1` can only print a deny.** `Write-Decision` took the decision as a parameter
+  (and silently dropped "allow"); it is now `Write-Deny`, which hardcodes `"deny"`, so a static
+  reader can see the hook never grants permission.
+- **`/review-gate:doctor` version probes are exact matches.** `Bash(python3 --version:*)` and the
+  other `--version` rules were prefix rules that matched any command starting with that program;
+  they are now exact `Bash(<program> --version)`.
+
+## [0.12.4] - 2026-10-03
+
+A security fix found by the Claude plugin directory's validation. The review prompt, verdicts and
+defaults are unchanged, so the review cache stays valid.
+
+### Security
+- **The PreToolUse hook no longer auto-approves Bash commands.** `gate-hook.sh`, `gate-hook.ps1`
+  and `review-gate.py --mode hook` answered `permissionDecision: "allow"` for every command that
+  was not a push (the hook fires on every Bash call), for a push that passed review, and under
+  `OCR_FAIL_OPEN`. A hook's allow is not "no objection": it approves the tool call and skips the
+  user's own permission prompt, so installing the plugin silently turned off permission prompts
+  for Bash. Every non-blocking path is now a pass-through: exit 0 with no `permissionDecision`
+  (empty stdout), so Claude Code's normal permission flow applies. **Deny is unchanged** and the
+  gate still fails closed; `OCR_FAIL_OPEN=1` still lets a push the gate cannot review go, it just
+  no longer approves it. Non-blocking findings that used to ride on the allow's
+  `permissionDecisionReason` are now a plain `systemMessage` (shown to you, grants nothing);
+  the model still gets them from the PostToolUse hook.
+- `gate-hook.ps1` used to read "the gate printed nothing" as "it crashed" and deny; it now treats
+  empty output with a zero exit as the pass-through and denies only on a non-zero exit.
+- Inside the headless review, the in-review guard also passes through instead of allowing, so the
+  reviewer's `--allowedTools` list is enforced rather than overridden by the hook.
+- `commands/doctor.md` no longer asks for blanket `Bash`: `allowed-tools` is narrowed to the
+  read-only probes the command runs (`--version` checks, `command -v`, `git config --get`,
+  `git rev-parse`, `ls`, `du`, `printenv OCR_*`, the telemetry report), plus `Read` and `Glob`.
+  The Python probe is now `python3 --version` rather than `python3 -c ...`.
+
+### Changed
+- Tests read hook output through `tests/hook_output.py`, which fails if a hook ever emits an allow;
+  `tests/test_hook_passthrough.py` pins the pass-through on each adapter and path.
+
+## [0.12.3] - 2026-10-03
+
+Fewer git subprocesses per review; the gate's verdicts, prompt and defaults are unchanged, so the
+review cache stays valid.
+
+### Changed
+- **Blob lookups are batched.** Two N+1 patterns the gate's own review flagged on the 0.12.1 push
+  now use one `git ls-tree` for the whole set of paths: `_seg_classify_foreign` (one lookup per
+  foreign finding) and `_SegState.finalize_ready` (one per finished file). The same pattern in
+  `_classify_priors` (one per prior finding) and in the resolver-evidence check is batched too, and
+  `_find_valid_resolution` takes an optional memo so a path is looked up once per pass.
+
+### Fixed
+- A test (`test_a_chunked_run_logs_phases_chunks_and_calls_without_paths_or_code`) assumed the
+  parallel chunks' telemetry records arrive in index order; they arrive as each chunk finishes.
+  It now checks the records by chunk index.
+
+## [0.12.2] - 2026-10-03
+
+A fix for the known issue recorded in 0.12.1. The review prompt and defaults are unchanged:
+the review cache stays valid.
+
+### Fixed
+- **Data loss in the live working tree.** When no detached worktree could be created (the review
+  then reads the live tree), a chunked review (more than 15 reviewable files, a file that timed
+  out earlier, or a big file reviewed in units) still ran `git clean -fdxq` and
+  `git checkout -q -- .` before each chunk in that tree, discarding uncommitted changes and
+  untracked or ignored files. The reset now runs only in a worktree the gate made (under its own
+  `worktrees/` dir and a linked worktree, checked by `_is_gate_worktree`); anywhere else it is
+  skipped and logged as `slot_reset_skipped`. Parallel slots were already never the live tree.
+
+## [0.12.1] - 2026-10-03
+
+Documentation and directory-listing metadata only. No review code, prompt or default
+changed: the review cache stays valid.
+
+### Added
+- **README: "What this plugin runs, sends and changes".** The hooks and when they fire, the
+  headless `claude` reviewer and what it is sent, the git worktrees, the optional global
+  `core.hooksPath` hook and how to undo it, why the PowerShell hooks use
+  `-ExecutionPolicy Bypass`, what `ocr_telemetry.py` writes (a local file under `.git`, no
+  network), and every file the plugin writes. It also recorded a known issue (fixed in 0.12.2): when no
+  worktree could be created, a chunked review ran `git clean -fdxq` and `git checkout -- .` in
+  the live working tree.
+- `PRIVACY.md` and `SUPPORT.md`; `assets/icon.svg`.
+- `plugin.json`: `icon`, `documentationUrl`, `supportUrl`, `privacyPolicyUrl`.
+
+### Changed
+- `scripts/sync-local-install.py` ships `assets/`, `PRIVACY.md` and `SUPPORT.md` in the local
+  snapshot, so the icon referenced by `plugin.json` is present there.
+
+## [0.12.0] - 2026-10-01
+
+Chunks are reviewed **in parallel**. Part C of `docs/plans/resume-truncated-chunks.md`.
+No prompt changed: the review cache stays valid.
+
+### Added
+- **`OCR_CHUNK_CONCURRENCY`** (default 2, clamped to 1-4): chunks reviewed at once.
+  `1` is the 0.11.0 sequential review exactly (the chunk runs on the supervisor's own
+  thread, in the same order).
+- **One worktree per slot.** Slot 0 is the run's worktree; the others are made beside it
+  (`-s<i>`), each cleaned before every chunk. A slot that cannot be made means fewer slots;
+  a review reading the live tree runs one chunk at a time. The state lists them all
+  (`worktrees`, `worktree` kept), the reaper protects them while the run is live, and the
+  run removes them when it ends.
+- **Every reviewer in flight is tracked.** The heartbeat writes `reviewer_pids` (and
+  `reviewer_pid`, the first, for older readers); a fence kills all of them, and so does a
+  stale restart.
+- **Progress:** `chunks_running`; the "still running" text says `chunks 2/10 done, 2 running`
+  while more than one runs.
+- Stub reviewer: `STUB_CHUNK_VERDICT` and `STUB_CHUNK_SLEEP`, keyed by the manifest's
+  `chunk_index` (`STUB_FAIL_ON_CALL` counts calls, which races at concurrency 2).
+
+### Changed
+- **Failure policy.** A fence or a usage limit stops everything at once (the siblings are
+  killed; chunks already recorded stay). A timeout or a failed second attempt lets the
+  chunks in flight finish and record, then fails the run (Part A's timeout splitting
+  applies). When several fail, the strongest is reported: fence, then limit, then a review
+  error, then the budget. The run budget is checked before each dispatch, so up to
+  `OCR_CHUNK_CONCURRENCY` chunks can still be finishing past it.
+- The supervisor's thread owns the state file and the ledger: manifests are built and
+  records written there, workers only run the reviewer. Results are merged in chunk order.
+- Per-call time metrics are per thread, and the debug log is written under a lock.
+- The resolver stays sequential.
+
+### Known limits
+- A chunk's manifest (its impact bundle) is built when it is dispatched, while earlier chunks
+  may still be running: nothing it holds depends on their results.
+- Usage limits come sooner at concurrency 2; disk use is one more worktree per slot.
+
+## [0.11.0] - 2026-10-01
+
+Big files are reviewed in **stable units**, and the callers of a changed unit are
+checked. Part S of `docs/plans/resume-truncated-chunks.md`.
+
+**Every cached review is invalidated once** (`agents/code-reviewer.md` is part of the
+ledger fingerprint and had to change: units, context files, tasks and `dep_verdicts`
+are new reviewer input and output). `OCR_SEGMENT=0` restores the 0.10.0 review of a
+big file exactly, for one release.
+
+### Added
+- **Units with content identity** (`scripts/ocr_segment.py`, pure functions over text).
+  Python by `ast` (top-level functions and classes; a class over 150 lines into its
+  methods; decorators and leading comments belong to the unit after them),
+  TS/JS/Go/Rust/shell/PowerShell/Java/Kotlin/C#/Ruby/PHP by the definitions
+  `ocr_impact._regex_defs` finds (outermost only: a big class is one unit), Markdown by
+  heading, everything else and module-level code by content-defined regions (24-120
+  lines; a cut is a starting line whose hash is the smallest within 24 lines, so an edit
+  moves the cuts around it and no others). Identity is the full blake2b-256 of the
+  normalised text (CRLF = LF, trailing whitespace ignored); a Python unit's hash includes
+  its parent's qualname. The units tile the file: every non-blank line is in exactly one.
+- **What a push compares**: a unit whose hash is on both sides is never reviewed
+  (order-preserving match first; then, for ast units only, by multiset, so a function moved
+  within its parent is no change); a heuristic unit that only changes position is changed;
+  the rest are paired by qualname, bare name, then position inside the same gap (a rename is
+  one pair); a removed unit gets a deletion item.
+- **Fail-closed coverage check.** Every changed line of `git diff -U0` (whitespace-only and
+  blank-line changes excluded) must lie in a unit, and the units must tile the file; if not,
+  that file is reviewed whole, as before, and the gap is logged (`seg_decline`). A changed
+  line over 500 characters declines too (a cut line is a line the reviewer did not see).
+- **`unit_diff` manifest items**: the unit's base -> tip diff with absolute line numbers, never
+  truncated; a unit too big for one item is split into parts at hunk boundaries (a single
+  huge hunk is cut inside), one record for all of them. A `file_context` item per file (imports,
+  at most 60 lines, and an index of every unit with the changed ones marked).
+- **Unit cache.** `seg:<version>:<fingerprint>:<lang>:<path hash>:<base>:<tip>` records, with
+  each finding's `anchor_hash`, `rel_start` and `rel_end`; a hit replays at the unit's current
+  lines, falling back to the finding's `existing_code`, else dropping it (`replay_dropped`). A
+  run killed halfway resumes with the unfinished units only. The file's per-file record is
+  written only when every unit and every caller check on it is final.
+- **Caller checks.** Same-file callers of each changed named unit (and of a removed or renamed
+  one under its old name), at most six, become a `context` item plus a `dep:<n>` task; the
+  reviewer answers `dep_verdicts`. Call edges: `ast` for Python; a name-reference regex
+  elsewhere (names under four characters, stoplisted or defined twice skipped; at most four).
+  A missing, malformed or `unsure` verdict is `unsure`, never `ok`: asked once more in the same
+  run, then a non-blocking "unverified dependency" note. `dep:` records keyed by both texts; a
+  check still owed when a run ends is stored `pending` and scheduled first on the next. No
+  cascade through unchanged units. A small file reviewed as a **delta** gets the same checks.
+- **Impact routing**: a symbol of a unit-reviewed file rides with the chunk holding its unit,
+  the symbol budget scales with the push (30 up to 60), a cross-file call site shows its whole
+  enclosing unit (up to 12 KB, 48 KB in all), and a missing impact verdict is a warning.
+- **File-affinity packing** (`OCR_CHUNK_DIFF_LINES`): all changed units of a file in one chunk;
+  a file is split only when it alone exceeds the budget, along call-graph components; files
+  linked by call edges are packed together; caller context capped at 80 lines per unit and 400
+  per chunk; chunks with owed caller checks run first. A timed-out chunk is retried split by
+  units.
+- **Part S never costs a review.** A failure of its own (planning a file, packing chunks,
+  recording a chunk) falls back to the 0.10.0 whole-file review of the affected files, with
+  their Part B flags restored, and is logged (`seg_decline`, `seg_plan_error`,
+  `seg_apply_error`); a caller check or unit that was not recorded is simply asked again.
+- `OCR_SEGMENT=0` (rollback), the doctor reports it and the ledger size, seg/dep records are
+  pruned by the 30-day TTL and a cap of four times `OCR_LEDGER_MAX_RECORDS`.
+- `docs/benchmark-part-s.md` and `tests/part_s_scenarios.py`: the 15 seeded scenarios, automated
+  as far as a stub reviewer allows (what the reviewer is handed), with the model half documented.
+
+### Changed
+- Only files over Part B's per-file limit (the `-U0` or hunk-header level of their diff) are
+  segmented; everything else keeps whole-file review. A delta over the limit is reviewed over
+  the whole push range in units (its record stays, for what it still owes).
+- **Truncation for unit-reviewed files**: the model's `diff truncated` warnings are ignored (Python
+  owns their diffs), and an old `truncated` record of a file that can be segmented is no longer
+  carried: the file gets its proper review. A file that cannot be segmented keeps being carried.
+- Reviewer and orchestrator prompts (`agents/code-reviewer.md`, `skills/review/SKILL.md`) gain the
+  `unit_diff`, `context` (`file_context`, `caller`, `callee_diff`) and `tasks` contract and the
+  `dep_verdicts` / `dep_task` output; the manifest's `tasks[]` is no longer always empty.
+
+### Known limits
+- Cross-file callers are the impact bundle's (`impact_verdicts`), not `dep:` records.
+- Shared state, constants and ordering have no call edge; a twin or the other half of a pair is
+  only in the unit index.
+- A prepended docstring is new text: its own one or two regions are reviewed (the plan said zero
+  calls); every function replays at its new lines.
+- Seg/dep records, like per-file ones, miss by design for a file that changed upstream (the base
+  unit hash is in the key).
+
+## [0.10.0] - 2026-10-01
+
+The reviewer reads its diffs from files the gate builds, instead of having the
+orchestrator retype every diff into an Agent prompt (about 20-30k output tokens
+for a 1,500-line diff, and the suspected main cost of a 314 s review call), and
+the size limits go up. Part B of `docs/plans/resume-truncated-chunks.md`.
+
+**Every cached review is invalidated once** (`agents/code-reviewer.md` is part of
+the ledger fingerprint and had to change): one full re-review per active branch.
+`OCR_PRECOMPUTED_DIFFS=0` restores the 0.9.x path exactly, for one release.
+
+### Changed
+- **Python builds each file's diff; the reviewer Reads it.** `git diff` runs once
+  per file with literal pathspecs (`ocr_impact.git_runner`: a file named `[x].py`
+  or `:(exclude)x` is a name, not a pattern), `--no-color --no-ext-diff
+  --no-textconv` and `core.quotePath=false`: full `-M <range> -- <path>` (both
+  paths for a rename), or the blob-to-blob delta with a `# path: ... (delta since
+  last review)` header. Diffs are written as LF text, with generated names, to
+  `.git/review-gate-async/run-<id>/diffs/<chunk>/<nnn>.diff`: **outside the
+  reviewed worktree.** The tip tree is attacker-controlled, so a tracked
+  `.review-gate` directory, file or symlink there can neither redirect a write nor
+  plant a diff, and nothing tracked is excluded from review. They are removed when
+  the run ends, and by the reaper for a run that died.
+- **A manifest is always written** (one `_build_review_manifest` replaces the two
+  duplicated builders): a small first push no longer uses the bare 0.7.0 command
+  line. With the plan unavailable the review is still manifest-less. The manifest
+  keeps `paths`, `renames`, `other_changed`, `files[]` (unchanged shape), `carried`
+  and the impact / known-defect extras, and gains `items[]`
+  (`kind: file_diff | unit_diff | context`; `file_diff` carries `path`, `old_path`,
+  `mode`, `file`, `lines`, `bytes`, `truncated`, `binary`, `level`; only
+  `file_diff` and `context` are used so far) and an empty `tasks[]`, the contract
+  Part S (units, cross-function checks) builds on.
+- **Higher limits, one definition, owned by Python.** A file's diff is delivered
+  in full up to **1,500 changed lines or 64 KB** (was 400 lines / 16 KB); past
+  that without context lines (`-U0`: every change still shown, not flagged), then
+  as hunk headers only (flagged `truncated`). A line over 500 characters is cut
+  and counts as truncated. Chunks are packed by the diff lines they deliver
+  (`OCR_CHUNK_DIFF_LINES`, default 3000, context lines included) instead of by
+  changed lines (`OCR_CHUNK_LINES`, now only for the rollback path); a file whose
+  own diff would not fit degrades first.
+- **Truncation is Python's call.** For a file whose diff the gate delivered, the
+  `truncated` flag of its ledger record and of every verdict is the gate's own;
+  the model's `diff truncated` warnings (named, or naming no file) are ignored for
+  it and still count for a file without a precomputed diff. A diff git could not
+  produce (non-zero exit, or empty output) is never replaced by an empty one: the
+  file goes to the orchestrator's own git path, as before. A reviewable file git
+  treats as binary (NUL bytes, or a `-diff` attribute) is reported in a warning.
+- **The resolver reads files too.** Its manifest keeps `files[]` and `prior_files`
+  and gains `items[]` with `role: active` (this push's diffs, rename paths
+  included) and `role: since` (the since-finding diffs).
+- **SKILL.md and the agents.** The orchestrator no longer runs `git diff`, copies
+  a diff or applies a size cap for an item that has a `file` (the old rules stay
+  for a file without one, and for a manifest without `items`); §2b reads the
+  definitions it needs with one `Grep` over the chunk's diff directory; the
+  `code-filter` still gets the cited files' diffs inline, for block candidates
+  only. `code-reviewer` reads `diff_file`s, labelled untrusted data, in pages of up
+  to 600 lines, outside its Read budget. `code-resolver` accepts diff paths.
+- **Phases.** A `diffs` phase is added to the run's phase timers (0.9.6), with the
+  number of files, lines, bytes, truncated, fallback and binary files.
+
+### Fixed
+- **The reviewer's whole process group is killed.** On POSIX it starts with
+  `start_new_session=True` and `_kill_child` uses `os.killpg`; before, only
+  `claude` died on a timeout or fence and its children outlived it, holding the
+  pipe open. On Windows `taskkill /T` now runs before the parent is killed (it
+  finds the children through the parent's pid, so after the kill it found
+  nothing). Creation flags are unchanged: no console window.
+
+### Operations
+- The reaper removes `run-*` diff directories of runs that died (older than an
+  hour and not owned by a live run). The doctor reports `OCR_PRECOMPUTED_DIFFS`
+  and `OCR_CHUNK_DIFF_LINES`, and checks that the diff directory is writable.
+- Spike: the headless reviewer, with the gate's existing arguments, reads files
+  outside its working directory (from the orchestrator and from the
+  `code-reviewer` subagent; `claude` 2.1.281), so no `--add-dir` is passed and the
+  tool allowlist and `--setting-sources` posture are unchanged.
+
+### Tests
+`tests/test_precomputed_diffs.py` (diff builder, limits, manifest, security with a
+hostile tree, resolver items, reaper), `tests/test_process_groups.py`; the stub
+reviewer traces the text of every diff file its manifest names and the `*.diff`
+files in its own working directory.
+
+## [0.9.6] - 2026-10-01
+
+Time metrics: every run now records where its minutes went. No change to what a
+review decides, reads or caches. Part B0 of `docs/plans/resume-truncated-chunks.md`:
+a review of a large push averages 314 s per call and the cause (the reviewer
+retyping diffs into its Agent prompt, or the review itself) was a guess until now.
+
+### Added
+- **Per model call**, parsed from the stream-json the gate already captures (also
+  from the partial stream of a call that timed out): turns, API time, cost, time to
+  the first event, tool calls and input bytes by tool, the Agent tool's input bytes,
+  and its wall time (`tool_use` to `tool_result`, overlapping calls counted once)
+  against the orchestrator's own time. Added to each `calls[]` entry of the
+  telemetry line; `_SCHEMA` stays 1.
+- **Per run phase and per chunk**: `phases[]` (worktree, plan, priors, impact,
+  review, resolve, recheck, finish; `failed` for the time a failing run died in)
+  and `chunks[]` (index, files, changed lines, outcome, seconds) in the telemetry
+  line.
+- **An always-on log**: one line per phase, chunk, call and run in
+  `review-gate-debug.log`, which now rotates at 1 MiB (three older files kept).
+  `OCR_DEBUG=1` still adds its verbose lines to it.
+- **`--telemetry-report`**: average and p90 seconds, turns, cost, Agent-input KB and
+  first-event time per kind of call; the orchestrator vs reviewer-agent split; the
+  per-phase breakdown with its share of run time; chunk counts by outcome.
+- **"Still running"** shows the average time per finished chunk of the run
+  (`chunk 3/10, avg 6m12s per chunk`).
+
+### Privacy
+The new telemetry keys and every log line hold counts, bytes and timings only,
+never a path or code. A log line is built by `ocr_telemetry.metric_line`, which
+writes only numbers and short `[A-Za-z0-9_.:+-]` tokens and turns anything else
+into `?`.
+
+### Tests
+`tests/stub_reviewer.py` can answer in stream-json (`STUB_STREAM`); `tests/conftest.py`
+points every test's plugin data dir at a temp dir, since the log is always on.
+
+## [0.9.5] - 2026-10-01
+
+Large pushes now converge. A push of 40 big files used to restart at the first
+file on every re-push: the skill truncates any per-file diff over 400 lines or
+16 KB, a truncated file got no ledger record, so the files that were most
+expensive to review were the ones that never stuck, and a chunk that timed out
+saved nothing and was retried unchanged. `plugin.json` was also still at 0.9.1
+while this file had reached 0.9.4; both now say 0.9.5.
+
+### Changed
+- **A truncated review is cached, flagged `truncated: true`.** `_write_run_records`
+  writes the record for a file whose diff the reviewer saw only partly: named by
+  a `diff truncated` warning, any file of the chunk when the warning names none
+  (`"*"`), or over the gate's own check of the skill's cap (400 changed lines or
+  16 KB of diff; numeric numstat only, binary files are not its business).
+  A resume carries it instead of reviewing it again. A flagged write never
+  replaces a complete record, a complete write replaces a flagged one, a flagged
+  record is never a delta base (and a cost-rule flip never keeps one), and a
+  changed blob is reviewed in full. No ledger schema bump; an absent flag means
+  complete. 0.9.4 reads a flagged record as an ordinary one.
+- **The truncated state stays visible.** Every flagged record, carried or just
+  written, re-emits the skill's `diff truncated` warning, makes the status
+  `completed_with_warnings` and is counted in the verdict as `N files effectively
+  unreviewed (truncated)` (also in `summary.unreviewed_truncated`, the findings
+  log and the PostToolUse report). The verdict itself is never softened.
+- **Rewriting a record's findings no longer rewrites its provenance.**
+  `_attach_to_carried_records` and `_drop_self_resolved` change only `findings`;
+  `truncated`, `chain_depth`, `run_id` and the timestamps survive.
+- **A prior on an identical blob replays without the resolver.** When a carried
+  record's head blob is the file's current blob and the finding targets that
+  blob, every severity replays as `(carried)`: nothing in an identical file can
+  have been fixed, and it no longer matters whether the flagged code can still
+  be found. Saves a resolver call on every resume. Trade-off: a fix that lives
+  in a *different* file no longer clears a finding on an unchanged carried file
+  (priors on a changed file, and findings aimed at an older blob, are still
+  judged by the resolver).
+
+### Fixed
+- **A chunk that always timed out looped.** A timeout saved nothing and was not
+  retried differently, so every re-push spent the same chunk timeout on the same
+  chunk. The files of a chunk that times out are now marked (per file and blob,
+  beside the ledger records, 24 h); the next push retries them in halves, down to
+  one file, even when there are too few files for the chunked path. A file that
+  times out alone twice ends the review with a terminal reason that names it
+  (`file X cannot be reviewed within the timeout`), not retried automatically
+  (`OCR_FORCE_REVIEW=1` tries once more; raising `OCR_CHUNK_TIMEOUT` forgets the
+  marks). A timeout whose files are marked is progress, not an attempt, so it no
+  longer burns the restart cap.
+- **Non-ASCII paths silently skipped by the push gate.** `_collect_diff_entries`
+  parsed `git diff --raw` / `--numstat` without `-z`, so under git's default
+  `core.quotePath=true` a path like `café.py` arrived C-quoted as
+  `"caf\303\251.py"`; the allowlist saw the extension `.py"` and dropped the
+  file, letting it through unreviewed. Both calls now use `-z` and parse
+  NUL-separated records, which also replaces the fragile `{a => b}` numstat
+  rename regex.
+- **Abbreviated blob OIDs in diff entries.** `--full-index` does not affect
+  `--raw` output, so entry `old_oid`/`new_oid` were 7-char abbreviations. They
+  were stamped as a finding's `target_oid` and compared with the full OIDs from
+  `_blob_oids_at`, so every carried finding looked changed and was re-sent to
+  the resolver. The raw diff now uses `--no-abbrev`. Ledger records and
+  resolutions written under short OIDs no longer match their keys and are
+  ignored, costing one full re-review per file.
+- **Findings on non-ASCII paths auto-resolved.** `_blob_oids_at` parsed
+  `git ls-tree` without `-z`, so a quoted path like `café.py` mapped to `""`
+  and its prior findings were dropped as if the file had been deleted. It now
+  uses `-z`.
+
+### Removed
+- **`OCR_CHECKPOINT_TTL`.** It governed the 0.7.0 `chunks/` cache, which 0.8.0
+  stopped writing and the reaper deletes outright; resume has been per-file ledger
+  records ever since (`OCR_LEDGER_TTL`). The README rows for the chunk cache and
+  the run budget now say so, and the `_reap_async` docstring no longer claims a
+  chunk TTL.
+
+## [0.9.4] - 2026-09-25
+
+### Fixed
+- **Guard resolution fallback for context-spanning evidence quotes.** The resolver
+  sometimes quotes a newly-added line together with its unchanged neighbour (e.g.
+  the existing `"--output-format", "stream-json",` line plus the new `"--verbose"`
+  line). `_quote_in_added_lines` only collects `+` lines, so the multi-line quote
+  never matched and the finding stayed "unverified" even though the fix was present.
+  Added a tip-text fallback: when the since-finding diff check fails, accept the
+  resolution if the full evidence_quote is present in the current tip file (file was
+  still changed, so `target_oid != tip_oid`).
+
+## [0.9.3] - 2026-09-25
+
+### Fixed
+- **`--output-format stream-json` requires `--verbose` in `-p` mode.** Without
+  it the CLI rejects the combination outright. Added `--verbose` to
+  `DEFAULT_CLAUDE_ARGS` (after `--output-format stream-json`) and to the golden
+  argv fixture.
+- **Brittle substring-match retry duplicated at three call sites.** Extracted the
+  2-attempt parse-failure retry into `_run_review_with_retry(call)` helper and
+  replaced all three copy-pasted loops. Added `is_parse_failure` typed flag to
+  `ReviewGateError` so the guard uses an attribute instead of `"could not parse"
+  in str(exc)`.
+
+## [0.9.2] - 2026-09-25
+
+### Fixed
+- **Parse failures ("could not parse review output"):** switched the headless reviewer to
+  `--output-format stream-json`; the gate now scans *all* assistant turns for the verdict rather
+  than only the last one. A stray task-notification ack landing after the JSON no longer replaces
+  it and causes a false-closed block.
+- Added a bounded single retry on exit-0 parse failure in the non-chunked review path (parity
+  with `_run_chunked` which already retried once per chunk).
+- `_extract_json` now accepts `resolutions`-keyed dicts (resolver path) in the balanced-scan
+  fallback, and validates that extracted dicts carry the required `status`/`verdict`/`findings`
+  keys before accepting them.
+- Parse-failure error now includes the number of turns captured and the path to the archived raw
+  output, making failures self-diagnosing.
+
+## [0.9.1] - 2026-09-25
+
+### Fixed
+- **Same-named changed symbols shared one call-site pool.** The impact
+  bundle kept its per-symbol pools, round-robin cursors and quotas keyed by
+  the bare name, so two changed `__init__`s or `run`s split one quota and
+  reported the same counts. They are now keyed by definition
+  (`defined_in` + `qualname`). Each call site records which definition's
+  importer search found it (`via`) and goes only to that definition. A site
+  no importer ties to one of them is sent once and marked `ambiguous`. Every
+  site now says whose caller it is (`defined_in`). The whole-repo search also
+  excludes every file defining a name, not just one of them.
+- **Function boundaries outside Python ran on to the next definition.** For
+  JS/TS, Go, Rust, shell, PowerShell, JVM, Ruby and PHP, a definition's
+  computed end skipped past top-level code up to the next definition, so a
+  change to that code was credited to the function above it. A block now ends
+  at the first line back at its own indentation. A closing `}`, `end`, `fi`,
+  `esac` or `done` there belongs to the block. An Allman `{` or a `) {` after
+  wrapped parameters stays in the header.
+
+### Removed
+- `ocr_impact.route_to_chunks`, which nothing called. The gate applies the
+  same per-chunk rule inline in `_impact_bundle`.
+
+## [0.9.0] - 2026-09-25
+
+Targeted re-checks instead of re-reviews: nothing already reviewed is reviewed
+again, and what a change can break elsewhere is checked instead.
+
+### Added
+- **Impact analysis** (`scripts/ocr_impact.py`). For every reviewed file the
+  gate lists the symbols the change touched — definition changes, body-only
+  changes, and fixes that only delete lines (mapped through the old version) —
+  and `git grep`s the tip for their uses, importers of the changed module
+  first. The call sites go to the reviewer as `impact_sites`, including ones in
+  carried files and in files the push never touched; it answers
+  `ok`/`broken`/`unsure` per site, and a broken caller blocks at the call site,
+  labelled `(caller of changed code)`. Such a finding is also kept on the
+  caller's own ledger record. Chunked reviews get callers in other chunks'
+  files. Capped (30 symbols, 5 sites each, 40 sites, 12 KB), allocated
+  round-robin. The reviewer's own cross-file step (§2b) still runs, now aimed
+  at what the exact-name search cannot see. `OCR_IMPACT=0` turns it off.
+- **Same defect elsewhere.** Code in the push matching a prior high/medium
+  finding goes to the reviewer as `known_defects`; a confirmed match blocks,
+  labelled `(same defect as an earlier finding)`. Matches of a new finding,
+  and any match in a file the push does not touch, are non-blocking `(note)`
+  lines. `OCR_SIBLINGS=0` turns it off.
+- **Local run log** (`scripts/ocr_telemetry.py`): one JSON line per review in
+  `.git/review-gate-telemetry/<date>.jsonl` — file classes, cost-rule numbers,
+  symbols and call sites from both searches, per-site verdicts, same-defect
+  matches, resolver inputs and outcomes, findings by provenance, verdict, and
+  each model call's duration. `review-gate.py --telemetry-report [--days N]`
+  summarises it. Local only; `OCR_TELEMETRY=0` turns it off.
+
+### Changed
+- **Cost rule replaces the delta-chain cap.** A file with a delta base is
+  reviewed over its whole push range when that diff is at most 1.5× the delta,
+  and keeps the record's owed findings when it is. The fixed cap (a full
+  re-review after 5 deltas) is gone.
+- **The ledger fingerprint covers review criteria only**: model, rubric,
+  language rules, the reviewer and filter prompts, the repo's `.ocr/`, and
+  `OCR_MODEL`/`OCR_BLOCK_SEVERITY`/`OCR_BLOCK_CONFIDENCE`. SKILL.md, the state
+  protocol version, `OCR_CLAUDE_ARGS`/`OCR_CLAUDE_EXTRA_ARGS` and the resolver
+  prompt no longer invalidate earlier reviews. This release changes the
+  fingerprint itself, so existing records are reviewed afresh once.
+- **Ledger TTL default is 30 days** (was 7).
+- The reviewer may anchor findings at `impact_sites` / `known_defects`
+  locations outside the change set, and returns
+  `{"findings": [...], "impact_verdicts": {...}}` when given call sites. The
+  skill emits `cross_file_context_summary` and `impact_verdicts` for the run
+  log. The finding schema gains `impact_site` and `sibling_of`.
+- A first push whose changes have call sites elsewhere now goes through a
+  manifest instead of the bare 0.7.0 command line.
+
+### Fixed
+- **Console windows on Windows.** The detached review supervisor has no
+  console, and every `git` it started without `CREATE_NO_WINDOW` opened a
+  window of its own — dozens per review, some left hanging with `0x800700e8`
+  (the chunk cleanup's `git checkout -q -- .`). All git calls now pass it.
+- A cost-rule or delta file's resolver guard only accepts evidence from lines
+  added since the file was last reviewed.
+
+## [0.8.1] - 2026-09-25
+
+### Fixed
+- **Crash on malformed resolver output.** A resolver answer of
+  `{"resolutions": {"<id>": true}}` crashed the gate with
+  `AttributeError: 'bool' object has no attribute 'get'`, which blocked the
+  push "to preserve gate integrity" and recorded nothing. Each per-finding
+  value is now checked separately. A value that is not an object, or has a
+  missing or unknown `status`, is treated as an evidence-free `still_present`
+  and noted in the result's warnings. The gate no longer crashes on it.
+- **Fixes lost after a failed resolver run.** The resolver only saw the
+  incremental diff since the last reviewed tip. If the fix landed in a push
+  whose resolver run failed, later runs could not see it, and the resolver
+  answered `still_present` with empty evidence for code that was already
+  gone. The resolver manifest now has `prior_files`: for each finding, the
+  diff from the file as it was reviewed then to the file at the tip. The
+  guard accepts `resolved` evidence from the added side of that diff. A
+  high/medium prior in a file that changed since the finding goes to the
+  resolver even when no other file is under review, instead of replaying and
+  blocking.
+- **`still_present` needs evidence.** A `still_present` verdict counts only
+  when its quote, or the finding's own `existing_code`, is in the file at the
+  tip. Otherwise it is *unverified*. Unverified priors are sent to the
+  resolver once more with `"recheck": true`, and the agent is told to read the
+  file at the tip. A finding that is still unverified keeps blocking, but its
+  block reason says `(unverified: ...)` instead of `(still present)`.
+
+### Changed
+- `agents/code-resolver.md` and the skill's resolve mode (§R) take the
+  since-raised diffs (`{{SINCE_DIFFS}}`) and a re-check note. They now spell
+  out that every `resolutions` value must be an object with `status`,
+  `evidence_path` and `evidence_quote`, and that `still_present` must quote
+  the code as it is at the tip.
+
+## [0.8.0] - 2026-09-24
+
+### Added
+- **Incremental re-review after a block.** The gate now maintains a
+  **review ledger** — a content-addressed per-file cache of findings
+  (keyed by file blob OIDs and a prompt fingerprint) stored at
+  `<git-common-dir>/review-gate-ledger/`. On a fix-and-re-push the
+  planner classifies each file as **carry** (same contents, findings
+  replayed), **delta** (contents changed, review the diff between the
+  old and new blobs), or **full** (no prior record). Only delta and
+  full files go to the reviewer; clean files are never re-reviewed.
+- **Resolver pass** (`agents/code-resolver.md`). After the reviewer
+  finishes, one targeted `--resolve` call re-judges every high/medium
+  prior finding from carried and delta records. A finding cleared by
+  the resolver is written as a resolution and suppressed from the
+  verdict; the reviewer can override the resolver by re-reporting the
+  same finding (in which case no resolution is written).
+- **Resolution reuse.** A prior finding already resolved in an earlier
+  run is suppressed immediately, without a resolver call, as long as
+  the resolving evidence is still present at the current tip.
+- **Per-file provenance** (`new` / `carried` / `still_present`) is
+  recorded in findings, surfaced in the verdict message as a
+  `(carried)` or `(still present)` prefix, and written into the state
+  snapshot together with per-file class and miss-reason counts.
+- **`OCR_LEDGER=0`** disables the ledger entirely (reads and writes);
+  every file is reviewed in full, matching 0.7.0 behaviour without
+  the chunk cache.
+- **`OCR_FORCE_REVIEW=1`** now also bypasses ledger reads (not only
+  the old per-tip cache), forces every file full, and resets the
+  attempt counter. Records are still written.
+- **No reviewer call on a no-change re-push.** When every file in the
+  push already has a valid ledger record (same-tip or same-blob carry)
+  the verdict is replayed from the records and resolutions, with zero
+  `claude -p` calls.
+- **Stable chunk boundaries (change 1).** Chunking now covers only the
+  delta and full files for this push, so adding one file never
+  re-reviews already-recorded files.
+- New env vars: `OCR_LEDGER` (`0` = off, default on), `OCR_LEDGER_TTL`
+  (7 days), `OCR_LEDGER_MAX_RECORDS` (5000).
+- New stub test harness: `STUB_RESOLVE`, `STUB_RESOLVE_VERDICT`,
+  `STUB_FINDINGS_FOR` without a manifest, `--resolve` mode.
+- 32 new scenario tests (`tests/test_ledger_scenarios.py`) covering
+  all major ledger, resolver, provenance and migration paths.
+
+### Changed
+- **Protocol version bump to 1.** State files written by 0.7.0 (or
+  any unknown protocol) are treated as stale, and a fresh run starts
+  automatically. The `chunks/` checkpoint directory is removed on the
+  first 0.8.0 run.
+- **`_run_review` / `_run_resolver`:** the resolver call now passes
+  `--resolve <manifest>` (not `--paths-file`), so the stub and skill
+  correctly enter resolver mode.
+
+## [0.7.0] - 2026-09-23
+
+### Added
+- **Checkpointed, serialised push reviews.** Large pushes (> `OCR_CHUNK_THRESHOLD`,
+  default 15 reviewable files) are now split into per-directory file-group *chunks*
+  and reviewed one at a time. Each completed chunk is written to a content-addressed
+  cache (`.git/review-gate-async/chunks/`) before the next one starts. An
+  interruption (kill, reboot, session limit, run-budget exhaustion) costs at most one
+  chunk; the next push resumes automatically from where it stopped. A follow-up push
+  that amends one file reuses every cached chunk whose files' blobs did not change.
+- **Usage-limit detection.** When the reviewer outputs a session-limit message (e.g.
+  `You've hit your session limit · resets 3:20pm (Europe/Lisbon)`), the gate raises
+  `ReviewLimitError`, records `failed(reason=limit, chunks_done, resets_at)` and
+  immediately denies the push with `"usage limit — N/M chunks saved; re-push after
+  <time>"`. The attempt counter is not incremented (it only counts runs that made
+  no progress). After the reset, a normal re-push resumes from the checkpoint.
+- **Per-run budget** (`OCR_RUN_BUDGET`, default 3600 s). When the next chunk cannot
+  start within the budget, the supervisor writes `failed(reason contains "budget")`
+  and the next push resumes. Budget exhaustion never increments attempts; it just
+  pauses progress without losing what was done.
+- **`--paths-file`** in `skills/review/SKILL.md`. The push gate passes a per-chunk
+  JSON manifest so the skill reviewer reads only the chunk's files, with the correct
+  range and rename context.
+- **Chunk progress** shown in "still running" and "resume" messages:
+  `chunk 4/12, 3 saved`.
+- New env vars: `OCR_CHUNK_THRESHOLD`, `OCR_CHUNK_FILES`, `OCR_CHUNK_LINES`,
+  `OCR_CHUNK_TIMEOUT`, `OCR_RUN_BUDGET`, `OCR_MAX_FILES`, `OCR_CHECKPOINT_TTL`.
+
+### Fixed
+- **Reaper now protects live-run worktrees.** The hourly sweep previously deleted
+  any worktree older than 1 h regardless of whether its supervisor was still
+  running. It now reads every `running` state file, collects live-heartbeat
+  worktrees, and skips them.
+- **Chunk-cache files use a separate 24-hour TTL** (`OCR_CHECKPOINT_TTL`), so they
+  survive the 1-hour marker sweep that would have evicted them on every run.
+
+## [0.6.1] - 2026-09-23
+
+### Fixed
+- **AGENTS.md: a second layer against injection.** Claude Code now reads
+  `AGENTS.md` from a session's cwd when no `CLAUDE.md` is present, and the
+  reviewer's cwd is the untrusted branch. Measured on 2.1.280, the gate's
+  `--setting-sources ""` already keeps it out; the reviewer now also runs with
+  `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1`, which keeps it out on its own, so the file
+  stays blocked when `OCR_CLAUDE_ARGS` replaces the default flags or a later
+  release decouples AGENTS.md from `--setting-sources`. A live opt-in test
+  (`OCR_LIVE_TESTS=1`) checks both layers against a control run that does see it.
+- **README cost table** showed `--setting-sources project`; corrected to `""`.
+
+## [0.6.0] - 2026-09-22
+
+### Fixed
+- **A review longer than ~16 minutes killed the Claude Code session under the
+  gate.** The desktop app terminates a session's CLI process after ~975 s
+  without an output frame while a turn is pending, and a PreToolUse hook emits
+  nothing for as long as it runs. Four of five pushes on 2026-09-21 died this
+  way (the survivor's hook took 973 s): the push never ran, the reviewer kept
+  burning tokens as an orphan, its verdict went to a dead pipe, and the next
+  resume synthesised `[Request interrupted by user for tool use]` -- so the
+  model reported a user interruption that never happened. 0.5.5 had guessed at
+  inherited environment as the cause; the app's own session record names the
+  watchdog. The review now runs under a **detached supervisor** (`--mode
+  supervise`) that outlives the hook; the hook joins it for at most
+  `OCR_INLINE_BUDGET` (600 s) and otherwise **denies** with "still running,
+  re-run the push". The retry joins the same review. Nothing is ever allowed
+  unreviewed. `hooks/hooks.json`'s PreToolUse timeout drops from 1920 to 900 so
+  it stays under the app's wall; `OCR_TIMEOUT` moves to the supervisor.
+- **Hook mode reviewed the checked-out `HEAD`, not the branch being pushed.**
+  `git push -u origin feat/b` with `feat/a` checked out reviewed `feat/a`
+  (observed, record in hand). The push command is now parsed: the named branch
+  is reviewed against its remote-tracking ref (merge-base), `@{push}` resolves
+  a bare `git push`, `--tags` is checked for commits the remote lacks, deletions
+  and dry runs are allowed, and everything the parser cannot read literally
+  is refused (`OCR_LEGACY_RANGE=1` restores the old range). `git -C <dir>
+  push` is now routed to the gate at all -- it never contained the substring
+  the adapters triggered on.
+- **Blocked verdicts were never persisted**, so every retry after a block paid
+  the full review again. Every verdict is now recorded per pushed tip for an
+  hour and replayed on retry. `OCR_FORCE_REVIEW=1` re-reviews.
+- **The reviewer could write files.** `git diff/log/show --output=<path>`
+  passes the reviewer's `Bash(git diff *)` allowlist (verified against the
+  host: the file appears), and a redirection into the working tree is admitted
+  too. A prompt-injected reviewer could therefore forge the gate's own pass
+  marker. Inside the review session the plugin's hook now refuses `--output`
+  and any redirection that leaves the reviewer's directory or reaches `.git`,
+  `..`, an absolute path or `~`.
+- **The reviewer read the live working tree.** With the review now running
+  while the session goes on editing, it reads a detached worktree at the
+  pushed commit instead, and its scratch files stay out of the user's tree.
+- **A ref-moving command before the push retargeted it** (`git switch x &&
+  git push`, `git commit && git push`): the hook reviewed one tip and git sent
+  another. Only read-only git subcommands may precede a push in one command;
+  more than one `git push` per command and `--no-verify` are refused.
+- **0.5.5's in-progress marker was deleted by the orphan it was meant to
+  report.** An orphaned run's `finally` unlinked the marker the next run had
+  just written for the same tip. The state file's heartbeat and run-id fencing
+  replace it; the prefix stays in the sweep for one release.
+
+### Added
+- `--mode resume`: SessionStart context naming a review that was running or
+  finished when the session's previous process ended, so a host restart is
+  not narrated as a user interruption.
+- `--mode post` announces the verdict of a review that outlived its push
+  (and reminds about one still running at most every five minutes).
+- `OCR_INLINE_BUDGET`, `OCR_INLINE_BUDGET_GIT`, `OCR_FORCE_REVIEW`,
+  `OCR_LEGACY_RANGE`; the git pre-push adapter uses the same state machine
+  with a 300 s budget under Claude's Bash tool (full `OCR_TIMEOUT` at a TTY).
+- End-to-end tests (`tests/test_async_gate.py`) that run the real hook, a
+  real detached supervisor and a stub reviewer against a temporary repository.
+  The stub is wired through `OCR_REVIEWER_CMD`, honoured only for a script
+  under the plugin's own `tests/` directory.
+
+### Changed
+- The Python probe in every adapter requires 3.7+ (the detach relies on
+  CPython passing only the redirected std handles to a child).
+
+## [0.5.5] - 2026-09-15
+
+### Fixed
+- **On Windows, `cd /j/codigo/repo && git push` was denied as an unresolvable
+  push.** Claude's Bash tool on Windows is Git Bash, whose `pwd` spells drive
+  `J:` as `/j/`, so that is how Claude writes the `cd`. The hook runs under
+  native Python, where a drive-less rooted path is a directory off the root
+  of the *current* drive — one that does not exist — so the resolver saw a
+  `cd` into nowhere and blocked with "could not determine which repository
+  this push targets". The resolver now reads the `/<letter>/` and
+  `/cygdrive/<letter>/` spellings as the drive they name. Everything it could
+  not resolve before, it still refuses.
+- **A reviewer killed mid-review left no trace, so the push was silently
+  re-reviewed from scratch.** The reviewed-marker was only written after the
+  review returned. An in-progress marker is now written before the reviewer
+  starts and removed when it finishes, so a review that was killed outright
+  is reported as such through the same findings channel the gate already
+  uses.
+- **The headless reviewer inherited the parent session's environment
+  unmodified**, including its live IPC channel and token and its own session
+  identity — state an independent reviewer must not hold. That bundle is now
+  scrubbed by default; `OCR_UNSET_ENV` overrides it (`none` to disable, or an
+  explicit list to replace). On Windows the reviewer is also spawned in its
+  own process group with no window and no shared stdin. `OCR_DEBUG=1` adds a
+  values-safe forensic breadcrumb of what was spawned and what was scrubbed.
+
+## [0.5.4] - 2026-09-02
+
+### Fixed
+- **A deferred report did not say which repository it was about.** 0.5.3's
+  parked notes are addressed to the session that pushed, and a session
+  routinely spans several repositories in one conversation — the gate exists
+  because Claude pushes as `cd <repo> && git push`. So a report flushed on a
+  later tool call could describe repo A while the reader had moved on to repo
+  B, and nothing in the body said so. It now names the repository. Withholding
+  the report unless the repo still matched would have re-opened the hole 0.5.3
+  was written to close, so the fix is to label it, not to suppress it.
+  Caught by the gate reviewing its own 0.5.3 push, through the delivery path
+  that release added.
+
+## [0.5.3] - 2026-09-02
+
+### Fixed
+- **A push that failed reported nothing, though it had already been reviewed.**
+  Delivery rode on the pushing tool call's own `PostToolUse` hook, and that hook
+  does not fire for a tool call that exited non-zero — so a rejected push, or a
+  `git push && gh pr create` whose second half blew up, reviewed the commits,
+  wrote the findings to the log, and told nobody. Seen in this repo's own
+  markers: two reviewed pushes carrying a finding each, both with a
+  `scr-push-reviewed-` marker and no `scr-post-delivered-` companion.
+  The gate now parks a note when it records a review and clears it when the
+  report lands, so any later tool call can deliver one the push never did.
+  Notes live in the plugin data dir rather than `.git`, because the adapter has
+  to answer "is anything waiting?" before it knows what repository it is in;
+  they expire on the same hour-long TTL as every other marker here, are
+  addressed to the session that pushed (a terminal push, having no session, goes
+  to whichever session sits in that repo), and the shell adapters test for one
+  with a bare glob — no subprocess and no Python on the hot path.
+
+### Changed
+- **A clean pass now says so, in one line.** It used to say nothing at all, on
+  the theory that the `PreToolUse` status line already showed the gate running.
+  It does not, to the reader that matters: silence is indistinguishable from
+  "no review happened", so the model went and read the findings log after every
+  push — the exact chore this channel exists to remove. `review-gate: pass - no
+  findings.` and nothing else; a clean pass has no raw output worth pointing at.
+
+## [0.5.2] - 2026-09-02
+
+### Fixed
+- **An unevaluable range counted as an empty one.** The remote sha in a pre-push
+  ref line is what the *remote* reported during negotiation, and the client only
+  needs the objects it must **send** — so that commit need not exist locally.
+  `git log <missing>..<local>` then fails, and a non-zero exit was treated
+  identically to "no commits": the range was dropped, nothing looked reviewable,
+  and the push went through unreviewed. Skipping the review precisely when the
+  base is least certain is the same fail-open in a new place. The base is now
+  confirmed with `git cat-file -e` and falls back to the default branch when
+  absent; a range that is still unevaluable counts as carrying commits, because
+  over-reviewing costs a review and under-reviewing costs the gate.
+- The `--chain-into` snippet's comment block was indented one level shallower
+  than the code it sits in. That text is printed verbatim for someone to paste
+  into their own hook, so its indentation is shipped output, not formatting.
+
+## [0.5.1] - 2026-09-01
+
+### Fixed
+- **A push to a ref that is not your upstream skipped the review entirely.**
+  `_has_unpushed_commits` asked *"is HEAD ahead of its own upstream?"* when the
+  question is *"what is the remote about to gain?"*. Those diverge the moment
+  the target ref differs from the upstream. Observed in a real repo: a branch
+  level with `origin/mybranch`, pushed as `mybranch:main`, reported nothing
+  unpushed — so the gate exited before even the marker replay, and five commits
+  reached `main` reviewed by nothing, with no hint in the output.
+  - Git hands a pre-push hook exactly this (`<local ref> <local sha> <remote
+    ref> <remote sha>` on stdin) and every adapter was discarding it with
+    `</dev/null`. All three now pass it through: `scripts/pre-push`, the
+    `--chain-into` snippet, and copies already installed in shadowed repos.
+  - The range is `<remote sha>..<local sha>` — what the remote gains. A
+    brand-new remote ref has no such base and falls back to the default-branch
+    heuristic: a guess about a new branch rather than a silent skip.
+  - Hook mode keeps the upstream heuristic, because it runs *before* git and
+    has no refs to consult. That asymmetry is why the git adapter is the one
+    that closes this.
+  - **Detection was only half.** The review is now invoked with
+    `--range <A>..<B>`; without it the skill re-derives `@{u}..HEAD` and would
+    have turned a silent skip into a confident empty pass. `--range` is
+    documented in `skills/review/SKILL.md` as taking precedence over
+    `--unpushed`.
+  - **A push updating several branches is refused, not half-reviewed.** No
+    single `A..B` expresses two branches, and reviewing one would leave the
+    rest unreviewed — the same fail-open one layer down. Tag refs are filtered
+    first, so a `--follow-tags` push is not mistaken for a multi-branch one.
+  - The `--chain-into` snippet no longer assumes a `$PUSH_REFS` variable it
+    never defined. It names the variable, says to point it at wherever the host
+    hook saved the ref lines, and degrades to the upstream heuristic when unset
+    rather than expanding to nothing unannounced.
+
+## [0.5.0] - 2026-09-01
+
+### Changed
+- **The gate denies ambiguous commands instead of parsing shell harder.**
+  ~290 lines go: heredoc stripping, quoted-span masking, a shlex tokenizer,
+  the shell `-c` recognizer, and the multi-stage `cd` resolver. All of it
+  existed to make exotic commands *work*, and between 0.4.2 and 0.4.7 it
+  produced eleven repair releases — several of them fail-opens this gate
+  caught on its own pushes. In a fail-closed tool the answer to an ambiguous
+  command is not a better parser; it is to refuse and say so.
+  - `_gate_repo` folds a `cd` chain of literal paths and calls everything else
+    unknown: an unexpanded `$VAR`, a command substitution, `cd -`, a target
+    that is not a directory. Ambiguous **and** a real push ⇒ denied, with the
+    message that already existed for that case. `OCR_FAIL_OPEN=1` still
+    bypasses.
+  - **Deliberate trade:** a quoted argument containing `cd … && git push` now
+    reads as ambiguous and **blocks**, where the old parser tried to tell code
+    from data and repeatedly got it wrong. Blocking is visible and bypassable;
+    misrouting is neither.
+  - **One exception, learned the hard way:** heredoc-body stripping stayed.
+    Removing it denied a plain `git commit` whose *message* discussed a
+    directory change and a push, within minutes of shipping. The line is
+    decidability — a heredoc body is data the command *writes*, and the shell
+    never runs it, so parsing it as code is a mistake rather than a judgement
+    call. Quoted arguments and shell `-c` are guesses at intent, and eleven
+    repair commits say those guesses kept being wrong; they stay gone.
+  - **Strictly better:** a quote now counts as a command boundary, so
+    `bash -c "cd /repo && git push"` resolves instead of silently falling back
+    to the session directory — the exact fail-open that five successive
+    spellings of the `-c` detector were chasing.
+- **Delivery does no command parsing at all.** The gate must resolve the pushed
+  repo to review it, so it records that (keyed by session, beside the gate-dir
+  pointer) and `--mode post` reads it — ignoring a breadcrumb older than
+  `MARKER_TTL` or pointing at a vanished directory. Re-deriving the repo by
+  parsing the command a second time was duplicated fragility with its own
+  failure modes.
+
+### Removed
+- The **"commit pushed unreviewed"** notice added in 0.4.4. It was never asked
+  for and existed only because the parser made it cheap.
+
+## [0.4.9] - 2026-09-01
+
+### Fixed
+- **The pre-0.3 markers were never reaped.** `_reap_markers` only globbed the
+  prefixes currently in use, so every `scr-reviewed-*` file the old per-commit
+  gate wrote is still in `.git` and always would be — 516 of them in one real
+  repo, found while testing `--chain-into`. That is the same defect 0.3.3's
+  reaper was added to fix, for the prefix the commit→push migration left
+  behind. Reaping is keyed on mtime, so listing the legacy prefix collects the
+  stragglers on the next push and then costs nothing.
+
+## [0.4.8] - 2026-09-01
+
+### Fixed
+- **The `--chain-into` snippet lacked the re-entry guard** the other two
+  adapters have. `review-gate.py` sets `OCR_IN_REVIEW=1` for its child so a
+  push made from inside the headless review does not spawn another reviewer,
+  and both `scripts/pre-push` and `gate-hook.sh` short-circuit on it. The
+  Python side would still have exited early, so this was a wasted process per
+  Bash call inside a review rather than a nested review — but a third adapter
+  ignoring the convention is the kind of drift that becomes a real divergence.
+  The block is also re-indented: it is code people paste into their own hook,
+  so a body at the wrong level under its guard is a defect in the shipped
+  thing, not cosmetics.
+
+## [0.4.7] - 2026-09-01
+
+### Fixed
+- **`-euxc` no longer misses.** 0.4.6 capped the shell `-c` cluster at two
+  letters to stop `-exec`, `-sync` and `-static` from matching, which worked but
+  lost `-euxc` — and a miss is the *unsafe* direction, blanking a real
+  `bash -euxc "cd /repo && git push"` into data. Length was the wrong
+  discriminator. Three lexical conditions replace it, each rejecting something
+  the others cannot: **length ≤ 4** (`-atomic`, `-public`, `-classic`,
+  `-topic`), **no repeated letters** (`-exec` has two `e`s and is *exactly*
+  four letters, so a cap alone never rejects it; `-static` has two `t`s), and
+  **every letter a real bash short option** (`-sync` has `y`, `-magic` has `g`).
+  Every cluster anyone writes passes: `-c`, `-lc`, `-ec`, `-xc`, `-euc`, `-euxc`.
+
+### Added
+- **`install-git-hook.sh --chain-into <repo>`**, for a repo that sets its own
+  `core.hooksPath`. Git resolves the local one first, so such a repo silently
+  drops the global gate — pushes from a plain terminal are not gated at all and
+  nothing announces it. `/review-gate:doctor` reports the condition; this prints
+  the cure.
+  - It **prints and does not edit**: that hook belongs to the repo and is under
+    its version control, and a generated edit landing in someone's commit
+    unannounced is not a trade an installer gets to make.
+  - The snippet calls `review-gate.py` **directly** rather than the global
+    pre-push wrapper, because that wrapper also chains `$GITDIR/hooks/pre-push`
+    — in a repo with its own checks, that runs them twice. It resolves the
+    reviewer through the `plugins/data/*/gate-dir` pointer the plugin refreshes
+    on every run, so it survives upgrades that move the versioned cache path.
+  - Place it immediately before the hook's success `exit 0`, not at the end of
+    the file: a hook that exits early never reaches an appended block.
+  - It **fails closed**, mirroring `scripts/pre-push`. A first cut no-opped when
+    the reviewer or a working Python could not be found, which is the least
+    visible place in the tool to fail open — the snippet exists precisely for
+    repos where nothing else reviews the push. `OCR_FAIL_OPEN=1` remains the
+    one-shot bypass.
+
+## [0.4.6] - 2026-09-01
+
+### Fixed
+- **`-exec` and friends matched the shell `-c` cluster.** The pattern was
+  `-[A-Za-z]*c$`, documented as matching short combined clusters but in fact
+  matching every single-dash long option merely *ending* in `c` — `-exec`,
+  `-sync`, `-static`, `-atomic`, `-public`, `-classic`. A quoted argument after
+  one of those was kept as executable shell, so `find . -exec "..."` in a
+  segment that also mentioned a shell had its argument parsed as code. Capped
+  at two letters before the `c`, which covers every cluster anyone writes
+  (`-c`, `-lc`, `-ec`, `-xc`, `-euc`). The trade is deliberate: a longer
+  cluster like `-euxc` is now missed, which is the unsafe direction — but
+  essentially nobody writes it, `find -exec` is common, and the git pre-push
+  adapter still covers what this adapter misses.
+
+### Added
+- **Direct tests for the tokenizer and the masking state machine.** They were
+  only exercised through the callers, and five prior spellings were each wrong
+  in a different way. Now pinned: punctuation split without surrounding spaces,
+  the newline token, the unbalanced-quote fallback, the segment reset at a
+  separator (so a `bash -c` does not make every later quote code), and both
+  directions of the cluster pattern.
+
+## [0.4.5] - 2026-09-01
+
+### Fixed
+- **Shell `-c` detection missed most real spellings**, and every miss was a
+  fail-open: blanking a genuine `bash -c "cd /repo && git push"` hides both the
+  `cd` and the push, so the gate resolves the session's repo instead of the one
+  being pushed. It took three passes to get right, because the framing was
+  wrong rather than the details:
+  - matching only the exact token `-c` missed `bash -lc` (a combined cluster,
+    never equal to `-c`) and `bash -eu -c`;
+  - walking back over tokens starting with `-` missed any flag taking a
+    *separate* value — `bash --rcfile FILE -c`, `bash -o pipefail -c` — since
+    the value stopped the walk before the shell name.
+
+  - taking the **first word** of the command missed every wrapper (`sudo bash
+    -c`, `timeout 30 bash -c`), and newlines vanish in `str.split()`, so `ls`
+    on the previous line looked like the runner.
+
+  Picking out *which* token is the runner was the wrong question. Detection now
+  asks whether the simple command owning the `-c` **mentions a shell anywhere**,
+  which needs no notion of flags, wrappers, or env assignments; newlines are
+  tokenized explicitly so a separator on a line boundary is visible. That errs
+  toward calling a span code, which is the right direction: treating data as
+  code costs at worst a conservative block, while treating code as data is the
+  fail-open. `python -c`, `node -e`, `ssh host -c` and `sudo python -c` still
+  do not qualify, as they must not.
+- **The runner lookup was quadratic.** It re-split the whole command prefix for
+  every quoted span, in a function that runs on every Bash call; a generated
+  script with thousands of quoted strings is exactly that input. Tokens are now
+  accumulated incrementally — each step extends the list by only the new gap,
+  and a quoted span counts as the single token it is. 6000 spans in ~19 ms.
+  - A first attempt bounded the lookup to a fixed 200-character window instead,
+    which traded the cost for a **correctness hole**: a runner past the cutoff
+    failed the shell test, so a real `bash <flags> -c "cd /repo && git push"`
+    was blanked as data and its push went invisible — reintroducing the very
+    fail-open the exception exists to prevent. The incremental form has no
+    cutoff, so the distance from a runner to its quote does not matter.
+
+## [0.4.4] - 2026-09-01
+
+Closes the two issues 0.4.2 and 0.4.3 documented rather than fixed.
+
+### Fixed
+- **A `cd` chain inside a quoted argument was parsed as code.**
+  `git commit -m "cd repo && cd sub && git push"` is a message, not a chain, and
+  a grep pattern is a pattern. Read as code, the chain resolved to nothing and
+  the unknown-target rule could deny an entirely innocent command. Quoted spans
+  are now blanked before parsing, with two exceptions that are load-bearing:
+  after `cd` (`cd "path with spaces"` *is* the hop being followed) and after a
+  **shell's** `-c` (`bash -c "cd /repo && git push"` really does execute its
+  argument). The shell name is checked, not just the flag — keying on `-c`
+  alone made `python -c "print('git push')"` read as a real push.
+  - Masking also allows a **quote** to count as a command boundary, which was
+    not safe before. That fixes `bash -c "cd /real && git push"`, whose `cd`
+    sits immediately after a quote and was previously invisible — the gate
+    resolved the session's repo instead of `/real`.
+
+- **Quote matching could hang the hook.** The first `_QUOTED` matched a span as
+  `(['"])(?:\\.|(?!\1).)*\1`, where both alternatives can consume a backslash —
+  so inside a run of them the engine tries every pairing, and an unterminated
+  quote gives it no early exit. Exponential, in a hook that runs on every Bash
+  call, reachable from any command with a stray quote. Both branches are now
+  unambiguous; 20000 backslashes after an open quote completes in ~1.5 ms.
+- **The push was located by raw substring in two places.** `_cd_targets` and
+  `_commits_in_same_command` used `find("git push")` — no word boundary, no
+  command position — while everything else uses the stricter pattern. Masking
+  only blanks *quoted* spans, so an unquoted mention survived: `git commit -m
+  "wip" && echo remember to git push later` would have been reported as a
+  commit pushed unreviewed, and a real `cd` after such a mention was hidden.
+
+### Added
+- **A commit pushed in the same command is now reported as unreviewed.**
+  `git commit && git push` in one command is never seen by the PreToolUse
+  adapter: it runs *before* the command, so the commit does not exist yet, HEAD
+  points at its parent, nothing is unpushed, and the gate allows without
+  looking at anything. The git pre-push adapter does cover it, so the gap is
+  real only where that adapter is absent or shadowed by a repo-local
+  `core.hooksPath` — the configuration this release line already found in the
+  wild. No pre-tool hook can review a commit that does not exist, so this is
+  surfaced rather than fixed: `--mode post` detects the shape and says so in
+  the session's context. Guarded three ways so it cannot become noise — the
+  shape must match, the push must not have been a no-op, and the notice is
+  claimed with the usual delivered-marker so it appears once.
+
+## [0.4.3] - 2026-09-01
+
+### Fixed
+- **A heredoc opener followed by a pipe was not recognised.** The lookahead
+  added in 0.4.2 allowed only *redirections* after the marker, so
+  `cat <<'EOF' | grep x` and `python - <<'PY' | tee log` — the shape this
+  project's own tooling uses constantly — were not treated as openers, their
+  bodies went unstripped, and body text resembling a `cd` chain was misparsed
+  exactly as before the stripping existed. What actually distinguishes an
+  opener from the same characters used as data is what *follows* the marker:
+  end-of-line, a redirection, or a pipe/separator — never a bare word. The
+  lookahead now says that, which is wider without being weaker.
+- **`_resolve_pushed_repo`'s docstring still described the removed single-hop
+  behaviour** after the implementation moved to the folded chain — the same
+  hazard this release line hit twice already: a comment asserting something the
+  code stopped doing.
+
+## [0.4.2] - 2026-09-01
+
+### Fixed
+- **Only the last `cd` hop was anchored to the session directory.** A relative
+  hop is relative to the hop before it, so in a two-hop chain the second lives
+  under the first, not under the session dir. Joining it onto the base produced
+  a path that either did not exist — falling through to the fallback this code
+  exists to avoid — or existed and pointed somewhere unrelated. `_effective_cd`
+  now folds the chain in order: an **absolute** hop re-anchors and clears an
+  earlier unknown (it fully determines the destination regardless of what came
+  before), a relative hop after an unknown one stays unknown, and `cd -` is
+  unfollowable since it needs the shell's directory history.
+- **Heredoc bodies were parsed as commands.** A body the command *writes* is
+  data the shell never runs. This was not academic: the change adding these
+  tests was itself denied by the gate, because the heredoc it was writing
+  contained a relative `cd` chain as test data — the parser read it as real,
+  resolved it to nothing, and the unknown-target rule blocked an innocent
+  command. `_strip_heredocs` drops bodies before parsing, keeping the opener
+  line (a real `cd` can share it) and handling quoted and unquoted markers.
+  - Stripping is deliberately narrow, because a first cut of it was worse than
+    the problem: it matched `<<WORD` anywhere on a line and, with no matching
+    terminator, discarded everything to the end of the command — which could
+    swallow a genuine `cd` and a genuine push and leave the parser blind. An
+    opener must now **end its line** (bar trailing redirections), and a body is
+    dropped **only when a terminator is actually found**. Unterminated input
+    therefore errs toward reading the body as code — at worst resolving the
+    wrong directory and *denying* — rather than toward deleting real commands
+    and allowing. Wrong-and-blocking is recoverable; blind-and-allowing is the
+    fail-open this whole line of work exists to close.
+  - Known residual: a `cd` chain inside a **quoted argument** is still parsed
+    as code. Stripping quoted spans wholesale is not safe, since
+    `cd "path with spaces"` is exactly that shape.
+
+## [0.4.1] - 2026-09-01
+
+### Fixed
+Three high-severity findings the gate raised against its own 0.4.0 release,
+all in the `cd`-resolution code that release introduced.
+- **A multi-line command matched nothing.** `_cd_targets`' separator
+  alternation had no newline case and `re.finditer` is not `re.MULTILINE`, so
+  `^` only ever meant the start of the whole string — `cd repo\ngit push`
+  yielded zero targets, and a Bash tool call is routinely multi-line.
+- **`_looks_like_real_push` had the same gap, and there it was worse.** A
+  `git push` on its own line returned `False`, so the unknown-target block that
+  function gates silently never fired — dead for exactly the command shape it
+  was meant to catch.
+- **Relative `cd` targets were not anchored.** Both resolvers called
+  `os.path.isdir` on the raw capture, which Python resolves against the *hook
+  process's* cwd — the very confusion this code path exists to correct. A new
+  `_cd_candidate` expands `~` and joins a relative target onto the session's
+  cwd. It still does not `expandvars`: `$T` was set by the shell running the
+  command, not in ours.
+
+## [0.4.0] - 2026-09-01
+
+### Added
+- **Findings now actually reach the model, via a PostToolUse adapter.** This is
+  the headline fix, and it exists because the 0.3.3 mechanism below never
+  worked. Verified against Claude Code's own transcript records: a PreToolUse
+  `permissionDecisionReason` on an **allow** decision produces a `hook_success`
+  entry and nothing else, while a PostToolUse `additionalContext` produces a
+  separate `hook_additional_context` record — and that companion record is what
+  delivers text into the session. So blocking findings (delivered as the
+  `tool_result` of a deny) were always seen, and non-blocking ones never were,
+  no matter how loudly they were printed.
+  - `hooks/hooks.json` gains a `PostToolUse` entry matching `Bash`, dispatching
+    to new `scripts/post-hook.sh` / `post-hook.ps1`. Timeout 30s, not 1920: this
+    path only reads a file and must never be able to stall a session.
+  - The new adapters **fail open**, the deliberate inverse of `gate-hook.*`.
+    That pair decides whether a push proceeds, so it must block when it cannot
+    run; this pair decides only whether a report is printed, so it goes quiet.
+    Nothing but a JSON object ever reaches its stdout.
+  - `review-gate.py --mode post` replays the record an earlier review already
+    wrote to `FINDINGS_LOG`. Silent on a clean pass, loud about a block-level
+    finding that advisory mode let through, and never renders an empty findings
+    block when the log shed them to fit `_MAX_LOG_LINE`.
+  - Delivery is deduplicated by `scr-post-delivered-*` markers, claimed with
+    `O_CREAT|O_EXCL` and swept by the existing `MARKER_TTL` reaper: silent on a
+    repeat within one session, re-delivered to a new session whose context
+    genuinely lacks the findings.
+  - Known gap: PostToolUse does not fire for a tool call that fails, so a
+    rejected push delivers nothing. The marker is claimed only after emitting,
+    so the retry reports instead. A command that updates the ref yet exits
+    non-zero and is never retried (a multi-ref push with one ref rejected,
+    `git push && gh pr create` where `gh` fails) leaves the findings in the log
+    for `--history`.
+- **`/review-gate:doctor` detects a shadowed git adapter.** It only ever read
+  `core.hooksPath` from **global** config, but git resolves the **local** one
+  first — so any repo managing its own hooks (husky, lefthook, a hand-rolled
+  `scripts/git-hooks`) silently drops the global gate out of the chain while
+  the doctor reported a clean bill of health. Plain-terminal pushes in such a
+  repo are ungated, and nothing announced it. `--mode post` surfaces the same
+  warning once per session.
+
+### Fixed
+- **0.3.3's "hook mode reports non-blocking findings to the calling session"
+  was not true.** `permissionDecisionReason` on an allow reaches the hook's own
+  record, visible UI-side and useful when debugging, and goes no further. The
+  reason string is kept for that purpose; the comment asserting it was a
+  delivery channel is corrected in place, because in a fail-closed tool a false
+  load-bearing comment is how the next regression ships.
+- **The gate reviewed whatever repo the process happened to sit in.** In hook
+  mode `repo_root` came from the process cwd — the directory Claude Code was
+  launched from — while Claude routinely pushes as `cd <repo> && git push`. The
+  gate therefore inspected the *session's* repo, found nothing unpushed, and
+  allowed a push it had never looked at. Silent, and total in any repo where
+  the git adapter is absent or shadowed. `_resolve_pushed_repo` now derives the
+  target from the command, and `_has_unpushed_commits` takes the repo instead
+  of asking the cwd. (A comment at the call site had described this intent
+  since before the code could deliver it.)
+- **Reviewer output was decoded with the locale's codepage.** Both
+  `subprocess.run` calls used `text=True` with no `encoding=`, so on a default
+  Windows box the reviewer's UTF-8 was read as cp1252: every em-dash in a
+  finding became `â€"` and was then stored that way permanently, in the
+  findings log, the raw snapshot, and the context injected into the session.
+- **Em-dashes and ellipses in terminal-bound strings** mojibake through git's
+  stderr on Windows. All such strings are ASCII now.
+
+### Changed
+- **The gate blocks when it cannot determine which repository a push targets**
+  (an unexpanded `$VAR`, a command substitution, a path that is not a repo),
+  honouring `OCR_FAIL_OPEN`. Same rule the rest of the tool applies to every
+  "cannot run" case. Deliberately narrower than the review trigger: reviews
+  fire on a loose `git push` substring because over-reviewing is cheap, but a
+  block additionally requires `git push` at a command position, so a command
+  that merely *mentions* it — a grep pattern, a heredoc, a commit message —
+  is never denied for a reason about pushing.
+
+## [0.3.3] - 2026-08-28
+
+### Added
+- **Non-blocking findings are now persisted instead of destroyed.** A `warn`
+  or `pass` verdict lets the push through, printed its findings once to stderr,
+  and left the detail only in `review-gate-last-output.json` — which
+  `_save_raw_output` overwrites on every run (`scripts/review-gate.py:280`
+  before this change). Medium/low findings on a passing push were therefore
+  unrecoverable as soon as the next review started.
+  - `_record_review` appends one JSON line per completed review — findings
+    verbatim, verdict, branch, HEAD sha, mode, timestamp — to
+    `.git/review-gate-findings.jsonl`. Written for **every** verdict, blocking
+    or not, and never pruned by this tool.
+  - `_archive_raw_output` also snapshots the reviewer's raw stdout to
+    `.git/review-gate-history/<UTC>-<sha7>.json`. Only these snapshots rotate
+    (`OCR_HISTORY_LIMIT`, default 50, `0` = keep all); the findings log does not.
+  - `review-gate.py --history [N]` replays recorded reviews. Without it there
+    was no command that could show a passing review's findings again.
+- **Push markers carry the findings of the review that wrote them.** They held
+  a bare epoch float, so when the paired adapter short-circuited on a fresh
+  marker it allowed silently and the first run's findings were shown exactly
+  once. `_write_marker`/`_read_marker`/`_prior_findings_note` now replay them;
+  markers written by older versions still parse (treated as "no findings").
+- **Hook mode reports non-blocking findings to the calling session.** `allow()`
+  takes an optional reason, so a `warn` verdict rides back in
+  `permissionDecisionReason` instead of going to a stderr stream Claude Code
+  does not surface on an allow decision.
+
+
+### Fixed
+- **`_archive_raw_output` claimed a snapshot filename with
+  `while (d / name).exists()` and only then wrote it** — check-then-act, so
+  the two adapters archiving the same HEAD inside one UTC second could both
+  see the same name free and one would overwrite the other, which is the
+  collision that loop exists to prevent. Found by the gate reviewing its own
+  commit. The name is now taken with `os.open(..., O_CREAT|O_EXCL|O_WRONLY)`
+  and the retry moves on instead of overwriting (bounded at 100 attempts).
+  Findings were never at risk — they are written separately to the findings
+  log — but a raw snapshot could be lost, leaving one review's log entry
+  pointing at another run's stdout.
+- **Archived snapshots were created executable on POSIX.** `os.open` defaults
+  to mode `0o777` (`0o755` under the usual umask), while every sibling
+  artifact this tool writes goes through Python's io layer and lands at
+  `0o644`. The mode is now passed explicitly as `0o666`.
+
+## [0.3.2] - 2026-08-20
+
+### Added
+- **A `SessionStart` check warns immediately if no working Python 3 is
+  found**, instead of the user only finding out when a real `git push` gets
+  denied. Claude Code has no plugin "on install" hook, so this fires on every
+  session start/resume — silent when Python is fine, and a short warning
+  (with the fix steps and `/review-gate:doctor` pointer) when it isn't.
+  `scripts/session-start-check.sh` / `.ps1`, same two-adapter pattern as the
+  push gate itself.
+
+### Fixed
+- **The push matcher's `if: "Bash(*git push*)"` was invalid syntax and
+  silently failed open.** Per Claude Code's own hooks docs, an unparseable
+  `if` pattern makes the hook run regardless of the command — `*text*`
+  substring wildcards aren't documented syntax. So the gate hook fired on
+  *every* Bash call, not just `git push`, confirmed when it denied an
+  unrelated `git config --global --get core.hooksPath` for lack of a working
+  Python interpreter. `if` is now `Bash(git *)` (valid, still best-effort),
+  and `gate-hook.sh`/`gate-hook.ps1` now read the PreToolUse payload and check
+  for `git push` themselves — before ever resolving Python — so a non-push
+  Bash call can no longer be blocked by a missing/unreachable interpreter.
+
+## [0.3.1] - 2026-08-20
+
+### Changed
+- **Review token spend cut ~70-85% per run.** `git diff` now passes `-M` for
+  rename detection, so a moved file no longer renders as a full delete+add. A
+  new symbol-context step resolves cross-file references via Serena or
+  `git grep HEAD` instead of giving the reviewer unrestricted Bash and telling
+  it to go read files itself. Hard caps added throughout: per-file and total
+  diff size, symbols per file, git-grep calls, snippets, and reference counts.
+
+### Fixed
+- **The gate's own README/header lied about failing open.** `gate-hook.sh`
+  still opened with "Fails open" while its body (rewritten in 0.3.0) denies
+  the push when there's no working Python. Corrected to match actual
+  behavior.
+- **The shell resolver had no test coverage.** `_resolve_gate_dir` is the
+  mechanism the whole plugin depends on to find its own reviewer; a
+  regression there could silently reintroduce the exact bug 0.3.0 closed.
+  Added `tests/test_pre_push_resolver.py`, which caught a real Windows bug:
+  `${hint%/bin}` only strips a forward-slash suffix, so a `C:\...\bin` hint
+  skipped the legacy fallback and blocked pushes even with a working gate.
+  Both path separators are now handled.
+- **Backgrounded review subagents could race the JSON verdict.** The
+  orchestrator never specified `run_in_background: false`, so a stray async
+  notification landing after the final `--json` verdict was printed could
+  silently replace it, false-blocking headless pushes with an
+  unparseable-output error.
+
+### Security
+- **Dropped `Bash(git grep *)` from the headless allowlist.**
+  `git grep -O/--open-files-in-pager=<cmd>` executes an arbitrary
+  caller-supplied command, and a prefix-wildcard allowlist pattern can't
+  exclude just that flag. All textual searches now go through the `Grep`
+  tool instead, which has no equivalent flag and isn't exploitable via
+  prompt injection.
+
+## [0.3.0] - 2026-08-14
+
+A hardening release, ahead of publishing the plugin. Three of these were silent
+fail-opens in a tool whose headline claim is that it fails closed.
+
+### Security
+- **The reviewer could be turned into a shell by the code it was reviewing.**
+  Its input is an untrusted diff, and it was handed tools to match:
+  `--allowedTools "Bash Read Grep Glob Task"` pre-approved *unrestricted* Bash,
+  `--setting-sources project` loaded the reviewed repo's own
+  `.claude/settings.json` (settings can define hooks, and hooks execute), and
+  the global git-hook adapter defaulted to `--dangerously-skip-permissions` on
+  top. Composed, a hostile branch could run arbitrary code on `git push`. The
+  allowlist is now read-only (`git diff`/`ls-files`/`log`/`show`/`rev-parse`/
+  `status`, plus `Read`/`Grep`/`Glob`/`Task`), Write/Edit/NotebookEdit/WebFetch/
+  WebSearch are removed from the model's context outright, settings sources are
+  empty, and skip-permissions is no longer defaulted — which is what makes the
+  allowlist binding, since a headless session has nobody to prompt and refuses
+  anything outside it.
+- **Findings are sanitized before being echoed back.** In hook mode they land in
+  `permissionDecisionReason`, i.e. straight into the calling session's context,
+  and they originate in the diff. Control characters are stripped and length is
+  capped, so one finding cannot forge extra report lines.
+- **Added a re-entry guard.** The review session is launched with
+  `--plugin-dir`, so this plugin's own push gate was registered inside it: every
+  Bash call the reviewer made spawned a Python process, and a push from within a
+  review would have recursed into a second full review. `OCR_IN_REVIEW=1` now
+  short-circuits both adapters.
+
+### Fixed
+- **Review markers no longer accumulate in the git dir.** A marker is written per
+  reviewed HEAD sha so the paired adapter (the Claude Code hook and the global
+  git hook) can skip re-reviewing the same push, and is only ever honored within
+  `MARKER_TTL`. Nothing removed the expired ones, so `.git/` gained one
+  `scr-push-reviewed-*` file per passing push, forever. `_reap_markers()` now
+  sweeps expired markers whenever a new one is written. Only expired markers go:
+  a fresh marker for another sha is still load-bearing, since the paired adapter
+  may be mid-push against a different HEAD. Failures during the sweep are
+  swallowed — housekeeping must never break the gate.
+- **No-Python failed OPEN.** Both adapters skipped the review and allowed the
+  push when no working interpreter was found, while the docs insisted a missing
+  `claude` binary was the only fail-open path. They now block, and say how to
+  recover.
+- **Windows without Git Bash had no gate at all.** Claude Code runs a shell-form
+  hook under Git Bash on Windows, or PowerShell when Git Bash is absent — so
+  `bash "..."` never started there, and a hook that fails to launch is treated
+  as non-blocking. `scripts/gate-hook.ps1` now covers that case. Hooks have no
+  platform condition, so both entries fire and the PowerShell one defers only
+  when Git Bash is *positively* confirmed (by installation, not `PATH`; a WSL
+  bash in `System32` does not count). When unsure it runs — a duplicate review
+  is cheaper than an unreviewed push.
+- **The push matcher missed wrapped commands.** `Bash(git push:*)` fires for
+  plain, compound (`cd x && git push`), env-prefixed and `;`-separated commands,
+  but not for `command git push` or `bash -c "git push"`. Now `Bash(*git push*)`,
+  which catches those and stays selective.
+- **The gate could create a stray `.git/` directory.** `_git_dir()` asked for
+  `--git-dir`, which answers the bare relative string `".git"` when cwd is the
+  repo root; callers resolved that against the process cwd (in hook mode,
+  wherever Claude Code was launched from) and then `mkdir -p`'d it. It now uses
+  `--absolute-git-dir`, anchors on the repo root, and returns empty outside a
+  repo.
+- **Every push wrote `.pyc` files into the installed plugin snapshot**, a
+  directory the plugin manager treats as immutable and `sync-local-install.py`
+  diffs for drift. `sys.dont_write_bytecode` is set before the sibling import.
+- **CI had been red on `main` since `69a4452`** — the verdict smoke test still
+  asserted the pre-`_is_actionable` answer. The fixture was stale, not the code.
+  CI now also runs the test suite (which it never did) across a 3.9/3.12 matrix,
+  and validates both manifests.
+- `.gitattributes` pinned `bin/pre-commit`, renamed to `pre-push` back in
+  `6aaf562`. The catch-all still normalized it, so the explicit CRLF protection
+  on the repo's most CRLF-fragile file had been quietly absent.
+- Corrected the fail-open documentation in five places, and the module
+  docstring's `OCR_TIMEOUT` default (600s → the actual 1800s).
+
+### Changed
+- **BREAKING: executables moved from `bin/` to `scripts/`.** A plugin's `bin/`
+  is added to the Bash tool's `PATH`, so every file in it became a bare command
+  in every Bash call for every user with the plugin enabled — including
+  `pre-push` (a template that resolves an unsubstituted placeholder, reviews
+  nothing, and exits 0) and `sync-local-install.py` (a dev tool that writes into
+  `~/.claude/plugins`). None were meant to be typed.
+  - **If you installed the global git hook, re-run
+    `bash scripts/install-git-hook.sh`.** You do not have to: the materialized
+    hook no longer trusts a baked path, and a compatibility shim remains at
+    `bin/review-gate.py` (removal target: **0.5.0**). Re-running just gives you
+    a clean install. `/review-gate:doctor` reports whether yours is stale.
+- **The global git hook resolves the reviewer at runtime.** It previously baked
+  an absolute path into a file outside the repo that no upgrade rewrites, so a
+  plugin upgrade — including this one — orphaned it, and an orphaned path meant
+  the push went through unreviewed. It now checks `$SCR_GATE_DIR`, then a
+  pointer written under `${CLAUDE_PLUGIN_DATA}` (which survives updates, unlike
+  the versioned cache dir), then the install-time hint, and **blocks with repair
+  instructions** if it finds nothing. This also retires the version-skew hazard
+  `CONTRIBUTING.md` has warned about.
+
+### Added
+- **`/review-gate:doctor`** — reports whether the gate is actually wired up and
+  able to run. Needed because a hook that fails to launch, times out, or dies
+  abnormally is non-blocking and cannot detect its own absence.
+- `displayName` in the plugin manifest, and a `pyproject.toml` pinning the lint
+  and test configuration CI already enforces.
+
+## [0.2.1] - 2026-08-14
+
+### Fixed
+- **An incomplete finding can no longer block a push on its own.**
+  `compute_verdict` decided block/warn/pass from severity + confidence alone,
+  with no check that a finding carries anything a human can act on. In practice
+  findings have come back with `severity`/`confidence`/`path` but no
+  `content`/`start_line`/`end_line` — the reviewing LLM dropping fields while
+  retyping findings through the filter/dedup/hallucination-check steps. Those
+  blocked a push while telling the developer nothing. `_is_actionable()` is now
+  required alongside the severity/confidence check before returning `block`; an
+  incomplete finding still counts toward `warn` and stays fully visible. The
+  skill's aggregation step is also hardened to carry every field forward
+  unchanged rather than retyping findings by hand.
+- **Raw reviewer output is persisted, and incomplete findings say so.**
+  `_format_reasons` used to render a field-less finding as a bare `path:? - `
+  with nothing after the dash, which reads as display truncation rather than a
+  defect in the review — with no way to see what the reviewer actually said
+  short of re-running it. Every run now dumps `claude`'s raw stdout to
+  `<git-dir>/review-gate-last-output.json` (inside `.git`, never tracked),
+  referenced from both the block and advisory messages.
+- **The verdict JSON is parsed by a balanced-brace scan, not a first/last span.**
+  `json.loads(text[find("{"):rfind("}")+1])` grabbed the *last* `}` anywhere in
+  the model's output, including one in trailing prose appended after the verdict
+  — turning a valid verdict into an unparseable-output failure. Now
+  `JSONDecoder.raw_decode` runs from each `{` in turn, keeping the last dict
+  carrying `findings` as the answer.
+- **A failed `claude` invocation is no longer reported as a bad review.**
+  `_run_review` never checked the subprocess exit code, so every failure mode
+  collapsed into "could not parse review output" — which points at the review
+  skill when the actual fault is the CLI. An expired login is the common case:
+  `claude` prints `Failed to authenticate: OAuth session expired` to **stdout**,
+  where the gate expects JSON. The gate now reports the exit code, which binary
+  ran, and its output, and recognizes credential failures specifically. Note a
+  Claude Code Desktop session refreshes its auth in-process, so the app keeps
+  working while the on-disk credentials the CLI reads go stale — the gate breaks
+  with no visible sign anything logged out. Still fails CLOSED: an unusable
+  login must not become a silent bypass.
+
+### Added
+- **`bin/sync-local-install.py`** — refreshes the local plugin snapshot from the
+  working tree. When the plugin is installed from a `directory` marketplace,
+  Claude Code runs a version-pinned *copy* under `~/.claude/plugins/cache/`, not
+  your checkout, and `${CLAUDE_PLUGIN_ROOT}` resolves there — so committing a fix
+  changes nothing the gate enforces until the snapshot is refreshed, with no
+  warning that the two have diverged. `--check` reports drift (exit 1), `--prune`
+  drops superseded snapshots. The global git hook is unaffected: it bakes in an
+  absolute path to `bin/` and always runs live code, so the two gates can
+  silently disagree about which version is in force.
+- `tests/test_review_gate.py` — unit tests for the `_extract_json` balanced-brace
+  parser: the trailing-prose stray-brace case that motivated the fix, plus
+  whole-string JSON, fenced blocks, unrelated JSON without `findings`,
+  last-match-wins, and no-JSON/malformed/empty inputs.
+
+## [0.2.0] - 2026-08-10
+
+### Changed — BREAKING
+- **The gate is now pre-push, not pre-commit.** It reviews every unpushed commit
+  once per push (`git diff @{u}..HEAD`) instead of reviewing staged changes on
+  every commit. A 10-commit push is one review.
+- **`bin/install-git-hook.sh` now installs `pre-push`** (`bin/pre-push` replaces
+  `bin/pre-commit`). **Re-run the installer if you installed before this
+  release**: the old `pre-commit` hook still fires on every commit, and because
+  the gate now reviews `@{u}..HEAD` it reviews the *wrong* state at commit time
+  — during a pre-commit hook the new commit does not exist yet, so `HEAD` is
+  still its parent. The installer detects and removes the stale hook.
+- **The gate fails CLOSED**, not open: a timeout, crash, or unparseable review
+  now blocks rather than allowing the push. Only a missing `claude` binary still
+  fails open. `OCR_FAIL_OPEN=1` is the emergency bypass. README and
+  `hooks/hooks.json` previously documented the old fail-open behavior.
+- `OCR_TIMEOUT` default raised 600s → 1800s; the `hooks.json` harness timeout
+  must stay above it (currently 1920s).
+
+### Added
+- **Cost isolation for the headless review session.** It now pins its model
+  (`OCR_MODEL`, default `sonnet`) instead of inheriting the parent session's,
+  loads only project settings (`--setting-sources project`, so global hooks do
+  not fire on every tool call), loads the plugin from disk (`--plugin-dir`),
+  connects no MCP servers (`--strict-mcp-config`), and keeps per-machine
+  sections out of the cached prefix. See the README's Cost section.
+- `OCR_CLAUDE_EXTRA_ARGS` — appends to the default `claude` flags.
+  `OCR_CLAUDE_ARGS` still replaces them wholesale, which discards the cost
+  controls; the bundled git hook now uses the appending form.
+- Per-language review rules (`skills/review/rules/{python,typescript,go,rust}.md`)
+  and `rules/llm-authored-code.md`, appended to the rubric per file.
+- Independent falsify pass: a `code-filter` subagent with a fresh context gets
+  only the diff and the findings and drops a finding solely on direct
+  counter-evidence. Runs only when a finding would actually block.
+- `evidence` field on findings; cross-file claims now require cited `Grep`
+  results or the orchestrator drops them.
+- Hallucination check: a finding whose `existing_code` is absent from the diff
+  and the file has its confidence downgraded.
+- `bin/uninstall-git-hook.sh` now removes the hook files it installed (both
+  `pre-push` and a legacy `pre-commit`), not just the `core.hooksPath` setting.
+
+### Changed
+- Single reviewer for the whole change set instead of one subagent per file, so
+  cross-file defects are visible. Diffs over 15 files fan out by directory.
+
+### Added
+- Extended file-type allowlist to match OCR v1.7.11–v1.7.13: FreeMarker
+  (`.ftl`, `.ftlh`, `.ftlx`), gettext translation files (`.po`, `.pot`),
+  Astro (`.astro`), fish shell (`.fish`), Python stubs (`.pyi`),
+  Objective-C (`.m`, `.mm`), VB.NET/F# (`.vb`, `.fs`), Erlang headers/ETS
+  (`.hrl`, `.ets`), Ruby build files (`.rake`, `.gemspec`), and `.htm`.
+- Sample FreeMarker and PO/POT checklists in `examples/.ocr/rule.json`.
+
+## [0.1.0] - 2026-06-29
+
+### Added
+- Orchestrator skill `/review-gate:review` — diff review, `--staged`,
+  full-file `--scan`, `--json`, `--rule`, `--summary`.
+- Per-file `code-reviewer` subagent (isolated context, parallel fan-out) that reads
+  real files, folds plan → main → "falsify, don't verify" in-session, and emits a
+  severity/confidence finding schema.
+- Commit gate: default Claude Code PreToolUse hook, plus an optional global git hook
+  (`bin/install-git-hook.sh`) for every-commit-everywhere coverage.
+- Deterministic verdict parser (`bin/ocr_verdict.py`) and fail-open gate core
+  (`bin/review-gate.py`).
+- Rule hierarchy, allowlist/exclusions, finding JSON Schema, sample `.ocr/rule.json`.
+- Apache-2.0 license with NOTICE attributing open-code-review.
+
+[Unreleased]: https://github.com/Jose-Ribeir/claude-code-review-gate/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/Jose-Ribeir/claude-code-review-gate/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/Jose-Ribeir/claude-code-review-gate/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/Jose-Ribeir/claude-code-review-gate/releases/tag/v0.1.0

@@ -1,0 +1,26 @@
+{
+  "name": "claude-code-review-gate",
+  "owner": {
+    "name": "José Ribeiro",
+    "url": "https://github.com/Jose-Ribeir"
+  },
+  "metadata": {
+    "description": "Single-plugin marketplace for claude-code-review-gate.",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "review-gate",
+      "source": ".",
+      "description": "Native Claude Code AI code review + blocking pre-push gate, on your Claude subscription. open-code-review methodology, run compliantly.",
+      "license": "Apache-2.0",
+      "keywords": [
+        "claude-code",
+        "code-review",
+        "ai-code-review",
+        "pre-commit",
+        "git-hook"
+      ]
+    }
+  ]
+}

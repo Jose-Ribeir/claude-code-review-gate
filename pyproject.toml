@@ -1,0 +1,22 @@
+# Tooling config only. This project is NOT a Python package -- it ships as a
+# Claude Code plugin, and sync-local-install.py's PAYLOAD is an allowlist, so
+# this file is deliberately not part of what gets installed.
+#
+# It exists to pin what CI already enforces, so `ruff check` and `pytest` behave
+# the same locally as in the workflow. It is intentionally NOT stricter than the
+# standard the code already meets: tightening the lint is a separate change from
+# hardening the plugin, and mixing the two would bury the latter in reformatting.
+
+[tool.ruff]
+# Ruff's default rule selection (E4/E7/E9 + F). Line length is deliberately not
+# enforced -- a handful of long lines are user-facing message strings that read
+# worse wrapped.
+line-length = 100
+
+[tool.ruff.lint]
+# Explicit rather than implicit, so a future ruff default change cannot quietly
+# turn CI red on untouched code.
+select = ["E4", "E7", "E9", "F"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
