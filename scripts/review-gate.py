@@ -3683,9 +3683,15 @@ def _supervise_run(state_path, run_id):
             })
         elif failure[0] == "timeout":
             # The timed-out chunk's files are marked: the next push splits it, so
-            # this is progress toward a verdict, not an attempt that burns the cap.
+            # a timeout WITH completed chunks is progress toward a verdict, not
+            # an attempt that burns the cap. A timeout with zero completed
+            # chunks (a hung worker -- C2's fail-closed trio) is no progress at
+            # all and burns an attempt like any other failure, so a permanently
+            # stuck reviewer reaches the sticky error state instead of being
+            # retried forever.
             st.update({
                 "state": "failed", "failed_ts": time.time(),
+                "attempts": int(st.get("attempts") or 0) + (1 if chunks_new == 0 else 0),
                 "reason": "timeout", "detail": _sanitize(failure[1], 1500),
             })
         elif failure[0] == "unreviewable":
