@@ -65,6 +65,14 @@ def _commit(work, files, amend=False):
 def _env(tmp_path, trace, **kw):
     env = {k: v for k, v in os.environ.items() if not k.startswith(("OCR_", "STUB_"))}
     env.update({"CLAUDE_PLUGIN_DATA": str(tmp_path / "gate-data"),
+                # Kimchi port (plan D12): async run-state and verdicts live in
+                # the EXTERNAL store under OCR_STATE_DIR -- the OCR_* filter
+                # above would strip it, sending the gate subprocess to the
+                # developer's real ~/.local/state/review-gate while the
+                # in-process _state() poll (keyed by the conftest's private
+                # store) never sees the state file and waits out its whole
+                # deadline. Keep the conftest's private store on both sides.
+                "OCR_STATE_DIR": os.environ["OCR_STATE_DIR"],
                 "OCR_REVIEWER_CMD": f'"{sys.executable}" "{_STUB}"',
                 "STUB_TRACE": str(tmp_path / trace), "OCR_INLINE_BUDGET": "30"})
     env.update({k: str(v) for k, v in kw.items()})
