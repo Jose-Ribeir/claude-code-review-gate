@@ -1974,27 +1974,37 @@ def _is_valid_verdict(obj):
 
 
 def _num_turns_from_stream_json(text):
-    """Extract num_turns from the result event of --output-format stream-json output."""
-    for line in reversed(text.splitlines()):
+    """Turn count from a --mode json stream: the turn_start events pi-mono emits.
+
+    Returns None when the text holds no JSON events at all (plain text-mode
+    output), so the caller's "N turn(s) captured" note only ever appears for
+    an actual stream."""
+    turns = 0
+    saw_event = False
+    for line in text.splitlines():
         line = line.strip()
         if not line:
             continue
         try:
             ev = json.loads(line)
-            if isinstance(ev, dict) and ev.get("type") == "result":
-                return ev.get("num_turns")
         except Exception:
             continue
-    return None
+        if isinstance(ev, dict):
+            saw_event = True
+            if ev.get("type") == "turn_start":
+                turns += 1
+    return turns if saw_event else None
 
 
 def _extract_from_stream_json(text):
-    """Scan ALL assistant-turn events for a valid verdict; return the last match.
+    """Scan ALL message_end/turn_end events for a valid verdict; last match wins.
 
-    With --output-format stream-json, claude emits NDJSON where each assistant
-    turn is its own event. A stray notification ack after the verdict becomes a
-    later event whose text has no verdict JSON -- it cannot replace the earlier
-    turn's payload because we scan every event, not just the last.
+    With --mode json, kimchi emits pi-mono NDJSON: each event is one line, and
+    the assistant text lives in the content blocks of the message carried by
+    message_end (and again, verbatim, by the closing turn_end). A stray
+    notification ack after the verdict becomes a later event whose text has
+    no verdict JSON -- it cannot replace the earlier turn's payload because
+    we scan every event, not just the last. (Port spec section 5.)
     """
     if not text:
         return None
@@ -2009,18 +2019,15 @@ def _extract_from_stream_json(text):
             continue
         if not isinstance(event, dict):
             continue
-        event_type = event.get("type")
-        if event_type == "assistant":
-            content = event.get("message", {}).get("content", [])
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    candidate = _extract_json(block.get("text", ""))
-                    if candidate is not None:
-                        match = candidate
-        elif event_type == "result":
-            candidate = _extract_json(event.get("result") or "")
-            if candidate is not None:
-                match = candidate
+        if event.get("type") not in ("message_end", "turn_end"):
+            continue
+        message = event.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        for block in content or []:
+            if isinstance(block, dict) and block.get("type") == "text":
+                candidate = _extract_json(block.get("text", ""))
+                if candidate is not None:
+                    match = candidate
     return match
 
 
