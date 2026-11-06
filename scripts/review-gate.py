@@ -2526,37 +2526,14 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
     else:
         args = list(DEFAULT_KIMI_ARGS)
         args += shlex.split(os.environ.get("OCR_KIMI_EXTRA_ARGS", ""))
-    # The child is given --plugin-dir, so THIS plugin -- including its
-    # PreToolUse push gate -- is registered inside the review session too.
-    # Without a marker in the environment, every Bash call the reviewer makes
-    # pays a Python spawn, and a push from inside a review would nest a whole
+    # The child is given -e/--plugin wiring, so THIS gate -- including its
+    # push hooks -- is registered inside the review session too. Without a
+    # marker in the environment, every Bash call the reviewer makes pays a
+    # Python spawn, and a push from inside a review would nest a whole
     # second review. Both adapters short-circuit on this (see _in_review).
     child_env = dict(os.environ)
     child_env["OCR_IN_REVIEW"] = "1"
-    # unset/empty -> scrub _SESSION_BRIDGE_ENV (the default, see its comment);
-    # "none" (case-insensitive) -> scrub nothing, the pre-0.6 behaviour, for a
-    # repo whose reviewer genuinely needs the desktop host's auth relay;
-    # anything else -> exactly that list, REPLACING the default rather than
-    # adding to it (a partial scrub of this bundle is its own novel, untested
-    # state -- see _SESSION_BRIDGE_ENV). Unset and explicitly-empty are treated
-    # identically: `set X=` on Windows deletes the variable outright, so a
-    # script cannot tell "cleared" from "never set" apart anyway. Names split
-    # on comma, semicolon, or whitespace (a `;`-separated PATH habit is a
-    # common typo here) and matched case-insensitively on Windows, where
-    # os.environ's keys are already upper-cased by CPython regardless of how
-    # the variable was actually set.
-    _override = os.environ.get("OCR_UNSET_ENV", "").strip()
-    if not _override:
-        _unset_names = list(_SESSION_BRIDGE_ENV)
-    elif _override.lower() == "none":
-        _unset_names = []
-    else:
-        _unset_names = [n for n in re.split(r"[,;\s]+", _override) if n]
-    scrubbed = []
-    for _name in _unset_names:
-        _key = _name.upper() if os.name == "nt" else _name
-        if child_env.pop(_key, None) is not None:
-            scrubbed.append(_key)
+    scrubbed = _scrub_worker_env(child_env)
 
     debug = _debug_enabled()
     creationflags = _WIN_FLAGS if sys.platform == "win32" else 0
@@ -2960,6 +2937,48 @@ def _new_run_id():
     return secrets.token_hex(8)
 
 
+# KIMCHI_PERMISSIONS* has grown members across releases (KIMCHI_PERMISSIONS,
+# KIMCHI_PERMISSIONS_MODE, ...); scrub the whole prefix so a future flag cannot
+# re-open the permissions surface in a worker (port spec section 4).
+_KIMCHI_ENV_DENY_PREFIXES = ("KIMCHI_PERMISSIONS",)
+
+
+def _scrub_worker_env(child_env):
+    """Pop the session-bridge vars from the worker env (in place); return the
+    names removed (for the OCR_DEBUG breadcrumb).
+
+    unset/empty OCR_UNSET_ENV -> scrub _SESSION_BRIDGE_ENV plus every
+    KIMCHI_PERMISSIONS* variant (the default); "none" (case-insensitive) ->
+    scrub nothing, the pre-0.6 behaviour, for a repo whose reviewer genuinely
+    needs the desktop host's auth relay; anything else -> exactly that list,
+    REPLACING the default rather than adding to it (a partial scrub of this
+    bundle is its own novel, untested state -- see _SESSION_BRIDGE_ENV).
+    Unset and explicitly-empty are treated identically: `set X=` on Windows
+    deletes the variable outright. Names split on comma, semicolon, or
+    whitespace and matched case-insensitively on Windows, where os.environ's
+    keys are already upper-cased by CPython regardless of how the variable was
+    actually set. OCR_*/STUB_* gate control vars are never on the list.
+    """
+    _override = os.environ.get("OCR_UNSET_ENV", "").strip()
+    if not _override:
+        _unset_names, _prefixes = list(_SESSION_BRIDGE_ENV), _KIMCHI_ENV_DENY_PREFIXES
+    elif _override.lower() == "none":
+        _unset_names, _prefixes = [], ()
+    else:
+        _unset_names = [n for n in re.split(r"[,;\s]+", _override) if n]
+        _prefixes = ()
+    scrubbed = []
+    for _name in _unset_names:
+        _key = _name.upper() if os.name == "nt" else _name
+        if child_env.pop(_key, None) is not None:
+            scrubbed.append(_key)
+    if _prefixes:
+        for _key in [k for k in child_env if k.startswith(_prefixes)]:
+            child_env.pop(_key, None)
+            scrubbed.append(_key)
+    return scrubbed
+
+
 def _supervisor_env():
     """Environment for the supervisor: the parent's, minus the session bridge
     (see _SESSION_BRIDGE_ENV), minus git's hook exports, and NOT in-review --
@@ -2967,6 +2986,8 @@ def _supervisor_env():
     env = dict(os.environ)
     for name in _SESSION_BRIDGE_ENV + _GIT_ENV_SCRUB + ("OCR_IN_REVIEW",):
         key = name.upper() if os.name == "nt" else name
+        env.pop(key, None)
+    for key in [k for k in env if k.startswith(_KIMCHI_ENV_DENY_PREFIXES)]:
         env.pop(key, None)
     return env
 
