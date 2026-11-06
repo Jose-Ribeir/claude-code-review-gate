@@ -4,6 +4,8 @@ import json
 import os
 import sys
 
+import pytest
+
 _SCRIPTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts")
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _STUB_PATH = os.path.join(_HERE, "stub_reviewer.py")
@@ -464,6 +466,11 @@ def test_in_review_is_false_when_unset_or_empty(monkeypatch):
 
 # --- the reviewer's tool allowlist is read-only -------------------------------
 
+@pytest.mark.xfail(strict=True, reason="Claude CLI argv: DEFAULT_CLAUDE_ARGS carried "
+             "--allowedTools/--disallowedTools. The Kimchi port's worker argv "
+             "(DEFAULT_KIMI_ARGS, pinned in test_argv_golden.py) grants no tools at "
+             "all -- the read-only sandbox is the review-gate-deny.ts extension "
+             "loaded with -e, plus the --no-hardlinks clone the reviewer runs in.")
 def test_allowlist_grants_no_write_capable_tool():
     args = review_gate.DEFAULT_CLAUDE_ARGS
     allowed = args[args.index("--allowedTools") + 1 : args.index("--disallowedTools")]
@@ -477,6 +484,10 @@ def test_allowlist_grants_no_write_capable_tool():
             assert ":" not in rule, f"colon form is ignored by Claude Code: {rule}"
 
 
+@pytest.mark.xfail(strict=True, reason="Claude CLI argv: --setting-sources is a Claude "
+             "Code flag with no Kimchi equivalent. The port does not load any "
+             "settings at all (no flag, and --mcp-config '{\"mcpServers\":{}}' pins "
+             "the extension/MCP surface); a hostile repo cannot inject hooks.")
 def test_settings_sources_are_empty_so_a_hostile_repo_cannot_inject_hooks():
     args = review_gate.DEFAULT_CLAUDE_ARGS
     assert args[args.index("--setting-sources") + 1] == ""
@@ -797,17 +808,19 @@ _WARN_RESULT = {"findings": [dict(_FINDING, content="unchecked index")]}
 
 
 def _isolate_gate_data(monkeypatch, tmp_path):
-    """Point the plugin's scratch dir at tmp_path.
+    """Point the gate's EXTERNAL state store at tmp_path.
 
-    Load-bearing, not hygiene: parked reports live there, and without this a
-    test would read -- and delete -- the pending notes of whatever real session
-    happens to be running on the machine executing the suite.
+    Load-bearing, not hygiene: parked reports, the debug log, async run state
+    and verdicts all live under the store (Kimchi port D12; OCR_STATE_DIR), so
+    without this a test would read -- and delete -- the pending notes of
+    whatever real session happens to be running on the machine executing the
+    suite. The store's scratch lives under <root>/data.
     """
-    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(tmp_path / "gate-data"))
+    monkeypatch.setenv("OCR_STATE_DIR", str(tmp_path / "gate-data"))
 
 
 def _pending_files(tmp_path):
-    d = tmp_path / "gate-data"
+    d = tmp_path / "gate-data" / "data"
     return sorted(p.name for p in d.glob("pending-*")) if d.is_dir() else []
 
 
@@ -858,6 +871,12 @@ def _inline_supervisor(monkeypatch):
     """
     def _spawn(state_path, run_id, repo_root):
         review_gate._supervise(state_path, run_id)
+        # Production holds the supervisor's flock until process exit; here the
+        # leaked fd would fence the NEXT in-process supervisor on the same
+        # state file (same process, different fd -> flock conflict). Drop the
+        # lock file so the next run opens a fresh inode, exactly as a new
+        # supervisor process would.
+        review_gate._unlink(str(state_path) + ".flock")
         return os.getpid()
 
     monkeypatch.setattr(review_gate, "_spawn_supervisor", _spawn)
@@ -898,16 +917,18 @@ def test_passing_review_persists_its_findings_and_reports_them(tmp_path, monkeyp
     _stub_gate(monkeypatch, tmp_path)
     _run_hook(monkeypatch)
 
-    out = capsys.readouterr().out
+    captured = capsys.readouterr()
+    out = captured.out
     assert "permissionDecision" not in out  # never "allow": that would auto-approve the call
-    decision, reason = parse_pretooluse(out)
+    decision, _ = parse_pretooluse(out)
     assert decision == "pass"
-    # The findings ride along as a `systemMessage`, shown to the user. NOTE: this
-    # does NOT reach the model -- verified 2026-09, a PreToolUse hook's message
-    # produces no `hook_additional_context` companion. Model delivery is --mode
-    # post; see the tests at the end of this file. This assertion pins the
-    # user-visible aid, not a delivery channel.
-    assert "unchecked index" in reason
+    # The findings ride along as the passing note on stderr, shown to the user
+    # (the Kimchi hook protocol has no user-visible message field on a
+    # pass-through, so _pass_through writes it to stderr). NOTE: this does NOT
+    # reach the model -- model delivery is --mode post; see the tests at the
+    # end of this file. This assertion pins the user-visible aid, not a
+    # delivery channel.
+    assert "unchecked index" in captured.err
 
     entry = _read_history(str(tmp_path))[0]
     assert entry["verdict"] == "warn" and entry["blocked"] is False
@@ -923,11 +944,13 @@ def test_the_paired_adapters_short_circuit_replays_instead_of_silencing(tmp_path
 
     # Second adapter, same HEAD, marker still fresh: no second review...
     _run_hook(monkeypatch)
-    _, reason = parse_pretooluse(capsys.readouterr().out)
+    captured = capsys.readouterr()
+    _, reason = parse_pretooluse(captured.out)
     assert calls == ["a" * 40]
-    # ...but the first run's findings are shown again rather than swallowed.
-    assert "already reviewed at this HEAD" in reason
-    assert "unchecked index" in reason
+    # ...but the first run's findings are shown again rather than swallowed
+    # (on stderr: the port's pass-through note channel).
+    assert "already reviewed at this HEAD" in captured.err
+    assert "unchecked index" in captured.err
 
 
 # --- the review runs elsewhere: state file, supervisor, inline join -----------
@@ -961,8 +984,8 @@ def test_a_blocked_verdict_is_replayed_without_a_second_review(tmp_path, monkeyp
     blocked = {"findings": [dict(_FINDING, severity="high", confidence=0.95, content="sql injection")]}
     _stub_gate(monkeypatch, tmp_path, result=blocked, calls=calls)
     _run_hook(monkeypatch)
-    first = json.loads(capsys.readouterr().out)["hookSpecificOutput"]
-    assert first["permissionDecision"] == "deny" and "sql injection" in first["permissionDecisionReason"]
+    d1, r1 = parse_pretooluse(capsys.readouterr().out)
+    assert d1 == "deny" and "sql injection" in r1
     # No pass marker for a block: an older git hook reads that marker as pass.
     assert not review_gate._marker_path(str(tmp_path), "a" * 40, "b" * 40).exists()
 
@@ -971,11 +994,11 @@ def test_a_blocked_verdict_is_replayed_without_a_second_review(tmp_path, monkeyp
     st["done_ts"] = time.time() - 120  # long enough ago to read as a replay
     review_gate._write_state(review_gate._state_path(str(tmp_path), "a" * 40, "b" * 40), st)
     _run_hook(monkeypatch)
-    second = json.loads(capsys.readouterr().out)["hookSpecificOutput"]
+    d2, r2 = parse_pretooluse(capsys.readouterr().out)
     assert calls == ["a" * 40]
-    assert second["permissionDecision"] == "deny"
-    assert "review recorded" in second["permissionDecisionReason"]
-    assert "sql injection" in second["permissionDecisionReason"]
+    assert d2 == "deny"
+    assert "review recorded" in r2
+    assert "sql injection" in r2
 
 
 def test_force_review_ignores_a_recorded_verdict(tmp_path, monkeypatch, capsys):
@@ -1000,14 +1023,15 @@ def test_a_running_review_past_the_budget_is_denied_not_allowed(tmp_path, monkey
         "protocol_version": review_gate.PROTOCOL_VERSION,
     })
     _run_hook(monkeypatch)
-    payload = json.loads(capsys.readouterr().out)["hookSpecificOutput"]
-    assert payload["permissionDecision"] == "deny"
-    assert "still running" in payload["permissionDecisionReason"]
-    assert "re-run this exact `git push`" in payload["permissionDecisionReason"]
+    d, r = parse_pretooluse(capsys.readouterr().out)
+    assert d == "deny"
+    assert "still running" in r
+    assert "re-run this exact `git push`" in r
     assert calls == []  # joined, never restarted
     assert _state_of(tmp_path)["run_id"] == "other"
     # ...and a note is parked so --mode post can announce the verdict later.
-    notes = [json.loads((tmp_path / "gate-data" / n).read_text()) for n in _pending_files(tmp_path)]
+    notes = [json.loads((tmp_path / "gate-data" / "data" / n).read_text())
+             for n in _pending_files(tmp_path)]
     assert [n["kind"] for n in notes] == ["async"]
 
 
@@ -1026,7 +1050,11 @@ def test_a_review_whose_supervisor_went_silent_is_restarted(tmp_path, monkeypatc
     assert st["state"] == "done" and st["run_id"] != "dead"
 
 
-def test_a_failed_review_is_retried_once_then_denied_with_its_reason(tmp_path, monkeypatch, capsys):
+def test_a_failed_review_is_retried_up_to_the_cap_then_denied_with_its_reason(
+    tmp_path, monkeypatch, capsys
+):
+    # Kimchi port (plan C1): ATTEMPT_CAP is 3 (upstream was 2) -- two
+    # automatic retries, then the sticky error state for the TTL.
     calls = []
     _stub_gate(monkeypatch, tmp_path, calls=calls)
 
@@ -1035,21 +1063,28 @@ def test_a_failed_review_is_retried_once_then_denied_with_its_reason(tmp_path, m
 
     monkeypatch.setattr(review_gate, "_run_review", _raise)
     _run_hook(monkeypatch)
-    first = json.loads(capsys.readouterr().out)["hookSpecificOutput"]
-    assert first["permissionDecision"] == "deny"
-    assert "could not complete" in first["permissionDecisionReason"]
+    d1, r1 = parse_pretooluse(capsys.readouterr().out)
+    assert d1 == "deny"
+    assert "could not complete" in r1
     assert _state_of(tmp_path)["attempts"] == 1
 
-    _run_hook(monkeypatch)  # automatic retry, fails again
+    _run_hook(monkeypatch)  # automatic retry 1, fails again
     assert _state_of(tmp_path)["attempts"] == 2
-    second = json.loads(capsys.readouterr().out)["hookSpecificOutput"]
-    assert "will not be retried automatically" in second["permissionDecisionReason"]
+    d2, r2 = parse_pretooluse(capsys.readouterr().out)
+    assert d2 == "deny"
+    assert "will not be retried automatically" not in r2  # retries remain
+
+    _run_hook(monkeypatch)  # automatic retry 2, fails again: at the cap
+    assert _state_of(tmp_path)["attempts"] == 3
+    d3, r3 = parse_pretooluse(capsys.readouterr().out)
+    assert d3 == "deny"
+    assert "will not be retried automatically" in r3
 
     monkeypatch.setattr(review_gate, "_run_review",
                         lambda *a, **kw: (_WARN_RESULT, True, ""))
-    _run_hook(monkeypatch)  # at the cap: no third attempt inside the TTL
-    third = json.loads(capsys.readouterr().out)["hookSpecificOutput"]
-    assert third["permissionDecision"] == "deny"
+    _run_hook(monkeypatch)  # at the cap: no third retry inside the TTL
+    d4, _ = parse_pretooluse(capsys.readouterr().out)
+    assert d4 == "deny"
 
 
 def test_a_stale_run_id_fences_the_old_supervisor(tmp_path, monkeypatch):
@@ -1391,7 +1426,7 @@ def test_env_prefixed_push_still_resolves(tmp_path):
 def test_the_reviewer_subprocess_decodes_as_utf8(monkeypatch, tmp_path):
     seen = {}
     monkeypatch.setattr(review_gate.subprocess, "Popen", _fake_popen(seen))
-    monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
+    monkeypatch.setattr(review_gate, "_find_kimi", lambda: "kimchi")
     review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40)
     assert seen.get("encoding") == "utf-8"
     assert seen.get("errors") == "replace"
@@ -1406,7 +1441,7 @@ def test_the_reviewer_subprocess_decodes_as_utf8(monkeypatch, tmp_path):
 def test_reviewer_gets_no_shared_stdin(monkeypatch, tmp_path):
     seen = {}
     monkeypatch.setattr(review_gate.subprocess, "Popen", _fake_popen(seen))
-    monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
+    monkeypatch.setattr(review_gate, "_find_kimi", lambda: "kimchi")
     review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40)
     assert seen.get("stdin") is review_gate.subprocess.DEVNULL
 
@@ -1420,7 +1455,7 @@ def test_reviewer_is_isolated_from_the_console_on_windows(monkeypatch, tmp_path)
     seen = {}
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(review_gate.subprocess, "Popen", _fake_popen(seen))
-    monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
+    monkeypatch.setattr(review_gate, "_find_kimi", lambda: "kimchi")
     review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40)
     assert seen.get("creationflags") == review_gate._WIN_FLAGS
 
@@ -1429,7 +1464,7 @@ def test_reviewer_gets_no_special_flags_off_windows(monkeypatch, tmp_path):
     seen = {}
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(review_gate.subprocess, "Popen", _fake_popen(seen))
-    monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
+    monkeypatch.setattr(review_gate, "_find_kimi", lambda: "kimchi")
     review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40)
     assert seen.get("creationflags") == 0
 
@@ -1461,7 +1496,7 @@ def test_a_cancelled_review_kills_the_child_instead_of_orphaning_it(monkeypatch,
             return False
 
     monkeypatch.setattr(review_gate.subprocess, "Popen", _HangingProc)
-    monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
+    monkeypatch.setattr(review_gate, "_find_kimi", lambda: "kimchi")
     try:
         review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40)
         raise AssertionError("expected KeyboardInterrupt to propagate")
@@ -1494,7 +1529,7 @@ def test_a_timed_out_review_kills_the_child_and_fails_closed(monkeypatch, tmp_pa
             return False
 
     monkeypatch.setattr(review_gate.subprocess, "Popen", _StuckProc)
-    monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
+    monkeypatch.setattr(review_gate, "_find_kimi", lambda: "kimchi")
     try:
         review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40)
         raise AssertionError("expected ReviewGateError")
@@ -1525,7 +1560,7 @@ def test_unset_env_default_scrubs_exactly_the_session_bridge_bundle(monkeypatch,
         monkeypatch.setenv(name, "x")
     monkeypatch.setenv("SOME_CLAUDE_MARKER", "1")  # not in the bundle -- must survive
     monkeypatch.setattr(review_gate.subprocess, "Popen", _fake_popen(seen))
-    monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
+    monkeypatch.setattr(review_gate, "_find_kimi", lambda: "kimchi")
     review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40)
     for name in review_gate._SESSION_BRIDGE_ENV:
         assert name not in seen["env"]
@@ -1538,7 +1573,7 @@ def test_unset_env_none_disables_the_default_scrub(monkeypatch, tmp_path):
     monkeypatch.setenv("OCR_UNSET_ENV", "none")
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "x")
     monkeypatch.setattr(review_gate.subprocess, "Popen", _fake_popen(seen))
-    monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
+    monkeypatch.setattr(review_gate, "_find_kimi", lambda: "kimchi")
     review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40)
     assert seen["env"]["CLAUDE_CODE_SESSION_ID"] == "x"
 
@@ -1549,7 +1584,7 @@ def test_unset_env_none_is_case_insensitive(monkeypatch, tmp_path):
     monkeypatch.setenv("OCR_UNSET_ENV", "None")
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "x")
     monkeypatch.setattr(review_gate.subprocess, "Popen", _fake_popen(seen))
-    monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
+    monkeypatch.setattr(review_gate, "_find_kimi", lambda: "kimchi")
     review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40)
     assert seen["env"]["CLAUDE_CODE_SESSION_ID"] == "x"
 
@@ -1563,7 +1598,7 @@ def test_unset_env_explicit_list_replaces_the_default_rather_than_adding_to_it(
     monkeypatch.setenv("SOME_CLAUDE_MARKER", "1")
     monkeypatch.setenv("OCR_UNSET_ENV", "SOME_CLAUDE_MARKER")
     monkeypatch.setattr(review_gate.subprocess, "Popen", _fake_popen(seen))
-    monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
+    monkeypatch.setattr(review_gate, "_find_kimi", lambda: "kimchi")
     review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40)
     assert "SOME_CLAUDE_MARKER" not in seen["env"]
     # An explicit list REPLACES the default -- it does not add to it, since a
@@ -1578,7 +1613,7 @@ def test_unset_env_accepts_semicolon_and_whitespace_separators(monkeypatch, tmp_
     monkeypatch.setenv("B_VAR", "1")
     monkeypatch.setenv("OCR_UNSET_ENV", "A_VAR; B_VAR")
     monkeypatch.setattr(review_gate.subprocess, "Popen", _fake_popen(seen))
-    monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
+    monkeypatch.setattr(review_gate, "_find_kimi", lambda: "kimchi")
     review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40)
     assert "A_VAR" not in seen["env"]
     assert "B_VAR" not in seen["env"]
@@ -1594,7 +1629,7 @@ def test_unset_env_names_are_matched_case_insensitively_on_windows(monkeypatch, 
     monkeypatch.setenv("SOME_CLAUDE_MARKER", "1")
     monkeypatch.setenv("OCR_UNSET_ENV", "some_claude_marker")
     monkeypatch.setattr(review_gate.subprocess, "Popen", _fake_popen(seen))
-    monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
+    monkeypatch.setattr(review_gate, "_find_kimi", lambda: "kimchi")
     review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40)
     assert "SOME_CLAUDE_MARKER" not in seen["env"]
 
@@ -1606,18 +1641,18 @@ def test_claude_code_execpath_survives_the_default_scrub(monkeypatch, tmp_path):
     _clear_session_bridge_env(monkeypatch)
     monkeypatch.setenv("CLAUDE_CODE_EXECPATH", "/path/to/claude")
     monkeypatch.setattr(review_gate.subprocess, "Popen", _fake_popen(seen))
-    monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
+    monkeypatch.setattr(review_gate, "_find_kimi", lambda: "kimchi")
     review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40)
     assert seen["env"]["CLAUDE_CODE_EXECPATH"] == "/path/to/claude"
 
 
 def test_ocr_debug_writes_a_spawn_and_completion_breadcrumb(monkeypatch, tmp_path):
     monkeypatch.setenv("OCR_DEBUG", "1")
-    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(tmp_path / "gate-data"))
+    monkeypatch.setenv("OCR_STATE_DIR", str(tmp_path / "gate-data"))
     monkeypatch.setattr(review_gate.subprocess, "Popen", _fake_popen({}))
-    monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
+    monkeypatch.setattr(review_gate, "_find_kimi", lambda: "kimchi")
     review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40)
-    log = tmp_path / "gate-data" / "review-gate-debug.log"
+    log = tmp_path / "gate-data" / "data" / "review-gate-debug.log"
     lines = log.read_text(encoding="utf-8").splitlines()
     assert any(line.startswith("start ") for line in lines)
     assert any("scrubbed=" in line for line in lines)
@@ -1627,20 +1662,20 @@ def test_ocr_debug_writes_a_spawn_and_completion_breadcrumb(monkeypatch, tmp_pat
 def test_ocr_debug_logs_safe_values_from_the_original_env_even_when_scrubbed(
     monkeypatch, tmp_path
 ):
-    # Regression: _DEBUG_SAFE_VALUES and _SESSION_BRIDGE_ENV overlap by design
-    # (CLAUDE_CODE_ENTRYPOINT, CLAUDE_CODE_CHILD_SESSION,
-    # CLAUDE_AGENT_SDK_VERSION are in both) -- reading the allowlisted values
-    # from child_env AFTER the default scrub silently logged {} for exactly
-    # the names it exists to surface. Caught by a live smoke test, not review.
+    # Regression: _DEBUG_SAFE_VALUES and the scrub list overlap by design
+    # (PI_ENTRYPOINT is in both) -- reading the allowlisted values from
+    # child_env AFTER the default scrub silently logged {} for exactly the
+    # names it exists to surface. Caught by a live smoke test, not review.
+    # (Kimchi port: the safe names are PI_ENTRYPOINT/KIMCHI_CHILD_SESSION.)
     _clear_session_bridge_env(monkeypatch)
     monkeypatch.setenv("OCR_DEBUG", "1")
-    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(tmp_path / "gate-data"))
-    monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "claude-desktop")
+    monkeypatch.setenv("OCR_STATE_DIR", str(tmp_path / "gate-data"))
+    monkeypatch.setenv("PI_ENTRYPOINT", "kimchi-studio")
     monkeypatch.setattr(review_gate.subprocess, "Popen", _fake_popen({}))
-    monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
+    monkeypatch.setattr(review_gate, "_find_kimi", lambda: "kimchi")
     review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40)
-    log = (tmp_path / "gate-data" / "review-gate-debug.log").read_text(encoding="utf-8")
-    assert "'CLAUDE_CODE_ENTRYPOINT': 'claude-desktop'" in log
+    log = (tmp_path / "gate-data" / "data" / "review-gate-debug.log").read_text(encoding="utf-8")
+    assert "'PI_ENTRYPOINT': 'kimchi-studio'" in log
 
 
 def test_ocr_debug_off_writes_no_forensic_breadcrumb_only_metric_lines(monkeypatch, tmp_path):
@@ -1648,11 +1683,12 @@ def test_ocr_debug_off_writes_no_forensic_breadcrumb_only_metric_lines(monkeypat
     # call: counts and timings), but the verbose spawn/exit breadcrumb -- pids,
     # cwd, env names -- is still OCR_DEBUG's alone.
     monkeypatch.delenv("OCR_DEBUG", raising=False)
-    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(tmp_path / "gate-data"))
+    monkeypatch.setenv("OCR_STATE_DIR", str(tmp_path / "gate-data"))
     monkeypatch.setattr(review_gate.subprocess, "Popen", _fake_popen({}))
-    monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
+    monkeypatch.setattr(review_gate, "_find_kimi", lambda: "kimchi")
     review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40)
-    lines = (tmp_path / "gate-data" / "review-gate-debug.log").read_text(encoding="utf-8").splitlines()
+    lines = (tmp_path / "gate-data" / "data" / "review-gate-debug.log").read_text(
+        encoding="utf-8").splitlines()
     assert lines and all("event=call" in line for line in lines)
     assert not any(line.startswith(("start ", "end ")) or "cwd=" in line for line in lines)
 
@@ -1826,7 +1862,7 @@ def test_a_note_older_than_any_push_it_could_describe_is_swept(tmp_path, monkeyp
     _seed_record(tmp_path)
     _park(monkeypatch, tmp_path)
     stale = time.time() - review_gate.MARKER_TTL - 60
-    for p in (tmp_path / "gate-data").glob("pending-*"):
+    for p in (tmp_path / "gate-data" / "data").glob("pending-*"):
         os.utime(p, (stale, stale))
     _run_post(monkeypatch, tmp_path, command="git status")
     assert _post_context(capsys) == ""
@@ -1835,7 +1871,7 @@ def test_a_note_older_than_any_push_it_could_describe_is_swept(tmp_path, monkeyp
 
 def test_an_unreadable_note_is_discarded_rather_than_crashing(tmp_path, monkeypatch, capsys):
     _seed_record(tmp_path)
-    data = tmp_path / "gate-data"
+    data = tmp_path / "gate-data" / "data"
     data.mkdir(parents=True, exist_ok=True)
     (data / "pending-garbage").write_text("{not json", encoding="utf-8")
     _run_post(monkeypatch, tmp_path, command="git status")
@@ -2300,7 +2336,7 @@ def test_the_review_is_told_the_range(monkeypatch, tmp_path):
     # on, the skill re-derives @{u}..HEAD and reviews nothing.
     seen = {}
     monkeypatch.setattr(review_gate.subprocess, "Popen", _fake_popen(seen))
-    monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
+    monkeypatch.setattr(review_gate, "_find_kimi", lambda: "kimchi")
     review_gate._run_review(str(tmp_path), "git", str(tmp_path), "a" * 40, "aaa..bbb")
     prompt = seen["cmd"][2]
     assert "--range aaa..bbb" in prompt
@@ -2310,7 +2346,7 @@ def test_the_review_is_told_the_range(monkeypatch, tmp_path):
 def test_without_a_range_the_prompt_is_unchanged(monkeypatch, tmp_path):
     seen = {}
     monkeypatch.setattr(review_gate.subprocess, "Popen", _fake_popen(seen))
-    monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
+    monkeypatch.setattr(review_gate, "_find_kimi", lambda: "kimchi")
     review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40)
     prompt = seen["cmd"][2]
     assert "--unpushed" in prompt
@@ -2538,7 +2574,8 @@ def test_the_retry_that_delivers_a_verdict_drops_its_async_note(tmp_path, monkey
         review_gate._main_inner(["review-gate.py", "--mode", "hook"], "hook")
     except SystemExit:
         pass
-    notes = [json.loads((tmp_path / "gate-data" / n).read_text()) for n in _pending_files(tmp_path)]
+    notes = [json.loads((tmp_path / "gate-data" / "data" / n).read_text())
+             for n in _pending_files(tmp_path)]
     assert [n["kind"] for n in notes] == ["review"]  # the async note is gone
 
 
@@ -2683,7 +2720,7 @@ def test_run_review_argv_unchanged_below_threshold(monkeypatch, tmp_path):
     """Below the chunk threshold, _run_review is called without --paths-file."""
     seen = {}
     monkeypatch.setattr(review_gate.subprocess, "Popen", _fake_popen(seen))
-    monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
+    monkeypatch.setattr(review_gate, "_find_kimi", lambda: "kimchi")
     review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40,
                             "b" * 40 + ".." + "a" * 40)
     cmd_str = " ".join(str(c) for c in seen["cmd"])
@@ -2698,7 +2735,7 @@ def test_run_review_argv_includes_paths_file_when_given(monkeypatch, tmp_path):
     rng = "b" * 40 + ".." + "a" * 40
     monkeypatch.setattr(review_gate.subprocess, "Popen",
                         _fake_popen(seen, stdout=_PASS_STDOUT))
-    monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
+    monkeypatch.setattr(review_gate, "_find_kimi", lambda: "kimchi")
     review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40,
                             rng, paths_file=pf)
     # In the non-stub path, cmd is [claude, "-p", "<prompt --paths-file ...>", ...]
@@ -2955,10 +2992,10 @@ def test_attempts_increments_when_no_new_chunks_reviewed(monkeypatch, tmp_path):
 
 def test_reap_async_skips_live_worktree(monkeypatch, tmp_path):
     # A worktree whose state file has a fresh heartbeat must not be deleted.
-    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(tmp_path / "gate-data"))
+    monkeypatch.setenv("OCR_STATE_DIR", str(tmp_path / "gate-data"))
     async_d = _async_dir(str(tmp_path))
-    async_d.mkdir(parents=True)
-    wt = _gate_data_dir() / "worktrees" / "live-wt"
+    async_d.mkdir(parents=True, exist_ok=True)  # _async_dir already created it (D12 store)
+    wt = review_gate.rg_store.clones_dir() / "live-wt"  # the reaper sweeps the store's clones/
     wt.mkdir(parents=True)
     # Write a state file pointing at the live worktree with a fresh heartbeat.
     state = {"state": "running", "run_id": "r1", "tip": "a" * 40,

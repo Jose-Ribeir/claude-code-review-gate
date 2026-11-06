@@ -114,7 +114,7 @@ def test_a_timeout_keeps_the_partial_stream_and_never_changes_the_error(monkeypa
             pass
 
     monkeypatch.setattr(review_gate.subprocess, "Popen", _Proc)
-    monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
+    monkeypatch.setattr(review_gate, "_find_kimi", lambda: "kimchi")
     monkeypatch.delenv("OCR_REVIEWER_CMD", raising=False)
     review_gate._TELE.clear()
     with pytest.raises(review_gate.ReviewGateError) as ei:
@@ -142,9 +142,10 @@ def test_metric_line_replaces_anything_that_is_not_a_number_or_a_short_token():
 
 
 def test_metric_log_lines_cannot_carry_a_path(tmp_path, monkeypatch):
-    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(tmp_path))
+    # Kimchi port (D12): the debug log lives under the external store's data/.
+    monkeypatch.setenv("OCR_STATE_DIR", str(tmp_path))
     review_gate._metric_log("phase", name="/home/me/secret.py", s=1.0)
-    text = (tmp_path / "review-gate-debug.log").read_text(encoding="utf-8")
+    text = (tmp_path / "data" / "review-gate-debug.log").read_text(encoding="utf-8")
     assert "name=?" in text and "secret" not in text and "/home" not in text
 
 
@@ -162,20 +163,20 @@ def test_rotating_append_shifts_files_and_drops_the_oldest(tmp_path):
 
 
 def test_the_debug_log_rotates_by_size(tmp_path, monkeypatch):
-    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(tmp_path))
+    monkeypatch.setenv("OCR_STATE_DIR", str(tmp_path))
     monkeypatch.setattr(review_gate, "_DEBUG_LOG_BYTES", 300)
     for i in range(40):
         review_gate._metric_log("phase", name="plan", s=i)
-    files = sorted(p.name for p in tmp_path.glob("review-gate-debug.log*"))
+    files = sorted(p.name for p in (tmp_path / "data").glob("review-gate-debug.log*"))
     assert "review-gate-debug.log.1" in files
     assert len(files) <= review_gate._DEBUG_LOG_KEEP + 1
 
 
 def test_the_log_is_on_without_ocr_debug(tmp_path, monkeypatch):
-    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(tmp_path))
+    monkeypatch.setenv("OCR_STATE_DIR", str(tmp_path))
     monkeypatch.delenv("OCR_DEBUG", raising=False)
     review_gate._metric_log("phase", name="plan", s=0.5)
-    assert "event=phase" in (tmp_path / "review-gate-debug.log").read_text(encoding="utf-8")
+    assert "event=phase" in (tmp_path / "data" / "review-gate-debug.log").read_text(encoding="utf-8")
 
 
 # --- phases, chunks, still-running -----------------------------------------------
@@ -235,8 +236,11 @@ def test_report_copes_with_records_from_before_0_9_6():
 # --- end to end ---------------------------------------------------------------------------
 
 def _debug_log_text(tmp_path):
+    # Kimchi port (D12): the always-on log lives under the external store's
+    # data/ (OCR_STATE_DIR, set per test by conftest), not CLAUDE_PLUGIN_DATA.
+    root = Path(os.environ["OCR_STATE_DIR"]) / "data"
     return "\n".join(p.read_text(encoding="utf-8")
-                     for p in sorted((tmp_path / "gate-data").glob("review-gate-debug.log*")))
+                     for p in sorted(root.glob("review-gate-debug.log*")))
 
 
 def _tele_record(work):

@@ -2023,7 +2023,7 @@ def _num_turns_from_stream_json(text):
 
 
 def _extract_from_stream_json(text):
-    """Scan ALL message_end/turn_end events for a valid verdict; last match wins.
+    """Scan ALL turn-carrying events for a valid verdict; last match wins.
 
     With --mode json, kimchi emits pi-mono NDJSON: each event is one line, and
     the assistant text lives in the content blocks of the message carried by
@@ -2031,6 +2031,12 @@ def _extract_from_stream_json(text):
     notification ack after the verdict becomes a later event whose text has
     no verdict JSON -- it cannot replace the earlier turn's payload because
     we scan every event, not just the last. (Port spec section 5.)
+
+    The claude stream-json shapes are accepted too: `assistant` events carry
+    the same message/content blocks, and a `result` event carries the final
+    turn's text in its `result` field. Both formats can appear side by side
+    (a stub, or a kimchi that adds a result event), and scanning every turn
+    keeps the last valid verdict whichever shape it arrived in.
     """
     if not text:
         return None
@@ -2045,7 +2051,13 @@ def _extract_from_stream_json(text):
             continue
         if not isinstance(event, dict):
             continue
-        if event.get("type") not in ("message_end", "turn_end"):
+        etype = event.get("type")
+        if etype == "result":
+            candidate = _extract_json(event.get("result") or "")
+            if candidate is not None:
+                match = candidate
+            continue
+        if etype not in ("message_end", "turn_end", "assistant"):
             continue
         message = event.get("message")
         content = message.get("content") if isinstance(message, dict) else None

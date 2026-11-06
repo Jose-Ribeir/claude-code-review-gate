@@ -173,7 +173,8 @@ def test_diff_files_are_written_in_the_run_dir_with_generated_names(tmp_path):
         str(common), "run9", 3, 5, items, ["other.py"], ["carried.py"], {"impact": {"x": 1}}, diffs)
     assert (manifest["chunk_index"], manifest["chunks_total"]) == (3, 5)
     files = [i["file"] for i in manifest["items"] if i["kind"] == "file_diff"]
-    base_dir = (common / review_gate.ASYNC_DIR / "run-run9" / "diffs" / "3").as_posix()
+    # Kimchi port (D12): the run dir is under the external store's async/<key>.
+    base_dir = (review_gate._async_dir(str(common)) / "run-run9" / "diffs" / "3").as_posix()
     assert files == [f"{base_dir}/000.diff", f"{base_dir}/001.diff"]
     assert {i["role"] for i in manifest["items"] if i["kind"] == "context"} == {
         "other_changed", "carried"}
@@ -183,7 +184,7 @@ def test_diff_files_are_written_in_the_run_dir_with_generated_names(tmp_path):
                                     "mode": "full", "from_oid": "",
                                     "to_oid": items[0]["entry"]["new_oid"]}
     review_gate._remove_run_dir(str(common), "run9")
-    assert not (common / review_gate.ASYNC_DIR / "run-run9").exists()
+    assert not (review_gate._async_dir(str(common)) / "run-run9").exists()
 
 
 def test_run_dir_removal_refuses_anything_outside_the_async_dir(tmp_path):
@@ -307,8 +308,9 @@ def test_truncated_reaches_the_flagged_record_and_models_cannot_change_it(tmp_pa
 # --- end to end -----------------------------------------------------------------------------
 
 def _run_dirs(work):
-    common = Path(review_gate._git_common_dir(str(work)))
-    return sorted((common / review_gate.ASYNC_DIR).glob("run-*"))
+    # Kimchi port (D12): run dirs live under the EXTERNAL store's async/<key>,
+    # keyed by the git common dir -- never inside .git.
+    return sorted(review_gate._async_dir(review_gate._git_common_dir(str(work))).glob("run-*"))
 
 
 def _calls(tmp_path, trace="stub.trace"):
@@ -333,7 +335,7 @@ def test_a_small_push_always_gets_a_manifest_and_the_reviewer_reads_the_diff(tmp
         text = call["item_files"][f"review:{i['path']}"]
         n = i["path"][3]
         assert f"diff --git a/{i['path']} b/{i['path']}" in text and f"+x = {n}" in text
-        assert i["file"] and ".git/review-gate-async/run-" in i["file"]
+        assert i["file"] and "run-" in i["file"]   # under the store's async run dir (D12)
         assert i["lines"] > 0 and i["truncated"] is False and i["binary"] is False
     assert call["manifest"]["tasks"] == []
     # The files outlive the call by no more than the run.
@@ -472,7 +474,7 @@ def test_a_tracked_review_gate_directory_is_reviewed_like_any_other_path(tmp_pat
     assert {".review-gate/evil.py", "ok.py"} <= paths
     assert "+evil = 1" in call["item_files"]["review:.review-gate/evil.py"]
     assert "fake" not in "".join(call["item_files"].values())
-    assert all(".git/review-gate-async/run-" in i["file"]
+    assert all(i["file"] and "run-" in i["file"]
                for i in call["manifest"]["items"] if i["kind"] == "file_diff")
     # The only *.diff in the reviewed worktree is the one the branch itself tracks.
     assert [Path(p).relative_to(Path(call["cwd"])).as_posix() for p in call["cwd_diffs"]] == [
@@ -535,7 +537,9 @@ def test_without_precomputed_diffs_the_resolver_manifest_has_no_items(tmp_path):
 
 def test_the_reaper_removes_the_diffs_of_dead_runs_and_keeps_live_ones(tmp_path):
     common = tmp_path / "common"
-    async_d = common / review_gate.ASYNC_DIR
+    # Kimchi port (D12): the async run state lives under the external store's
+    # async/<key-of-common>, never inside the repo's .git.
+    async_d = review_gate._async_dir(str(common))
     (async_d / "run-dead" / "diffs" / "0").mkdir(parents=True)
     (async_d / "run-dead" / "diffs" / "0" / "000.diff").write_text("x")
     (async_d / "run-live" / "diffs" / "0").mkdir(parents=True)
