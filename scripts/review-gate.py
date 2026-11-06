@@ -7881,14 +7881,40 @@ def _chunk_progress(st):
     return f", chunk {cd + 1}/{ct}"
 
 
+def _record_range_within(repo_root, rec, base):
+    """True when the push's `base..tip` range lies within the record's range.
+
+    The `covers` set check cannot see commits a CAPPED record truncated
+    away, and `record_commits` caps both sides at _MAX_COMMITS -- so a capped
+    record is additionally trusted only when its base is an ancestor of (or
+    equal to) the push's base, making the pushed range a subset of the
+    reviewed one (A4: the truncated verdict vouches for exactly what was
+    reviewed, never for older commits the cap cut off).
+    """
+    rec_base = str(rec.get("base") or "").strip()
+    base = str(base or "").strip()
+    if not rec_base:
+        return True          # the record covered everything its tip reaches
+    if not base:
+        return False         # the push range is unbounded; only an unbounded record covers it
+    if rec_base == base or rec_base == _EMPTY_TREE:
+        return True
+    out, rc = _git(["merge-base", "--is-ancestor", rec_base, base], cwd=repo_root)
+    return rc == 0
+
+
 def _verdict_backing(common_dir, tip, base, remote_id, repo_root, push_range):
     """("ok"|"missing"|"corrupt"|"uncovered") -- does the external verdict
     store back the recorded state for this (remote, tip)?
 
     corrupt    a record exists but cannot be trusted -> caller DENIES
-    uncovered  a record exists but does not cover the pushed commits -> DENIES
-    missing    a done state with NO record -> the state is invalidated here so
-               the review restarts (fail closed without a TTL-long deny loop)
+    uncovered  the record cannot be checked against this push at all (an
+               empty range: no commit set can be enumerated) -> DENIES
+    missing    no usable record for this push (absent, or one that does not
+               cover its range: a different base, a remote that moved, or a
+               capped set that cannot prove commits below its cap) -> the
+               stale record and the done state are invalidated here so the
+               review RESTARTS (fail closed without a TTL-long deny loop)
     """
     state_path = _state_path(common_dir, tip, base)
     try:
@@ -7896,12 +7922,27 @@ def _verdict_backing(common_dir, tip, base, remote_id, repo_root, push_range):
     except rg_store.StoreError:
         return "corrupt"
     if rec is not None:
-        if not push_range or rg_store.covers(rec, rg_store.record_commits(repo_root, base, tip)):
+        if push_range and rg_store.covers(rec, rg_store.record_commits(repo_root, base, tip)) \
+                and _record_range_within(repo_root, rec, base):
             return "ok"
-        return "uncovered"
+        if not push_range:
+            # A4: an empty range authorizes nothing. The record cannot be
+            # checked against commits we cannot enumerate, so this DENIES
+            # rather than vacuously passing.
+            return "uncovered"
+        # A4: the record does not vouch for this push's range. It authorizes
+        # nothing: drop it and restart the review below (the same tip under
+        # a wider base is a NEW review, never a replay -- test_stacked_base).
+        rg_store.remove_verdict(remote_id, tip)
+        invalidated = True
+    else:
+        invalidated = False
     st = _read_state(state_path) or {}
     if st.get("state") != "done":
-        return "ok"  # nothing recorded; the run state machine is intact
+        # Nothing recorded and no done state: the run state machine is intact.
+        # (After a record removal above, "missing" is still returned so no
+        # marker fast path can authorize what the store no longer backs.)
+        return "missing" if invalidated else "ok"
     try:
         with _StateLock(state_path):
             st2 = _read_state(state_path) or {}
@@ -9135,6 +9176,13 @@ def _main_inner(argv, mode):
         return  # unreachable
 
     # done
+    if st.get("verdict") != "skipped":
+        # Re-evaluate the store backing NOW: a review that ran in this call
+        # has recorded its verdict since `backing` was computed (A4 drops a
+        # non-covering record and restarts; the fresh run re-backs the
+        # state). Only a state that is STILL unbacked after its own review
+        # denies.
+        backing = _verdict_backing(common_dir, tip, base, remote_id, repo_root, push_range)
     if backing in ("missing", "corrupt", "uncovered") and st.get("verdict") != "skipped":
         # The state said done but the store did not back it (a race between
         # the invalidation above and the supervisor's final write). Deny, never

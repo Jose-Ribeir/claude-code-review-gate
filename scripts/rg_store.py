@@ -134,15 +134,27 @@ def load_verdict(remote, tip):
 
 
 def covers(record, commits):
-    """True when every commit in `commits` is inside the record's covered set."""
+    """True when every commit in `commits` is inside the record's covered set.
+
+    A capped record's set was truncated at the newest _MAX_COMMITS commits,
+    so it vouches for exactly the commits it lists -- never for older ones
+    the cap cut off (A4: no vacuous authorizations). A record that is not
+    capped lists every commit its review saw, and the subset check is the
+    whole contract.
+    """
     if record is None:
         return False
-    covered = set(record.get("commits") or [])
-    if record.get("capped"):
-        # The set was truncated; identity of the range is preserved by the
-        # (remote, tip, base) key, so treat the cap as covered.
-        return True
-    return set(commits or []) <= covered
+    return set(commits or []) <= set(record.get("commits") or [])
+
+
+def remove_verdict(remote, tip):
+    """Delete the verdict record for (remote, tip), if present. Used when a
+    record exists but does not cover the push being made (A4): it authorizes
+    nothing, so it is dropped and the review restarts rather than replaying."""
+    try:
+        os.unlink(verdict_path(remote, tip))
+    except FileNotFoundError:
+        pass
 
 
 def remote_url(repo_root, remote):
