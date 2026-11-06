@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+#
+# review-gate — repo-level git pre-push hook (the PRIMARY gate).
+#
+# Installed by scripts/install-kimchi-hook.sh into the repository's
+# .git/hooks/pre-push. Reviews the commits being pushed and blocks confident
+# high-severity findings. This is a PRE-PUSH hook, not pre-commit, and that is
+# load-bearing: the gate reviews the commits being pushed (the ref updates git
+# feeds this hook). During a pre-commit hook the new commit does not exist yet,
+# so HEAD still points at its parent.
+#
+# git feeds the ref updates on stdin: `<local ref> <local sha> <remote ref>
+# <remote sha>`. That is the authoritative answer to "what is being sent, and
+# where", so it goes to the reviewer AND on to any pre-existing repo-local
+# hook (preserved as pre-push.user by the installer), which may well expect it.
+#
+# The verdict check runs SYNCHRONOUSLY but briefly: a recorded verdict for this
+# (remote, tip) answers immediately; no verdict spawns ONE detached supervisor
+# (singleflight) and this hook exits 1 with "review started — re-run this
+# push". The retry joins the recorded verdict instantly.
+#
+# This file is COPIED to .git/hooks/pre-push at install time and then never
+# updated again. That is why it resolves the reviewer at runtime instead of
+# trusting a path baked in (see _resolve_gate_dir below).
+#
+# Ported from scripts/pre-push (claude-code-review-gate); SCR_BIN/SCR_GATE_DIR
+# semantics preserved.
+set -euo pipefail
+
+# Stamped by install-kimchi-hook.sh so the doctor (a later chunk) can spot a
+# copy that predates the installed gate. Left as literal placeholders when this
+# file is run straight out of the repo, which is harmless -- both are advisory.
+SCR_INSTALLED_VERSION="__SCR_VERSION__"
+SCR_BIN="${SCR_BIN:-__SCR_DIR__}"
+
+# ---------------------------------------------------------------------------
+# Locate the reviewer. Resolve fresh on every push, most-specific source
+# first; a stale baked-in path must never silently fail open (upstream's
+# lesson, kept verbatim in spirit).
+# ---------------------------------------------------------------------------
+_resolve_gate_dir() {
+  # 1. Explicit override. Always wins.
+  if [ -n "${SCR_GATE_DIR:-}" ] && [ -f "$SCR_GATE_DIR/review-gate.py" ]; then
+    printf '%s' "$SCR_GATE_DIR"; return 0
+  fi
+
+  # 2. The pointer review-gate.py refreshes on every run. Survives the checkout
+  #    moving, and is equally correct for any install location.
+  local ptr="${OCR_STATE_DIR:-$HOME/.local/state/review-gate}/gate-dir"
+  if [ -f "$ptr" ]; then
+    local dir
+    dir="$(cat "$ptr" 2>/dev/null || true)"
+    if [ -n "$dir" ] && [ -f "$dir/review-gate.py" ]; then
+      printf '%s' "$dir"; return 0
+    fi
+  fi
+
+  # 3. The hint baked in at install time (this file's own directory is the
+  #    last-resort fallback, for running straight out of the checkout).
+  local hint="${SCR_BIN:-}"
+  if [ -n "$hint" ]; then
+    if [ -f "$hint/review-gate.py" ]; then printf '%s' "$hint"; return 0; fi
+    local base moved
+    for base in "${hint%/bin}" "${hint%\\bin}"; do
+      [ "$base" = "$hint" ] && continue   # this separator did not match
+      for moved in "$base/scripts" "$base\\scripts"; do
+        if [ -f "$moved/review-gate.py" ]; then printf '%s' "$moved"; return 0; fi
+      done
+    done
+  fi
+  if [ -f "$(dirname "${BASH_SOURCE[0]}")/../../scripts/review-gate.py" ] 2>/dev/null; then
+    printf '%s' "$(cd "$(dirname "${BASH_SOURCE[0]}")/../../scripts" && pwd)"; return 0
+  fi
+
+  return 1
+}
+
+# git feeds pre-push the ref updates on stdin; consume once, replay to the
+# chained hook (see below).
+REFS="$(cat || true)"
+
+_fail_open_requested() {
+  case "${OCR_FAIL_OPEN:-}" in 1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]) return 0 ;; esac
+  return 1
+}
+
+# Pick a WORKING Python interpreter; skip Windows Store alias stubs.
+PY=""
+for _c in python3 python py; do
+  _p="$(command -v "$_c" 2>/dev/null)" || continue
+  case "$_p" in *[Ww]indows[Aa]pps*) continue ;; esac
+  if "$_p" -c "import sys" >/dev/null 2>&1; then PY="$_p"; break; fi
+done
+
+RC=0
+# OCR_IN_REVIEW=1 means we are inside the headless review session. Skip our own
+# review, but still fall through to the chained repo-local hook below.
+if [ "${OCR_IN_REVIEW:-}" = "1" ]; then
+  :
+elif GATE_DIR="$(_resolve_gate_dir)"; then
+  if [ -n "$PY" ]; then
+    echo "$REFS" | "$PY" "$GATE_DIR/review-gate.py" --mode git --remote "${1:-}" || RC=$?
+  elif _fail_open_requested; then
+    echo "review-gate: no working Python 3 found; OCR_FAIL_OPEN set, skipping review." >&2
+  else
+    # FAIL CLOSED.
+    cat >&2 <<'MSG'
+[review-gate] BLOCKED: no working Python 3 interpreter found, so your unpushed
+commits could not be reviewed. A gate that cannot run must not wave a push
+through.
+
+Fix it:
+  - Install Python 3, then push again.
+  - Run the review-gate doctor (scripts/ocr_doctor.py) to see what is missing.
+  - Emergency bypass: OCR_FAIL_OPEN=1 git push
+  - Or skip hooks entirely for one push: git push --no-verify
+MSG
+    RC=1
+  fi
+elif _fail_open_requested; then
+  echo "review-gate: reviewer not found; OCR_FAIL_OPEN set, skipping review." >&2
+else
+  # An install we cannot locate is a broken gate, not an absent one.
+  cat >&2 <<'MSG'
+[review-gate] BLOCKED: could not locate review-gate.py, so your unpushed commits
+were not reviewed.
+
+This usually means the gate checkout was moved or removed after this git hook
+was installed. Repair it with either:
+  - Re-run the installer:  bash <gate>/scripts/install-kimchi-hook.sh
+  - Remove the gate:        bash <gate>/scripts/uninstall-kimchi-hook.sh
+  - Point at it directly:   SCR_GATE_DIR=/path/to/gate/scripts git push
+
+Emergency bypass: OCR_FAIL_OPEN=1 git push   (or: git push --no-verify)
+MSG
+  RC=1
+fi
+
+# The installer preserves a pre-existing repo-local pre-push as
+# .git/hooks/pre-push.user; run it too (only if we did not already block),
+# replaying the ref lines we consumed above on its stdin.
+GITDIR="$(git rev-parse --git-dir 2>/dev/null || echo .git)"
+LOCAL_USER="$GITDIR/hooks/pre-push.user"
+if [ "$RC" -eq 0 ] && [ -x "$LOCAL_USER" ] && [ "$LOCAL_USER" -ef "$0" ] 2>/dev/null; then
+  : # guard: never recurse into ourselves
+elif [ "$RC" -eq 0 ] && [ -x "$LOCAL_USER" ]; then
+  printf '%s\n' "$REFS" | "$LOCAL_USER" "$@" || RC=$?
+fi
+
+exit "$RC"
