@@ -1826,7 +1826,7 @@ def _hook_target(repo_root, cmd):
             f"({_sanitize(tgt.get('reason') or '', 120)}), so it was not reviewed. "
             "Blocking, because a gate that cannot see the commits must not wave them "
             "through.\n\nUse the plain form: git push [-u] <remote> <branch>\n"
-            "  - OCR_LEGACY_RANGE=1 (in the environment Claude Code was launched from) "
+            "  - OCR_LEGACY_RANGE=1 (in the environment Kimchi was launched from) "
             "reviews the checked-out branch against its upstream instead."
         )}
     remote = tgt.get("remote") or ""
@@ -2192,7 +2192,7 @@ def _auth_hint(output):
         "  Fix it : run `claude` in an interactive terminal and log in via /login,\n"
         "    then retry. The headless session the gate spawns cannot complete an\n"
         "    OAuth flow itself (no terminal to hand the browser callback to).\n"
-        "  Note   : a Claude Code Desktop session refreshes its own auth in-process,\n"
+        "  Note   : a Kimchi Studio session refreshes its own auth in-process,\n"
         "    so the app keeps working while the on-disk credentials the CLI reads go\n"
         "    stale -- the gate breaks with no visible sign anything logged out.\n"
     )
@@ -2224,21 +2224,21 @@ def _downgrade_hint(mode):
     OCR_ADVISORY has the identical env-inheritance limitation as OCR_FAIL_OPEN
     (see _bypass_hint) -- an inline prefix on `git commit` never reaches this
     process in hook mode. But this message is `permissionDecisionReason`, which
-    Claude Code surfaces back to the SAME agent whose commit just got blocked
+    Kimchi surfaces back to the SAME agent whose commit just got blocked
     -- unlike a human at a terminal reading a git CLI error, that agent has a
     Write tool. A file-based alternative (.ocr/config.json {"blocking": false})
     is therefore not a neutral workaround here: it reads as a self-service,
     persistent, repo-wide kill switch the blocked agent could just write and
     commit. Keep the session-scoped env-var route as the primary hint (it
-    still requires a human to re-launch Claude Code with the var set -- not
+    still requires a human to re-launch Kimchi with the var set -- not
     something the agent can do to itself mid-session) and only mention the
     file route with an explicit human-only/persistent/repo-wide label.
     """
     if mode == "hook":
         return (
             '  Downgrade to advisory (warn-only) : export OCR_ADVISORY=1 in the environment\n'
-            "    Claude Code itself is launched from (a shell prefix on `git commit` will NOT\n"
-            "    work in hook mode -- this process inherits Claude Code's env, not the Bash\n"
+            "    Kimchi itself is launched from (a shell prefix on `git commit` will NOT\n"
+            "    work in hook mode -- this process inherits Kimchi's env, not the Bash\n"
             '    tool call\'s). A human can also add (or create) {"blocking": false} in\n'
             "    .ocr/config.json, but that is a PERSISTENT, REPO-WIDE change committed into\n"
             "    the repo -- a human decision, not something to self-apply from inside a\n"
@@ -2673,7 +2673,7 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
             # to stay under the desktop app's ~16 min session wall.
             escalation = (
                 f"  Give Claude more time : export OCR_TIMEOUT={TIMEOUT * 2} in the environment\n"
-                f"    Claude Code itself is launched from (a shell prefix on `git push` will\n"
+                f"    Kimchi itself is launched from (a shell prefix on `git push` will\n"
                 f"    NOT work in hook mode). Leave hooks/hooks.json's PreToolUse timeout\n"
                 f"    alone: the review runs detached from the hook, and that timeout must\n"
                 f"    stay below the host's session watchdog."
@@ -5487,7 +5487,7 @@ def _unreviewable_message(paths, timeout_s):
     return (
         f"file {names} cannot be reviewed within the timeout: it timed out on its own "
         f"twice at OCR_CHUNK_TIMEOUT={timeout_s}s. Split the file, or raise OCR_CHUNK_TIMEOUT "
-        "in the environment Claude Code was launched from, then push again."
+        "in the environment Kimchi was launched from, then push again."
     )
 
 
@@ -8890,7 +8890,7 @@ def _main_inner(argv, mode):
                 "this hook cannot resolve (an unexpanded shell variable, a command "
                 "substitution, or a path that is not a git repository).\n\nFix it:\n"
                 "  - Use a literal path: cd /full/path/to/repo && git push\n"
-                "  - Or run the push from the directory Claude Code was started in.\n"
+                "  - Or run the push from the directory Kimchi was started in.\n"
                 "  - Emergency bypass: set OCR_FAIL_OPEN=1 in the environment Claude Code "
                 "itself was launched from.\n"
                 "  - Or push from a plain terminal, which this adapter does not gate.",
