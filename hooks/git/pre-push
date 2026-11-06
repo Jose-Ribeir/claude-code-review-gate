@@ -93,11 +93,12 @@ for _c in python3 python py; do
 done
 
 RC=0
-# OCR_IN_REVIEW=1 means we are inside the headless review session. Skip our own
-# review, but still fall through to the chained repo-local hook below.
-if [ "${OCR_IN_REVIEW:-}" = "1" ]; then
-  :
-elif GATE_DIR="$(_resolve_gate_dir)"; then
+# NOTE: there is deliberately NO `OCR_IN_REVIEW` skip here. That env var is
+# trivially spoofable (`OCR_IN_REVIEW=1 git push ...` — proven live to bypass
+# the gate), and the reviewer it scopes never pushes: it works in a
+# --no-hardlinks clone that carries no hooks. The PRIMARY gate never
+# disables itself on an environment variable the gated command can set.
+if GATE_DIR="$(_resolve_gate_dir)"; then
   if [ -n "$PY" ]; then
     echo "$REFS" | "$PY" "$GATE_DIR/review-gate.py" --mode git --remote "${1:-}" || RC=$?
   elif _fail_open_requested; then

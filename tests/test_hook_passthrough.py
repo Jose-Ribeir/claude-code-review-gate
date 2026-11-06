@@ -205,3 +205,63 @@ def test_sh_adapter_fails_closed_when_the_gate_is_missing_and_fail_open_passes(t
     # OCR_FAIL_OPEN lets the push go; it must not APPROVE it.
     proc = run_broken(fail_open=True)
     assert proc.returncode == 0 and parse_pretooluse(proc.stdout)[0] == "pass"
+
+
+# --- A1/A2 spoof shapes: a gated repo must still DENY them --------------------
+# Proven live during the port: these shapes used to fail OPEN. Each is driven
+# through the same gated-repo setup as the routing test above.
+
+def _gated_repo(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    hooks = repo / ".git" / "hooks"
+    hooks.mkdir(parents=True, exist_ok=True)
+    (hooks / "pre-push").write_text("# review-gate\n")
+    return repo
+
+
+@needs_bash
+@pytest.mark.parametrize("cmd", [
+    'git pu""sh origin main',              # tokenizer must not flush on quote-close
+    "git pu''sh origin main",
+    'git "pu"sh origin main',
+    'bash -c "git push origin main"',     # recursion into the interpreter arg
+    "sh -c 'git push origin main'",
+    "env OCR_IN_REVIEW=1 git push origin main",   # env(1) prefix: still a push
+    "env -u X OCR_IN_REVIEW=1 git push origin main",
+])
+def test_sh_adapter_denies_quote_splice_and_env_preflex_spoof_shapes(tmp_path, cmd):
+    repo = _gated_repo(tmp_path)
+    proc = subprocess.run(
+        [_BASH, _SH], input=_payload(cmd, cwd=str(repo)),
+        capture_output=True, text=True, env=_env(), timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    decision, reason = parse_pretooluse(proc.stdout)
+    assert decision == "deny", (cmd, proc.stdout)
+
+
+@needs_bash
+def test_sh_adapter_blocks_send_pack_as_plumbing(tmp_path):
+    proc = _run([_BASH, _SH], "git send-pack ../remote.git main")
+    decision, reason = parse_pretooluse(proc.stdout)
+    assert decision == "deny"
+    assert "send-pack" in reason
+
+
+def test_core_does_not_self_disable_on_a_spoofed_in_review_env(tmp_path):
+    # OCR_IN_REVIEW in the PROCESS environment (what a spoofing shell gives
+    # the pre-push hook) must not disable the push gate in hook mode: the
+    # push payload is still denied; only non-push calls route to the guard.
+    repo = _gated_repo(tmp_path)
+    argv = [sys.executable, _GATE, "--mode", "hook"]
+    payload = json.dumps({"tool_name": "bash", "input": {"command": "git push origin main"},
+                          "cwd": str(repo)})
+    proc = subprocess.run(argv, input=payload, capture_output=True, text=True,
+                          env=_env(OCR_IN_REVIEW="1"), timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    decision, reason = parse_pretooluse(proc.stdout)
+    assert decision == "deny", proc.stdout
+    # And the guard routing for non-push commands is preserved.
+    _assert_passes(_run(argv, "git diff HEAD~1", OCR_IN_REVIEW="1"))

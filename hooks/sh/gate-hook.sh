@@ -54,6 +54,7 @@ fi
 
 BLOCK_UNPARSEABLE='review-gate: could not parse push command — re-run with an explicit refspec (git push <remote> <ref>)'
 BLOCK_MULTI='review-gate: this command runs more than one `git push`. A review covers one push; reviewing the first would leave the rest unreviewed. Run them as separate commands.'
+BLOCK_SENDPACK='review-gate: git send-pack is plumbing-level push transport; git never runs its pre-push hook for it, so it would bypass the review entirely. Use: git push <remote> <ref>. Emergency bypass: OCR_FAIL_OPEN=1 (or git push --no-verify from a terminal).'
 BLOCK_NOPYTHON='review-gate: no working Python 3.7+ interpreter found, so the push could not be reviewed. Blocking, because a gate that cannot run must not wave a push through. Fix: install Python 3, then retry. Emergency bypass: OCR_FAIL_OPEN=1 (or git push --no-verify from a terminal).'
 BLOCK_NOGATE='review-gate: review-gate.py not found (broken install), so the push could not be reviewed. Blocking. Re-run scripts/install-kimchi-hook.sh. Emergency bypass: OCR_FAIL_OPEN=1 (or git push --no-verify from a terminal).'
 
@@ -190,14 +191,23 @@ strip_heredocs() {
 #
 # Sets PUSH_FOUND=1 when the command performs a real `git push` (count in
 # PUSH_COUNT), and PUSH_WORDS = the tokens AFTER `push` up to the next
-# separator, redirections dropped.
+# separator, redirections dropped. PUSH_PLUMBING=1 for `git send-pack`:
+# a push by plumbing git never runs pre-push for (A1).
+#
+# `bash -c '<script>'` / `eval '<script>'` execute their argument, so the
+# script text is re-classified recursively (depth-capped): a push hidden in a
+# quoted argument is still a push (A2 — proven live: `bash -c "git push ..."`
+# used to pass the raw-text prefilter and the classifier alike).
 # ---------------------------------------------------------------------------
 PUSH_FOUND=0
 PUSH_COUNT=0
 PUSH_WORDS=""
+PUSH_PLUMBING=0
+
+_INTERPRETERS='bash sh zsh dash ksh ash'
 
 classify_command() {
-  local cmd="$1"
+  local cmd="$1" depth="${2:-0}"
   strip_heredocs "$cmd"
   local code="$REPLY"
   local -a words=()
@@ -205,6 +215,7 @@ classify_command() {
   PUSH_FOUND=0
   PUSH_COUNT=0
   PUSH_WORDS=""
+  PUSH_PLUMBING=0
   while [ "$i" -lt "$n" ]; do
     ch="${code:i:1}"
     if [ -n "$quote" ]; then
@@ -212,8 +223,12 @@ classify_command() {
         word+="${code:i:2}"; i=$((i + 2)); continue
       fi
       if [ "$ch" = "$quote" ]; then
+        # Do NOT flush here: a closing quote does not end the word in shell
+        # (`git pu""sh` is the single word `push`). The word flushes only on
+        # whitespace, a separator, or end of input. Flushing here would
+        # tokenize `git pu""sh origin main` as `git pu sh ...` -- no push
+        # found -- and fail OPEN (proven live).
         quote=""
-        words+=("$word"); word=""   # a closed quoted span is one word
       else
         word+="$ch"
       fi
@@ -255,18 +270,55 @@ classify_command() {
   done
   [ -n "$word" ] && words+=("$word")
 
+  # Interpreters that execute a quoted argument (A2): `bash -c '...'`,
+  # `sh -c '...'`, `eval '...'`. The tokenizer already decoded the quotes
+  # into the word's content, so re-classify that content directly.
+  local m=${#words[@]}
+  if [ "$depth" -lt 3 ]; then
+    local j=0 w2
+    while [ "$j" -lt "$m" ]; do
+      w2="${words[j]}"
+      local recurse=""
+      case " $_INTERPRETERS " in
+        *" $w2 "*)
+          if [ "$((j + 2))" -lt "$m" ] && [ "${words[j+1]}" = "-c" ]; then
+            recurse="${words[j+2]}"
+          fi ;;
+        eval)
+          if [ "$((j + 1))" -lt "$m" ]; then
+            recurse="${words[j+1]}"
+          fi ;;
+      esac
+      if [ -n "$recurse" ]; then
+        local sf=$PUSH_FOUND sc=$PUSH_COUNT sw="$PUSH_WORDS" sp=$PUSH_PLUMBING
+        classify_command "$recurse" $((depth + 1))
+        PUSH_COUNT=$((sc + PUSH_COUNT))
+        [ "$PUSH_FOUND" = 1 ] || PUSH_FOUND=$sf
+        [ "$PUSH_PLUMBING" = 1 ] || PUSH_PLUMBING=$sp
+        [ -n "$PUSH_WORDS" ] || PUSH_WORDS="$sw"
+      fi
+      j=$((j + 1))
+    done
+  fi
+
   # Walk the word list looking for `git ... push` at command positions.
-  local k=0 m=${#words[@]} w found_at=-1
-  while [ "$k" -lt "$m" ]; do
-    # skip env prefixes at a command position
-    while [ "$k" -lt "$m" ]; do
+  local k=0 m2=$m w found_at=-1
+  while [ "$k" -lt "$m2" ]; do
+    # skip `env` (and its assignments/options) and NAME=VALUE prefixes at a
+    # command position: `env OCR_IN_REVIEW=1 git push ...` is still a push.
+    while [ "$k" -lt "$m2" ]; do
       w="${words[k]}"
+      if [ "$w" = "env" ] || [[ "$w" == -i ]] || [ "$w" = "--ignore-environment" ] \
+         || [[ "$w" == --unset=* ]] || [[ "$w" == -u ]]; then
+        if [ "$w" = "-u" ]; then k=$((k + 2)); else k=$((k + 1)); fi
+        continue
+      fi
       if [[ "$w" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then k=$((k + 1)); else break; fi
     done
-    if [ "$k" -lt "$m" ] && [ "${words[k]}" = "git" ]; then
+    if [ "$k" -lt "$m2" ] && [ "${words[k]}" = "git" ]; then
       k=$((k + 1))
       # git global options
-      while [ "$k" -lt "$m" ]; do
+      while [ "$k" -lt "$m2" ]; do
         w="${words[k]}"
         [ "$w" = ";" ] && break
         [ "$w" = "--" ] && { k=$((k + 1)); break; }
@@ -276,13 +328,19 @@ classify_command() {
         [[ "$w" == -* ]] && { k=$((k + 1)); continue; }
         break
       done
-      if [ "$k" -lt "$m" ] && [ "${words[k]}" = "push" ]; then
-        PUSH_COUNT=$((PUSH_COUNT + 1))
-        found_at="$k"
+      if [ "$k" -lt "$m2" ]; then
+        # A1: `git send-pack` is push transport git runs NO pre-push hook
+        # for — positively parsed as plumbing, never as a non-push.
+        if [ "${words[k]}" = "send-pack" ]; then
+          PUSH_PLUMBING=1
+        elif [ "${words[k]}" = "push" ]; then
+          PUSH_COUNT=$((PUSH_COUNT + 1))
+          found_at="$k"
+        fi
       fi
     fi
     # advance to the next separator
-    while [ "$k" -lt "$m" ] && [ "${words[k]}" != ";" ]; do k=$((k + 1)); done
+    while [ "$k" -lt "$m2" ] && [ "${words[k]}" != ";" ]; do k=$((k + 1)); done
     k=$((k + 1))
   done
   if [ "$PUSH_COUNT" -gt 0 ] && [ "$found_at" -ge 0 ]; then
@@ -369,10 +427,33 @@ _find_python() {
 # ---------------------------------------------------------------------------
 payload="$(cat 2>/dev/null || true)"
 
-# Inside the review session: the gate's own worker must not re-gate itself.
-# File-writing shapes inside a review go to review-gate.py --mode guard (the
-# same policy as upstream's adapter); everything else passes through.
-if [ "${OCR_IN_REVIEW:-}" = "1" ]; then
+# Read the command (Kimchi puts it under input.command; the re-wrapped
+# tool_input.command shape from the git adapter is accepted too).
+cmd=""
+json_get "$payload" "command" && cmd="$REPLY"
+[ -z "$cmd" ] && _pass
+
+# Prefilter (A2): OVER-approximate. The raw text merely has to contain `git`
+# for the strict classifier to run; the decision is NEVER made on the raw
+# text. The old `*git*push*` literal under-matched quoted / `bash -c` /
+# spliced-subcommand shapes (proven live: `git pu""sh origin main`,
+# `bash -c 'git push ...'` both slipped past it). Never under-match.
+case "$cmd" in
+  *git*) ;;
+  *) _pass ;;
+esac
+
+classify_command "$cmd"
+[ "$PUSH_COUNT" -gt 1 ] && { _fail_open_requested && _pass; _emit_block "$BLOCK_MULTI"; }
+# A1: `git send-pack` never reaches git's pre-push hook. Block it outright.
+[ "$PUSH_PLUMBING" = 1 ] && { _fail_open_requested && _pass; _emit_block "$BLOCK_SENDPACK"; }
+
+# Inside the review session: the gate's own worker must not re-gate itself —
+# file-writing shapes inside a review go to review-gate.py --mode guard. But
+# OCR_IN_REVIEW is a SPOOFABLE env var (any gated command can export it), so
+# it NEVER disables the push gate (A2): a positively-parsed push falls
+# through to the same repo guard and reviewer as outside the review.
+if [ "${OCR_IN_REVIEW:-}" = "1" ] && [ "$PUSH_FOUND" != 1 ]; then
   case "$payload" in
     *--o*|*'>'*)
       if PY="$(_find_python)" && [ -f "$GATE_DIR/review-gate.py" ]; then
@@ -385,20 +466,6 @@ if [ "${OCR_IN_REVIEW:-}" = "1" ]; then
   _pass
 fi
 
-# Read the command (Kimchi puts it under input.command; the re-wrapped
-# tool_input.command shape from the git adapter is accepted too).
-cmd=""
-json_get "$payload" "command" && cmd="$REPLY"
-[ -z "$cmd" ] && _pass
-
-# Loose substring pre-filter before any classification work.
-case "$cmd" in
-  *git*push*) ;;
-  *) _pass ;;
-esac
-
-classify_command "$cmd"
-[ "$PUSH_COUNT" -gt 1 ] && { _fail_open_requested && _pass; _emit_block "$BLOCK_MULTI"; }
 [ "$PUSH_FOUND" = 1 ] || _pass
 
 # --- from here on the command performs exactly one real `git push` ----------

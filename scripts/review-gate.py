@@ -44,6 +44,7 @@
 # The orchestrated review methodology this drives is adapted from open-code-review
 # (ocr): https://github.com/alibaba/open-code-review (Apache-2.0). See NOTICE.
 import hashlib
+import io
 import json
 import os
 from collections import deque
@@ -1527,23 +1528,44 @@ def _fail_open_requested():
 # loose, since over-reviewing is cheap -- while a DENY is held to this stricter
 # test. Without it, a grep pattern or commit message that merely mentions a
 # push could be blocked for a reason about pushing.
+# Quote splices: the shell concatenates adjacent quoted spans, so `git pu""sh`
+# and `git "pu"sh` ARE `git push` (proven live: the raw text `git pu""sh origin
+# main` used to match nothing here and fail OPEN). The literals `git`/`push`
+# are therefore matched with quotes allowed between their characters. Allowing
+# the quotes can only over-match (block a non-push), never under-match.
+def _spliceable(word):
+    return "['\"]*" + "['\"]*".join(word)
+
+
+# `env(1)` prefixes: `env OCR_IN_REVIEW=1 git push ...` is a push (proven live
+# to fail OPEN when only bare NAME=VALUE prefixes were recognized). Options
+# `-u NAME`, `--unset=NAME`, `--ignore-environment`, assignments, and any
+# other -s/--long option are skipped; the sequence must end in `git`.
+_ENV_PREFIX = (
+    r"env(?:\s+(?:-u\s+\S+|--unset(?:=\S+)?|--ignore-environment"
+    r"|-[A-Za-z]+|--[A-Za-z][A-Za-z0-9_-]*(?:=\S+)?"
+    r"|[A-Za-z_][A-Za-z0-9_]*=\S+))*"
+)
+
 _REAL_PUSH = re.compile(
     # start of string, a command separator, a newline, a quote, or an
     # opening subshell/brace/command-substitution (Kimchi port: `$(...)` runs)
-    "(?:^|[;&|(){}\\n\\r\"'`]|\\$\\(|&&|\\|\\|)\\s*"
+    "(?:^|[;&|(){}\\n\\r\"'`]|\\$\(|&&|\|\|)\\s*"
+    "(?:" + _ENV_PREFIX + "\\s+)?"            # env(1) prefix: env X=1 git push
     "(?:[A-Za-z_][A-Za-z0-9_]*=\\S*\\s+)*"   # env prefixes: FOO=bar git push
-    "git\\s+"
+    + _spliceable("git") + "\\s+"
     # git's own options, including the two that take a separate value:
     # `-C <dir>` (which _gate_repo honours as a final cd) and `-c k=v`.
     "(?:(?:-[Cc]\\s+(?:\"[^\"]*\"|'[^']*'|\\S+)|-\\S+|\\S+=\\S+)\\s+)*"
-    "push\\b"
+    + _spliceable("push") + "\\b"
 )
 # Same shape, capturing git's global options and the subcommand, for every
 # `git <sub>` at a command position -- used to vet what runs BEFORE the push.
 _GIT_CMD = re.compile(
-    "(?:^|[;&|\\n\\r\"']|&&|\\|\\|)\\s*"
+    "(?:^|[;&|\\n\\r\"']|&&|\|\|)\\s*"
+    "(?:" + _ENV_PREFIX + "\\s+)?"
     "(?:[A-Za-z_][A-Za-z0-9_]*=\\S*\\s+)*"
-    "git\\s+"
+    + _spliceable("git") + "\\s+"
     "((?:(?:-[Cc]\\s+(?:\"[^\"]*\"|'[^']*'|\\S+)|-\\S+|\\S+=\\S+)\\s+)*)"
     "([A-Za-z][A-Za-z0-9-]*)"
 )
@@ -8850,12 +8872,31 @@ def _main_inner(argv, mode):
     # plugin's own push gate is registered inside the review session. Without
     # this, every Bash call the reviewer makes spawns a Python process, and a
     # push from inside a review would recurse into a second full review.
-    # Checked before anything else, including stdin, so the cost is one env
-    # lookup on the hot path.
-    if _in_review():
-        if mode == "hook":
-            _mode_guard(argv)  # exits
-        sys.exit(0)
+    #
+    # OCR_IN_REVIEW is SPOOFABLE: any command the gate is about to run can set
+    # it (`OCR_IN_REVIEW=1 git push ...` runs the pre-push hook with the var
+    # in ITS environment -- proven live to pass BOTH gates). It therefore NEVER
+    # disables a push gate: git mode (the PRIMARY pre-push gate) ignores it
+    # entirely, and hook mode routes only NON-push Bash calls to the in-review
+    # guard -- a positively-parsed push is gated like any other push. The
+    # genuine reviewer child works in a hooks-free clone and never pushes, so
+    # this costs the real review session nothing.
+    if _in_review() and mode == "hook":
+        # stdin is one-shot: buffer the payload so the guard (which reads
+        # stdin itself) and the push gate below both see it.
+        try:
+            _raw_in = sys.stdin.read() or "{}"
+        except Exception:
+            _raw_in = "{}"
+        sys.stdin = io.StringIO(_raw_in)
+        try:
+            _peek = json.loads(_raw_in) or {}
+        except Exception:
+            _peek = {}
+        _peek_cmd = _payload_command(_peek) if isinstance(_peek, dict) else ""
+        if not _looks_like_real_push(_peek_cmd):
+            _mode_guard(argv)  # exits: guards file writes, passes the rest
+        # else: a real push inside a review falls through to the full gate
 
     # Keep the global git hook's pointer current. Done on every run so an
     # upgrade self-heals on the next push through Claude Code, without the user

@@ -88,6 +88,16 @@ def _env(tmp_path, **stub):
     return env
 
 
+def _chunk_env(tmp_path, **extra):
+    """Like _env but with threshold/files set so 4 files produce 4 chunks."""
+    e = _env(tmp_path, **extra)
+    e["OCR_CHUNK_THRESHOLD"] = "3"   # >3 files → chunking
+    e["OCR_CHUNK_FILES"] = "1"       # 1 file per chunk
+    e["OCR_CHUNK_LINES"] = "99999"   # don't split on lines
+    e["OCR_RUN_BUDGET"] = "9999"     # won't exhaust budget
+    return e
+
+
 def _hook(work, cmd, env, session="s1", timeout=120):
     payload = json.dumps({"session_id": session, "tool_name": "bash", "cwd": str(work),
                           "input": {"command": cmd}})
@@ -118,6 +128,21 @@ def _wait_state(work, tip, want, timeout=60):
             return st
         time.sleep(0.2)
     raise AssertionError(f"state never reached {want}: {review_gate._read_state(path)}")
+
+
+def _supervise_inproc(repo, tip, run_id, attempts=0):
+    """One supervisor run, in this process, against the real stub reviewer."""
+    common = review_gate._git_common_dir(str(repo))
+    state_path = review_gate._state_path(common, tip)
+    base = _git(["rev-parse", "origin/main"], cwd=repo)
+    review_gate._write_state(state_path, {
+        "state": "claimed", "run_id": run_id, "claimed_ts": time.time(), "tip": tip,
+        "branch": "main", "base": base, "range": f"{base}..{tip}", "repo_root": str(repo),
+        "git_dir": review_gate._git_dir(str(repo)), "mode": "hook", "attempts": attempts,
+        "protocol_version": review_gate.PROTOCOL_VERSION,
+    })
+    review_gate._supervise(str(state_path), run_id)
+    return review_gate._read_state(state_path)
 
 
 def _verdict_record(work, tip, remote="origin"):
