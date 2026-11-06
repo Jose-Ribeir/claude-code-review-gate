@@ -1,5 +1,5 @@
 {
-  "_comment": "Normalized argv from review_gate._run_review for a first push of ≤15 files (Kimchi port, C2). Scenarios 13 and 20 compare byte-for-byte after normalisation. Normalised: claude executable → '<claude>', plugin root (_PLUGIN_ROOT) → '<plugin-dir>', deny extension path (_DENY_EXT) → '<deny-ext>', push range in prompt → '<RANGE>'.",
+  "_comment": "Normalized argv from review_gate._run_review for a first push of \u226415 files (Kimchi port, C2 + A6: --approve for skill discovery in the untrusted clone). Scenarios 13 and 20 compare byte-for-byte after normalisation. Normalised: claude executable \u2192 '<claude>', plugin root (_PLUGIN_ROOT) \u2192 '<plugin-dir>', deny extension path (_DENY_EXT) \u2192 '<deny-ext>', push range in prompt \u2192 '<RANGE>'.",
   "argv": [
     "<claude>",
     "-p",
@@ -7,6 +7,7 @@
     "--mode",
     "json",
     "--no-session",
+    "--approve",
     "--model",
     "kimchi-dev/kimi-k3",
     "-e",

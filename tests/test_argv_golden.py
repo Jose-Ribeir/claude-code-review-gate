@@ -86,3 +86,11 @@ def test_golden_has_correct_model():
     fixture = _load_fixture()
     idx = fixture.index("--model")
     assert fixture[idx + 1] == "kimchi-dev/kimi-k3"
+
+
+def test_golden_approves_project_local_files():
+    """A6: the worker argv carries --approve so skill discovery works in the
+    untrusted --no-hardlinks clone (spelling verified against `kimchi --help`)."""
+    fixture = _load_fixture()
+    assert "--approve" in fixture
+    assert "--no-approve" not in fixture

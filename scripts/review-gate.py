@@ -107,6 +107,10 @@ DEFAULT_KIMI_ARGS = [
     # shape of the call is fixed here.
     "--mode", "json",
     "--no-session",
+    # Trust project-local files for this run: skill discovery in the
+    # UNTRUSTED --no-hardlinks clone needs it (A6; spelling verified against
+    # `kimchi --help`: --approve / -a).
+    "--approve",
     # Pin the model rather than inheriting the parent session's.
     "--model", _MODEL,
     # Load the deny extension (D13): -p sessions run yolo, the extension is
