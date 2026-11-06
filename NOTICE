@@ -36,3 +36,21 @@ This project is not affiliated with, sponsored by, or endorsed by Alibaba or
 Anthropic. It does not run the open-code-review binary and does not transmit any
 authentication token to any third-party tool; all model inference is performed
 by Claude Code itself.
+
+------------------------------------------------------------------------------
+Port attribution
+------------------------------------------------------------------------------
+
+This repository (kimchi-review-gate) is a port of claude-code-review-gate to
+Kimchi Studio. The gate machinery, review methodology, tests, and
+documentation above are carried over from:
+
+    https://github.com/Jose-Ribeir/claude-code-review-gate
+    Copyright 2026 José Ribeiro and contributors.
+    Licensed under the Apache License, Version 2.0.
+
+Kimchi-specific modifications made by the port include: the Kimchi bash-hook
+adapter (hooks/sh/gate-hook.sh), the repo-level git pre-push adapter
+(hooks/git/pre-push), the external verdict store
+(~/.local/state/review-gate/), and the reviewer sandbox based on
+`git clone --no-hardlinks` instead of a git worktree.
