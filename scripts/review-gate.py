@@ -81,6 +81,13 @@ PROMPT_RANGE = "/skill:review --range {rng} --json"
 # review skill still resolves when we skip user settings below.
 _PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# Read-only sandbox (port plan D13): the pi-package deny extension loaded with
+# `-e`. It hard-denies write/edit/web_fetch/web_search tool calls while
+# OCR_IN_REVIEW=1. Permission FLAGS are not enforced headlessly (verified),
+# the extension is. C2 ships the verified prototype; C3 hardens it (bash
+# allowlist, startup canary, inertness test).
+_DENY_EXT = os.path.join(_PLUGIN_ROOT, "extensions", "review-gate-deny.ts")
+
 # Model for the headless review session. Pinned deliberately: without --model
 # the spawned session inherits whatever model the PARENT Claude Code session is
 # on, so a user on Opus pays Opus cache-read rates ($0.50/M) for every gate run
@@ -101,6 +108,9 @@ DEFAULT_KIMI_ARGS = [
     "--no-session",
     # Pin the model rather than inheriting the parent session's.
     "--model", _MODEL,
+    # Load the deny extension (D13): -p sessions run yolo, the extension is
+    # the layer that actually blocks write/edit/web tools in the worker.
+    "-e", _DENY_EXT,
     # No MCP servers. A code review needs read/grep/find and nothing else.
     "--mcp-config", '{"mcpServers":{}}',
 ]
