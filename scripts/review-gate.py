@@ -69,12 +69,13 @@ from ocr_verdict import compute_verdict  # noqa: E402
 import ocr_impact  # noqa: E402
 import ocr_segment  # noqa: E402
 import ocr_telemetry  # noqa: E402
+import rg_store  # noqa: E402  # the Kimchi port's external verdict store + sandbox
 
-PROMPT = "/review-gate:review --unpushed --json"
+PROMPT = "/skill:review --unpushed --json"
 # With an explicit range the skill reviews exactly what the remote is about to
 # gain, instead of re-deriving `@{u}..HEAD` and reaching the same wrong answer
 # the gate used to.
-PROMPT_RANGE = "/review-gate:review --range {rng} --json"
+PROMPT_RANGE = "/skill:review --range {rng} --json"
 
 # The plugin's own root (scripts/.. == the plugin dir). Passed explicitly so the
 # review skill still resolves when we skip user settings below.
@@ -88,76 +89,24 @@ _PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # gate that emits false positives gets bypassed, and a bypassed gate has zero
 # recall); set OCR_MODEL=haiku to trade some precision for cost, or =opus if you
 # want maximum depth and accept the bill.
-_MODEL = os.environ.get("OCR_MODEL", "sonnet").strip() or "sonnet"
+_MODEL = os.environ.get("OCR_MODEL", "kimchi-dev/kimi-k3").strip() or "kimchi-dev/kimi-k3"
 
-DEFAULT_CLAUDE_ARGS = [
-    # The reviewer's input is an UNTRUSTED diff. Anything it is pre-approved to
-    # run is therefore reachable by prompt injection from a hostile branch, so
-    # the allowlist is read-only: the review reads code and asks git what
-    # changed, and needs nothing else. Each rule is its own argv element -- the
-    # documented form is `--allowedTools "Bash(git log *)" "Bash(git diff *)"`,
-    # and note the SPACE before `*`, not a colon: a `param:value` rule against
-    # Bash's primary `command` field is ignored (with a startup warning) because
-    # it would be bypassable by a compound command.
-    #
-    # Everything outside this list still *exists*, it just is not pre-approved,
-    # and a headless session has nobody to prompt -- so it is refused. That is
-    # only true while --dangerously-skip-permissions is absent; see pre-push,
-    # which used to set it by default and no longer does.
-    "--allowedTools",
-    "Bash(git diff *)",
-    "Bash(git ls-files *)",
-    "Bash(git log *)",
-    "Bash(git show *)",
-    "Bash(git rev-parse *)",
-    "Bash(git status *)",
-    "Read",
-    "Grep",
-    "Glob",
-    "Task",
-    # Belt and braces: a bare tool name removes the tool from the model's
-    # context entirely rather than merely denying calls to it. The review skill
-    # promises "Never modify files" (skills/review/SKILL.md); this enforces it.
-    "--disallowedTools",
-    "Write",
-    "Edit",
-    "NotebookEdit",
-    "WebFetch",
-    "WebSearch",
-    # Pin the model rather than inheriting the parent session's (see above).
+DEFAULT_KIMI_ARGS = [
+    # Kimchi headless worker argv (port spec section 4). The read-only sandbox
+    # lives BELOW the flags -- permission flags are NOT enforced headlessly
+    # (verified) -- in the deny extension + the guard hook + the reviewer
+    # sandbox (a --no-hardlinks clone). Those land with later chunks; the
+    # shape of the call is fixed here.
+    "--mode", "json",
+    "--no-session",
+    # Pin the model rather than inheriting the parent session's.
     "--model", _MODEL,
-    # Load NO settings sources. The user's ~/.claude/settings.json is where
-    # global hooks live; in a headless review session those fire on every tool
-    # call (each one a subprocess, and any that inject context add tokens to a
-    # context that is already re-read on every call).
-    #
-    # `project` used to be loaded here for that cost reason, but project
-    # settings live in the repo BEING REVIEWED -- on a hostile branch they are
-    # attacker-controlled, and settings can define hooks, which execute. An
-    # empty value loads none of the three (`none` is not a valid source name;
-    # the CLI accepts user/project/local only). Auth is unaffected --
-    # OAuth/keychain is not a settings source.
-    "--setting-sources", "",
-    # Load the review plugin from disk. Required because --setting-sources
-    # above drops the user-level enabledPlugins registry.
-    "--plugin-dir", _PLUGIN_ROOT,
-    # No MCP servers. --mcp-config is given an empty object so there is nothing
-    # to load; --strict-mcp-config makes that authoritative and ignores every
-    # other MCP configuration. A code review needs Bash/Read/Grep/Glob and
-    # nothing else, and each connected server's tool schemas cost context.
+    # No MCP servers. A code review needs read/grep/find and nothing else.
     "--mcp-config", '{"mcpServers":{}}',
-    "--strict-mcp-config",
-    # Move per-machine sections (cwd, env, git status) out of the system prompt
-    # so the cached prefix stays stable across runs.
-    "--exclude-dynamic-system-prompt-sections",
-    # Emit NDJSON (one event per turn) instead of the bare last-turn text.
-    # This lets _extract_from_stream_json scan EVERY assistant turn for the
-    # verdict -- a stray task-notification ack that lands after the verdict
-    # becomes a later event, not a replacement, so it can no longer cause a
-    # "could not parse review output" failure.
-    "--output-format", "stream-json",
-    "--verbose",   # required when --output-format stream-json is used in -p mode
 ]
+# Legacy alias (upstream name, kept for diff parity of callers/tests).
+DEFAULT_CLAUDE_ARGS = DEFAULT_KIMI_ARGS
+
 try:
     TIMEOUT = int(os.environ.get("OCR_TIMEOUT", "1800"))
     if TIMEOUT <= 0:
@@ -187,19 +136,21 @@ MARKER_PREFIX = "scr-push-reviewed-"
 # lives in the repository's common git dir, so two worktrees, two adapters
 # or two sessions pushing the same commits share one review.
 ASYNC_DIR = "review-gate-async"
-_INLINE_BUDGET_DEFAULT = 600
+# Kimchi kills a bash hook after 5 s; the hook-mode join budget must sit
+# safely below that (the bash adapter itself takes some of the window).
+_INLINE_BUDGET_DEFAULT = 3
 # hooks/hooks.json's PreToolUse timeout is 900 s and the app wall is ~975 s;
 # a budget at or above the hooks timeout would let Claude Code kill the hook
 # (treated as non-blocking, i.e. fail-open) before the budget deny fires.
-_INLINE_BUDGET_MAX = 840
-_INLINE_BUDGET_MIN = 30
+_INLINE_BUDGET_MAX = 4
+_INLINE_BUDGET_MIN = 1
 # Under the Bash tool's 600 s ceiling, for a terminal push made through Claude.
 _INLINE_BUDGET_GIT_DEFAULT = 300
 POLL_S = 1.0
 HEARTBEAT_S = 10
 STALE_S = 45          # a supervisor silent this long is presumed dead
 LOCK_STALE_S = 60
-ATTEMPT_CAP = 2       # automatic restarts of a failed review, per tip, per TTL
+ATTEMPT_CAP = 3       # failed attempts before the sticky error state (port plan C1)
 
 # --- chunking / checkpoint (0.7.0) -------------------------------------------
 try:
@@ -960,13 +911,7 @@ def _write_gate_pointer():
     Best-effort throughout: this is housekeeping and must never break the gate.
     """
     try:
-        data_dir = os.environ.get("CLAUDE_PLUGIN_DATA", "").strip()
-        if not data_dir:
-            cfg = os.environ.get("CLAUDE_CONFIG_DIR", "").strip() or os.path.join(
-                os.path.expanduser("~"), ".claude"
-            )
-            data_dir = os.path.join(cfg, "plugins", "data", "review-gate-local")
-        target = Path(data_dir)
+        target = rg_store.store_root()
         target.mkdir(parents=True, exist_ok=True)
         here = os.path.dirname(os.path.abspath(__file__))
         ptr = target / "gate-dir"
@@ -1494,6 +1439,19 @@ def _cd_targets(cmd):
             if any(g for g in m.groups())]
 
 
+def _payload_command(payload):
+    """The Bash command of a hook payload. Upstream (and the Kimchi bash
+    adapter, which re-wraps) put it at tool_input.command; a raw Kimchi payload
+    puts it at input.command. Accept both."""
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("tool_input", "input"):
+        block = payload.get(key)
+        if isinstance(block, dict) and block.get("command"):
+            return str(block["command"])
+    return ""
+
+
 def _gate_repo(payload):
     """(repo_root, ambiguous) for the push described by a PreToolUse payload.
 
@@ -1512,7 +1470,7 @@ def _gate_repo(payload):
     """
     cmd, cwd = "", ""
     if isinstance(payload, dict):
-        cmd = (payload.get("tool_input") or {}).get("command", "") or ""
+        cmd = _payload_command(payload)
         cwd = str(payload.get("cwd") or "")
     cur, unknown = (cwd or os.getcwd()), False
     # `git -C <dir> push` changes directory for that one command: a final cd,
@@ -1560,8 +1518,9 @@ def _fail_open_requested():
 # test. Without it, a grep pattern or commit message that merely mentions a
 # push could be blocked for a reason about pushing.
 _REAL_PUSH = re.compile(
-    # start of string, a command separator, a newline, or a quote
-    "(?:^|[;&|\\n\\r\"']|&&|\\|\\|)\\s*"
+    # start of string, a command separator, a newline, a quote, or an
+    # opening subshell/brace/command-substitution (Kimchi port: `$(...)` runs)
+    "(?:^|[;&|(){}\\n\\r\"'`]|\\$\\(|&&|\\|\\|)\\s*"
     "(?:[A-Za-z_][A-Za-z0-9_]*=\\S*\\s+)*"   # env prefixes: FOO=bar git push
     "git\\s+"
     # git's own options, including the two that take a separate value:
@@ -1882,23 +1841,17 @@ def _hook_target(repo_root, cmd):
             return "allow", {"why": "tags already on remote"}
     src, dst = tgt.get("src") or "", tgt.get("dst") or ""
     if not src:
-        # `git push` / `git push origin`: what git itself would send.
-        full, rc = _git(["rev-parse", "--symbolic-full-name", "@{push}"], cwd=repo_root)
-        if rc == 0 and full.startswith("refs/remotes/"):
-            rest = full[len("refs/remotes/"):]
-            rem, _, dst = rest.partition("/")
-            remote = remote or rem
-            src = _branch(repo_root) or "HEAD"
-        elif tgt.get("set_upstream") or remote:
-            src = _branch(repo_root)
-            dst = src
-        else:
-            if legacy:
-                return _legacy_target(repo_root)
-            return "deny", {"why": (
-                "review-gate: this branch has no push destination configured, so what "
-                "`git push` would send is undefined. Name it: git push -u <remote> <branch>"
-            )}
+        # D14 of the port plan: `git push` / `git push origin` depend on
+        # push.default and @{push} state this gate cannot read literally, so
+        # the push is refused rather than guessed at. The git pre-push layer
+        # does not need this (git resolves the refspec before invoking it);
+        # this hook runs BEFORE git, so the command line is all there is.
+        if legacy:
+            return _legacy_target(repo_root)
+        return "deny", {"why": (
+            "review-gate: could not parse push command — re-run with an explicit refspec "
+            "(git push <remote> <ref>)"
+        )}
     if not remote:
         remote = "origin"
     if src == "HEAD":
@@ -2110,28 +2063,20 @@ def _extract_json(text):
     return match
 
 
-def _find_claude():
-    """Locate the claude CLI so the gate works from any shell, not just inside
-    Claude Code. Order: PATH; then OCR_CLAUDE_BIN / CLAUDE_CODE_EXECPATH; then,
-    on Windows, the Desktop App's bundled claude.exe (a versioned path that is
-    not on PATH) — newest version wins."""
-    found = shutil.which("claude")
+def _find_kimi():
+    """Locate the kimchi CLI so the gate works from any shell. Order: PATH;
+    then the KIMCHI_BIN override (port spec section 3)."""
+    found = shutil.which("kimchi")
     if found:
         return found
-    for env in ("OCR_CLAUDE_BIN", "CLAUDE_CODE_EXECPATH"):
-        exe = os.environ.get(env, "")
-        if exe and os.path.isfile(exe):
-            return exe
-    import glob
-
-    roots = [p for p in (os.environ.get("LOCALAPPDATA"), os.path.join(os.path.expanduser("~"), "AppData", "Local")) if p]
-    cands = []
-    for root in roots:
-        cands += glob.glob(os.path.join(root, "Packages", "Claude_*", "LocalCache", "Roaming", "Claude", "claude-code", "*", "claude.exe"))
-    if cands:
-        cands.sort(key=lambda f: os.path.getmtime(f), reverse=True)
-        return cands[0]
+    exe = os.environ.get("KIMCHI_BIN", "")
+    if exe and os.path.isfile(exe):
+        return exe
     return None
+
+
+# Upstream name kept as an alias for callers/tests written against it.
+_find_claude = _find_kimi
 
 
 # Substrings that identify a credentials problem rather than a review problem.
@@ -2249,8 +2194,8 @@ def _bypass_hint(mode):
     if mode == "hook":
         return (
             "  Emergency one-shot bypass : export OCR_FAIL_OPEN=1 in the environment\n"
-            "    Claude Code itself is launched from (a shell prefix on `git commit` will\n"
-            "    NOT work in hook mode -- this process inherits Claude Code's env, not the\n"
+            "    Kimchi itself is launched from (a shell prefix on `git push` will\n"
+            "    NOT work in hook mode -- this process inherits Kimchi's env, not the\n"
             "    Bash tool call's)."
         )
     return "  Emergency one-shot bypass : OCR_FAIL_OPEN=1 git commit ..."
@@ -2351,26 +2296,26 @@ _WIN_FLAGS = (
 # per-feature flags (DISABLE_CRON, EAGER_FLUSH, etc.) which configure
 # behaviour rather than claim a session.
 _SESSION_BRIDGE_ENV = (
-    "CLAUDE_CODE_MESSAGING_SOCKET",
-    "CLAUDE_CODE_MESSAGING_TOKEN",
-    "CLAUDE_CODE_SESSION_ID",
-    "CLAUDE_CODE_HOST_SESSION_ID",
-    "CLAUDE_CODE_CHILD_SESSION",
-    "CLAUDE_PID",
-    "CLAUDE_CODE_ENTRYPOINT",
-    "CLAUDE_AGENT_SDK_VERSION",
-    "CLAUDE_CODE_SDK_HAS_HOST_AUTH_REFRESH",
-    "CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH",
-    "CLAUDE_CODE_OAUTH_SCOPES",
+    # Kimchi session-bridge vars (port spec section 3): a detached supervisor
+    # or a headless reviewer must never inherit the interactive session's
+    # sockets, ids, or permission state.
+    "KIMCHI_PARENT_SESSION_ID",
+    "KIMCHI_SESSION_ID",
+    "KIMCHI_CHILD_SESSION",
+    "KIMCHI_MESSAGING_SOCKET",
+    "KIMCHI_MESSAGING_TOKEN",
+    "PI_PACKAGE_DIR",
+    "PI_ENTRYPOINT",
+    "KIMCHI_PERMISSIONS",
+    "KIMCHI_PERMISSIONS_MODE",
 )
 
 # Values safe to log verbatim in the OCR_DEBUG breadcrumb (not secret-adjacent
 # -- unlike the socket/token/session-id members of _SESSION_BRIDGE_ENV, which
 # are logged as names only, same as everything else).
 _DEBUG_SAFE_VALUES = (
-    "CLAUDE_CODE_ENTRYPOINT",
-    "CLAUDE_CODE_CHILD_SESSION",
-    "CLAUDE_AGENT_SDK_VERSION",
+    "PI_ENTRYPOINT",
+    "KIMCHI_CHILD_SESSION",
 )
 
 
@@ -2418,6 +2363,22 @@ _TELE = {}
 # after it returns or raises. Counts, bytes and timings only. Per thread: since
 # 0.12.0 several chunks' reviewers run at once, one per worker thread.
 _CALL_STATS_TLS = threading.local()
+
+
+def _stub_worker_cmd():
+    """argv of the STUB reviewer for OCR_STUB_WORKER=1 (C1 bring-up / tests).
+
+    Emits a fixed verdict without ever calling kimchi, so the full
+    hook -> supervisor -> store -> join round trip can be exercised with no
+    network and no model. The stub is this repo's own tests/kimi_stub.py,
+    mirroring stub_reviewer.py's contract.
+    """
+    if os.environ.get("OCR_STUB_WORKER", "").strip().lower() not in ("1", "true", "yes"):
+        return None
+    stub = os.path.join(_PLUGIN_ROOT, "tests", "kimi_stub.py")
+    if not os.path.isfile(stub):
+        return None
+    return [sys.executable, stub]
 
 
 def _last_call_stats():
@@ -2527,23 +2488,27 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
     ReviewLimitError when the reviewer reports a usage/session limit, or
     returns (None, False, "") when claude is not installed (fail-open).
     """
-    claude = _find_claude()
-    # The test stub runs INSTEAD of claude, so it must not need claude to be
-    # installed -- CI runners have none, and every end-to-end test there was
-    # silently "skipped (fail-open)" instead of exercising the gate.
-    if not claude and not _test_reviewer_cmd():
-        _warn("`claude` CLI not found on PATH or CLAUDE_CODE_EXECPATH - skipping review (fail-open).")
-        return None, False, ""
-    # OCR_CLAUDE_ARGS replaces the defaults wholesale (full escape hatch, also
-    # discards the cost controls AND the read-only tool allowlist);
-    # OCR_CLAUDE_EXTRA_ARGS appends to them, which is what callers usually want.
-    override = os.environ.get("OCR_CLAUDE_ARGS")
+    kimi = _find_kimi()
+    bypass = _bypass_hint(mode)
+    stub = _test_reviewer_cmd() or _stub_worker_cmd()
+    # D9 of the port plan: a missing reviewer NEVER fails open. The stubs run
+    # INSTEAD of kimchi, so they must not need it to be installed.
+    if not kimi and not stub:
+        raise ReviewGateError(
+            "`kimchi` CLI not found on PATH or KIMCHI_BIN - blocking to preserve gate "
+            "integrity (a gate without a reviewer must not wave a push through).\n"
+            "  Install Kimchi Studio, or point KIMCHI_BIN at the CLI, then push again.\n"
+            "  Run scripts/ocr_doctor.py (review-gate doctor) to diagnose.\n"
+            f"{bypass}"
+        )
+    # OCR_KIMI_ARGS replaces the defaults wholesale (full escape hatch);
+    # OCR_KIMI_EXTRA_ARGS appends to them, which is what callers usually want.
+    override = os.environ.get("OCR_KIMI_ARGS")
     if override:
         args = shlex.split(override)
     else:
-        args = list(DEFAULT_CLAUDE_ARGS)
-        args += shlex.split(os.environ.get("OCR_CLAUDE_EXTRA_ARGS", ""))
-    bypass = _bypass_hint(mode)
+        args = list(DEFAULT_KIMI_ARGS)
+        args += shlex.split(os.environ.get("OCR_KIMI_EXTRA_ARGS", ""))
     # The child is given --plugin-dir, so THIS plugin -- including its
     # PreToolUse push gate -- is registered inside the review session too.
     # Without a marker in the environment, every Bash call the reviewer makes
@@ -2551,9 +2516,6 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
     # second review. Both adapters short-circuit on this (see _in_review).
     child_env = dict(os.environ)
     child_env["OCR_IN_REVIEW"] = "1"
-    # The cwd is the untrusted branch, whose AGENTS.md/CLAUDE.md a session would
-    # load. --setting-sources "" also blocks them, but OCR_CLAUDE_ARGS can drop it.
-    child_env["CLAUDE_CODE_DISABLE_CLAUDE_MDS"] = "1"
     # unset/empty -> scrub _SESSION_BRIDGE_ENV (the default, see its comment);
     # "none" (case-insensitive) -> scrub nothing, the pre-0.6 behaviour, for a
     # repo whose reviewer genuinely needs the desktop host's auth relay;
@@ -2600,8 +2562,7 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
         prompt = f'{base_prompt} --paths-file "{pf_fwd}" --json'
     else:
         prompt = PROMPT_RANGE.format(rng=push_range) if push_range else PROMPT
-    cmd = [claude, "-p", prompt] + args
-    stub = _test_reviewer_cmd()
+    cmd = [kimi, "-p", prompt] + args
     if stub:
         # Range is always last so stub's sys.argv[-1] still gives the range.
         if resolve_file:
@@ -2651,7 +2612,7 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
                 # included so a debug run also shows whether the reviewer's
                 # auth path is an inherited API key rather than the host relay.
                 present = sorted(
-                    k for k in child_env if k.upper().startswith(("CLAUDE", "ANTHROPIC"))
+                    k for k in child_env if k.upper().startswith(("KIMCHI", "PI_"))
                 )
                 # From the ORIGINAL environment, not child_env: several
                 # _DEBUG_SAFE_VALUES names are also in _SESSION_BRIDGE_ENV, so
@@ -2756,9 +2717,9 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
         # leaving detail empty and hiding why the review failed.
         detail = (out_text or "").strip() or (err_text or "").strip()
         raise ReviewGateError(
-            f"`claude` exited {proc.returncode} without running the review -- blocking commit "
+            f"`kimchi` exited {proc.returncode} without running the review -- blocking commit "
             "to preserve gate integrity.\n"
-            f"  {claude}\n"
+            f"  {kimi}\n"
             f"  Output (first 400 chars): {detail[:400]!r}\n"
             f"{_auth_hint(detail)}"
             f"{bypass}"
@@ -2864,7 +2825,15 @@ def _tree_kill(pid):
 
 
 def _async_dir(common_dir):
-    return Path(common_dir) / ASYNC_DIR
+    """The per-repo async run-state dir -- under the EXTERNAL store (D12 of
+    the port plan), never inside the repository: the repo's own .git is
+    content the review cannot trust to have written, so run state and verdicts
+    live where only this gate writes. Keyed by the canonical git common dir;
+    the in-repo layout is the fallback when the store is unavailable."""
+    try:
+        return rg_store.async_dir(common_dir)
+    except Exception:
+        return Path(common_dir) / ASYNC_DIR
 
 
 def _state_path(common_dir, tip, base=None):
@@ -2909,6 +2878,10 @@ def _write_state(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + f".tmp-{os.getpid()}")
     tmp.write_text(json.dumps(data, ensure_ascii=False, default=str), encoding="utf-8")
+    try:
+        os.chmod(tmp, 0o600)   # supervisor-written only (D12)
+    except OSError:
+        pass
     last = None
     for _ in range(40):
         try:
@@ -3108,6 +3081,21 @@ def _drive_review(common_dir, repo_root, meta, mode, budget):
 
 def _supervise(state_path, run_id):
     """_supervise_run, then one line in the local run log (best-effort)."""
+    # flock singleflight (port plan C1): exactly one supervisor per state
+    # file. The O_EXCL _StateLock already singleflights the CLAIM; this holds
+    # the run itself, so a stale-pid respawn cannot overlap a live supervisor.
+    if sys.platform != "win32":
+        try:
+            import fcntl
+            fd = os.open(str(state_path) + ".flock", os.O_CREAT | os.O_RDWR, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                # Hold until process exit: the fd is intentionally leaked.
+            except OSError:
+                os.close(fd)
+                return 0  # a live supervisor owns this run; fenced anyway
+        except Exception:
+            pass
     _TELE.clear()
     _TELE.update({"ts": time.time(), "run_id": run_id})
     _PHASE_CLOCK["t"] = time.monotonic()
@@ -3238,7 +3226,7 @@ def _supervise_run(state_path, run_id):
         else:
             review_root = repo_root
             cwd_note = (
-                "review-gate could not create a detached worktree for this tip, so the "
+                "review-gate could not create a detached clone for this tip, so the "
                 "reviewer read the LIVE working tree; findings may describe files as they "
                 "were during the review rather than at the pushed commit."
             )
@@ -3688,7 +3676,7 @@ def _supervise_run(state_path, run_id):
         # claude not installed: the one deliberately fail-open case.
         st.update({"state": "done", "done_ts": time.time(), "verdict": "skipped",
                    "blocked": False, "reasons": "", "finding_count": 0,
-                   "note": "`claude` CLI not found - review skipped (fail-open)."})
+                   "note": "no reviewer ran - review skipped (fail-open escape)."})
         _write_state(state_path, st)
         return 0
     if cwd_note and isinstance(result, dict):
@@ -3716,6 +3704,16 @@ def _supervise_run(state_path, run_id):
     reasons = _format_reasons(result)
     advisory = _is_advisory(repo_root)
     blocked = verdict == "block" and not advisory
+    # D12: record the verdict in the EXTERNAL store before the done state, so
+    # a done state always has a store record behind it (the store is what the
+    # join validates; a torn write here fails closed, never open).
+    try:
+        remote_id = st.get("remote_url") or st.get("remote") or ""
+        rg_store.record_verdict(
+            remote_id, tip, base, verdict, blocked, reasons,
+            rg_store.record_commits(repo_root, base, tip))
+    except Exception:
+        pass
     record = _record_review(git_dir, tip, branch, mode, verdict, advisory, blocked, result, raw_name)
     if not blocked:
         # The pass-only legacy marker, unchanged: an older global git hook
@@ -3749,60 +3747,51 @@ def _supervise_run(state_path, run_id):
 
 
 def common_dir_of(state_path):
+    """The git common dir a state file belongs to.
+
+    State lives under the external store (keyed by a hash of the common dir),
+    so the path itself cannot be walked back the way the in-repo layout could;
+    read the state's own recorded dirs instead, with the legacy layout as the
+    last resort.
+    """
+    st = _read_state(state_path) or {}
+    common = str(st.get("common_dir") or "")
+    if common:
+        return common
+    for key in ("git_dir", "repo_root"):
+        base = str(st.get(key) or "")
+        if base:
+            found = _git_common_dir(base) or ""
+            if found:
+                return found
     return str(Path(state_path).parent.parent)
 
 
 def _make_worktree(repo_root, tip, run_id):
-    """A detached worktree at `tip` for the reviewer to read, or "".
+    """The reviewer sandbox at `tip`, or "" (name kept for diff parity).
 
-    The review now runs while the session goes on editing, switching and
-    stashing in the live tree, and the skill reads files with Read/Grep -- so
-    without this a 20-minute review describes a tree that no longer matches
-    the commits being pushed. Also keeps the reviewer's scratch files out of
-    the user's tree. Under the plugin data dir, never inside .git.
-    """
-    try:
-        base = _gate_data_dir() / "worktrees"
-        base.mkdir(parents=True, exist_ok=True)
-        path = base / f"{tip[:12]}-{run_id}"
-        out, rc = _git(["worktree", "add", "--detach", str(path), tip], cwd=repo_root)
-        if rc == 0 and path.is_dir():
-            return str(path)
-    except Exception:
-        pass
-    return ""
+    Kimchi port (D12): a `git clone --no-hardlinks` COPY, never a git
+    worktree -- a worktree shares refs, config, hooks, and the object database
+    with the real repository, which would let reviewed content forge verdicts,
+    move remote-tracking refs, or fire the real repo's hooks. A clone has its
+    own everything. node_modules is symlinked in and tsconfig `plugins` keys
+    are scrubbed (see rg_store)."""
+    return rg_store.make_review_clone(repo_root, tip, run_id)
 
 
 def _is_gate_worktree(path):
-    """True only for a directory this gate made with _make_worktree: under its own
-    worktrees/ dir and a linked worktree (a `.git` FILE, never the `.git` directory
-    of a real checkout). Anything doubtful is False -- callers use this to decide
-    whether a destructive reset (git clean / checkout) may run there."""
-    try:
-        base = os.path.normcase(os.path.realpath(str(_gate_data_dir() / "worktrees")))
-        real = os.path.realpath(str(path))
-        if not os.path.normcase(real).startswith(base + os.sep):
-            return False
-        return os.path.isfile(os.path.join(real, ".git"))
-    except Exception:
-        return False
+    """True only for a directory this gate made with _make_worktree: under the
+    store's own clones/ dir (see rg_store.is_gate_clone). Anything doubtful is
+    False -- callers use this to decide whether a destructive reset (git clean
+    / checkout) may run there."""
+    return rg_store.is_gate_clone(path)
 
 
 def _remove_worktree(repo_root, path):
-    """Tear down a worktree _make_worktree created. Refuses anything else:
-    the only directory this gate ever deletes is one under its own
-    worktrees/ dir, never a path handed to it by mistake."""
-    try:
-        base = os.path.realpath(str(_gate_data_dir() / "worktrees"))
-        real = os.path.realpath(str(path))
-        if not real.startswith(base + os.sep):
-            return
-        _git(["worktree", "remove", "--force", path], cwd=repo_root)
-        if os.path.isdir(real):
-            shutil.rmtree(real, ignore_errors=True)
-        _git(["worktree", "prune"], cwd=repo_root)
-    except Exception:
-        pass
+    """Tear down a clone _make_worktree created. Refuses anything else: the
+    only directory this gate ever deletes is one under its own clones/ dir,
+    never a path handed to it by mistake."""
+    rg_store.remove_review_clone(path)
 
 
 def _reap_async(common_dir):
@@ -3853,7 +3842,7 @@ def _reap_async(common_dir):
             except OSError:
                 continue
 
-        wts = _gate_data_dir() / "worktrees"
+        wts = rg_store.clones_dir()
         if wts.is_dir():
             for p in wts.iterdir():
                 try:
@@ -7807,6 +7796,58 @@ def _chunk_progress(st):
     return f", chunk {cd + 1}/{ct}"
 
 
+def _verdict_backing(common_dir, tip, base, remote_id, repo_root, push_range):
+    """("ok"|"missing"|"corrupt"|"uncovered") -- does the external verdict
+    store back the recorded state for this (remote, tip)?
+
+    corrupt    a record exists but cannot be trusted -> caller DENIES
+    uncovered  a record exists but does not cover the pushed commits -> DENIES
+    missing    a done state with NO record -> the state is invalidated here so
+               the review restarts (fail closed without a TTL-long deny loop)
+    """
+    state_path = _state_path(common_dir, tip, base)
+    try:
+        rec = rg_store.load_verdict(remote_id, tip)
+    except rg_store.StoreError:
+        return "corrupt"
+    if rec is not None:
+        if not push_range or rg_store.covers(rec, rg_store.record_commits(repo_root, base, tip)):
+            return "ok"
+        return "uncovered"
+    st = _read_state(state_path) or {}
+    if st.get("state") != "done":
+        return "ok"  # nothing recorded; the run state machine is intact
+    try:
+        with _StateLock(state_path):
+            st2 = _read_state(state_path) or {}
+            if st2.get("state") == "done":
+                _unlink(state_path)
+    except Exception:
+        pass
+    return "missing"
+
+
+def _unbacked_reason(kind, mode):
+    if kind == "corrupt":
+        return (
+            "review-gate: the recorded verdict for this push is corrupt or partial, so "
+            "it was not trusted. Blocking, because an unreadable verdict must never "
+            "allow a push.\n\nFix it:\n  - Re-run this push (the review restarts).\n"
+            "  - Run scripts/ocr_doctor.py (review-gate doctor) to diagnose.\n"
+            + _bypass_hint(mode)
+        )
+    if kind == "uncovered":
+        return (
+            "review-gate: the recorded verdict does not cover every commit this push "
+            "sends (a re-push after the remote moved?). Blocking. Re-run this push so "
+            "the new commits are reviewed.\n" + _bypass_hint(mode)
+        )
+    return (
+        "review-gate: no recorded verdict backs this push. Blocking. Re-run this push to "
+        "review it.\n" + _bypass_hint(mode)
+    )
+
+
 def _still_running_reason(st, budget, mode):
     tip = _sanitize(str(st.get("tip") or ""), 40)[:7]
     branch = _sanitize(str(st.get("branch") or "?"), 80)
@@ -7877,8 +7918,9 @@ def _failed_reason(st, mode):
     if attempts >= ATTEMPT_CAP:
         head += (
             f"  This tip failed {attempts} times; it will not be retried automatically for "
-            f"{MARKER_TTL // 60} min. OCR_FORCE_REVIEW=1 (in the environment Claude Code was "
+            f"{MARKER_TTL // 60} min. OCR_FORCE_REVIEW=1 (in the environment Kimchi was "
             "launched from) retries now.\n"
+            "  Run scripts/ocr_doctor.py (review-gate doctor) to diagnose the failure.\n"
         )
     body = "\n".join("  " + line for line in detail.splitlines()[:12]) if detail else ""
     return head + body + ("\n" if body else "") + _bypass_hint(mode)
@@ -8078,15 +8120,20 @@ def _post_context(entry, git_dir, shadow=False):
 
 
 def _gate_data_dir():
-    """Plugin-local scratch beside the gate-dir pointer: the one location that
-    survives plugin upgrades. Holds breadcrumbs and parked reports."""
-    data = os.environ.get("CLAUDE_PLUGIN_DATA", "").strip()
-    if not data:
-        cfg = os.environ.get("CLAUDE_CONFIG_DIR", "").strip() or os.path.join(
-            os.path.expanduser("~"), ".claude"
-        )
-        data = os.path.join(cfg, "plugins", "data", "review-gate-local")
-    return Path(data)
+    """Gate-local scratch: under the external state store (D12), beside the
+    gate-dir pointer. Holds breadcrumbs and parked reports."""
+    try:
+        data = rg_store.store_root() / "data"
+        data.mkdir(parents=True, exist_ok=True)
+        return data
+    except Exception:
+        data = os.environ.get("CLAUDE_PLUGIN_DATA", "").strip()
+        if not data:
+            cfg = os.environ.get("CLAUDE_CONFIG_DIR", "").strip() or os.path.join(
+                os.path.expanduser("~"), ".claude"
+            )
+            data = os.path.join(cfg, "plugins", "data", "review-gate-local")
+        return Path(data)
 
 
 def _unlink(path):
@@ -8486,7 +8533,7 @@ def _mode_post(argv):
         payload = {}
     if isinstance(payload, dict):
         session_id = str(payload.get("session_id") or "")
-        cmd = (payload.get("tool_input") or {}).get("command", "")
+        cmd = _payload_command(payload)
 
     # Same command-position test the PreToolUse adapter applies (0.6.0: a
     # `git -C <dir> push` is a push; a command that mentions one is not).
@@ -8587,8 +8634,8 @@ def _mode_guard(argv):
     except Exception:
         payload = {}
     cmd = ""
-    if isinstance(payload, dict) and (payload.get("tool_name") in (None, "", "Bash")):
-        cmd = (payload.get("tool_input") or {}).get("command", "") or ""
+    if isinstance(payload, dict) and (payload.get("tool_name") in (None, "", "Bash", "bash")):
+        cmd = _payload_command(payload)
     why = _guard_reviewer_command(cmd) if cmd else ""
     if why:
         _emit_hook("deny", why)
@@ -8596,21 +8643,17 @@ def _mode_guard(argv):
 
 
 def _pass_through(message=""):
-    """Take no part in the permission decision: exit 0, no permissionDecision.
+    """Take no part in the permission decision: exit 0, print nothing.
 
-    Every NON-blocking outcome of a PreToolUse hook goes through here. It used
-    to emit a `permissionDecision` of allow, and that is not "no objection": an
-    allow from a hook auto-approves the tool call and skips the user's own
-    permission prompt, so this gate was silently approving every Bash command
-    it was merely asked to look at. Staying silent hands the call back to the
-    normal permission flow (rules, prompts, --allowedTools) untouched. Only a
-    deny (or ask) is ever worth saying out loud.
-
-    `message`, when given, goes in `systemMessage`: a universal hook field that
-    is shown to the user and grants nothing.
+    Kimchi port: the hook protocol is {"decision":"block","reason":...} on
+    stdout; a hook that prints nothing (or fails) is a pass-through. Every
+    NON-blocking outcome goes through here -- a hook may never grant
+    permission, so silence is the only neutral answer. `message` (the note a
+    passing review wants to leave) goes to stderr, where the user still sees
+    it and it grants nothing.
     """
     if message:
-        sys.stdout.write(json.dumps({"systemMessage": message}))
+        _warn(message)
     sys.exit(0)
 
 
@@ -8618,14 +8661,9 @@ def _emit_hook(decision, reason=""):
     if decision == "allow":
         # Defence in depth: nothing in this file may grant permission.
         _pass_through(reason)
-    out = {
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": decision,
-        }
-    }
+    out = {"decision": "block" if decision == "deny" else decision}
     if reason:
-        out["hookSpecificOutput"]["permissionDecisionReason"] = reason
+        out["reason"] = reason
     sys.stdout.write(json.dumps(out))
     sys.exit(0)  # hook itself always exits 0; the decision is in the payload
 
@@ -8770,7 +8808,7 @@ def _main_inner(argv, mode):
     if mode == "hook":
         try:
             payload = json.load(sys.stdin) or {}
-            cmd = (payload.get("tool_input") or {}).get("command", "")
+            cmd = _payload_command(payload)
             # Command-position test, not a substring: `git -C <dir> push` is
             # a push (the adapters route it here since 0.6.0), and a command
             # that merely mentions one is not.
@@ -8789,7 +8827,7 @@ def _main_inner(argv, mode):
     # hook is absent or shadowed by a repo-local core.hooksPath.
     cmd = ""
     if mode == "hook":
-        cmd = (payload.get("tool_input") or {}).get("command", "") if isinstance(payload, dict) else ""
+        cmd = _payload_command(payload) if isinstance(payload, dict) else ""
         if not _looks_like_real_push(cmd):
             _pass_through()  # mentions a push; does not perform one
         _resolved, _ambiguous = _gate_repo(payload)
@@ -8887,6 +8925,7 @@ def _main_inner(argv, mode):
         else:
             tip = _head_sha(repo_root)
         branch = _branch(repo_root)
+        remote_name = _pushed_remote_arg(argv, repo_root)
         # The remote ref this tip is being pushed to; the one ref when only one
         # is in play, "" when it cannot be told apart.
         _hit = [r[2] for r in refs3 if r[0] == tip] or ([refs3[0][2]] if len(refs3) == 1 else [])
@@ -8900,6 +8939,7 @@ def _main_inner(argv, mode):
                 allow()
             _fail_closed(mode, str(info.get("why") or "review-gate: refused."))
         tip, branch = info["tip"], info.get("branch") or ""
+        remote_name = str(info.get("remote") or "")
         push_ref = _norm_push_ref(info.get("dst"))
         base, push_range = info.get("base") or "", info.get("range") or ""
         if not push_range and not _has_unpushed_commits(repo_root, ""):
@@ -8916,11 +8956,25 @@ def _main_inner(argv, mode):
     common_dir = _git_common_dir(repo_root) or git_dir
     marker = _marker_path(git_dir, tip, base)
 
+    # The verdict STORE is the authority (D12). Before trusting any recorded
+    # state -- the marker fast path or a done state -- the external store must
+    # back it for this (remote, tip); a corrupt record DENIES, a missing one
+    # invalidates the unbacked state so the review restarts.
+    force = os.environ.get("OCR_FORCE_REVIEW", "").strip().lower() in ("1", "true", "yes")
+    remote_id = rg_store.remote_url(repo_root, remote_name)
+    backing = _verdict_backing(common_dir, tip, base, remote_id, repo_root, push_range)
+    if backing == "corrupt":
+        if _fail_open_requested():
+            allow()
+        _fail_closed(mode, _unbacked_reason("corrupt", mode))
+    if backing == "uncovered":
+        if _fail_open_requested():
+            allow()
+        _fail_closed(mode, _unbacked_reason("uncovered", mode))
     # The legacy pass marker: the other adapter, or an older gate, already
     # reviewed these exact commits and passed them within the TTL. Replay what
     # it found instead of allowing silently.
-    force = os.environ.get("OCR_FORCE_REVIEW", "").strip().lower() in ("1", "true", "yes")
-    if _marker_fresh(marker) and not force:
+    if _marker_fresh(marker) and not force and backing == "ok":
         note = _prior_findings_note(_read_marker(marker))
         if note:
             _warn(note + _output_hints(git_dir, _findings_log_path(git_dir)))
@@ -8937,7 +8991,8 @@ def _main_inner(argv, mode):
     meta = {
         "tip": tip, "branch": branch, "base": base, "range": push_range,
         "repo_root": repo_root, "git_dir": git_dir, "commit_count": count,
-        "push_ref": push_ref,
+        "push_ref": push_ref, "common_dir": common_dir,
+        "remote": remote_name, "remote_url": rg_store.remote_url(repo_root, remote_name),
     }
     budget = _inline_budget(mode)
     try:
@@ -8976,6 +9031,14 @@ def _main_inner(argv, mode):
         return  # unreachable
 
     # done
+    if backing in ("missing", "corrupt", "uncovered") and st.get("verdict") != "skipped":
+        # The state said done but the store did not back it (a race between
+        # the invalidation above and the supervisor's final write). Deny, never
+        # allow -- re-running the push re-evaluates.
+        if _fail_open_requested():
+            allow()
+        _fail_closed(mode, _unbacked_reason(backing, mode))
+        return  # unreachable
     if st.get("verdict") == "skipped":
         _warn(str(st.get("note") or "review skipped"))
         allow()  # fail-open: only reaches here when claude is not installed
