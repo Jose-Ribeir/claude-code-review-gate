@@ -63,7 +63,8 @@ def _commit(work, files, amend=False):
 
 
 def _env(tmp_path, trace, **kw):
-    env = {k: v for k, v in os.environ.items() if not k.startswith(("OCR_", "STUB_"))}
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("OCR_", "STUB_", "GIT_TRACE"))}
     env.update({"CLAUDE_PLUGIN_DATA": str(tmp_path / "gate-data"),
                 # Kimchi port (plan D12): async run-state and verdicts live in
                 # the EXTERNAL store under OCR_STATE_DIR -- the OCR_* filter

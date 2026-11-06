@@ -70,7 +70,7 @@ def _env(tmp_path, **kw):
     """A hook env with NO reviewer seam: no stub, no KIMCHI_BIN, and a PATH
     where `kimchi` is only what the test put there (or nothing)."""
     env = {k: v for k, v in os.environ.items()
-           if not k.startswith(("OCR_", "STUB_", "KIMCHI_"))}
+           if not k.startswith(("OCR_", "STUB_", "KIMCHI_", "GIT_TRACE"))}
     env["PATH"] = "/usr/bin:/bin"
     # The conftest's private store on BOTH sides: the subprocess writes run
     # state / verdicts there, and the in-process _wait_terminal poll reads it.

@@ -14,6 +14,7 @@ import shutil
 import subprocess
 
 import pytest
+from conftest import scrub_git_trace  # noqa: E402
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _PRE_PUSH = os.path.join(_REPO, "scripts", "pre-push")
@@ -31,7 +32,7 @@ def _stub_plugin(tmp_path, name="plug"):
 
 
 def _run(tmp_path, env_extra, cwd=None):
-    env = dict(os.environ)
+    env = scrub_git_trace(dict(os.environ))
     # Neutralize the developer's real environment: without this the test would
     # silently pass by finding the actual installed plugin.
     env["CLAUDE_CONFIG_DIR"] = str(tmp_path / "empty-config")
@@ -206,7 +207,7 @@ def _extract_snippet(stdout):
 def _run_snippet(tmp_path, stdout, env_extra=None):
     script = tmp_path / "snippet.sh"
     script.write_text(_extract_snippet(stdout) + "\necho REACHED_END\n", encoding="utf-8")
-    env = dict(os.environ)
+    env = scrub_git_trace(dict(os.environ))
     # No gate-dir pointer anywhere, so the reviewer cannot be resolved.
     env["CLAUDE_CONFIG_DIR"] = str(tmp_path / "empty-config")
     env.pop("OCR_FAIL_OPEN", None)

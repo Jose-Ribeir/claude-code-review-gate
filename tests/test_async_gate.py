@@ -30,6 +30,7 @@ _STUB = os.path.join(_HERE, "kimi_stub.py")
 
 sys.path.insert(0, _SCRIPTS)
 from hook_output import parse_pretooluse  # noqa: E402
+from conftest import scrub_git_trace  # noqa: E402
 _spec = importlib.util.spec_from_file_location("review_gate_async", _GATE)
 review_gate = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(review_gate)
@@ -73,7 +74,7 @@ def _commit(work, name="feat", msg="change"):
 def _env(tmp_path, **stub):
     """Environment for a hook run: isolated state store, stub worker, no
     inherited in-review/bypass state, the 3 s hook budget."""
-    env = dict(os.environ)
+    env = scrub_git_trace(dict(os.environ))
     for k in ("OCR_IN_REVIEW", "OCR_FAIL_OPEN", "OCR_ADVISORY", "OCR_FORCE_REVIEW",
               "OCR_LEGACY_RANGE", "OCR_INLINE_BUDGET", "STUB_SLEEP", "STUB_VERDICT", "STUB_TRACE"):
         env.pop(k, None)

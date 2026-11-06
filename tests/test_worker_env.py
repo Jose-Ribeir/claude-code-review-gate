@@ -32,6 +32,16 @@ def _env_with_everything():
     return env
 
 
+def _env_with_git_trace():
+    """What a Kimchi Studio session hands the hook: the git-attribution
+    trace vars, pointing at temp dirs that vanish when the session ends."""
+    env = {"PATH": "/usr/bin:/bin", "HOME": "/tmp"}
+    for name in ("GIT_TRACE", "GIT_TRACE_REFS", "GIT_TRACE2_EVENT",
+                 "GIT_TRACE_PARENT", "GIT_TRACE_FUTURE_FLAG"):
+        env[name] = "/tmp/vanished-kimchi-session/" + name
+    return env
+
+
 def test_the_scrubbed_env_has_none_of_the_deny_listed_keys():
     env = _env_with_everything()
     removed = review_gate._scrub_worker_env(env)
@@ -85,3 +95,45 @@ def test_the_supervisor_env_is_scrubbed_the_same_way():
     finally:
         for k in list(review_gate._SESSION_BRIDGE_ENV) + ["KIMCHI_PERMISSIONS_MODE"]:
             os.environ.pop(k, None)
+
+
+# --- C2-fix: Kimchi's git-attribution GIT_TRACE* vars point at temp dirs
+# that vanish with the session; any git WRITE run inheriting them dies exit
+# 128 (the supervisor's `git clone --no-hardlinks` was proven to fail live).
+
+def test_the_scrubbed_worker_env_has_no_git_trace_vars():
+    env = _env_with_git_trace()
+    removed = review_gate._scrub_worker_env(env)
+    for name in ("GIT_TRACE", "GIT_TRACE_REFS", "GIT_TRACE2_EVENT",
+                 "GIT_TRACE_PARENT", "GIT_TRACE_FUTURE_FLAG"):
+        assert name not in env, name
+        assert name in removed, name
+
+
+def test_the_scrubbed_worker_env_has_no_git_trace_vars_even_with_unset_env_none():
+    # A broken git is broken regardless of the scrub policy knob: the trace
+    # scrub is unconditional.
+    env = _env_with_git_trace()
+    try:
+        os.environ["OCR_UNSET_ENV"] = "none"
+        review_gate._scrub_worker_env(env)
+    finally:
+        del os.environ["OCR_UNSET_ENV"]
+    assert not [k for k in env if k.startswith("GIT_TRACE")]
+
+
+def test_the_supervisor_env_has_no_git_trace_vars():
+    os.environ.update(_env_with_git_trace())
+    try:
+        env = review_gate._supervisor_env()
+        assert not [k for k in env if k.startswith("GIT_TRACE")]
+    finally:
+        for k in list(_env_with_git_trace()):
+            os.environ.pop(k, None)
+
+
+def test_the_test_environment_itself_has_no_git_trace_vars():
+    # The conftest autouse scrub: every test subprocess (and every env helper
+    # that copies os.environ) runs git without the trace vars, even when the
+    # developer's Kimchi session exported them into pytest's own environment.
+    assert not [k for k in os.environ if k.startswith("GIT_TRACE")]

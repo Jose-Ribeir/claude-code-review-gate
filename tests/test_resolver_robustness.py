@@ -25,6 +25,7 @@ _STUB = os.path.join(_HERE, "stub_reviewer.py")
 
 sys.path.insert(0, _SCRIPTS)
 from hook_output import parse_pretooluse  # noqa: E402
+from conftest import scrub_git_trace  # noqa: E402
 _spec = importlib.util.spec_from_file_location("review_gate_rr", _GATE)
 review_gate = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(review_gate)
@@ -64,7 +65,7 @@ def _amend(work, files):
 
 
 def _env(tmp_path, trace="stub.trace", **kw):
-    env = dict(os.environ)
+    env = scrub_git_trace(dict(os.environ))
     for k in list(env):
         if k.startswith(("OCR_", "STUB_")):
             env.pop(k)

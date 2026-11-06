@@ -2942,6 +2942,16 @@ def _new_run_id():
 # re-open the permissions surface in a worker (port spec section 4).
 _KIMCHI_ENV_DENY_PREFIXES = ("KIMCHI_PERMISSIONS",)
 
+# Kimchi Studio's git-attribution feature injects GIT_TRACE* env vars
+# (GIT_TRACE, GIT_TRACE_REFS, GIT_TRACE2_EVENT, GIT_TRACE_PARENT, ...) that
+# point at per-session temp dirs which are deleted when the session ends. Any
+# git WRITE run that inherits them fails with exit 128 as soon as it touches
+# its trace target -- the supervisor's `git clone --no-hardlinks` and every
+# git call the reviewer makes must run without them, or every review dies.
+# Unconditional in BOTH the supervisor and the worker scrub (a broken git is
+# broken regardless of the OCR_UNSET_ENV policy knob).
+_GIT_TRACE_ENV_PREFIXES = ("GIT_TRACE",)
+
 
 def _scrub_worker_env(child_env):
     """Pop the session-bridge vars from the worker env (in place); return the
@@ -2976,6 +2986,9 @@ def _scrub_worker_env(child_env):
         for _key in [k for k in child_env if k.startswith(_prefixes)]:
             child_env.pop(_key, None)
             scrubbed.append(_key)
+    for _key in [k for k in child_env if k.startswith(_GIT_TRACE_ENV_PREFIXES)]:
+        child_env.pop(_key, None)
+        scrubbed.append(_key)
     return scrubbed
 
 
@@ -2988,6 +3001,8 @@ def _supervisor_env():
         key = name.upper() if os.name == "nt" else name
         env.pop(key, None)
     for key in [k for k in env if k.startswith(_KIMCHI_ENV_DENY_PREFIXES)]:
+        env.pop(key, None)
+    for key in [k for k in env if k.startswith(_GIT_TRACE_ENV_PREFIXES)]:
         env.pop(key, None)
     return env
 

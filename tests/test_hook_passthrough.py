@@ -34,7 +34,8 @@ def _payload(cmd, cwd=None):
 
 
 def _env(**extra):
-    env = {k: v for k, v in os.environ.items() if not k.startswith(("OCR_", "STUB_"))}
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("OCR_", "STUB_", "GIT_TRACE"))}
     env.update(extra)
     return env
 
