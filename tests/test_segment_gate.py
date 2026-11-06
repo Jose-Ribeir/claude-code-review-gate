@@ -58,6 +58,13 @@ def run(work, tip, tmp_path, monkeypatch, trace=None):
     name = trace or f"t{_RUN['n']}.trace"
     monkeypatch.setenv("STUB_TRACE", str(tmp_path / name))
     st = ag._supervise_inproc(work, tip, f"run{_RUN['n']}")
+    # Production supervisors are own processes; the .flock _supervise leaks
+    # (held until process exit) would fence the NEXT in-process run on the same
+    # state file (same process, different fd -> flock conflict). Drop the lock
+    # file so the next run opens a fresh inode, exactly as a new supervisor
+    # process would (same medicine as beeb893's _inline_supervisor).
+    state_path = review_gate._state_path(review_gate._git_common_dir(str(work)), tip)
+    review_gate._unlink(str(state_path) + ".flock")
     return st, rr._trace(tmp_path, name)
 
 

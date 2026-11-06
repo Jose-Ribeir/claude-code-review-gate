@@ -444,6 +444,10 @@ def _env(tmp_path, trace, **kw):
         if k.startswith(("OCR_", "STUB_")):
             env.pop(k)
     env["CLAUDE_PLUGIN_DATA"] = str(tmp_path / "gate-data")
+    # The gate's state store lives under OCR_STATE_DIR (D12): the subprocess
+    # must see the same private store the in-process _done polls. Scrubed above
+    # with the rest of OCR_*; put the conftest one back (b600804 medicine).
+    env["OCR_STATE_DIR"] = os.environ["OCR_STATE_DIR"]
     env["OCR_REVIEWER_CMD"] = f'"{sys.executable}" "{_STUB}"'
     env["STUB_TRACE"] = str(tmp_path / trace)
     env["OCR_INLINE_BUDGET"] = "30"

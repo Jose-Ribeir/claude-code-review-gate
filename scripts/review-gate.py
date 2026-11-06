@@ -7855,8 +7855,15 @@ def _make_slot_worktrees(review_root, tip, run_id, n):
     """Up to n more worktrees at `tip` for parallel chunks (Part C), named after the
     run's own with an `-s<i>` suffix. Only beside a gate-made worktree: a review
     reading the live tree runs one chunk at a time, and a slot is never the live
-    tree. A slot that cannot be made just means fewer slots."""
-    base = os.path.realpath(str(_gate_data_dir() / "worktrees"))
+    tree. A slot that cannot be made just means fewer slots.
+
+    Port (D12): the reviewer sandbox is a clone under the store's own clones/
+    dir now, so that is the base a slot must sit beside.
+    """
+    try:
+        base = os.path.realpath(str(rg_store.clones_dir()))
+    except Exception:
+        return []
     if not os.path.realpath(str(review_root)).startswith(base + os.sep):
         return []
     made = []

@@ -15,6 +15,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import test_async_gate as ag  # noqa: E402
+import rg_store  # noqa: E402
 from test_async_gate import review_gate  # noqa: E402
 
 
@@ -44,8 +45,9 @@ def _worktrees(work):
     return [ln.split(" ", 1)[1] for ln in out.splitlines() if ln.startswith("worktree ")]
 
 
-def _gate_worktree_dirs(tmp_path):
-    d = tmp_path / "gate-data" / "worktrees"
+def _gate_worktree_dirs():
+    """Clones left under the store's clones/ dir (the port's sandbox, D12)."""
+    d = rg_store.clones_dir()
     return sorted(p.name for p in d.iterdir()) if d.is_dir() else []
 
 
@@ -86,10 +88,10 @@ def test_two_chunks_run_at_once_each_in_its_own_worktree(tmp_path):
     cwds = {os.path.realpath(c["cwd"]) for c in calls}
     assert len(cwds) == 2, cwds
     for cwd in cwds:
-        assert "worktrees" in cwd and os.path.realpath(str(work)) != cwd
+        assert "clones" in cwd and os.path.realpath(str(work)) != cwd
     assert any(c.endswith("-s1") for c in cwds), cwds
     # All gone afterwards, on disk and in git's bookkeeping.
-    assert _gate_worktree_dirs(tmp_path) == []
+    assert _gate_worktree_dirs() == []
     assert [os.path.realpath(w) for w in _worktrees(work)] == [os.path.realpath(str(work))]
 
 
@@ -147,7 +149,7 @@ def test_a_limit_stops_the_sibling_but_finished_chunks_keep_their_records(tmp_pa
     recorded = _recorded(work)
     assert {"mod0.py", "mod1.py"} <= recorded, recorded
     assert "mod3.py" not in recorded and "mod2.py" not in recorded, recorded
-    assert _gate_worktree_dirs(tmp_path) == []
+    assert _gate_worktree_dirs() == []
 
 
 def test_a_timeout_lets_the_siblings_finish_and_record(tmp_path):
@@ -164,7 +166,7 @@ def test_a_timeout_lets_the_siblings_finish_and_record(tmp_path):
     assert sorted(c["manifest"]["chunk_index"] for c in calls) == [0, 1, 2, 3]
     recorded = _recorded(work)
     assert {"mod1.py", "mod2.py", "mod3.py"} <= recorded and "mod0.py" not in recorded, recorded
-    assert _gate_worktree_dirs(tmp_path) == []
+    assert _gate_worktree_dirs() == []
 
 
 def test_the_budget_is_checked_before_each_dispatch(tmp_path):
@@ -274,12 +276,12 @@ def _alive(pid):
     return True
 
 
-def test_the_reaper_protects_every_slot_of_a_live_run(tmp_path, monkeypatch):
-    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(tmp_path / "data"))
-    common = tmp_path / "common"
-    async_d = common / review_gate.ASYNC_DIR
-    async_d.mkdir(parents=True)
-    wts = tmp_path / "data" / "worktrees"
+def test_the_reaper_protects_every_slot_of_a_live_run(tmp_path):
+    # Port (D12): async run state lives in the external store keyed by the
+    # common dir, and the reaper sweeps the store's clones/ dir.
+    common = str(tmp_path / "common")
+    async_d = rg_store.async_dir(common)
+    wts = rg_store.clones_dir()
     old = time.time() - review_gate.MARKER_TTL - 60
     for name in ("live", "live-s1", "dead-s1"):
         (wts / name).mkdir(parents=True)
@@ -292,20 +294,23 @@ def test_the_reaper_protects_every_slot_of_a_live_run(tmp_path, monkeypatch):
     assert not (wts / "dead-s1").exists()
 
 
-def test_no_slot_worktree_beside_the_live_tree(tmp_path, monkeypatch):
-    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(tmp_path / "data"))
+def test_no_slot_worktree_beside_the_live_tree(tmp_path):
+    # A path outside the store's clones/ dir is never a slot base.
     assert review_gate._make_slot_worktrees(str(tmp_path), "a" * 40, "r", 3) == []
 
 
 
-def test_chunked_review_without_a_worktree_never_wipes_the_live_tree(tmp_path):
-    """No detached worktree can be made (the gate's worktrees/ path is a file), so the
+def test_chunked_review_without_a_worktree_never_wipes_the_live_tree(tmp_path, monkeypatch):
+    """No sandbox clone can be made (the store's clones/ path is a file), so the
     reviewer reads the live tree. The per-chunk reset (git clean -fdxq, git checkout --)
     must not run there: uncommitted edits and untracked or ignored files survive."""
     work = ag._big_repo(tmp_path, n_files=4)
     tip = ag._git(["rev-parse", "HEAD"], cwd=work)
-    (tmp_path / "gate-data").mkdir(exist_ok=True)
-    (tmp_path / "gate-data" / "worktrees").write_text("not a directory")
+    # The gate's sandbox clones live under OCR_STATE_DIR/clones (D12): make that
+    # path a file so no clone can be made and the run reads the live tree.
+    monkeypatch.setenv("OCR_STATE_DIR", str(tmp_path / "blocked-store"))
+    (tmp_path / "blocked-store").mkdir()
+    (tmp_path / "blocked-store" / "clones").write_text("not a directory")
     (work / "base.py").write_text("# base\n# uncommitted edit\n")
     (work / "scratch.txt").write_text("untracked\n")
     (work / "secret.env").write_text("ignored\n")
@@ -325,20 +330,18 @@ def test_chunked_review_without_a_worktree_never_wipes_the_live_tree(tmp_path):
     assert (work / "notes" / "todo.md").read_text() == "untracked dir\n"
 
 
-def test_only_a_gate_made_worktree_is_reset(tmp_path, monkeypatch):
-    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(tmp_path / "data"))
+def test_only_a_gate_made_worktree_is_reset(tmp_path):
+    # Port (D12): the sandbox is a clone under the store's clones/ dir --
+    # that dir is the only thing _is_gate_worktree trusts, and a clone's .git
+    # is a directory, not the linked-worktree file of the old scheme.
     live = tmp_path / "live"
     (live / ".git").mkdir(parents=True)
     assert not review_gate._is_gate_worktree(str(live))
     assert not review_gate._is_gate_worktree(str(tmp_path / "missing"))
-    wts = tmp_path / "data" / "worktrees"
-    fake = wts / "t-r"          # under worktrees/ but a real checkout (.git directory)
-    (fake / ".git").mkdir(parents=True)
-    assert not review_gate._is_gate_worktree(str(fake))
-    linked = wts / "t-r-s1"     # a linked worktree has a .git file
-    linked.mkdir()
-    (linked / ".git").write_text("gitdir: elsewhere\n")
-    assert review_gate._is_gate_worktree(str(linked))
+    wts = rg_store.clones_dir()
+    clone = wts / "t-r"           # under clones/: a clone this gate would have made
+    (clone / ".git").mkdir(parents=True)
+    assert review_gate._is_gate_worktree(str(clone))
     assert not review_gate._is_gate_worktree(str(wts))
 
 
