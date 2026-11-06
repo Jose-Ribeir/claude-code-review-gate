@@ -70,6 +70,13 @@ def _env(tmp_path, trace="stub.trace", **kw):
         if k.startswith(("OCR_", "STUB_")):
             env.pop(k)
     env["CLAUDE_PLUGIN_DATA"] = str(tmp_path / "gate-data")
+    # Kimchi port (plan D12): async run-state and verdicts live in the
+    # EXTERNAL store under OCR_STATE_DIR -- the OCR_* scrub above would strip
+    # it, sending the gate subprocess into the developer's real
+    # ~/.local/state/review-gate while the in-process polls (keyed by the
+    # conftest's private store) never see the state. Keep the private store
+    # on both sides (same fix as test_impact_gate).
+    env["OCR_STATE_DIR"] = os.environ["OCR_STATE_DIR"]
     env["OCR_REVIEWER_CMD"] = f'"{sys.executable}" "{_STUB}"'
     env["STUB_TRACE"] = str(tmp_path / trace)
     env["OCR_INLINE_BUDGET"] = "30"

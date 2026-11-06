@@ -9,14 +9,19 @@ gate into an absent one -- and it would be invisible to every Python test.
 So these drive the real script through bash and assert on exit codes: 0 means
 the push proceeds, 1 means blocked.
 """
+import glob
 import os
 import shutil
 import subprocess
+import sys
 
 import pytest
 from conftest import scrub_git_trace  # noqa: E402
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(_REPO, "scripts"))
+import rg_store  # noqa: E402
+
 _PRE_PUSH = os.path.join(_REPO, "scripts", "pre-push")
 _BASH = shutil.which("bash")
 
@@ -113,12 +118,19 @@ def test_writer_and_reader_agree_on_the_pointer_location(tmp_path):
         else:
             os.environ["CLAUDE_CONFIG_DIR"] = old
 
-    # Exactly the glob scripts/pre-push uses: $cfg/plugins/data/*/gate-dir
-    import glob
-    found = glob.glob(str(cfg / "plugins" / "data" / "*" / "gate-dir"))
-    assert found, "writer put the pointer where pre-push's glob will not find it"
-    assert os.path.isfile(os.path.join(open(found[0], encoding="utf-8").read().strip(),
+    # Kimchi port (D12): the pointer moved out of the CLAUDE_CONFIG_DIR tree
+    # into the EXTERNAL store -- hooks/git/pre-push resolves exactly
+    # ${OCR_STATE_DIR:-$HOME/.local/state/review-gate}/gate-dir, so the
+    # writer and the reader agree there. CLAUDE_CONFIG_DIR is no longer
+    # consulted at all.
+    ptr = os.path.join(rg_store.store_root(), "gate-dir")
+    assert os.path.isfile(ptr), \
+        "writer put the pointer where the installed pre-push will not find it"
+    assert os.path.isfile(os.path.join(open(ptr, encoding="utf-8").read().strip(),
                                        "review-gate.py"))
+    # The old location must NOT have been used (a stale pointer there would
+    # shadow the real one for any reader still globbing it).
+    assert not glob.glob(str(cfg / "plugins" / "data" / "*" / "gate-dir"))
 
 
 # --- install-git-hook.sh --chain-into -----------------------------------------
