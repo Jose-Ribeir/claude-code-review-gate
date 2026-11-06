@@ -1,0 +1,5 @@
+[project]
+name = "py-app"
+version = "0.1.0"
+description = "Seeded-bug Python fixture repo for the C5 acceptance runs."
+requires-python = ">=3.9"

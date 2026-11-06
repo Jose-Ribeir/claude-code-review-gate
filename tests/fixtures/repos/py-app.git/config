@@ -1,0 +1,8 @@
+[core]
+	repositoryformatversion = 0
+	filemode = true
+	bare = true
+	ignorecase = true
+	precomposeunicode = true
+[remote "origin"]
+	url = /var/folders/16/wv5gyzrx0xqdhnstgbngr6_r0000gn/T/tmp.dKbtV49UQS/py-app
