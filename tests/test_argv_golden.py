@@ -7,6 +7,7 @@ add extra arguments in those cases.
 Normalisation (documented):
   - Claude executable path  → '<claude>'
   - Plugin root (_PLUGIN_ROOT) → '<plugin-dir>'
+  - Deny extension path (_DENY_EXT) → '<deny-ext>'
   - Push range in the prompt  → '<RANGE>'
 """
 import importlib.util
@@ -37,14 +38,17 @@ def _build_normalized_argv(push_range=_PLACEHOLDER_RANGE, model=None):
         args = list(review_gate.DEFAULT_CLAUDE_ARGS)
     # The real claude path (non-stub) — normalised to '<claude>'.
     cmd = ["<real-claude>", "-p", prompt] + args
-    # Normalise: plugin root and range in prompt.
+    # Normalise: plugin root, deny extension path, and range in prompt.
     plugin_root = os.path.normcase(os.path.abspath(review_gate._PLUGIN_ROOT))
+    deny_ext = os.path.normcase(os.path.abspath(review_gate._DENY_EXT))
     normalized = []
     for a in cmd:
-        # Only substitute if the token is non-empty AND matches the plugin root.
+        # Only substitute if the token is non-empty AND matches the path.
         if a and (os.path.normcase(a) == plugin_root
                   or os.path.normcase(os.path.abspath(a)) == plugin_root):
             a = "<plugin-dir>"
+        if a and os.path.normcase(os.path.abspath(a)) == deny_ext:
+            a = "<deny-ext>"
         normalized.append(a.replace(push_range, "<RANGE>"))
     normalized[0] = "<claude>"
     return normalized
@@ -77,7 +81,8 @@ def test_golden_has_no_paths_file():
 
 
 def test_golden_has_correct_model():
-    """The golden argv uses the default model (sonnet)."""
+    """The golden argv uses the port's default reviewer pin (kimchi-dev/kimi-k3,
+    port plan D16); OCR_MODEL overrides it."""
     fixture = _load_fixture()
     idx = fixture.index("--model")
-    assert fixture[idx + 1] == "sonnet"
+    assert fixture[idx + 1] == "kimchi-dev/kimi-k3"
