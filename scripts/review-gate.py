@@ -90,6 +90,11 @@ _PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # allowlist, startup canary, inertness test).
 _DENY_EXT = os.path.join(_PLUGIN_ROOT, "extensions", "review-gate-deny.ts")
 
+# C9: the exact, runnable doctor command for every error-state deny message.
+# "run the doctor" is not actionable from a terminal; a full path is.
+_DOCTOR_CMD = "python3 " + os.path.join(
+    _PLUGIN_ROOT, "scripts", "ocr_doctor.py")
+
 # Model for the headless review session. Pinned deliberately: without --model
 # the spawned session inherits whatever model the PARENT Claude Code session is
 # on, so a user on Opus pays Opus cache-read rates ($0.50/M) for every gate run
@@ -160,14 +165,14 @@ def _canary_probe(kimi, args, child_env):
                 "review-gate: the read-only sandbox could not be verified - the "
                 "startup canary run timed out. Blocking this run and burning an "
                 "attempt to preserve gate integrity.\n"
-                "  Run scripts/ocr_doctor.py (review-gate doctor) to diagnose, "
+                f"  Run {_DOCTOR_CMD} (review-gate doctor) to diagnose, "
                 "then push again.")
         except OSError as exc:
             raise ReviewGateError(
                 "review-gate: the read-only sandbox could not be verified - the "
                 f"startup canary run failed to start ({exc}). Blocking this run "
                 "and burning an attempt to preserve gate integrity.\n"
-                "  Run scripts/ocr_doctor.py (review-gate doctor) to diagnose, "
+                f"  Run {_DOCTOR_CMD} (review-gate doctor) to diagnose, "
                 "then push again.")
     finally:
         shutil.rmtree(canary_dir, ignore_errors=True)
@@ -177,7 +182,7 @@ def _canary_probe(kimi, args, child_env):
             "extension (extensions/review-gate-deny.ts) failed to load in the "
             "review worker, so the startup canary write SUCCEEDED. Blocking "
             "this run and burning an attempt to preserve gate integrity.\n"
-            f"  Run scripts/ocr_doctor.py (review-gate doctor), and verify the "
+            f"  Run {_DOCTOR_CMD} (review-gate doctor), and verify the "
             f"extension loads with: kimchi -e {_DENY_EXT} -p 'use your write "
             "tool to create /tmp/rg-canary-check.txt' (the write must be "
             "blocked with a read-only reason).")
@@ -2613,7 +2618,7 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
             "`kimchi` CLI not found on PATH or KIMCHI_BIN - blocking to preserve gate "
             "integrity (a gate without a reviewer must not wave a push through).\n"
             "  Install Kimchi Studio, or point KIMCHI_BIN at the CLI, then push again.\n"
-            "  Run scripts/ocr_doctor.py (review-gate doctor) to diagnose.\n"
+            f"  Run {_DOCTOR_CMD} (review-gate doctor) to diagnose.\n"
             f"{bypass}"
         )
     # OCR_KIMI_ARGS replaces the defaults wholesale (full escape hatch);
@@ -8047,7 +8052,7 @@ def _unbacked_reason(kind, mode):
             "review-gate: the recorded verdict for this push is corrupt or partial, so "
             "it was not trusted. Blocking, because an unreadable verdict must never "
             "allow a push.\n\nFix it:\n  - Re-run this push (the review restarts).\n"
-            "  - Run scripts/ocr_doctor.py (review-gate doctor) to diagnose.\n"
+            f"  - Run {_DOCTOR_CMD} (review-gate doctor) to diagnose.\n"
             + _bypass_hint(mode)
         )
     if kind == "uncovered":
@@ -8134,7 +8139,7 @@ def _failed_reason(st, mode):
             f"  This tip failed {attempts} times; it will not be retried automatically for "
             f"{MARKER_TTL // 60} min. OCR_FORCE_REVIEW=1 (in the environment Kimchi was "
             "launched from) retries now.\n"
-            "  Run scripts/ocr_doctor.py (review-gate doctor) to diagnose the failure.\n"
+            f"  Run {_DOCTOR_CMD} (review-gate doctor) to diagnose the failure.\n"
         )
     body = "\n".join("  " + line for line in detail.splitlines()[:12]) if detail else ""
     return head + body + ("\n" if body else "") + _bypass_hint(mode)
