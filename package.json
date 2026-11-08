@@ -1,0 +1,34 @@
+{
+  "name": "kimchi-review-gate",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Blocking AI code-review gate for Kimchi Studio: a git pre-push primary gate plus a Kimchi UX hook, reviewing unpushed commits with `kimchi -p` worker sessions on your Kimchi Inference subscription.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Jose-Ribeir/kimchi-review-gate.git"
+  },
+  "bin": {
+    "kimchi-review-gate-install": "scripts/install-kimchi-hook.sh",
+    "kimchi-review-gate-uninstall": "scripts/uninstall-kimchi-hook.sh"
+  },
+  "files": [
+    "extensions/",
+    "skills/",
+    "scripts/",
+    "hooks/sh/",
+    "hooks/git/",
+    "schemas/",
+    "LICENSE",
+    "NOTICE",
+    "README.md"
+  ],
+  "pi": {
+    "extensions": [
+      "extensions/review-gate-deny.ts"
+    ],
+    "skills": [
+      "skills/review/**"
+    ]
+  }
+}
