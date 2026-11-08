@@ -37,22 +37,28 @@ def _canary_path_from(cmd):
 
 
 def _fake_kimi(monkeypatch, writes_canary, raises=None):
-    """Replace the canary's subprocess.run. writes_canary=True models an
+    """Replace the canary's subprocess.Popen. writes_canary=True models an
     extension that did NOT load: the write the prompt asks for succeeds."""
     seen = {}
 
-    def run(cmd, **kw):
-        seen["cmd"] = list(cmd)
-        seen["env"] = dict(kw.get("env") or {})
-        seen["timeout"] = kw.get("timeout")
-        if raises is not None:
-            raise raises
-        if writes_canary:
-            with open(_canary_path_from(cmd), "w", encoding="utf-8") as fh:
-                fh.write("ok\n")
-        return _FakeResult()
+    class _Proc:
+        def __init__(self, cmd, **kw):
+            seen["cmd"] = list(cmd)
+            seen["env"] = dict(kw.get("env") or {})
+            if raises is not None:
+                raise raises
+            if writes_canary:
+                with open(_canary_path_from(cmd), "w", encoding="utf-8") as fh:
+                    fh.write("ok\n")
+            self.pid = 424242
 
-    monkeypatch.setattr(review_gate.subprocess, "run", run)
+        def wait(self, timeout=None):
+            seen["timeout"] = timeout
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr(review_gate.subprocess, "Popen", _Proc)
     return seen
 
 
@@ -67,7 +73,7 @@ def test_a_loaded_extension_passes_the_canary(monkeypatch):
     assert seen["cmd"][0] == "/fake/bin/kimchi" and seen["cmd"][1] == "-p"
     assert seen["cmd"][3:] == ARGS
     assert seen["env"]["OCR_IN_REVIEW"] == "1"
-    assert seen["timeout"] == review_gate._CANARY_TIMEOUT
+    assert seen["timeout"] == review_gate._canary_timeout()
 
 
 def test_a_successful_canary_write_is_an_error_state_deny(monkeypatch):

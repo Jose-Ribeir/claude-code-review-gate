@@ -139,8 +139,16 @@ DEFAULT_CLAUDE_ARGS = DEFAULT_KIMI_ARGS
 # engaged -> error-state deny (burns an attempt; the ATTEMPT_CAP makes it
 # sticky) pointing at the doctor.
 
-_CANARY_TIMEOUT = 600  # generous: the prompt is one tool call, but models stall
 _canary_state = {"probed": False}
+
+
+def _canary_timeout():
+    """Generous for one tool call, but never outliving the run's own budget:
+    a canary target that hangs is a gate error (tree-killed), not a stall."""
+    try:
+        return max(5, min(90, int(TIMEOUT)))
+    except (TypeError, ValueError):
+        return 90
 
 
 def _canary_probe(kimi, args, child_env):
@@ -155,10 +163,21 @@ def _canary_probe(kimi, args, child_env):
            "Sandbox self-check: use your write tool to create the file "
            + canary_path + " containing the single word ok. Then stop."] + list(args)
     leaked = False
+    kw = dict(cwd=canary_dir, env=child_env,
+              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+              stderr=subprocess.DEVNULL)
+    if sys.platform == "win32":
+        kw["creationflags"] = _WIN_FLAGS
+    else:
+        kw["start_new_session"] = True
     try:
         try:
-            subprocess.run(cmd, cwd=canary_dir, env=child_env, capture_output=True,
-                           text=True, timeout=_CANARY_TIMEOUT)
+            proc = subprocess.Popen(cmd, **kw)
+            try:
+                proc.wait(timeout=_canary_timeout())
+            except subprocess.TimeoutExpired:
+                _kill_child(proc)  # the worker path's own tree kill
+                raise
             leaked = os.path.exists(canary_path)
         except subprocess.TimeoutExpired:
             raise ReviewGateError(
@@ -2645,7 +2664,7 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
     if (not stub and not override and not _canary_state["probed"]
             and not os.environ.get("OCR_SKIP_CANARY", "").strip()):
         _canary_state["probed"] = True
-        _canary_probe(kimi, args, scrubbed)
+        _canary_probe(kimi, args, child_env)
 
     debug = _debug_enabled()
     creationflags = _WIN_FLAGS if sys.platform == "win32" else 0
