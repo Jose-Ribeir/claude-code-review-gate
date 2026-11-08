@@ -84,6 +84,27 @@ The gate assumes the commits being pushed are **untrusted input**:
   crashed review, a timeout, or unparseable reviewer output blocks the push.
   Three failed attempts put the tip in a sticky error state whose message
   points at the doctor command.
+- **The reviewer worker itself is sandboxed by a deny extension** (D13).
+  Headless `-p` sessions ignore permission flags (verified on this build), so
+  the worker loads `extensions/review-gate-deny.ts` via `-e` and runs with
+  `OCR_IN_REVIEW=1`: `write`/`edit`/`web_fetch`/`web_search`/`mcp__*` are
+  hard-denied, and `bash` is an **allowlist** — git read verbs (`diff`, `log`,
+  `show`, `rev-parse`, `cat-file`, `blame`, `ls-files`, `grep`, `status`,
+  `describe`, `merge-base`) plus `grep`/`rg`/`find`/`ls`/`wc`/`cat`/`head`/
+  `tail`/`sed -n`; everything else is denied with a reason naming what to do
+  instead (network clients, git write/network verbs, git escapes like
+  `-C`/`--git-dir`/`-c`, interpreters and package managers, and the
+  `kimchi`/`claude` binaries themselves). Parsing is quote-tolerant
+  (`git log --grep "git push"` allows; `bash -c "git push"` denies) and
+  ambiguous input denies. Because a `-e` extension that silently fails to
+  load is invisible to permission flags, the supervisor runs a **startup
+  canary**: one cheap headless run with the same argv, prompted to write a
+  canary file. If that write succeeds, the extension never loaded — the run
+  aborts, an attempt burns, and the error-state deny points at the doctor.
+  Not covered: tsserver (LSP) retains a residual surface beyond the scrubbed
+  tsconfig `plugins` key — the reviewer can still ask the language server to
+  read code it should not need. That residual is documented, not fixed (D6
+  kept LSP in v1 deliberately).
 
 **The explicit human escape is `git push --no-verify`** (or `OCR_FAIL_OPEN=1`).
 A gate that cannot be bypassed by its owner is a denial-of-service tool, not a
