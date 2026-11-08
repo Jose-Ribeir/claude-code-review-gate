@@ -50,6 +50,9 @@ def _fake_popen(seen, stdout=_PASS_STDOUT, stderr="", returncode=0):
         def communicate(self, timeout=None):
             return stdout, stderr
 
+        def wait(self, timeout=None):
+            return self.returncode
+
         def kill(self):
             pass
 
