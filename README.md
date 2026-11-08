@@ -51,15 +51,73 @@ takes minutes, so "deny + join on retry" is the only correct mode.
 
 ## Install
 
+There are two install paths. They are **not** equivalent: only the first one
+installs enforcement.
+
+### Primary (recommended): per-repo install — both enforcement layers
+
 ```console
-$ bash scripts/install-kimchi-hook.sh     # from inside the repository to gate
+$ git clone https://github.com/Jose-Ribeir/kimchi-review-gate.git
+$ cd /path/to/the-repo-you-want-gated
+$ bash /path/to/kimchi-review-gate/scripts/install-kimchi-hook.sh
 ```
 
-This installs (a) the repo-level git `pre-push` hook, (b) the Kimchi bash hook at
-`~/.config/kimchi/harness/hooks/bash/review-gate.sh`, and (c) reserves the
-deny-extension slot (`~/.config/kimchi/harness/extensions/review-gate-deny.ts`,
-landed by a later chunk). Uninstall with
-`bash scripts/uninstall-kimchi-hook.sh`, which removes all of them.
+Run once per repository you want gated. It installs three things:
+
+1. **the git `pre-push` hook** (the PRIMARY gate) into that repository's
+   `.git/hooks/pre-push` — this is the layer that sees every push reaching git:
+   your terminal, scripts, heredocs, `python -c`, `gh`, GUIs;
+2. **the Kimchi bash hook** (the UX layer) at
+   `~/.config/kimchi/harness/hooks/bash/review-gate.sh` — installed once, and
+   inert in any repository that did not install the pre-push layer; it surfaces
+   the block reason verbatim to the model when the agent tries to push;
+3. **the deny extension** at
+   `~/.config/kimchi/harness/extensions/review-gate-deny.ts` — inert outside
+   review sessions (it only acts while the supervisor runs the worker with
+   `OCR_IN_REVIEW=1`).
+
+Uninstall with `bash scripts/uninstall-kimchi-hook.sh` from inside the gated
+repository: it removes all three components and restores any pre-existing
+`.git/hooks/pre-push` it displaced. (`scripts/install-git-hook.sh` /
+`uninstall-git-hook.sh` are upstream holdovers that manage only the pre-push
+layer.)
+
+The explicit human escape is `git push --no-verify` (or `OCR_FAIL_OPEN=1`) —
+see the threat model above.
+
+### Experimental: `kimchi install` — skills + extension only
+
+The repository doubles as a Kimchi package (the `pi` manifest in
+`package.json` declares the skill and the extension):
+
+```console
+$ kimchi install /path/to/kimchi-review-gate
+```
+
+This installs the `review` skill and the deny extension under
+`~/.config/kimchi/harness/` for **discovery convenience** — e.g. invoking
+`/skill:review` manually in a session, or browsing the skill via
+`kimchi resources list`.
+
+**A package install does NOT gate anything.** Package-installed components
+carry no git `pre-push` hook, so the primary gate — the layer that covers
+terminal, script, `gh`, and GUI pushes — is absent, and the Kimchi bash hook
+(the UX layer) is not registered either. **You still need
+`scripts/install-kimchi-hook.sh` per repository for enforcement.** The
+package ships the skill and the extension so they are easy to find and invoke
+by hand; it is not a substitute for the installer.
+
+**Why no package hooks (C8 open question, deliberately not shipped):** Kimchi
+packages *may* also ship `hooks/hooks.json` (the full Claude Code hook event
+set, honored by the plugin-package hook adapter), which in principle would
+fire the gate from package-installed components alone. Whether such package
+carried hooks get their own timeout — and whether it is at or above the
+supervisor join budget, rather than the 5 s core bash-hook budget — is
+**unverified**. Since the async "deny + join on retry" design depends on that
+timing, this package deliberately ships **no hooks**: `hooks/hooks.json` is
+excluded from the npm tarball, and the shipped bash hook + repo pre-push
+install (Decision D1 of the port plan) remain the default enforcement
+mechanism. Revisit after the timeout experiment.
 
 ## Threat model (and the human escape hatch)
 
