@@ -53,6 +53,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 from concurrent import futures as _futures
 import shlex
@@ -121,6 +122,65 @@ DEFAULT_KIMI_ARGS = [
 ]
 # Legacy alias (upstream name, kept for diff parity of callers/tests).
 DEFAULT_CLAUDE_ARGS = DEFAULT_KIMI_ARGS
+
+# --- C3: the deny-extension startup canary --------------------------------------
+# `-p` sessions run yolo: permission FLAGS are not enforced (verified), so the
+# only thing making the review worker read-only is the `-e` deny extension. If
+# that extension silently fails to load, the worker can write freely and
+# nothing downstream notices. The canary is the only detector: before the
+# first real worker call in this process, ONE cheap headless run with the same
+# `-e`/OCR_IN_REVIEW wiring is prompted to write a canary file. The write MUST
+# be blocked; a canary file that exists afterwards means the sandbox never
+# engaged -> error-state deny (burns an attempt; the ATTEMPT_CAP makes it
+# sticky) pointing at the doctor.
+
+_CANARY_TIMEOUT = 600  # generous: the prompt is one tool call, but models stall
+_canary_state = {"probed": False}
+
+
+def _canary_probe(kimi, args, child_env):
+    """One headless run whose canary write MUST be blocked by the extension.
+
+    Raises ReviewGateError (the error-state deny path, which burns an attempt)
+    when the canary file appears -- i.e. the deny extension did not load.
+    """
+    canary_dir = tempfile.mkdtemp(prefix="rg-canary-")
+    canary_path = os.path.join(canary_dir, "canary.txt")
+    cmd = [kimi, "-p",
+           "Sandbox self-check: use your write tool to create the file "
+           + canary_path + " containing the single word ok. Then stop."] + list(args)
+    leaked = False
+    try:
+        try:
+            subprocess.run(cmd, cwd=canary_dir, env=child_env, capture_output=True,
+                           text=True, timeout=_CANARY_TIMEOUT)
+            leaked = os.path.exists(canary_path)
+        except subprocess.TimeoutExpired:
+            raise ReviewGateError(
+                "review-gate: the read-only sandbox could not be verified - the "
+                "startup canary run timed out. Blocking this run and burning an "
+                "attempt to preserve gate integrity.\n"
+                "  Run scripts/ocr_doctor.py (review-gate doctor) to diagnose, "
+                "then push again.")
+        except OSError as exc:
+            raise ReviewGateError(
+                "review-gate: the read-only sandbox could not be verified - the "
+                f"startup canary run failed to start ({exc}). Blocking this run "
+                "and burning an attempt to preserve gate integrity.\n"
+                "  Run scripts/ocr_doctor.py (review-gate doctor) to diagnose, "
+                "then push again.")
+    finally:
+        shutil.rmtree(canary_dir, ignore_errors=True)
+    if leaked:
+        raise ReviewGateError(
+            "review-gate: the read-only sandbox did NOT engage - the deny "
+            "extension (extensions/review-gate-deny.ts) failed to load in the "
+            "review worker, so the startup canary write SUCCEEDED. Blocking "
+            "this run and burning an attempt to preserve gate integrity.\n"
+            f"  Run scripts/ocr_doctor.py (review-gate doctor), and verify the "
+            f"extension loads with: kimchi -e {_DENY_EXT} -p 'use your write "
+            "tool to create /tmp/rg-canary-check.txt' (the write must be "
+            "blocked with a read-only reason).")
 
 try:
     TIMEOUT = int(os.environ.get("OCR_TIMEOUT", "1800"))
@@ -2572,6 +2632,15 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
     child_env = dict(os.environ)
     child_env["OCR_IN_REVIEW"] = "1"
     scrubbed = _scrub_worker_env(child_env)
+
+    # C3 canary: prove the deny extension actually loaded before the first real
+    # worker call in this process. Skipped for stub workers (no kimchi involved)
+    # and when OCR_KIMI_ARGS replaced the argv wholesale (the caller owns that
+    # sandbox); OCR_SKIP_CANARY=1 is the emergency escape hatch.
+    if (not stub and not override and not _canary_state["probed"]
+            and not os.environ.get("OCR_SKIP_CANARY", "").strip()):
+        _canary_state["probed"] = True
+        _canary_probe(kimi, args, scrubbed)
 
     debug = _debug_enabled()
     creationflags = _WIN_FLAGS if sys.platform == "win32" else 0

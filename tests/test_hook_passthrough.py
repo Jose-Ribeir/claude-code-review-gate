@@ -36,6 +36,12 @@ def _payload(cmd, cwd=None):
 def _env(**extra):
     env = {k: v for k, v in os.environ.items()
            if not k.startswith(("OCR_", "STUB_", "GIT_TRACE"))}
+    # Kimchi port (plan D12): gate state and parked reports live in the
+    # EXTERNAL store under OCR_STATE_DIR -- the OCR_* filter above would strip
+    # it, sending every gate subprocess this test spawns into the developer's
+    # REAL ~/.local/state/review-gate (refreshing the gate-dir pointer, parking
+    # pending- reports, leaking verdicts). Keep the conftest's private store.
+    env["OCR_STATE_DIR"] = os.environ["OCR_STATE_DIR"]
     env.update(extra)
     return env
 
