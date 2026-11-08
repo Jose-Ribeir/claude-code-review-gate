@@ -1,0 +1,90 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install tooling
+        run: python -m pip install ruff pytest
+
+      # scripts/ + bin/ only: tests/ and fixtures/ are not lint-clean (fixture
+      # repos intentionally contain buggy code, and the ported test files have
+      # not been ruff-normalized). pyproject.toml pins the rule selection.
+      - name: Lint Python (ruff)
+        run: ruff check scripts bin
+
+      - name: Byte-compile Python
+        run: python -m compileall -q scripts bin
+
+      - name: Validate JSON files
+        run: |
+          python - <<'PY'
+          import json, sys
+          files = [
+              "package.json",
+              "schemas/finding.schema.json",
+              "hooks/hooks.json",
+          ]
+          bad = []
+          for f in files:
+              try:
+                  json.load(open(f, encoding="utf-8"))
+              except Exception as e:
+                  bad.append(f"{f}: {e}")
+          if bad:
+              print("\n".join(bad))
+              sys.exit(1)
+          print(f"OK: {len(files)} JSON files valid")
+          PY
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The suite is stub-driven (kimi_stub.py / stub_reviewer.py); no kimchi
+        # binary is needed on PATH -- tests that exercise the real worker are
+        # skipped-if-missing by design. 3.9 is the documented floor (stdlib-only
+        # code, no syntax above it).
+        python-version: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install tooling
+        run: python -m pip install ruff pytest
+
+      - name: Run the test suite
+        run: python -m pytest -q
+
+  node:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # Not `node --test`: the suite is a plain script (process.exit on
+      # failure) with its own check() harness. Node >= 24 is required --
+      # it strips the extension's erasable TypeScript types natively.
+      - name: Deny-extension test suite
+        run: node extensions/review-gate-deny.test.mjs
+
+      - name: Packaging sanity (npm pack dry-run)
+        run: npm pack --dry-run
