@@ -275,7 +275,14 @@ def _load_verdict(mods, url, tip):
 
 
 def _wait_terminal(mods, work, tip, base, deadline):
-    """Poll the async state + verdict store until the supervisor is done."""
+    """Poll the async state + verdict store until the supervisor is done.
+
+    The computed state path is the primary read, but a path-hash mismatch
+    (observed 2026-11-09: some rows' supervisors write under a different
+    async/<hash>/ dir than this side computes) left the poll blind and each
+    such row burned its full deadline. The glob fallback below finds ANY
+    state file for this tip under the store's async tree, whatever dir it
+    landed in."""
     common = mods.review_gate._git_common_dir(str(work))
     state_path = mods.review_gate._state_path(common, tip, base)
     url = mods.rg_store.remote_url(str(work), "origin")
@@ -285,6 +292,17 @@ def _wait_terminal(mods, work, tip, base, deadline):
         if state.get("state") in ("done", "failed"):
             break
         if _load_verdict(mods, url, tip) is not None:
+            break
+        # Blind-poll fallback: any state file for this tip, any async dir.
+        try:
+            import glob as _glob
+            for cand in _glob.glob(str(mods.rg_store.store_root() / "async" / "*" / f"*-{tip}.json")):
+                state = mods.review_gate._read_state(cand) or state
+                if state.get("state") in ("done", "failed"):
+                    break
+        except Exception:
+            pass
+        if state.get("state") in ("done", "failed"):
             break
         time.sleep(2)
     return state
