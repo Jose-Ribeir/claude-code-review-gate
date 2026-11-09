@@ -2667,6 +2667,23 @@ def _note_call_stats(out_text, started_at):
         pass
 
 
+# Set by _run_review_with_retry on a first-attempt parse failure: the retry's
+# prompt carries the verdict-contract reminder (models improvise report
+# schemas when the run is long; the reminder re-anchors the final output).
+_RETRY_CONTRACT_REMINDER = (
+    "\n\nOUTPUT CONTRACT — YOUR PREVIOUS ATTEMPT DID NOT COMPLY. Your FINAL "
+    "message must be EXACTLY one fenced ```json block and NOTHING after it, "
+    "with precisely these keys: {\"status\": \"success|completed_with_warnings"
+    "|skipped\", \"verdict\": \"block|warn|pass\", \"summary\": {\"files_reviewed\": N, "
+    "\"findings\": N, \"high\": N, \"medium\": N, \"low\": N}, \"findings\": [{\"severity\": "
+    "\"low|medium|high\", \"path\": \"<file>\", \"start_line\": \"<n>\", \"end_line\": "
+    "\"<n>\", \"content\": \"<what and why, one paragraph>\", \"confidence\": 0.0-1.0}], "
+    "\"warnings\": []}. No other keys, no prose before or after the block. "
+    "Report schemas with different keys (findings-under-standards, notes, "
+    "aggregates) are NOT acceptable.")
+_RETRY_REMINDER_ACTIVE = False
+
+
 def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
                      paths_file=None, timeout=None, raw_tag="", resolve_file=None):
     """Return (result_dict, True, raw_archive_name) on success.
@@ -2723,12 +2740,17 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
     debug = _debug_enabled()
     creationflags = _WIN_FLAGS if sys.platform == "win32" else 0
     _SUFFIX = " --json"
+    global _RETRY_REMINDER_ACTIVE
+    _reminder = ""
+    if _RETRY_REMINDER_ACTIVE:
+        _reminder = _RETRY_CONTRACT_REMINDER
+        _RETRY_REMINDER_ACTIVE = False  # one-shot: the reminder rides only the retry
     if resolve_file:
         base_prompt = PROMPT_RANGE.format(rng=push_range) if push_range else PROMPT
         if base_prompt.endswith(_SUFFIX):
             base_prompt = base_prompt[: -len(_SUFFIX)]
         rf_fwd = resolve_file.replace("\\", "/")
-        prompt = f'{base_prompt} --resolve "{rf_fwd}" --json'
+        prompt = f'{base_prompt} --resolve "{rf_fwd}" --json{_reminder}'
     elif paths_file:
         base_prompt = PROMPT_RANGE.format(rng=push_range) if push_range else PROMPT
         # Strip exactly the trailing " --json" suffix (both PROMPT constants end
@@ -2738,9 +2760,9 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
         # Forward slashes + double quotes so a path with spaces and backslashes
         # (e.g. C:\Users\John Doe\...) survives the slash-command arg parser.
         pf_fwd = paths_file.replace("\\", "/")
-        prompt = f'{base_prompt} --paths-file "{pf_fwd}" --json'
+        prompt = f'{base_prompt} --paths-file "{pf_fwd}" --json{_reminder}'
     else:
-        prompt = PROMPT_RANGE.format(rng=push_range) if push_range else PROMPT
+        prompt = (PROMPT_RANGE.format(rng=push_range) if push_range else PROMPT) + _reminder
     cmd = [kimi, "-p", prompt] + args
     if stub:
         # Range is always last so stub's sys.argv[-1] still gives the range.
@@ -3376,13 +3398,21 @@ def _write_telemetry(state_path, run_id):
 
 
 def _run_review_with_retry(call):
-    """Run `call()` and retry once on a parse failure (exit 0, unparseable output)."""
+    """Run `call()` and retry once on a parse failure (exit 0, unparseable output).
+
+    The retry's prompt carries the verdict-contract reminder: the observed
+    failure mode (2026-11-09 calibration) is the model improvising its own
+    report schema on long runs — valid JSON, wrong keys — so the reminder
+    re-anchors the exact output shape on the second attempt."""
+    global _RETRY_REMINDER_ACTIVE
     for attempt in range(2):
         try:
             return call()
         except ReviewGateError as exc:
             if attempt == 0 and exc.is_parse_failure and not exc.is_timeout:
-                _warn("[gate] parse failure on first attempt; retrying once.")
+                _warn("[gate] parse failure on first attempt; retrying once "
+                      "with the output-contract reminder.")
+                _RETRY_REMINDER_ACTIVE = True
                 continue
             raise
 
