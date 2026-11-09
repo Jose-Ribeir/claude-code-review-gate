@@ -24,6 +24,22 @@ import sys
 
 _SEVERITY_RANK = {"low": 0, "medium": 1, "high": 2}
 
+# Reviewers sometimes improvise the severity vocabulary (observed on kimi-k3
+# during calibration: critical/major/minor/blocker/nit). The gate's rule
+# engine only ranks low/medium/high, so map the common synonyms.
+_SEVERITY_ALIASES = {
+    "critical": "high", "blocker": "high", "catastrophic": "high",
+    "severe": "high",
+    "major": "medium", "moderate": "medium", "important": "medium",
+    "minor": "low", "nit": "low", "trivial": "low",
+}
+
+
+def norm_severity(s):
+    """Canonical severity for a (possibly improvised) label."""
+    s = str(s or "").strip().lower()
+    return _SEVERITY_ALIASES.get(s, s)
+
 
 def _block_threshold():
     sev = os.environ.get("OCR_BLOCK_SEVERITY", "high").strip().lower()
@@ -82,7 +98,7 @@ def compute_verdict(data):
     for f in findings:
         if not isinstance(f, dict):
             continue
-        rank = _SEVERITY_RANK.get(str(f.get("severity", "")).lower(), -1)
+        rank = _SEVERITY_RANK.get(norm_severity(f.get("severity")), -1)
         try:
             conf = float(f.get("confidence", 0.0))
         except (TypeError, ValueError):

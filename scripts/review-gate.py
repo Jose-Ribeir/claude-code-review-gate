@@ -67,7 +67,7 @@ from pathlib import Path
 # is short-lived, so losing bytecode caching costs nothing measurable.
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from ocr_verdict import compute_verdict  # noqa: E402
+from ocr_verdict import compute_verdict, norm_severity  # noqa: E402
 import ocr_impact  # noqa: E402
 import ocr_segment  # noqa: E402
 import ocr_telemetry  # noqa: E402
@@ -2174,9 +2174,12 @@ def _normalize_verdict(obj):
             g["start_line"] = str(g.pop("line"))
             g.setdefault("end_line", g["start_line"])
         if "content" not in g:
-            parts = [str(g.pop(k)) for k in ("issue", "detail", "message") if k in g]
+            parts = [str(g.pop(k)) for k in ("issue", "detail", "message",
+                                             "description", "title", "problem",
+                                             "reason", "summary", "evidence", "text")
+                     if k in g]
             g["content"] = "\n".join(p for p in parts if p)
-        g.setdefault("severity", "info")
+        g["severity"] = norm_severity(g.get("severity") or "info")
         findings.append(g)
     shaped = dict(obj)
     shaped["findings"] = findings
