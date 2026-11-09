@@ -53,6 +53,8 @@ REMOTES = {
     "electron-ts": FIXTURES / "electron-ts.git",
     "clean-ts": FIXTURES / "clean-ts.git",
     "upstream": UPSTREAM,
+    # Dogfooding: the gate's own repo as a review source.
+    "port": REPO_ROOT,
 }
 
 # One row per seeded bug (short shas; resolved to full at run time). The
