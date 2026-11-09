@@ -97,13 +97,14 @@ _DOCTOR_CMD = "python3 " + os.path.join(
 
 # Model for the headless review session. Pinned deliberately: without --model
 # the spawned session inherits whatever model the PARENT Claude Code session is
-# on, so a user on Opus pays Opus cache-read rates ($0.50/M) for every gate run
-# -- ~5x Haiku and ~1.7x Sonnet, on a workload that re-reads its whole context
-# on every tool call. Sonnet is the default because review quality matters (a
-# gate that emits false positives gets bypassed, and a bypassed gate has zero
-# recall); set OCR_MODEL=haiku to trade some precision for cost, or =opus if you
-# want maximum depth and accept the bill.
-_MODEL = os.environ.get("OCR_MODEL", "kimchi-dev/kimi-k3").strip() or "kimchi-dev/kimi-k3"
+# Model tiers (latency analysis, docs/review-latency-analysis.md): the SESSION --
+# the /skill:review orchestration, manifest reads, section-2b greps -- runs on
+# a fast flash tier, because that work is mechanical and 99% of review wall
+# time is the model. The REVIEWER PERSONA keeps its own pin
+# (kimchi-dev/kimi-k3 @ max thinking, D16 in skills/review/SKILL.md) via the
+# Agent spawn's explicit model+thinking, independent of this session model.
+# OCR_MODEL overrides this orchestration tier only.
+_MODEL = os.environ.get("OCR_MODEL", "kimchi-dev/glm-5.3-flash").strip() or "kimchi-dev/glm-5.3-flash"
 
 DEFAULT_KIMI_ARGS = [
     # Kimchi headless worker argv (port spec section 4). The read-only sandbox

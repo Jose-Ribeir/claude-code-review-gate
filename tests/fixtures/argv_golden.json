@@ -9,7 +9,7 @@
     "--no-session",
     "--approve",
     "--model",
-    "kimchi-dev/kimi-k3",
+    "kimchi-dev/glm-5.3-flash",
     "-e",
     "<deny-ext>",
     "--mcp-config",
