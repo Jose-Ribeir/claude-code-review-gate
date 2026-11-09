@@ -68,7 +68,14 @@ def _is_actionable(f):
 
 
 def compute_verdict(data):
-    """Return 'block' | 'warn' | 'pass' for a parsed review result."""
+    """Return 'block' | 'warn' | 'pass' for a parsed review result.
+
+    D15 (port plan, user decision): ANY single high-severity finding blocks
+    regardless of confidence; a medium-severity finding blocks at high
+    confidence (OCR_BLOCK_CONFIDENCE, default 0.7). Lowering
+    OCR_BLOCK_SEVERITY below 'high' extends the UNCONDITIONAL bar
+    (e.g. 'medium' makes medium findings block at any confidence).
+    """
     min_rank, min_conf = _block_threshold()
     findings = _findings(data)
     has_warn = False
@@ -80,7 +87,9 @@ def compute_verdict(data):
             conf = float(f.get("confidence", 0.0))
         except (TypeError, ValueError):
             conf = 0.0
-        if rank >= min_rank and conf >= min_conf and _is_actionable(f):
+        if _is_actionable(f) and (rank >= min_rank
+                                 or (rank >= _SEVERITY_RANK["medium"]
+                                     and conf >= min_conf)):
             return "block"
         if rank >= _SEVERITY_RANK["medium"]:
             has_warn = True

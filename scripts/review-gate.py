@@ -2153,6 +2153,45 @@ def _extract_from_stream_json(text):
     return match
 
 
+def _normalize_verdict(obj):
+    """Best-effort rescue of a NEAR-MISS verdict: the reviewer ran a correct
+    review but spelled the contract keys its own way (kimi models improvise
+    `file`/`line`/`issue` instead of `path`/`start_line`/`content`). The
+    gate recomputes the real verdict from the findings (compute_verdict), so
+    the model's own `verdict` key is advisory anyway; what must be rescued
+    is the findings list. Returns a contract-shaped dict, or None when obj
+    does not look like a verdict at all."""
+    if not isinstance(obj, dict) or not isinstance(obj.get("findings"), list):
+        return None
+    findings = []
+    for f in obj.get("findings") or []:
+        if not isinstance(f, dict):
+            continue
+        g = dict(f)
+        if "path" not in g and "file" in g:
+            g["path"] = str(g.pop("file"))
+        if "start_line" not in g and "line" in g:
+            g["start_line"] = str(g.pop("line"))
+            g.setdefault("end_line", g["start_line"])
+        if "content" not in g:
+            parts = [str(g.pop(k)) for k in ("issue", "detail", "message") if k in g]
+            g["content"] = "\n".join(p for p in parts if p)
+        g.setdefault("severity", "info")
+        findings.append(g)
+    shaped = dict(obj)
+    shaped["findings"] = findings
+    shaped.setdefault("status", "success")
+    shaped.setdefault("verdict", compute_verdict(shaped))
+    shaped.setdefault("summary", {
+        "files_reviewed": len({f.get("path") for f in findings if f.get("path")}),
+        "findings": len(findings),
+        "high": sum(1 for f in findings if str(f.get("severity")).lower() == "high"),
+        "medium": sum(1 for f in findings if str(f.get("severity")).lower() == "medium"),
+        "low": sum(1 for f in findings if str(f.get("severity")).lower() == "low"),
+    })
+    return shaped
+
+
 def _extract_json(text):
     """Pull the review JSON object out of claude's stdout. Returns dict or None."""
     if not text:
@@ -2162,6 +2201,9 @@ def _extract_json(text):
     try:
         obj = json.loads(text)
         if _is_valid_verdict(obj):
+            return obj
+        obj = _normalize_verdict(obj)
+        if obj is not None:
             return obj
     except Exception:
         pass
@@ -2173,6 +2215,9 @@ def _extract_json(text):
         try:
             obj = json.loads(b)
             if _is_valid_verdict(obj):
+                return obj
+            obj = _normalize_verdict(obj)
+            if obj is not None:
                 return obj
         except Exception:
             continue
@@ -2196,6 +2241,10 @@ def _extract_json(text):
             obj, end = decoder.raw_decode(text, idx)
             if _is_valid_verdict(obj):
                 match = obj
+            else:
+                norm = _normalize_verdict(obj)
+                if norm is not None:
+                    match = norm
             idx = text.find("{", end)
         except json.JSONDecodeError:
             idx = text.find("{", idx + 1)

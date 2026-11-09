@@ -136,10 +136,31 @@ def test_is_valid_verdict_rejects_missing_keys():
 # --- _extract_json updated behavior ---
 
 def test_extract_json_now_rejects_dict_without_status_and_verdict():
-    # A JSON object with "findings" but no "status"/"verdict" was previously returned;
-    # now _is_valid_verdict gates it.
-    result = _extract_json('{"findings": []}')
+    # A JSON object with "findings" but no "status"/"verdict" is no longer a
+    # hard reject: the port's normalizer rescues near-miss verdict shapes
+    # (kimi models improvise file/line/issue keys). What stays rejected:
+    # "findings" that is not a list (the quoted-config-fixture case the
+    # _is_valid_verdict gate exists for).
+    result = _extract_json('{"findings": "not-a-list"}')
     assert result is None
+
+
+def test_extract_json_normalizes_a_near_miss_verdict():
+    # Real shape captured from a kimi-k3 review run (calibration, 2026-11-08):
+    # correct review, improvised keys. The normalizer must rescue it.
+    text = ("Confirmed — the review found one issue.\n```json\n"
+            '{"range": "A..B", "paths": ["app/main.py"], "findings": '
+            '[{"severity": "high", "file": "app/main.py", "line": 29, '
+            '"issue": "NameError", "detail": "on_command not imported", '
+            '"suggestion": "from app.handlers import on_command"}], '
+            '"notes": ["self-contained module"]}\n```')
+    result = _extract_json(text)
+    assert result is not None and _is_valid_verdict(result)
+    f = result["findings"][0]
+    assert f["path"] == "app/main.py" and f["start_line"] == "29"
+    assert "NameError" in f["content"]
+    # D15: a high finding blocks regardless of the missing confidence field.
+    assert compute_verdict(result) == "block"
 
 
 def test_extract_json_accepts_resolutions_in_method3():
