@@ -287,7 +287,11 @@ def _wait_terminal(mods, work, tip, base, deadline):
     state_path = mods.review_gate._state_path(common, tip, base)
     url = mods.rg_store.remote_url(str(work), "origin")
     state = {}
+    _hb = time.monotonic() + 60
     while time.monotonic() < deadline:
+        if time.monotonic() > _hb:
+            _hb = time.monotonic() + 60
+            _log(f"wait: still polling {tip[:7]} state={state.get('state')!r}")
         state = mods.review_gate._read_state(state_path) or {}
         if state.get("state") in ("done", "failed"):
             break
@@ -377,22 +381,32 @@ def _append_row(md_path, row, result):
         fh.write(line)
 
 
+def _log(msg):
+    """Stage logging: the harness's story, flushable, for wedge diagnosis."""
+    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
 def run_row(row, opts, mods, state_dir, stub=False):
     """Push one range through the real gate and record the matrix row."""
     # rg_store resolves its root from the env at CALL time, so pointing the
     # env here retargets every poll below (and the stub run gets a store no
     # real-model row can ever be satisfied from).
     os.environ["OCR_STATE_DIR"] = str(state_dir)
+    _log(f"row {row.rid}: scratch...")
     work = _scratch(row.source, opts)
     _point_refs(work, row.base, row.tip)
     url = mods.rg_store.remote_url(str(work), "origin")
     pre = _load_verdict(mods, url, row.tip)
+    _log(f"row {row.rid}: pre-verdict={'hit' if pre else 'miss'} url={url}")
     env = _hook_env(opts, state_dir, stub=stub)
     t0 = time.monotonic()
-    _push_hook(work, env)  # pushes the review; a real review answers async
+    d0, r0 = _push_hook(work, env)  # pushes the review; a real review answers async
+    _log(f"row {row.rid}: push#1 decision={d0} reason={r0[:100]!r}")
     state = _wait_terminal(mods, work, row.tip, row.base,
                            time.monotonic() + opts.timeout + 240)
+    _log(f"row {row.rid}: wait done state={state.get('state')} attempts={state.get('attempts')}")
     decision, reason = _push_hook(work, env)  # the verdict-backed decision
+    _log(f"row {row.rid}: push#2 decision={decision} reason={reason[:100]!r}")
     wall = time.monotonic() - t0
     record = _load_verdict(mods, url, row.tip)
     findings = _findings_for(work, row.tip)
