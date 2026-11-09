@@ -24,3 +24,14 @@ positive; its findings are recorded verbatim.
 | upstream-4a40fa1-41dad24 | upstream | 4a40fa1..41dad24 | pass | pass | no | pass | (none) | 1144.8 | upstream: chore(release): 0.13.0 [verdict landed in the store after the harness's 19-min patience; corrected from the store] |
 | upstream-e2bb9e6-4a40fa1 | upstream | e2bb9e6..4a40fa1 | pass | pass | no | pass | (none) | 1144.6 | upstream: [W5] ledger: scope delta priors by tip ancestry across refs [verdict landed in the store after the harness's 19-min patience; corrected from the store] |
 | upstream-fbc880c-e2bb9e6 | upstream | fbc880c..e2bb9e6 | pass | warn | no | pass | (none) | 2340.9 | upstream: [W6] docs: stacked-branch review base and findings persistence [timed out waiting for the supervisor] |
+
+## Experiment log: flash orchestration tier (2026-11-09, reverted)
+
+Re-running the 6 FN reviews with the worker session on `kimchi-dev/glm-5.3-flash`
+(latency-report rec #1) broke the pipeline: every review ran 9-12 turns, surfaced
+the findings, then died unparseable (`could not parse review output`, verdict None
+on all 6 rows; wall 191-279 s vs the 30-41 s baseline, from error+retry churn).
+Pushes still denied (fail-closed held), but no verdicts were produced. The
+session model default was reverted to `kimchi-dev/kimi-k3`; `OCR_MODEL` remains
+the escape hatch. Rec #1 is invalidated by measurement — see
+docs/review-latency-analysis.md.

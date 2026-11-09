@@ -97,14 +97,15 @@ _DOCTOR_CMD = "python3 " + os.path.join(
 
 # Model for the headless review session. Pinned deliberately: without --model
 # the spawned session inherits whatever model the PARENT Claude Code session is
-# Model tiers (latency analysis, docs/review-latency-analysis.md): the SESSION --
-# the /skill:review orchestration, manifest reads, section-2b greps -- runs on
-# a fast flash tier, because that work is mechanical and 99% of review wall
-# time is the model. The REVIEWER PERSONA keeps its own pin
-# (kimchi-dev/kimi-k3 @ max thinking, D16 in skills/review/SKILL.md) via the
-# Agent spawn's explicit model+thinking, independent of this session model.
-# OCR_MODEL overrides this orchestration tier only.
-_MODEL = os.environ.get("OCR_MODEL", "kimchi-dev/glm-5.3-flash").strip() or "kimchi-dev/glm-5.3-flash"
+# Model tiers (latency analysis, docs/review-latency-analysis.md): the session
+# model must be a capable orchestration tier. MEASURED 2026-11-09: a flash
+# session (glm-5.3-flash) broke the skill flow — every FN review ran 9-12
+# turns, surfaced findings, then died unparseable ("could not parse review
+# output"), with 3-6x wall time from error+retry churn. The default stays
+# the reviewer pin; the REVIEWER PERSONA carries kimi-k3 @ max thinking (D16
+# in skills/review/SKILL.md) via its Agent spawn regardless. OCR_MODEL
+# overrides this session pin for experimentation.
+_MODEL = os.environ.get("OCR_MODEL", "kimchi-dev/kimi-k3").strip() or "kimchi-dev/kimi-k3"
 
 DEFAULT_KIMI_ARGS = [
     # Kimchi headless worker argv (port spec section 4). The read-only sandbox

@@ -81,13 +81,13 @@ def test_golden_has_no_paths_file():
 
 
 def test_golden_has_correct_model():
-    """The golden argv uses the port's default orchestration tier
-    (kimchi-dev/glm-5.3-flash — fast mechanical session work per the latency
-    analysis; the reviewer persona pins kimi-k3 @ max thinking itself, D16);
-    OCR_MODEL overrides it."""
+    """The golden argv uses the reviewer pin (kimchi-dev/kimi-k3, D16). A flash
+    orchestration default was tried and reverted (2026-11-09): it broke the
+    skill flow (verdict extraction failed on every review) and tripled wall
+    time — see docs/review-latency-analysis.md."""
     fixture = _load_fixture()
     idx = fixture.index("--model")
-    assert fixture[idx + 1] == "kimchi-dev/glm-5.3-flash"
+    assert fixture[idx + 1] == "kimchi-dev/kimi-k3"
 
 
 def test_golden_approves_project_local_files():

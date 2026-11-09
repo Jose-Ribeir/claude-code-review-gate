@@ -100,3 +100,16 @@ grep -E "event=(call|run)" /tmp/ocr-calib/state/data/review-gate-debug.log | tai
 The `call` rows (turns, api_s, first_event_s) are the model-cost ground truth; `run` rows
 are the supervisor totals; the delta between `run` and row `wall_s` exposes
 harness/fence/orphan overhead, which is measurement, not review latency.
+
+## Postscript (2026-11-09): recommendation #1 tested and invalidated
+
+Rec #1 (fast orchestration tier) was implemented and measured: with the worker
+session on `kimchi-dev/glm-5.3-flash`, every FN fixture review ran 9–12 turns,
+surfaced its findings, and then **died unparseable** ("could not parse review
+output", verdict None on 6/6 rows) — with wall time tripled to 191–279 s by
+error+retry churn. The skill's orchestration is not mechanical enough for a
+flash tier: it drives the persona spawns and the verdict emission, and a weak
+session model breaks both. **Default reverted to `kimchi-dev/kimi-k3`**;
+`OCR_MODEL` remains the experiment hatch. The remaining valid levers are
+#2 (reviewer thinking tier, quality-gated), #3 (retry waste — the normalizer
+already removed the known class), #4 (context caps) and #7 (amortization).
