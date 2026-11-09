@@ -791,20 +791,52 @@ files were reviewable.
 - `cross_file_context.symbols_dropped > 0`:
   `{file: null, message: "symbol extraction capped; <N> changed symbols were not searched for external references"}`
 
-**If `--json`:** print ONLY this object (no other text):
-```json
-{
-  "status": "...",
-  "verdict": "block | warn | pass",
-  "summary": {"files_reviewed": 0, "findings": 0, "high": 0, "medium": 0, "low": 0},
-  "findings": [ /* Finding objects, schema in schemas/finding.schema.json */ ],
-  "project_summary": "optional markdown (scan/summary only)",
-  "warnings": [ {"file": "...", "message": "..."} ],
-  "cross_file_context_summary": {"symbols": [{"name": "...", "defined_in": "...", "change": "...", "external_refs": [{"path": "...", "line": 0}]}]},
-  "impact_verdicts": {"<site id>": "ok | broken | unsure"},
-  "dep_verdicts": {"<task id>": "ok | broken | unsure"}
-}
+**If `--json`:** DO NOT compose the object in this session — your context is
+long by now and long sessions drift off the output contract (measured
+2026-11-09: 6 of 15 upstream reviews improvised their own schema; the
+retrieval-augmented retry fixed only some). Instead **spawn the formatter
+subagent** — it has a SMALL context and exactly one job — and relay its output
+verbatim as your final message:
+
+- `subagent_type`: `"General-Purpose"`
+- `model`: `"kimchi-dev/deepseek-v4.1-flash-1017"`, `thinking`: `"high"`
+- `prompt` (fill the bracketed inputs from YOUR state; emit the findings
+  array exactly as §3a/§3b/§4 left it):
+
 ```
+You are a verdict formatter. Your ENTIRE output is one fenced ```json
+block — no prose before, during, or after it. You receive the review's
+results; you emit the verdict object. Nothing else.
+
+Inputs (verbatim):
+[FINDINGS]: <the final findings array as JSON>
+[WARNINGS]: <the unified truncation warnings as JSON, or []>
+[CROSS_FILE_CONTEXT_SUMMARY]: <the §2b symbol summary, or {"symbols":[]}>
+[IMPACT_VERDICTS]: <the reviewer's merged map, or omit>
+[DEP_VERDICTS]: <the per-task map, or omit>
+[STATUS_INPUTS]: <subagent errored: yes|no; warning count: N; files reviewable: K>
+
+The object — EXACTLY these keys, no others:
+{"status": "success|completed_with_warnings|completed_with_errors|skipped",
+ "verdict": "block|warn|pass",
+ "summary": {"files_reviewed": K, "findings": N, "high": H, "medium": M, "low": L},
+ "findings": [...the input findings verbatim...],
+ "warnings": [...the input warnings verbatim...]}
+
+Rules:
+- verdict: "block" if any finding has severity "high" (regardless of
+  confidence), or any "medium" finding with confidence >= 0.7; else "warn"
+  if any "medium" remains; else "pass".
+- status: "skipped" when K == 0; "completed_with_errors" when any subagent
+  errored; "completed_with_warnings" when warnings exist; else "success".
+- Copy findings/warnings inputs VERBATIM — do not rewrite, summarize, or
+  re-rank them. Keep each finding's impact_site / sibling_of fields.
+- Append "cross_file_context_summary", "impact_verdicts", "dep_verdicts"
+  keys when those inputs were given.
+```
+
+Your final message = the formatter's output, relayed verbatim (print it;
+add nothing).
 
 `cross_file_context_summary` is what §2b found **by itself** (not the manifest's
 `impact`); emit it whenever §2b ran, with `"symbols": []` if it found nothing.
