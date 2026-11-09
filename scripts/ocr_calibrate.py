@@ -164,6 +164,7 @@ def upstream_rows(count):
     out = []
     for line in _git(["log", "--oneline", f"-{count + 10}"], UPSTREAM).splitlines():
         sha, subject = line.split(" ", 1)
+        sha = _git(["rev-parse", sha], UPSTREAM).strip()  # --oneline abbreviates; the store keys FULL tips
         parents = _git(["rev-list", "--parents", "-n", "1", sha], UPSTREAM).split()
         if len(parents) > 2:  # a merge: its range is not one clean step
             continue
