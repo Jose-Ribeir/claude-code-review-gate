@@ -35,3 +35,19 @@ Pushes still denied (fail-closed held), but no verdicts were produced. The
 session model default was reverted to `kimchi-dev/kimi-k3`; `OCR_MODEL` remains
 the escape hatch. Rec #1 is invalidated by measurement — see
 docs/review-latency-analysis.md.
+| upstream-0356c55-fbc880c | upstream | 0356c55..fbc880c | pass | pass | no | pass | (none) | 0 | upstream: [W4] orphans to their own record, siblings after the resolver, dedup fixes [recorded from store after harness wedge] |
+| upstream-ab54c53-0356c55 | upstream | ab54c53..0356c55 | pass | pass | no | pass | (none) | 0 | upstream: [W3] resolutions: quote-presence validity, read-time suppression [recorded from store after harness wedge] |
+
+## Known issue: calibration harness wedge (2026-11-09)
+
+Two consecutive `--fp-upstream` runs wedged mid-corpus: the harness process
+blocks in `select()` with NO live child (sampled stack: `_PyEval_EvalFrameDefault
+→ __select`), always AFTER a row's review completed (state done + verdict in the
+store) but BEFORE the row is appended. Stranded verdicts are recoverable from
+the store (this note documents the two manual reconciliations). The wedge is
+in the harness's row-recording path, not in the gate — all reviews completed
+and their verdicts landed. Fix candidates: the `_push_hook` join call's pipe
+handling (a detached supervisor or killed run holding the hook's stdout pipe
+would block `communicate()` despite the child having exited) — needs a bounded
+read or `Popen`+explicit kill. Until fixed, run `--fp-upstream` in ~1-hour
+slices and reconcile any stranded rows from the store.
