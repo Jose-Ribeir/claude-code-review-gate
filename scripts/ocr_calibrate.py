@@ -232,15 +232,32 @@ def _hook_env(opts, state_dir, stub=False):
 
 def _push_hook(work, env, timeout=180):
     """One synthetic push: the PreToolUse payload the Kimchi bash hook feeds
-    review-gate.py. Returns (decision, reason) -- "pass" is hook silence."""
+    review-gate.py. Returns (decision, reason) -- "pass" is hook silence.
+
+    PIPE-FREE by design (wedge fix, 2026-11-09): two --fp-upstream runs
+    blocked forever in select() inside subprocess.communicate() after a
+    row's review completed -- the hook spawns detached trees, and any
+    survivor holding an inherited stdout pipe keeps communicate() waiting
+    for an EOF that never comes, even past the timeout kill. Temp files
+    cannot be held open that way: no pipes, no wedge."""
     payload = json.dumps({"session_id": "calibrate", "tool_name": "bash",
                           "cwd": str(work), "input": {"command": "git push origin main"}})
-    proc = subprocess.run([sys.executable, str(GATE), "--mode", "hook"],
-                          input=payload, capture_output=True, text=True,
-                          cwd=str(work), env=env, timeout=timeout)
-    if proc.returncode != 0:
-        raise RuntimeError(f"hook exited {proc.returncode}: {proc.stderr[-2000:]}")
-    text = (proc.stdout or "").strip()
+    import tempfile
+    with tempfile.TemporaryFile("w+") as out, tempfile.TemporaryFile("w+") as err:
+        proc = subprocess.Popen([sys.executable, str(GATE), "--mode", "hook"],
+                                stdin=subprocess.PIPE, stdout=out, stderr=err,
+                                text=True, cwd=str(work), env=env)
+        try:
+            proc.communicate(payload, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=30)
+            raise
+        if proc.returncode != 0:
+            err.seek(0)
+            raise RuntimeError(f"hook exited {proc.returncode}: {err.read()[-2000:]}")
+        out.seek(0)
+        text = (out.read() or "").strip()
     if not text:
         return "pass", ""
     obj = json.loads(text)
