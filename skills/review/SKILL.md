@@ -269,6 +269,11 @@ Skip the "Determine the revision range" block and the file enumeration commands
 below — proceed directly to diff collection using the manifest's paths and
 the `--range` argument.
 
+The §6 verdict contract applies to this chunk session unchanged: with
+`--json`, spawn the formatter subagent (§6, same exact-keys prompt) and relay
+its output verbatim as your final message — never compose the chunk's verdict
+object yourself.
+
 **Determine the revision range** for `--unpushed`:
 0. If `--range <A>..<B>` was given, use it verbatim as `<range>` and skip the
    rest — the caller knows what is being pushed and this does not.
@@ -791,7 +796,8 @@ files were reviewable.
 - `cross_file_context.symbols_dropped > 0`:
   `{file: null, message: "symbol extraction capped; <N> changed symbols were not searched for external references"}`
 
-**If `--json`:** DO NOT compose the object in this session — your context is
+**If `--json` — in any session, a full run or a chunk session started with
+`--paths-file`:** DO NOT compose the object in this session — your context is
 long by now and long sessions drift off the output contract (measured
 2026-11-09: 6 of 15 upstream reviews improvised their own schema; the
 retrieval-augmented retry fixed only some). Instead **spawn the formatter
@@ -836,7 +842,9 @@ Rules:
 ```
 
 Your final message = the formatter's output, relayed verbatim (print it;
-add nothing).
+add nothing). A chunk session follows this identically: the chunk's verdict
+object comes from the formatter subagent, relayed verbatim — never composed
+in the reviewing session itself.
 
 `cross_file_context_summary` is what §2b found **by itself** (not the manifest's
 `impact`); emit it whenever §2b ran, with `"symbols": []` if it found nothing.
