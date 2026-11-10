@@ -32,6 +32,101 @@ TELEMETRY_DIR = "review-gate-telemetry"
 _ROTATE_BYTES = 50 * 1024 * 1024
 _SCHEMA = 1
 
+# --- per-tier cost records (review-gate v2) ----------------------------------
+
+# The four v2 tiers measured separately (spec: "Cost is measured, not
+# capped"; user story 25): the context spotter, the tier-1 review, the
+# tier-2 deep pass, and the deterministic collectors. Bucket names are a
+# code-level contract; reporting groups on them.
+TIER_SPOTTER = "spotter"
+TIER_REVIEW = "tier1"
+TIER_DEEP = "tier2"
+TIER_COLLECTORS = "collectors"
+TIER_NAMES = (TIER_SPOTTER, TIER_REVIEW, TIER_DEEP, TIER_COLLECTORS)
+
+# Records on the jsonl run log sharing `append` with run records are
+# discriminated by this kind, so report() can keep them out of run/verdict
+# counters.
+TIER_RECORD_KIND = "tier_call"
+
+
+def estimate_tokens(chars_or_text):
+    """Token estimate when exact counts are unavailable: chars // 4.
+
+    ``None`` in -> ``None`` out (no estimate is not zero). Accepts a char
+    count or the text itself. Deterministic code (the collectors) uses this
+    to cost evidence bytes it gathered; model tiers use it when the CLI
+    reported no usage numbers.
+    """
+    if chars_or_text is None:
+        return None
+    n = len(chars_or_text) if isinstance(chars_or_text, str) else int(chars_or_text)
+    return max(0, n // 4)
+
+
+def _num(value, digits=None):
+    """A real number (or None), rounded to ``digits`` when given."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return int(value) if digits is None else round(float(value), digits)
+    if isinstance(value, float):
+        return round(value, digits) if digits is not None else value
+    return None
+
+
+def _count(value):
+    """A token count: numerics coerced to int, anything else None."""
+    n = _num(value)
+    return None if n is None else int(n)
+
+
+def tier_record(tier, *, model="", tokens_in=None, tokens_out=None,
+                token_estimate=None, cost_usd=None, seconds=None):
+    """One per-tier cost record (review-gate v2). Raises no I/O errors but
+    refuses an unknown tier -- a typo'd bucket would silently split the
+    operator's report.
+
+    Fields: tier (spotter / tier1 / tier2 / collectors), model (configurable
+    per tier; "" for tiers with no model), tokens_in/tokens_out (exact usage
+    when the CLI reports it, else None), token_estimate (estimate_tokens
+    fallback when it does not), cost_usd, seconds (duration). Exactness rule:
+    a record carries exact counts OR an estimate, never both implied -- the
+    caller decides which it has; the fields it does not have stay None.
+    """
+    if tier not in TIER_NAMES:
+        raise ValueError("unknown tier %r (expected one of %s)"
+                         % (tier, ", ".join(TIER_NAMES)))
+    return {
+        "tier": tier,
+        "model": str(model or ""),
+        "tokens_in": _count(tokens_in),
+        "tokens_out": _count(tokens_out),
+        "token_estimate": _count(token_estimate),
+        "cost_usd": _num(cost_usd, 4),
+        "seconds": _num(seconds, 2),
+    }
+
+
+def record_tier_call(common_dir, tier, *, model="", tokens_in=None,
+                     tokens_out=None, token_estimate=None, cost_usd=None,
+                     seconds=None, ts=None):
+    """Append one per-tier cost record (kind %r) to the local run log.
+
+    Returns the record written, or None when telemetry is disabled, the write
+    fails, or the tier is unknown -- recording is best-effort and never
+    affects a review's outcome (same discipline as `append`).
+    """ % TIER_RECORD_KIND
+    try:
+        rec = tier_record(tier, model=model, tokens_in=tokens_in,
+                          tokens_out=tokens_out, token_estimate=token_estimate,
+                          cost_usd=cost_usd, seconds=seconds)
+    except ValueError:
+        return None
+    rec = dict(rec, kind=TIER_RECORD_KIND, ts=ts or time.time())
+    path = append(common_dir, rec)
+    return rec if path else None
+
 
 def enabled():
     return os.environ.get("OCR_TELEMETRY", "1").strip().lower() not in ("0", "false", "no")
@@ -342,12 +437,46 @@ def _time_metrics(calls, records, add):
             + "  ".join(f"{k}={v}" for k, v in by_outcome.most_common()))
 
 
+def _tier_report_lines(records, add):
+    """Per-tier cost section (review-gate v2 records, kind "tier_call").
+
+    Old records simply contribute nothing. Per tier: calls, totals/avg of
+    duration, exact tokens when recorded, token estimates, and cost -- the
+    measured reality an informed budget is set from.
+    """
+    tiers = defaultdict(list)
+    for r in records:
+        if r.get("kind") == TIER_RECORD_KIND and r.get("tier"):
+            tiers[r["tier"]].append(r)
+    if not tiers:
+        return
+    add("\nPer-tier cost (calls, avg s, total s, in tok, out tok, est tok, cost $):")
+    for tier in TIER_NAMES:
+        recs = tiers.get(tier)
+        if not recs:
+            add(f"  {tier:<10} {0:>5}")
+            continue
+        secs = [r.get("seconds") or 0 for r in recs if isinstance(r.get("seconds"), (int, float))]
+        tin = [r["tokens_in"] for r in recs if isinstance(r.get("tokens_in"), (int, float)) and not isinstance(r.get("tokens_in"), bool)]
+        tout = [r["tokens_out"] for r in recs if isinstance(r.get("tokens_out"), (int, float)) and not isinstance(r.get("tokens_out"), bool)]
+        est = [r["token_estimate"] for r in recs if isinstance(r.get("token_estimate"), (int, float)) and not isinstance(r.get("token_estimate"), bool)]
+        cost = [r["cost_usd"] for r in recs if isinstance(r.get("cost_usd"), (int, float)) and not isinstance(r.get("cost_usd"), bool)]
+        add(f"  {tier:<10} {len(recs):>5}  {_fmt(_avg(secs)):>7}  {_fmt(sum(secs) if secs else None):>7}"
+            f"  {_fmt(sum(tin) if tin else None, '.0f'):>7}  {_fmt(sum(tout) if tout else None, '.0f'):>7}"
+            f"  {_fmt(sum(est) if est else None, '.0f'):>7}  {_fmt(sum(cost) if cost else None, '.3f'):>7}")
+
+
 def report(records):
     """Plain-text summary of `records` (see load)."""
     if not records:
         return "No review-gate telemetry recorded in this period."
     lines = []
     add = lines.append
+
+    # Per-tier cost records (v2) are events on the log, not runs: they must
+    # not inflate run counts, verdict tallies or any run-shaped section.
+    all_records = records
+    records = [r for r in records if r.get("kind") != TIER_RECORD_KIND]
 
     verdicts = Counter(r.get("verdict") or r.get("state") or "?" for r in records)
     add(f"Runs: {len(records)}  " + "  ".join(f"{k}={v}" for k, v in verdicts.most_common()))
@@ -473,5 +602,7 @@ def report(records):
             changed = sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
             when = time.strftime("%Y-%m-%d %H:%M", time.gmtime(ts or 0))
             add(f"  {when} -> {fp[:12]}: {', '.join(changed) or '?'}")
+
+    _tier_report_lines(all_records, add)
 
     return "\n".join(lines)
