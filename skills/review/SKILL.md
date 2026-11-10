@@ -299,9 +299,28 @@ After resolving the base rubric for each file, also apply:
    for every file (this repo is primarily LLM-authored; remove this step for
    non-LLM projects by adding `"llm_authored": false` to `.ocr/config.json`).
 
-For the single-reviewer case (≤15 files), include per-file language and LLM rules
-as a `language_rules` note alongside each entry in the `files` list passed to the
-subagent.
+7. **Convention docs:** resolve the per-file convention docs (global +
+   per-surface) by running, once, with the repo root as cwd:
+
+   ```
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/ocr_conventions.py" \
+     --repo-root "<repo root>" <changed file 1> <changed file 2> ...
+   ```
+
+   The script prints `{"files": {path: text, ...}, "warnings": [...]}` on
+   stdout. Append each file's text to its `language_rules`; files absent from
+   the result have no applicable conventions. Copy every entry of `warnings`
+   verbatim into the skill output's `warnings` array. The exact two-layer
+   merge, budget, and warning contract is specified in
+   `${CLAUDE_PLUGIN_ROOT}/skills/review/conventions.md` — never reimplement it
+   by hand; treat the script's output as the authoritative merged result.
+
+For the single-reviewer case (≤15 files), include per-file language, LLM and
+convention rules as a `language_rules` note alongside each entry in the
+`files` list passed to the subagent. Append the same per-file convention
+text in the fan-out path (>15 files): run the script once over the full
+changed-file list and distribute each file's text into its group's `files`
+entries.
 
 ## 2b. Symbol context extraction
 
