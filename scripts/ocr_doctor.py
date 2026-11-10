@@ -12,8 +12,12 @@ health check over every dependency the gate has:
     runs, it is just running on an unverified release),
   - the deny extension (repo layout + installed slot): nonempty text with
     the tool_call subscriber and the OCR_IN_REVIEW gate string,
-  - hook health (with --repo): the pre-push primary gate at the
-    core.hooksPath-resolved location, and the Kimchi bash UX hook,
+  - hook health (with --repo): the EFFECTIVE hook path git resolves for the
+    repo (core.hooksPath, repo-top-relative when relative, else the default
+    hooks dir -- the common dir for a linked worktree), whether a gate hook
+    is reachable through it (following chained shims such as husky's), a
+    stale gate copy left shadowed in the default hooks dir, and the Kimchi
+    bash UX hook,
   - the external state store (D12): writable, readable, no stale state
     locks, and how many tips are sitting in the sticky error state,
   - a reminder of how to run the read-only sandbox canary by hand.
@@ -236,47 +240,178 @@ def check_deny_ext(add, env, repo_ext=None, installed_ext=None):
             add("deny-extension-slot", "ok", f"{installed_ext} (tool_call + OCR_IN_REVIEW present)")
 
 
+def _git_str(repo, args, env):
+    """Stripped stdout of a git query, or None when git fails to answer."""
+    try:
+        out = _run(["git", "-C", repo, *args], env)
+    except Exception:
+        return None
+    if out.returncode != 0:
+        return None
+    return (out.stdout or "").strip() or None
+
+
+def _norm(p):
+    return Path(os.path.normpath(str(p)))
+
+
+def _same_dir(a, b):
+    try:
+        return os.path.normcase(os.path.realpath(str(a))) == \
+            os.path.normcase(os.path.realpath(str(b)))
+    except Exception:
+        return False
+
+
+def _resolve_hooks_dirs(repo, env, top, gitdir):
+    """Exactly git's hook resolution: (effective, default, cfg).
+
+    Effective = core.hooksPath when set (a relative value resolves against
+    the repo top, which is where git runs the hook from), else the default
+    hooks dir. Default = the repo's OWN hooks dir -- `git-common-dir`/hooks,
+    which for a linked worktree is the main checkout's .git/hooks (hooks are
+    per-repo, not per-worktree)."""
+    cfg = _git_str(repo, ["config", "core.hooksPath"], env)
+    if cfg:
+        base = top if top is not None else (Path(gitdir).parent if gitdir else Path(repo))
+        effective = Path(cfg) if os.path.isabs(cfg) else _norm(base / cfg)
+    else:
+        effective = None
+    common = _git_str(repo, ["rev-parse", "--git-common-dir"], env)
+    if common:
+        base = top if top is not None else Path(repo)
+        default = _norm(Path(common) if os.path.isabs(common) else base / common) / "hooks"
+    elif gitdir:
+        default = Path(gitdir) / "hooks"
+    else:
+        default = Path(repo) / ".git" / "hooks"
+    if effective is None:
+        effective = default
+    return effective, default, cfg
+
+
+# A gate is reachable through a chain when any script in it invokes the
+# gate. A plain substring is the same strong signal the hook check has
+# always used: the installed hook carries the gate's own name.
+_GATE_MARK = "review-gate"
+# Bound the chain walk: a handful of hops covers husky's shim indirection;
+# deeper than that is not a hook chain, it is a maze.
+_CHAIN_DEPTH = 5
+# `. file`, `source file`, `exec file`, `sh file` hand-offs, one per line.
+_HANDOFF_RE = re.compile(r"^\s*(?:\.|source|exec|sh)\s+(\S+)", re.MULTILINE)
+
+
+def _referenced_scripts(text, hook_path, top):
+    """Files this hook hands off to, best effort.
+
+    husky v9's real shim (.husky/_/pre-push -> sources ${0%/*}/h) resolves
+    statically; its helper then runs the real hook through variables
+    (`sh -e "$s/$h"`) that no static scan can resolve -- for a shim inside
+    a `_` dir the doctor therefore also tries the same-named hook one level
+    up (.husky/_/pre-push -> .husky/pre-push), which is husky's actual chain."""
+    refs = []
+    hook_dir = hook_path.parent
+    for tok in _HANDOFF_RE.findall(text):
+        tok = tok.strip("\"'").replace("${0%/*}", str(hook_dir))
+        if not tok or "$" in tok:
+            continue  # a variable we cannot resolve statically
+        cand = Path(tok)
+        if not cand.is_absolute():
+            cand = hook_dir / tok
+            if not cand.is_file():
+                cand = top / tok
+        refs.append(_norm(cand))
+    if hook_dir.name == "_":
+        refs.append(_norm(hook_dir.parent / hook_path.name))
+    return refs
+
+
+def _gate_chain(hook_path, top, depth=_CHAIN_DEPTH):
+    """The pre-push chain git would execute, hook first: the hook itself
+    plus every distinct script it hands off to (bounded, cycle-safe)."""
+    out, seen = [], set()
+    queue = [hook_path]
+    while queue and len(out) < depth:
+        p = queue.pop(0)
+        key = os.path.normcase(str(p))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(p)
+        try:
+            text = p.read_text(encoding="utf-8")
+        except (OSError, ValueError):
+            continue
+        queue.extend(_referenced_scripts(text, p, top))
+    return out
+
+
+def _check_repo_hooks(add, env, repo):
+    repo = os.path.abspath(repo)
+    try:
+        gitdir_out = _run(["git", "-C", repo, "rev-parse", "--absolute-git-dir"], env)
+    except Exception as exc:
+        add("pre-push-hook", "fail", f"git could not be run against {repo} ({exc})")
+        return
+    if gitdir_out.returncode != 0 or not gitdir_out.stdout.strip():
+        add("pre-push-hook", "fail", f"not a git repository: {repo}")
+        return
+    gitdir = gitdir_out.stdout.strip()
+    top = _git_str(repo, ["rev-parse", "--show-toplevel"], env)
+    effective, default, cfg = _resolve_hooks_dirs(repo, env,
+                                                  Path(top) if top else None, gitdir)
+    if cfg:
+        where = f"core.hooksPath {cfg} -> {effective}"
+    else:
+        where = f"{effective} (default hooks dir)"
+    add("effective-hook-path", "ok", where)
+    prepush = effective / "pre-push"
+    if not prepush.is_file():
+        add("pre-push-hook", "fail",
+            f"not installed at {prepush} ({where}) -- terminal and script pushes "
+            "from this repo are NOT gated (the PRIMARY layer, D11); run "
+            "scripts/install-git-hook.sh")
+    else:
+        chain = _gate_chain(prepush, Path(top) if top else Path(repo))
+        reached = next((p for p in chain if _GATE_MARK in _read_text(p, "")), None)
+        if reached is not None:
+            detail = f"installed at {prepush} ({where})"
+            if not _same_dir(reached, prepush):
+                detail += f"; gate reached through {reached}"
+            add("pre-push-hook", "ok", detail)
+        else:
+            add("pre-push-hook", "fail",
+                f"{prepush} exists but does not run the gate (no '{_GATE_MARK}' "
+                f"in the file or the chain it sources) -- {where}")
+    if cfg and not _same_dir(effective, default):
+        stale = default / "pre-push"
+        if stale.is_file() and _GATE_MARK in _read_text(stale, ""):
+            add("stale-hook-copy", "fail",
+                f"stale gate copy: {stale} sits in the default hooks dir but git runs "
+                f"hooks from {effective} (core.hooksPath {cfg}) -- the shadowed copy "
+                "will never run; remove it or run scripts/install-git-hook.sh")
+        else:
+            add("stale-hook-copy", "ok",
+                f"no shadowed gate copy in the default hooks dir ({default})")
+    else:
+        add("stale-hook-copy", "ok",
+            f"no shadowed gate copy in the default hooks dir ({default})")
+
+
+def _read_text(path, default=None):
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return default
+
+
 def check_hooks(add, env, repo=None, hook_dir=None):
     hook_dir = (Path(hook_dir) if hook_dir
                 else Path(env.get("KIMCHI_HOOKS_DIR", "").strip()
                           or os.path.join(os.path.expanduser("~"), ".config", "kimchi",
                                           "harness", "hooks", "bash")))
     if repo:
-        repo = os.path.abspath(repo)
-        try:
-            gitdir = _run(["git", "-C", repo, "rev-parse", "--absolute-git-dir"], env)
-        except Exception as exc:
-            add("pre-push-hook", "fail", f"git could not be run against {repo} ({exc})")
-            gitdir = None
-        if gitdir is not None:
-            if gitdir.returncode != 0 or not gitdir.stdout.strip():
-                add("pre-push-hook", "fail", f"not a git repository: {repo}")
-            else:
-                cfg = _run(["git", "-C", repo, "config", "core.hooksPath"], env)
-                if cfg.returncode == 0 and cfg.stdout.strip():
-                    top = _run(["git", "-C", repo, "rev-parse", "--show-toplevel"], env)
-                    base = Path(top.stdout.strip()) if (top.returncode == 0
-                                                        and top.stdout.strip()) else Path(repo)
-                    hooks = (base / cfg.stdout.strip()).resolve()
-                    where = f"core.hooksPath {cfg.stdout.strip()} -> {hooks}"
-                else:
-                    hooks = Path(gitdir.stdout.strip()) / "hooks"
-                    where = f"{hooks}"
-                prepush = hooks / "pre-push"
-                try:
-                    text = prepush.read_text(encoding="utf-8")
-                except OSError:
-                    add("pre-push-hook", "fail",
-                        f"not installed at {prepush} ({where}) -- terminal and script pushes "
-                        "from this repo are NOT gated (the PRIMARY layer, D11); run "
-                        "scripts/install-git-hook.sh")
-                else:
-                    if "review-gate" in text:
-                        add("pre-push-hook", "ok", f"installed at {prepush} ({where})")
-                    else:
-                        add("pre-push-hook", "fail",
-                            f"{prepush} exists but does not run the gate (no 'review-gate' "
-                            f"in the file) -- {where}")
+        _check_repo_hooks(add, env, repo)
     # The Kimchi bash hook is the UX layer only; the pre-push layer still
     # enforces without it, so its absence is a WARN.
     kimchi_hook = hook_dir / "review-gate.sh"
