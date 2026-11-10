@@ -103,6 +103,83 @@ def _read_spotter_model():
 
 _SPOTTER_MODEL = _read_spotter_model()
 
+
+def _read_tier1_model():
+    """Model for the tier-1 (fast-lane) reviewer subagent
+    (agents/code-reviewer.md), spawned by the review skill's step 3. Defaults
+    to the flagship open model positioned for correctness-critical review;
+    the tier-1 reviewer reads every push's evidence, so OCR_TIER1_MODEL
+    trades review depth for cost or a different provider."""
+    return os.environ.get("OCR_TIER1_MODEL", "kimi-k3").strip() or "kimi-k3"
+
+
+_TIER1_MODEL = _read_tier1_model()
+
+# Provider guard (spec "Models"; story 18). The account's subscription terms
+# forbid routing the gate's automated review traffic to Anthropic or OpenAI
+# models (account-lock grounds), so the review models below are vetted after
+# config/env resolution and BEFORE any review work: a blocked provider fails
+# loudly then, never mid-run. OCR_MODEL is deliberately absent from
+# _GUARDED_MODEL_VARS: it pins the headless harness session itself (the
+# pre-existing v1 surface), not a review model the v2 gate routes traffic to.
+_BLOCKED_PROVIDERS = ("anthropic", "openai")
+
+_GUARDED_MODEL_VARS = (
+    ("OCR_TIER1_MODEL", lambda: _read_tier1_model()),
+    ("OCR_SPOTTER_MODEL", lambda: _read_spotter_model()),
+)
+
+# First-token families, lowercased. Anthropic ids are `claude-*` plus the
+# bare `sonnet`/`haiku`/`opus` shorthands; OpenAI ids are `gpt-*`,
+# `chatgpt-*`, and the reasoning series `o1`/`o3`/`o4`.
+_PROVIDER_FIRST_TOKENS = (
+    ("anthropic", ("claude", "sonnet", "haiku", "opus")),
+    ("openai", ("gpt", "chatgpt", "o1", "o3", "o4")),
+)
+
+
+def _model_provider(model):
+    """Provider family for a model id, or "" when it is unrecognized. The
+    guard is a deny-list for subscription-violating providers, so unknown
+    providers pass."""
+    first = (model or "").strip().lower().split("-", 1)[0]
+    for provider, tokens in _PROVIDER_FIRST_TOKENS:
+        if first in tokens:
+            return provider
+    return ""
+
+
+def _provider_guard_violations():
+    """[(var, model, provider)] for every configured review model from a
+    blocked provider. Reads the RESOLVED value of each guarded var (the
+    defaults are open models, so an unset var never trips)."""
+    out = []
+    for var, read in _GUARDED_MODEL_VARS:
+        model = read()
+        provider = _model_provider(model)
+        if provider in _BLOCKED_PROVIDERS:
+            out.append((var, model, provider))
+    return out
+
+
+def _check_provider_guard():
+    """Raise ReviewGateError when any configured review model names a blocked
+    provider. Called after config/env resolution and before any review work:
+    in the push hook (fail-closed with this message) and in the supervisor
+    (recorded as the run's failure)."""
+    bad = _provider_guard_violations()
+    if not bad:
+        return
+    detail = "\n".join(f"  - {var}={model!r} (provider: {provider})"
+                       for var, model, provider in bad)
+    raise ReviewGateError(
+        "provider guard refused to start: configured review model(s) come from"
+        " a provider whose use would violate the subscription account-lock"
+        " terms (providers " + ", ".join(_BLOCKED_PROVIDERS) + " are blocked):\n"
+        + detail +
+        "\nSet the variable to an allowed open model (e.g. kimi-k3, glm-5.3,"
+        " deepseek-v4-flash) or unset it to use the default.")
+
 DEFAULT_CLAUDE_ARGS = [
     # The reviewer's input is an UNTRUSTED diff. Anything it is pre-approved to
     # run is therefore reachable by prompt injection from a hostile branch, so
@@ -302,7 +379,7 @@ _COST_RULE_RATIO = 1.5
 # how the reviewer runs, not what it is asked to find.
 _FINGERPRINT_ENV_VARS = (
     "OCR_MODEL", "OCR_BLOCK_SEVERITY", "OCR_BLOCK_CONFIDENCE",
-    "OCR_SPOTTER_MODEL",
+    "OCR_SPOTTER_MODEL", "OCR_TIER1_MODEL",
 )
 # Agents whose prompts decide which findings exist. The resolver only judges
 # whether a known finding was fixed, so editing it keeps the ledger. The
@@ -3242,6 +3319,10 @@ def _supervise_run(state_path, run_id):
     plan_summary = ""
     diffs = None     # precomputed diffs (_build_diffs); None on the 0.9.x path
     try:
+        # Provider guard, belt and braces for the worker path: the push hook
+        # already vetted, but a supervisor can also be started out of band
+        # (retries, force). A violation is recorded as the run's failure.
+        _check_provider_guard()
         worktree = _make_worktree(repo_root, tip, run_id)
         if worktree:
             review_root = worktree
@@ -6029,6 +6110,9 @@ def _build_review_manifest(common_dir, run_id, k, total, chunk_items, other_chan
     # The headless review session's allowlist has no env-reading Bash, so the
     # skill learns which model to spawn the context spotter with from here.
     manifest["spotter_model"] = _SPOTTER_MODEL
+    # Same channel for the tier-1 reviewer model (skills/review/SKILL.md step
+    # 3 reads it to spawn the code-reviewer subagent).
+    manifest["tier1_model"] = _TIER1_MODEL
     return manifest
 
 
@@ -9163,6 +9247,11 @@ def _main_inner(argv, mode):
     }
     budget = _inline_budget(mode)
     try:
+        # Provider guard: refuse a misconfigured review model BEFORE any
+        # review state is claimed, a supervisor spawned, or a token flows
+        # (spec story 18). A ReviewGateError becomes a fail-closed deny
+        # carrying the offending variable and value.
+        _check_provider_guard()
         st = _drive_review(common_dir, repo_root, meta, mode, budget)
     except ReviewGateError as exc:
         if _fail_open_requested():
