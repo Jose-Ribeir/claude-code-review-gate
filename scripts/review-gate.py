@@ -8990,6 +8990,52 @@ def _emit_hook(decision, reason=""):
     sys.exit(0)  # hook itself always exits 0; the decision is in the payload
 
 
+def _full_history_limit():
+    """OCR_FULL_HISTORY_LIMIT: the commit count above which an unbounded range
+    (_EMPTY_TREE base -- no remote ref bounds it) is refused. Default 500;
+    0 disables the guard."""
+    raw = os.environ.get("OCR_FULL_HISTORY_LIMIT", "").strip()
+    if not raw:
+        return 500
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 500
+
+
+def _huge_range_reason(count, limit):
+    return (
+        "review-gate: this push has no base commit to review against - the remote "
+        f"holds no ref that bounds the range - and it carries {count} commits, more "
+        f"than the OCR_FULL_HISTORY_LIMIT of {limit}. Reviewing that much history in "
+        "one gate run is not practical, so the push is refused.\n\n"
+        "Proceed in one of these ways:\n"
+        "  - Push the base branch first (e.g. git push origin main) so the remote ref "
+        "bounds this range to only the new commits; then push this branch again.\n"
+        "  - Or seed the remote with the base commit itself: git push <remote> "
+        "<base-sha>:refs/heads/<branch>.\n"
+        "  - Or narrow the base: push from a branch that already contains the history "
+        "you do not want re-reviewed.\n"
+        "  - A brand-new repository's first push lands here legitimately: push main "
+        "first, then push the feature branch.\n"
+        "  - To review the full history on purpose, set OCR_FULL_HISTORY_LIMIT=0 for "
+        "this push.\n"
+        "  - Emergency bypass: set OCR_FAIL_OPEN=1."
+    )
+
+
+def _refuse_huge_range(mode, allow, count, limit):
+    """Block an unbounded (_EMPTY_TREE-base) push past OCR_FULL_HISTORY_LIMIT.
+
+    Honors OCR_FAIL_OPEN like every sibling refusal: a requested bypass warns
+    and allows; otherwise the push fails closed with the remedy text.
+    """
+    if _fail_open_requested():
+        _warn(_huge_range_reason(count, limit))
+        allow()
+    _fail_closed(mode, _huge_range_reason(count, limit))
+
+
 def _fail_closed(mode, msg):
     """Block the commit (or deny the hook) with a clear message.
 
@@ -9329,6 +9375,18 @@ def _main_inner(argv, mode):
         out, rc = _git(["rev-list", "--count", tip if base == _EMPTY_TREE else push_range],
                        cwd=repo_root)
         count = out.strip() if rc == 0 else ""
+
+    # Huge-range guard (SPEC-09). An _EMPTY_TREE base means NO ref bounds the
+    # range -- an unseeded remote (or a brand-new repository's first push). A
+    # review over that much history is not a review, it is a denial of
+    # service to the reviewer and the developer alike, so refuse before
+    # spawning anything. A bounded base is never affected: whatever its count,
+    # the remote ref already scoped the diff. OCR_FULL_HISTORY_LIMIT=0
+    # disables the guard for intentional full-history reviews.
+    limit = _full_history_limit()
+    if (base == _EMPTY_TREE and limit > 0 and count.isdigit()
+            and int(count) > limit):
+        _refuse_huge_range(mode, allow, count, limit)
     meta = {
         "tip": tip, "branch": branch, "base": base, "range": push_range,
         "repo_root": repo_root, "git_dir": git_dir, "commit_count": count,

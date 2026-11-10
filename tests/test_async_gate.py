@@ -76,7 +76,8 @@ def _env(tmp_path, **stub):
     inherited in-review/bypass state, the 3 s hook budget."""
     env = scrub_git_trace(dict(os.environ))
     for k in ("OCR_IN_REVIEW", "OCR_FAIL_OPEN", "OCR_ADVISORY", "OCR_FORCE_REVIEW",
-              "OCR_LEGACY_RANGE", "OCR_INLINE_BUDGET", "STUB_SLEEP", "STUB_VERDICT", "STUB_TRACE"):
+              "OCR_LEGACY_RANGE", "OCR_INLINE_BUDGET", "STUB_SLEEP", "STUB_VERDICT", "STUB_TRACE",
+              "OCR_FULL_HISTORY_LIMIT"):
         env.pop(k, None)
     # OCR_STATE_DIR is inherited from conftest's per-test private store: the
     # in-process review_gate module reads the same one, so state written by the
@@ -475,3 +476,85 @@ def _record(common, fp, e):
     key = review_gate._record_key(e["path"], e.get("old_path") or "", e["status"], e["old_oid"])
     return review_gate._read_ledger_record(
         review_gate._record_path(common, fp, key, e["new_oid"]), fp, key, e["new_oid"])
+
+
+# --- huge-range guard (SPEC-09) ----------------------------------------------
+
+def _fresh_repo(tmp_path, commits=3):
+    """A repo whose remote holds NO branches: every push has no bounding ref,
+    so resolve_review_base lands on _EMPTY_TREE (the unseeded-remote case)."""
+    remote = tmp_path / "bare-origin.git"
+    work = tmp_path / "fresh-work"
+    _git(["init", "--bare", "-b", "main", str(remote)], cwd=tmp_path)
+    _git(["init", "-b", "main", str(work)], cwd=tmp_path)
+    _git(["config", "user.email", "t@example.com"], cwd=work)
+    _git(["config", "user.name", "t"], cwd=work)
+    _git(["config", "commit.gpgsign", "false"], cwd=work)
+    hooks = tmp_path / "fresh-no-hooks"
+    hooks.mkdir(exist_ok=True)
+    _git(["config", "core.hooksPath", str(hooks)], cwd=work)
+    if commits:
+        marks = []
+        for i in range(commits):
+            marks.append(
+                "commit refs/heads/main\n"
+                f"mark :{i + 1}\n"
+                f"committer t <t@example.com> {1600000000 + i} +0000\n"
+                f"data {len(f'c{i}')}\nc{i}\n"
+                + (f"from :{i}\n" if i else "")
+                + "M 644 inline f.txt\n"
+                + f"data {len(str(i)) + 1}\n{i}\n")
+        proc = subprocess.run(["git", "fast-import", "--quiet"], cwd=str(work),
+                              input="".join(marks), capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr
+    return work
+
+
+def test_an_unseeded_remote_push_past_the_history_limit_is_refused(tmp_path):
+    work = _fresh_repo(tmp_path, commits=1000)
+    decision, reason, _, _ = _hook(work, "git push origin main", _env(tmp_path))
+    assert decision == "deny", reason
+    assert "OCR_FULL_HISTORY_LIMIT" in reason
+    assert "500" in reason and "1000" in reason
+    # Remedy text: seed the remote (push base/main first) or narrow the base.
+    assert "push origin main" in reason
+    assert "narrow" in reason.lower()
+    # A brand-new repository's first push legitimately hits this path; the
+    # remedy must say exactly what to do about it.
+    assert "first push" in reason
+    # Refused BEFORE any review spawns.
+    assert _trace(tmp_path) == []
+
+
+def test_an_unseeded_remote_push_under_the_limit_reviews_normally(tmp_path):
+    work = _fresh_repo(tmp_path, commits=3)
+    env = _env(tmp_path, OCR_FULL_HISTORY_LIMIT=10)
+    decision, reason, _, _ = _hook(work, "git push origin main", env)
+    assert decision == "pass", reason
+    assert len(_trace(tmp_path)) == 1
+
+
+def test_full_history_limit_zero_disables_the_guard(tmp_path):
+    work = _fresh_repo(tmp_path, commits=1000)
+    env = _env(tmp_path, OCR_FULL_HISTORY_LIMIT=0)
+    decision, reason, _, _ = _hook(work, "git push origin main", env)
+    assert decision == "pass", reason
+
+
+def test_a_bounded_range_never_trips_the_history_limit(repo, tmp_path):
+    # Non-empty base: origin/main bounds the range, however many commits it
+    # carries -- the guard is only for the unbounded (_EMPTY_TREE) case.
+    for i in range(3):
+        _commit(repo, f"f{i}", f"change {i}")
+    env = _env(tmp_path, OCR_FULL_HISTORY_LIMIT=1)
+    decision, reason, _, _ = _hook(repo, "git push origin main", env)
+    assert decision == "pass", reason
+
+
+def test_the_history_limit_refusal_honors_fail_open(tmp_path):
+    work = _fresh_repo(tmp_path, commits=1000)
+    env = _env(tmp_path, OCR_FAIL_OPEN=1)
+    decision, reason, _, stderr = _hook(work, "git push origin main", env)
+    assert decision == "pass"
+    assert "OCR_FULL_HISTORY_LIMIT" in (reason or "") or "OCR_FULL_HISTORY_LIMIT" in stderr
+    assert _trace(tmp_path) == []
