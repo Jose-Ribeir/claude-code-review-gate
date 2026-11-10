@@ -92,6 +92,17 @@ _PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # want maximum depth and accept the bill.
 _MODEL = os.environ.get("OCR_MODEL", "sonnet").strip() or "sonnet"
 
+
+def _read_spotter_model():
+    """Model for the context-spotter (agents/context-spotter.md), spawned by the
+    review skill between rule resolution and reviewer spawn. Defaults to a fast
+    codebase-scanning open model -- the spotter reads every push's diff, so it
+    must stay cheap; OCR_SPOTTER_MODEL trades cost for demand quality."""
+    return os.environ.get("OCR_SPOTTER_MODEL", "deepseek-v4-flash").strip() or "deepseek-v4-flash"
+
+
+_SPOTTER_MODEL = _read_spotter_model()
+
 DEFAULT_CLAUDE_ARGS = [
     # The reviewer's input is an UNTRUSTED diff. Anything it is pre-approved to
     # run is therefore reachable by prompt injection from a hostile branch, so
@@ -291,10 +302,13 @@ _COST_RULE_RATIO = 1.5
 # how the reviewer runs, not what it is asked to find.
 _FINGERPRINT_ENV_VARS = (
     "OCR_MODEL", "OCR_BLOCK_SEVERITY", "OCR_BLOCK_CONFIDENCE",
+    "OCR_SPOTTER_MODEL",
 )
 # Agents whose prompts decide which findings exist. The resolver only judges
-# whether a known finding was fixed, so editing it keeps the ledger.
-_FINGERPRINT_AGENTS = ("code-reviewer.md", "code-filter.md")
+# whether a known finding was fixed, so editing it keeps the ledger. The
+# spotter prompt steers the reviewer's context input, which steers findings in
+# the same direction, so it is fingerprinted too.
+_FINGERPRINT_AGENTS = ("code-reviewer.md", "code-filter.md", "context-spotter.md")
 # -----------------------------------------------------------------------------
 
 PROTOCOL_VERSION = 1   # bumped whenever state-file semantics change
@@ -6012,6 +6026,9 @@ def _build_review_manifest(common_dir, run_id, k, total, chunk_items, other_chan
                for p in manifest["carried"]])
         manifest["tasks"] = tasks
     manifest.update(extras or {})
+    # The headless review session's allowlist has no env-reading Bash, so the
+    # skill learns which model to spawn the context spotter with from here.
+    manifest["spotter_model"] = _SPOTTER_MODEL
     return manifest
 
 

@@ -1,0 +1,95 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/Jose-Ribeir/claude-code-review-gate/schemas/demands.schema.json",
+  "title": "context-spotter demands",
+  "description": "Output of the context-spotter agent: context demands only, never findings. Validated gate-side, fail-closed (scripts/ocr_demands.py is the single source; this schema is generated from it).",
+  "type": "object",
+  "required": [
+    "symbol_callers",
+    "event_couples",
+    "doc_refs",
+    "conventions",
+    "prose_pointers",
+    "risk"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "symbol_callers": {
+      "$ref": "#/definitions/demandList"
+    },
+    "event_couples": {
+      "$ref": "#/definitions/demandList"
+    },
+    "doc_refs": {
+      "$ref": "#/definitions/demandList"
+    },
+    "conventions": {
+      "$ref": "#/definitions/demandList"
+    },
+    "prose_pointers": {
+      "$ref": "#/definitions/demandList"
+    },
+    "risk": {
+      "$ref": "#/definitions/risk"
+    }
+  },
+  "definitions": {
+    "demandList": {
+      "type": "array",
+      "items": {
+        "anyOf": [
+          {
+            "type": "string",
+            "minLength": 1
+          },
+          {
+            "type": "object",
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": [
+                    "string",
+                    "number",
+                    "boolean",
+                    "null"
+                  ]
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": [
+                      "string",
+                      "number",
+                      "boolean",
+                      "null"
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "risk": {
+      "type": "object",
+      "required": [
+        "score",
+        "reasons"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "score": {
+          "type": "number",
+          "minimum": 0
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}
