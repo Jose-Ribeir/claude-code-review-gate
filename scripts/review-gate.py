@@ -3891,6 +3891,12 @@ _EXCLUDED_DIRS = frozenset({
     "tests", "__tests__", "testdata",
 })
 
+# Test-family directory names: excluded from review, but SEARCHABLE for
+# callers / cross-file references / siblings (the context filter below).
+_TEST_FAMILY_DIRS = frozenset({"tests", "__tests__", "testdata"})
+
+_CONTEXT_EXCLUDED_DIRS = _EXCLUDED_DIRS - _TEST_FAMILY_DIRS
+
 # Exact filenames that are always excluded (lockfiles).
 _EXCLUDED_FILES = frozenset({
     "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "go.sum",
@@ -3922,6 +3928,30 @@ def _is_allowed_path(path):
     if any(p.lower() in _EXCLUDED_DIRS for p in parts[:-1]):
         return False
     if _EXCLUDED_TEST_RE.search(norm):
+        return False
+    return True
+
+
+def _is_context_allowed_path(path):
+    """True if this path may be searched for callers, cross-file references,
+    and siblings (allowlist split, see skills/review/allowlist.md).
+
+    Same rules as _is_allowed_path minus the test-family exclusions: spec/test
+    files are not review targets, but a caller living in one is exactly where
+    impact analysis must look. Vendored/generated dirs, VCS dirs, lockfiles,
+    generated suffixes, and the extension allowlist still apply.
+    """
+    name = os.path.basename(path)
+    if name.lower() in _EXCLUDED_FILES:
+        return False
+    ext = os.path.splitext(name)[1].lower()
+    if ext not in _ALLOWED_EXTS:
+        return False
+    if _EXCLUDED_SUFFIX_RE.search(name):
+        return False
+    norm = path.replace("\\", "/")
+    parts = norm.split("/")
+    if any(p.lower() in _CONTEXT_EXCLUDED_DIRS for p in parts[:-1]):
         return False
     return True
 
@@ -4767,7 +4797,9 @@ def _compute_impact(review_root, tip, active_items):
                 unsupported.append(e["path"])
             symbols += [s for s in got.get("symbols") or [] if s.get("change") != "added"]
             warnings += got.get("warnings") or []
-        refs = ocr_impact.find_references(run, tip, symbols, is_allowed=_is_allowed_path)
+        refs = ocr_impact.find_references(run, tip, symbols,
+                                          is_allowed=_is_allowed_path,
+                                          is_context_allowed=_is_context_allowed_path)
         return {"symbols": symbols, "sites": refs.get("sites") or [],
                 "ref_counts": refs.get("ref_counts") or {}, "unsupported": unsupported,
                 "warnings": warnings + list(refs.get("warnings") or [])}
@@ -4868,7 +4900,8 @@ def _known_defects(review_root, tip, prior_findings, push_paths):
             continue
         try:
             got = ocr_impact.find_siblings(run, tip, dict(f, id=f.get("id") or _finding_id(f)),
-                                           push_paths=push_paths, is_allowed=_is_allowed_path)
+                                           push_paths=push_paths, is_allowed=_is_allowed_path,
+                                           is_context_allowed=_is_context_allowed_path)
         except Exception:
             continue
         added = fixed.get((f.get("path") or "", f.get("target_oid") or ""), set())
@@ -4911,7 +4944,8 @@ def _new_finding_notes(review_root, tip, new_findings, push_paths):
             continue
         try:
             got = ocr_impact.find_siblings(run, tip, dict(f, id=f.get("id") or _finding_id(f)),
-                                           push_paths=push_paths, is_allowed=_is_allowed_path)
+                                           push_paths=push_paths, is_allowed=_is_allowed_path,
+                                           is_context_allowed=_is_context_allowed_path)
         except Exception:
             continue
         for s in got.get("siblings") or []:

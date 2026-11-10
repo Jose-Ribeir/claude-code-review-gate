@@ -486,6 +486,125 @@ class TestFindReferences:
 
 
 # ===========================================================================
+# find_references / find_siblings — is_context_allowed split (t01)
+# ===========================================================================
+
+def _helper_symbol(defined_in="pkg/utils.py"):
+    return {
+        "name": "helper",
+        "qualname": "helper",
+        "kind": "function",
+        "change": "body",
+        "defined_in": defined_in,
+        "line": 1,
+        "old_signature": "def helper():",
+        "new_signature": "def helper():",
+        "renamed_to": "",
+        "lines_changed": 1,
+    }
+
+
+def _review_filter(path):
+    """Mimics review-gate's review filter: test paths are NOT review targets."""
+    norm = path.replace("\\", "/")
+    return not ("tests/" in norm or ".spec." in norm or ".test." in norm
+                or "/test_" in norm or "_test." in norm)
+
+
+def _context_filter(path):
+    """Context filter: test paths ARE searchable for callers and siblings."""
+    return True
+
+
+class TestContextFilterFindReferences:
+    def setup_repo(self, tmp_path):
+        cwd = _init_repo(tmp_path)
+        tip = _commit(cwd, {
+            "pkg/__init__.py": "",
+            "pkg/utils.py": "def helper():\n    return 1\n",
+            "tests/__init__.py": "",
+            "tests/test_utils.py": (
+                "from pkg.utils import helper\n\n"
+                "def test_helper():\n    assert helper() == 1\n"
+            ),
+            "src/caller.py": "from pkg.utils import helper\n\nx = helper()\n",
+        })
+        return cwd, tip
+
+    def test_spec_path_caller_collected_with_context_filter(self, tmp_path):
+        cwd, tip = self.setup_repo(tmp_path)
+        result = oi.find_references(oi.git_runner(cwd), tip, [_helper_symbol()],
+                                    is_allowed=_review_filter,
+                                    is_context_allowed=_context_filter)
+        paths = {s["path"] for s in result["sites"]}
+        assert "tests/test_utils.py" in paths, f"spec-path caller missing: {paths}"
+
+    def test_context_filter_defaults_to_is_allowed(self, tmp_path):
+        # Back-compat: with no context filter, is_allowed still gates everything.
+        cwd, tip = self.setup_repo(tmp_path)
+        result = oi.find_references(oi.git_runner(cwd), tip, [_helper_symbol()],
+                                    is_allowed=_review_filter)
+        paths = {s["path"] for s in result["sites"]}
+        assert "tests/test_utils.py" not in paths, f"back-compat broken: {paths}"
+        assert "src/caller.py" in paths, f"normal caller missing: {paths}"
+
+    def test_ts_spec_caller_collected_with_context_filter(self, tmp_path):
+        cwd = _init_repo(tmp_path)
+        tip = _commit(cwd, {
+            "app/util.ts": "export function render_widget() {\n  return 1;\n}\n",
+            "tests/util.spec.ts": (
+                "describe(\"util\", () => {\n"
+                "  it(\"renders\", () => { render_widget(); });\n"
+                "});\n"
+            ),
+        })
+        syms = [dict(_helper_symbol("app/util.ts"), name="render_widget",
+                     qualname="render_widget", old_signature="", new_signature="")]
+        result = oi.find_references(oi.git_runner(cwd), tip, syms,
+                                    is_allowed=_review_filter,
+                                    is_context_allowed=_context_filter)
+        paths = {s["path"] for s in result["sites"]}
+        assert "tests/util.spec.ts" in paths, f"ts spec caller missing: {paths}"
+
+
+class TestContextFilterFindSiblings:
+    def setup_repo(self, tmp_path):
+        cwd = _init_repo(tmp_path)
+        pattern = "    result = dangerous_call(user_input, validate=False)"
+        tip = _commit(cwd, {
+            "a/vuln.py": f"def process(user_input):\n{pattern}\n    return result\n",
+            "tests/test_handle.py": f"def test_handle(x):\n{pattern}\n    return x\n",
+        })
+        return cwd, tip, pattern.strip()
+
+    def _finding(self, pattern):
+        return {
+            "id": "f1",
+            "path": "a/vuln.py",
+            "start_line": 2,
+            "end_line": 2,
+            "existing_code": f"    {pattern}",
+            "severity": "high",
+            "content": "Dangerous call without validation",
+        }
+
+    def test_spec_path_sibling_collected_with_context_filter(self, tmp_path):
+        cwd, tip, pattern = self.setup_repo(tmp_path)
+        result = oi.find_siblings(oi.git_runner(cwd), tip, self._finding(pattern),
+                                  push_paths=set(), is_allowed=_review_filter,
+                                  is_context_allowed=_context_filter)
+        paths = {s["path"] for s in result["siblings"]}
+        assert "tests/test_handle.py" in paths, f"spec-path sibling missing: {paths}"
+
+    def test_context_filter_defaults_to_is_allowed(self, tmp_path):
+        cwd, tip, pattern = self.setup_repo(tmp_path)
+        result = oi.find_siblings(oi.git_runner(cwd), tip, self._finding(pattern),
+                                  push_paths=set(), is_allowed=_review_filter)
+        paths = {s["path"] for s in result["siblings"]}
+        assert "tests/test_handle.py" not in paths, f"back-compat broken: {paths}"
+
+
+# ===========================================================================
 # build_bundle
 # ===========================================================================
 

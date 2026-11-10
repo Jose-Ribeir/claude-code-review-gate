@@ -2609,6 +2609,105 @@ def test_allowed_exts_parity_with_allowlist_md():
     )
 
 
+# --- allowlist split: review filter vs context filter (t01) ------------------
+# _is_allowed_path decides what is REVIEWED; _is_context_allowed_path decides
+# what is searchable for callers/cross-file refs/siblings. Test files are
+# excluded from review but included in context search; vendored/generated/VCS/
+# lockfile exclusions apply to both.
+
+_CONTEXT_ONLY_PATHS = [
+    "app/helper.spec.ts", "app/helper.test.js", "pkg/x_test.go",
+    "tests/test_utils.py", "pkg/utils_test.py", "__tests__/x.ts",
+    "testdata/x.py", "demo/test_app.py",
+]
+
+_ALWAYS_EXCLUDED_PATHS = [
+    "vendor/lib.py", "node_modules/pkg/index.js", "dist/bundle.py",
+    "build/out.py", "target/gen.py", ".next/static/x.js",
+    "__generated__/types.py", "app/b.min.js", "pkg/a.pb.go",
+    "x.generated.py", ".git/hooks/hook.py", ".idea/misc.py",
+    "package-lock.json", "yarn.lock", "README.md",
+]
+
+
+def test_is_allowed_path_is_unchanged_review_filter():
+    # Characterization pin: the review filter still rejects all test paths.
+    for p in _CONTEXT_ONLY_PATHS:
+        assert not _is_allowed_path(p), f"review filter must reject test path {p}"
+    assert _is_allowed_path("src/app.py")
+    for p in _ALWAYS_EXCLUDED_PATHS:
+        assert not _is_allowed_path(p), f"review filter must reject {p}"
+
+
+def test_is_context_allowed_admits_test_paths():
+    pred = review_gate._is_context_allowed_path
+    for p in _CONTEXT_ONLY_PATHS:
+        assert pred(p), f"context filter must admit test path {p}"
+    for p in _ALWAYS_EXCLUDED_PATHS:
+        assert not pred(p), f"context filter must reject {p}"
+    assert pred("src/app.py")
+
+
+def test_allowlist_md_documents_context_filter():
+    # Parity: the split must be documented next to the allowlist.
+    p = os.path.join(os.path.dirname(_SCRIPTS), "skills", "review", "allowlist.md")
+    text = open(p, encoding="utf-8").read().lower()
+    assert "context search" in text, "allowlist.md must document the context filter"
+
+
+def test_compute_impact_passes_both_filters(monkeypatch):
+    monkeypatch.delenv("OCR_IMPACT", raising=False)
+    captured = {}
+
+    def fake_run(args, _cwd=None):
+        if args[:2] == ["cat-file", "-p"]:
+            return "def helper():\n    pass\n", 0
+        return "", 0
+
+    monkeypatch.setattr(review_gate.ocr_impact, "git_runner", lambda cwd: fake_run)
+    monkeypatch.setattr(
+        review_gate.ocr_impact, "changed_symbols",
+        lambda path, old, new: {"symbols": [{
+            "name": "helper", "qualname": "helper", "kind": "function",
+            "change": "body", "defined_in": path, "line": 1,
+            "old_signature": "", "new_signature": "", "renamed_to": "",
+            "lines_changed": 1,
+        }], "supported": True, "warnings": []})
+
+    def fake_refs(run, tip, symbols, **kw):
+        captured.update(kw)
+        return {"sites": [], "ref_counts": {}, "warnings": []}
+
+    monkeypatch.setattr(review_gate.ocr_impact, "find_references", fake_refs)
+    items = [{"entry": {"path": "pkg/utils.py", "old_oid": "0" * 40,
+                        "new_oid": "1" * 40, "status": "M"}, "mode": "full"}]
+    got = review_gate._compute_impact(".", "deadbeef", items)
+    assert got is not None
+    assert captured.get("is_allowed") is _is_allowed_path
+    assert captured.get("is_context_allowed") is review_gate._is_context_allowed_path
+
+
+def test_know_defects_and_new_notes_use_context_filter(monkeypatch):
+    # Sibling sweeps must search with the context filter, not the review filter.
+    monkeypatch.delenv("OCR_SIBLINGS", raising=False)
+    seen = []
+
+    def fake_siblings(run, tip, finding, **kw):
+        seen.append(kw)
+        return {"siblings": [], "warnings": []}
+
+    monkeypatch.setattr(review_gate.ocr_impact, "find_siblings", fake_siblings)
+    monkeypatch.setattr(review_gate, "_fix_added_lines", lambda *a, **k: {})
+    finding = {"id": "f1", "path": "a.py", "start_line": 1, "severity": "high",
+               "content": "c", "existing_code": "    result = some_important_func(x)"}
+    review_gate._known_defects(".", "deadbeef", [dict(finding)], {"a.py"})
+    review_gate._new_finding_notes(".", "deadbeef", [dict(finding)], {"a.py"})
+    assert len(seen) == 2
+    for kw in seen:
+        assert kw.get("is_allowed") is _is_allowed_path
+        assert kw.get("is_context_allowed") is review_gate._is_context_allowed_path
+
+
 # --- _plan_chunks: threshold and limits ---------------------------------------
 
 def _make_entries(n, ext=".py", lines_each=10):
