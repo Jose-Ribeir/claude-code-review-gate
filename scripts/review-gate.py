@@ -2188,6 +2188,18 @@ def _extract_from_stream_json(text):
     return match
 
 
+def _findings_summary(findings):
+    """The skill's summary object: files reviewed, finding count, per-severity
+    tally. One shape, three builders (normalizer, rescue, chunk merger)."""
+    return {
+        "files_reviewed": len({f.get("path") for f in findings if f.get("path")}),
+        "findings": len(findings),
+        "high": sum(1 for f in findings if str(f.get("severity")).lower() == "high"),
+        "medium": sum(1 for f in findings if str(f.get("severity")).lower() == "medium"),
+        "low": sum(1 for f in findings if str(f.get("severity")).lower() == "low"),
+    }
+
+
 def _normalize_verdict(obj):
     """Best-effort rescue of a NEAR-MISS verdict: the reviewer ran a correct
     review but spelled the contract keys its own way (kimi models improvise
@@ -2220,13 +2232,7 @@ def _normalize_verdict(obj):
     shaped["findings"] = findings
     shaped.setdefault("status", "success")
     shaped.setdefault("verdict", compute_verdict(shaped))
-    shaped.setdefault("summary", {
-        "files_reviewed": len({f.get("path") for f in findings if f.get("path")}),
-        "findings": len(findings),
-        "high": sum(1 for f in findings if str(f.get("severity")).lower() == "high"),
-        "medium": sum(1 for f in findings if str(f.get("severity")).lower() == "medium"),
-        "low": sum(1 for f in findings if str(f.get("severity")).lower() == "low"),
-    })
+    shaped.setdefault("summary", _findings_summary(findings))
     return shaped
 
 
@@ -2397,13 +2403,7 @@ def _rescue_verdict(obj):
         # downgrade applies on top of compute_verdict (the honor-at-recompute
         # rule in _final_verdict keeps it from being silently recomputed away).
         shaped["verdict"] = "warn"
-    shaped.setdefault("summary", {
-        "files_reviewed": len({f.get("path") for f in findings if f.get("path")}),
-        "findings": len(findings),
-        "high": sum(1 for f in findings if str(f.get("severity")).lower() == "high"),
-        "medium": sum(1 for f in findings if str(f.get("severity")).lower() == "medium"),
-        "low": sum(1 for f in findings if str(f.get("severity")).lower() == "low"),
-    })
+    shaped.setdefault("summary", _findings_summary(findings))
     _metric_log("verdict_rescued", kind=kind)
     return shaped
 
@@ -6087,16 +6087,9 @@ def _run_budget_secs(chunks_total, slots, flat=None):
     no prior chunk telemetry the per-chunk estimate is OCR_TIMEOUT-derived
     (one slot-wave's worth), so a first or small push budgets OCR_TIMEOUT --
     the flat behaviour this replaces. Budget exhaustion stays resumable, never
-    an attempt. An explicit OCR_RUN_BUDGET keeps its flat meaning and
-    overrides the computation: a `flat` budget that differs from the default
-    (an explicit OCR_RUN_BUDGET, or a _RUN_BUDGET overridden after import)
-    wins over the computed one."""
-    explicit = os.environ.get("OCR_RUN_BUDGET", "").strip()
-    if explicit:
-        try:
-            return max(1, int(explicit))
-        except ValueError:
-            pass
+    an attempt. The caller's flat budget (the module-level _RUN_BUDGET, which
+    already honours an explicit OCR_RUN_BUDGET) overrides the computation
+    whenever it differs from the default."""
     if flat is not None and flat != _RUN_BUDGET_DEFAULT:
         return flat
     total = max(1, int(chunks_total or 1))
@@ -6820,19 +6813,11 @@ def _merge_chunk_results(chunk_results, planner_warnings=None):
     worst_status = ["success", "completed_with_warnings", "completed_with_errors"][
         worst_status_rank
     ]
-    high = sum(1 for f in merged if f.get("severity") == "high")
-    medium = sum(1 for f in merged if f.get("severity") == "medium")
-    low = sum(1 for f in merged if f.get("severity") == "low")
-    files_reviewed = len({f.get("path") for f in merged if f.get("path")})
     out = {
         "status": worst_status,
         "findings": merged,
         "warnings": all_warnings,
-        "summary": {
-            "files_reviewed": files_reviewed,
-            "findings": len(merged),
-            "high": high, "medium": medium, "low": low,
-        },
+        "summary": _findings_summary(merged),
     }
     if cross_symbols:
         out["cross_file_context_summary"] = {"symbols": cross_symbols}
@@ -8083,7 +8068,6 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
     else:
         chunks = _plan_to_chunks(active_items, timeout_marks)
     total = len(chunks)
-    run_budget, budget_end = _RUN_BUDGET, time.monotonic() + _RUN_BUDGET
     results_by_k = {}
     progress_n = {"done": 0, "new": 0, "secs": 0.0}
 
