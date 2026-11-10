@@ -149,11 +149,19 @@ def _ast_defs(text: str, path: str) -> List[Dict]:
     lines = text.splitlines()
 
     def _sig(node):
-        # First physical line of the definition
+        # Full definition header: from the def/class line through the line
+        # before the first body statement, so a wrapped multi-line
+        # signature compares in full (an added optional parameter often
+        # lands on a continuation line while line 1 stays identical).
         lineno = node.lineno - 1  # 0-based
-        if 0 <= lineno < len(lines):
-            return lines[lineno]
-        return ""
+        if not (0 <= lineno < len(lines)):
+            return ""
+        body = getattr(node, "body", None)
+        if body and isinstance(body[0], ast.stmt):
+            end = body[0].lineno - 1  # exclusive, 0-based
+            if end > lineno:
+                return "\n".join(lines[lineno:end])
+        return lines[lineno]
 
     defs = []
 
@@ -1079,13 +1087,17 @@ def build_bundle(
     include_paths: Optional[Set] = None,
     exclude_paths: Tuple = (),
     max_symbols: int = 30,
-    per_symbol: int = 5,
-    max_sites: int = 40,
+    per_symbol: int = 12,
+    max_sites: int = 100,
     max_bytes: int = 12000,
     context: int = 6,
     line_cap: int = 200,
 ) -> Dict:
     """Assemble a compact, byte-capped bundle for reviewer context.
+
+    ``per_symbol`` (default 12) must cover a shared helper's whole caller set
+    (an 11-caller helper strands callers at 10); ``max_sites`` (default 100)
+    leaves room for several fully covered symbols per chunk.
 
     Returns {"symbols": [...], "sites": [...], "dropped_symbols": [...],
              "truncated": bool, "counts": {...}}.

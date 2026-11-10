@@ -1040,3 +1040,206 @@ class TestSameNamedSymbols:
         assert via[("use_b.py", 2)] == ["pkg/b.py"]
         # Neither defining file is reported as a caller of the other's `run`.
         assert not {"pkg/a.py", "pkg/b.py"} & {s["path"] for s in out["sites"]}
+
+
+# ===========================================================================
+# Optional-param signature classification (t02 characterization)
+# ===========================================================================
+
+class TestOptionalParamClassification:
+    """Adding an *optional* parameter to an existing def changes the contract,
+    so it must classify as "signature" (caller-collecting) whether the def
+    header is written on one line or wrapped across several."""
+
+    def _change_of(self, old, new, name="shared_helper"):
+        r = oi.changed_symbols("pkg/utils.py", old, new)
+        sym = next((s for s in r["symbols"] if s["name"] == name), None)
+        assert sym is not None, f"symbol {name} not found in {r['symbols']}"
+        return sym["change"]
+
+    def test_single_line_def_optional_param_is_signature(self):
+        old = "def shared_helper(x):\n    return x\n"
+        new = "def shared_helper(x, strict=False):\n    return x\n"
+        assert self._change_of(old, new) == "signature"
+
+    def test_multiline_def_optional_param_is_signature(self):
+        # New param lands on a CONTINUATION line; the first physical def line
+        # is unchanged, but the full signature still changed.
+        old = "def shared_helper(\n    x,\n):\n    return x\n"
+        new = "def shared_helper(\n    x,\n    strict=False,\n):\n    return x\n"
+        assert self._change_of(old, new) == "signature"
+
+    def test_multiline_def_body_only_change_stays_body(self):
+        old = "def shared_helper(\n    x,\n):\n    return x\n"
+        new = "def shared_helper(\n    x,\n):\n    return str(x)\n"
+        assert self._change_of(old, new) == "body"
+
+    def test_multiline_method_optional_param_is_signature(self):
+        old = (
+            "class C:\n"
+            "    def render(\n"
+            "        self,\n"
+            "        theme,\n"
+            "    ):\n"
+            "        return theme\n"
+        )
+        new = (
+            "class C:\n"
+            "    def render(\n"
+            "        self,\n"
+            "        theme,\n"
+            "        dark=False,\n"
+            "    ):\n"
+            "        return theme\n"
+        )
+        assert self._change_of(old, new, name="render") == "signature"
+
+
+# ===========================================================================
+# Bundle capacity: shared helpers with many callers (t02)
+# ===========================================================================
+
+class TestBuildBundleCaps:
+    """Default caps must collect all callers of a shared helper: an 11-caller
+    helper needs per_symbol >= 11 with headroom (>= 12), and max_sites must
+    stay coherent when several symbols each bring their full caller set."""
+
+    def _sym(self, name, defined_in="pkg/utils.py"):
+        return {
+            "name": name, "qualname": name, "kind": "function",
+            "change": "signature", "defined_in": defined_in,
+            "line": 1, "old_signature": "", "new_signature": "",
+            "renamed_to": "", "lines_changed": 1,
+        }
+
+    def _sites(self, name, specs):
+        # specs: list of (path, line) call-site locations.
+        return [{"id": f"{name}_{i}", "path": p, "line": ln, "name": name,
+                 "tier": 1, "text": f"result = {name}()"}
+                for i, (p, ln) in enumerate(specs)]
+
+    def _repo_with(self, tmp_path, files):
+        cwd = _init_repo(tmp_path)
+        tip = _commit(cwd, files)
+        return oi.git_runner(cwd), tip
+
+    def test_default_per_symbol_collects_twelve_callers(self, tmp_path):
+        # 12 callers in 12 distinct files: one per-file slot each, so the
+        # binding constraint is per_symbol, which must be >= 12.
+        files = {f"callers/c{i}.py": "result = helper()\n" for i in range(12)}
+        run, tip = self._repo_with(tmp_path, files)
+        specs = [(f"callers/c{i}.py", 1) for i in range(12)]
+        result = oi.build_bundle(run, tip, [self._sym("helper")],
+                                 self._sites("helper", specs), {"helper": 12})
+        got = {(s["path"], s["line"]) for s in result["sites"]}
+        assert got == set(specs), f"expected 12 caller sites, got {len(got)}"
+
+    def test_two_per_file_cap_keeps_snippet_diversity(self, tmp_path):
+        # Characterization of the deliberate per-(symbol, file) cap: 3 caller
+        # lines in ONE file still yield at most 2 sites, so the bundle shows
+        # diverse files rather than every line of one caller.
+        run, tip = self._repo_with(tmp_path, {
+            "one_caller.py": "a = helper()\nb = helper()\nc = helper()\n",
+        })
+        specs = [("one_caller.py", 1), ("one_caller.py", 2), ("one_caller.py", 3)]
+        result = oi.build_bundle(run, tip, [self._sym("helper")],
+                                 self._sites("helper", specs), {"helper": 3})
+        assert len(result["sites"]) == 2
+
+    def test_default_max_sites_fits_several_fully_covered_symbols(self, tmp_path):
+        # 4 symbols x 12 callers in distinct files = 48 sites; the default
+        # max_sites must not strand any of them (it must exceed one full
+        # per-symbol budget by a sane multiple).
+        names = [f"fn{i}" for i in range(4)]
+        files = {}
+        syms = []
+        all_sites = []
+        ref_counts = {}
+        for s_i, name in enumerate(names):
+            files[f"pkg/{name}.py"] = f"def {name}():\n    pass\n"
+            syms.append(self._sym(name, defined_in=f"pkg/{name}.py"))
+            specs = []
+            for i in range(12):
+                path = f"callers/{name}_c{i}.py"
+                files[path] = f"result = {name}()\n"
+                specs.append((path, 1))
+            all_sites += self._sites(name, specs)
+            ref_counts[name] = 12
+        run, tip = self._repo_with(tmp_path, files)
+        result = oi.build_bundle(run, tip, syms, all_sites, ref_counts)
+        assert result["counts"]["sites_included"] == 48, \
+            f"expected 48 sites, got {result['counts']['sites_included']}"
+
+
+# ===========================================================================
+# t02 acceptance: optional param on a shared helper, 11 callers in 8 spec files
+# ===========================================================================
+
+class TestElevenCallersAcceptance:
+    """End-to-end over the ocr_impact pipeline: adding an optional parameter
+    to a multi-line-wrapped helper def must classify as "signature" and the
+    default caps must collect every one of its 11 spec-file caller lines."""
+
+    _HELPER_OLD = (
+        "def helper(\n"
+        "    x,\n"
+        "):\n"
+        "    return x\n"
+    )
+    _HELPER_NEW = (
+        "def helper(\n"
+        "    x,\n"
+        "    strict=False,\n"
+        "):\n"
+        "    return x if x is not None else (0 if strict else None)\n"
+    )
+
+    def _caller_file(self, tag, n_calls):
+        lines = ["import pkg.utils", ""]
+        for i in range(1, n_calls + 1):
+            lines += [
+                f"def test_{tag}_{i}():",
+                f"    assert pkg.utils.helper({i}) == {i}",
+                "",
+            ]
+        return "\n".join(lines)
+
+    def test_signature_change_collects_all_eleven_callers(self, tmp_path):
+        cwd = _init_repo(tmp_path)
+        files = {
+            "pkg/__init__.py": "",
+            "pkg/utils.py": self._HELPER_NEW,
+        }
+        # 11 caller lines over 8 spec files: 3 files x 2 calls + 5 files x 1.
+        expected_sites = set()
+        for idx in range(8):
+            tag = chr(ord("a") + idx)
+            n_calls = 2 if idx < 3 else 1
+            path = f"tests/test_{tag}.py"
+            files[path] = self._caller_file(tag, n_calls)
+            for ln, text in enumerate(files[path].splitlines(), start=1):
+                if "helper(" in text:
+                    expected_sites.add((path, ln))
+        assert len(expected_sites) == 11  # guard the fixture itself
+        tip = _commit(cwd, files)
+        run = oi.git_runner(cwd)
+
+        # 1. The signature change classification
+        got = oi.changed_symbols("pkg/utils.py", self._HELPER_OLD, self._HELPER_NEW)
+        helper = next((s for s in got["symbols"] if s["name"] == "helper"), None)
+        assert helper is not None
+        assert helper["change"] == "signature", \
+            "multi-line wrapped def with new optional param must be 'signature'"
+
+        # 2. Reference search with the production wiring (review filter +
+        #    context filter), then bundling under DEFAULT caps.
+        refs = oi.find_references(run, tip, got["symbols"],
+                                  is_allowed=_review_filter,
+                                  is_context_allowed=_context_filter)
+        bundle = oi.build_bundle(run, tip, got["symbols"], refs["sites"],
+                                 refs["ref_counts"])
+
+        caller_sites = {(s["path"], s["line"]) for s in bundle["sites"]
+                        if s["path"].startswith("tests/")}
+        assert caller_sites == expected_sites, \
+            f"missing callers: {sorted(expected_sites - caller_sites)}"
