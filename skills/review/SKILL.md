@@ -142,6 +142,14 @@ manifest JSON. The manifest fields are:
 - `tier1_model` — (v2, review manifests only) the model to spawn the §3
   code-reviewer subagent(s) with, pinned for the same reason: the allowlist
   cannot read `OCR_TIER1_MODEL`.
+- `deep_review` — (v2 t10, review manifests only) present and `true` when
+  the gate's risk gate escalated this push to the tier-2 slow lane: meet §3's
+  escalation rule with it. `deep_reasons` (list of strings, one per matched
+  risk glob) tells the deep-reviewer why the push is here.
+- `tier2_model` — (v2 t10) the model to spawn the §3 deep-reviewer subagent
+  with when the escalation rule fires; the allowlist cannot read
+  `OCR_TIER2_MODEL`. Also present on deep manifests is `risk_threshold`, the
+  score bar the gate session applies for mid-session escalation (below).
 
 Use `--range` (from the command line) as the revision range.
 
@@ -551,7 +559,9 @@ same way.
 
 **Step 4 — Pass on:** valid demands go verbatim into §3's reviewer prompt as
 the `demands` field, fenced and labelled as untrusted data exactly like
-`impact_sites`.
+`impact_sites`. Their `risk` block also feeds §3's escalation rule: a
+`risk.score` at or above the configured threshold moves the whole pass into
+the deep lane (§3, "Escalation to the deep pass").
 
 ## 2d. Evidence bundle (deterministic collectors)
 
@@ -623,6 +633,25 @@ precomputed `file` is never re-fetched, re-truncated or retyped:
   `diff_truncated: true`. **Never fully omit a file's entry.** A degraded entry is still
   an entry — the reviewer knows the file changed, sees hunk locations, and can Read it
   (see reviewer instructions for `diff_truncated` handling).
+
+**Escalation to the deep pass (v2 t10):** this push reviews in the **deep
+lane** when `manifest.deep_review` is `true` — the gate's deterministic risk
+globs already decided it before any review started — OR when §2c's valid
+demands carry `risk.score` at or above the threshold (`manifest.risk_threshold`
+when pinned there, otherwise `risk_threshold` in the project
+`.ocr/rule.json`, default **7**). Escalation only ever **raises** the tier —
+a low spotter score NEVER downgrades a `deep_review: true` manifest back to
+the fast lane. In the deep lane, spawn **one `deep-reviewer` subagent
+INSTEAD of the `code-reviewer`** below (model `manifest.tier2_model`,
+otherwise `OCR_TIER2_MODEL`, default `kimi-k3`), with the same prompt
+fields as below plus the manifest's `deep_reasons` — *instead-of* because
+the deep-reviewer is a strict superset of the tier-1 reviewer (same inputs,
+same output contract, plus repo-browsing time), so an additional
+`code-reviewer` pass would only duplicate cost. Everything downstream is
+**unchanged**: the deep-reviewer's findings go through §3a's hallucination
+check and §3b's falsify filter exactly like tier-1 findings, and the same
+`compute_verdict` bar (high severity ∧ confidence ≥ 0.7) decides the block
+— the deep lane swaps the reviewer, never the verdict authority.
 
 **Model (v2) — tier-1 reviewer:** spawn the reviewer with
 `manifest.tier1_model` when a manifest was given; otherwise the environment

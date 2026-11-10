@@ -43,6 +43,7 @@
 #
 # The orchestrated review methodology this drives is adapted from open-code-review
 # (ocr): https://github.com/alibaba/open-code-review (Apache-2.0). See NOTICE.
+import fnmatch
 import hashlib
 import json
 import os
@@ -115,6 +116,19 @@ def _read_tier1_model():
 
 _TIER1_MODEL = _read_tier1_model()
 
+
+def _read_tier2_model():
+    """Model for the tier-2 (slow-lane) deep-reviewer subagent
+    (agents/deep-reviewer.md), spawned by the review skill's step 3 ONLY for
+    pushes the risk gate (t10) escalated. Same default as the tier-1
+    reviewer: the flagship open model positioned for correctness-critical
+    review -- OCR_TIER2_MODEL lets a project spend more (or less) on the
+    ~one-in-seven escalated pushes independently of the fast lane."""
+    return os.environ.get("OCR_TIER2_MODEL", "kimi-k3").strip() or "kimi-k3"
+
+
+_TIER2_MODEL = _read_tier2_model()
+
 # Provider guard (spec "Models"; story 18). The account's subscription terms
 # forbid routing the gate's automated review traffic to Anthropic or OpenAI
 # models (account-lock grounds), so the review models below are vetted after
@@ -127,6 +141,7 @@ _BLOCKED_PROVIDERS = ("anthropic", "openai")
 _GUARDED_MODEL_VARS = (
     ("OCR_TIER1_MODEL", lambda: _read_tier1_model()),
     ("OCR_SPOTTER_MODEL", lambda: _read_spotter_model()),
+    ("OCR_TIER2_MODEL", lambda: _read_tier2_model()),
 )
 
 # First-token families, lowercased. Anthropic ids are `claude-*` plus the
@@ -340,6 +355,21 @@ try:
     _MAX_FILES = max(1, _MAX_FILES)
 except ValueError:
     _MAX_FILES = 40
+
+
+def _read_deep_timeout():
+    """Wall-clock budget (seconds) for one tier-2 deep-review run (t10).
+    The deep lane exists to let a strong model browse the repo for minutes,
+    so it gets its own budget, longer than a chunk's but bounded: past it
+    the supervisor kills the reviewer and records a normal timeout failure
+    for the retry to pick up. Default 10 minutes per the v2 spec."""
+    try:
+        return max(60, int(os.environ.get("OCR_DEEP_TIMEOUT", "600")))
+    except ValueError:
+        return 600
+
+
+_DEEP_TIMEOUT = _read_deep_timeout()
 # --- review ledger (0.8.0) ---------------------------------------------------
 LEDGER_DIR = "review-gate-ledger"
 # 30 days: a branch picked up again after a week or two keeps its review
@@ -379,16 +409,18 @@ _COST_RULE_RATIO = 1.5
 # how the reviewer runs, not what it is asked to find.
 _FINGERPRINT_ENV_VARS = (
     "OCR_MODEL", "OCR_BLOCK_SEVERITY", "OCR_BLOCK_CONFIDENCE",
-    "OCR_SPOTTER_MODEL", "OCR_TIER1_MODEL",
+    "OCR_SPOTTER_MODEL", "OCR_TIER1_MODEL", "OCR_TIER2_MODEL",
 )
 # Agents whose prompts decide which findings exist. The resolver only judges
 # whether a known finding was fixed, so editing it keeps the ledger. The
 # spotter prompt steers the reviewer's context input, which steers findings in
-# the same direction, so it is fingerprinted too.
-_FINGERPRINT_AGENTS = ("code-reviewer.md", "code-filter.md", "context-spotter.md")
+# the same direction, so it is fingerprinted too. So is the deep-reviewer: an
+# escalated push's findings could depend on its prompt.
+_FINGERPRINT_AGENTS = ("code-reviewer.md", "code-filter.md", "context-spotter.md",
+                       "deep-reviewer.md")
 # -----------------------------------------------------------------------------
 
-PROTOCOL_VERSION = 1   # bumped whenever state-file semantics change
+PROTOCOL_VERSION = 2   # bumped whenever state-file semantics change (2: tier/deep_reasons, t10)
 
 _EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 # git exports these to its own hooks (pre-push runs with GIT_DIR set, among
@@ -3104,6 +3136,112 @@ def _spawn_supervisor(state_path, run_id, repo_root):
         return subprocess.Popen(cmd, start_new_session=True, **kw).pid
 
 
+# --- risk gate (t10): which lane this push reviews in --------------------
+# Deterministic escalation only: git paths, config and fnmatch -- no model
+# call ever happens at this layer. The spotter's risk score is the second
+# escalation trigger, but the spotter runs INSIDE the review session, so the
+# skill (skills/review/SKILL.md §3) applies it mid-run against the pinned
+# risk_threshold. Both triggers may raise the tier fast -> deep; neither may
+# ever lower it.
+_DEFAULT_RISK_GLOBS = (
+    # Migrations: a bad one corrupts production state irreversibly.
+    "**/migrations/**", "**/migrate*.py", "**/alembic/**",
+    # Identity, sessions and permissions.
+    "**/auth/**", "**/auth/*.py", "**/oauth*", "**/session*.py", "**/permission*",
+    # Money movement.
+    "**/payments/**", "**/payment*.py", "**/billing/**", "**/checkout/**",
+    # Concurrency: races and lock coupling.
+    "**/concurrency/**", "**/locks*.py", "**/*_lock.py",
+    # Public API surface: consumers compile against it.
+    "**/api/**", "**/public_api*",
+)
+
+
+def _risk_glob_match(path, glob):
+    """fnmatch of a repo-relative path against one risk glob. fnmatch's `*`
+    spans separators; a leading `**/` is made optional so the glob also
+    matches at the repo root (`auth/login.py` matches `**/auth/**`)."""
+    path = (path or "").strip("/")
+    glob = (glob or "").strip()
+    if not path or not glob:
+        return False
+    if fnmatch.fnmatchcase(path, glob):
+        return True
+    if glob.startswith("**/") and fnmatch.fnmatchcase(path, glob[3:]):
+        return True
+    return False
+
+
+def _risk_config(repo_root):
+    """(risk_globs, risk_threshold) from <repo_root>/.ocr/rule.json, fail-soft
+    to the defaults: the starter set above and a spotter-score threshold of 7.
+    `risk_globs` EXTENDS the starter set; `risk_threshold` (0..10) overrides
+    the default the skill escalates the spotter's score against. A malformed
+    or unreadable file changes nothing (never raises)."""
+    globs, threshold = list(_DEFAULT_RISK_GLOBS), 7
+    try:
+        rule = Path(repo_root) / ".ocr" / "rule.json" if repo_root else None
+        data = json.loads(rule.read_text(encoding="utf-8")) if rule and rule.is_file() else None
+        if isinstance(data, dict):
+            extra = data.get("risk_globs")
+            if isinstance(extra, list):
+                globs += [g.strip() for g in extra
+                          if isinstance(g, str) and g.strip()]
+            t = data.get("risk_threshold")
+            if isinstance(t, (int, float)) and not isinstance(t, bool):
+                threshold = max(0, min(10, int(t)))
+    except Exception:
+        pass
+    return globs, threshold
+
+
+def _push_paths(meta):
+    """Changed path list for the push meta describes -- [] when git cannot
+    say (the caller then escalates nothing)."""
+    repo_root = meta.get("repo_root") or ""
+    tip = meta.get("tip") or ""
+    base = meta.get("base") or _EMPTY_TREE
+    rng = meta.get("range") or (base + ".." + tip if tip else "")
+    if not repo_root or not rng:
+        return []
+    out, rc = _git(["diff", "--name-only", rng], cwd=repo_root)
+    if rc != 0 and rng != base + ".." + tip:
+        out, rc = _git(["diff", "--name-only", base + ".." + tip], cwd=repo_root)
+    if rc != 0:
+        return []
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
+def _deep_escalation(meta):
+    """(True, reasons) iff this push warrants the tier-2 slow lane.
+
+    Gate-side evaluation, run by _drive_review BEFORE any state is claimed so
+    the whole deny-first-push / retry-join machine covers the deep pass
+    exactly like a slow fast-lane review. Deterministic trigger: any
+    review-admitted changed path hitting a risk glob. The spotter risk-score
+    trigger happens inside the review session (it owns the spotter); this
+    side only ever RAISES fast to deep.
+
+    Fail-soft: git/config trouble means NO escalation -- a classifier failure
+    degrades the pipeline to the fast lane, it never stalls it (spec story 27
+    discipline).
+    """
+    try:
+        globs, _threshold = _risk_config(meta.get("repo_root") or "")
+        reasons = []
+        for path in _push_paths(meta):
+            if not _is_allowed_path(path):
+                # Only review content can escalate: a risky-glob match on an
+                # excluded file (a test, a lockfile) reviews nothing.
+                continue
+            hit = next((g for g in globs if _risk_glob_match(path, g)), None)
+            if hit:
+                reasons.append(f"{path} (risk glob `{hit}`)")
+        return bool(reasons), reasons
+    except Exception:
+        return False, []
+
+
 def _drive_review(common_dir, repo_root, meta, mode, budget):
     """Get a verdict for meta["tip"], starting a review if none is under way.
 
@@ -3112,6 +3250,17 @@ def _drive_review(common_dir, repo_root, meta, mode, budget):
     a review problem -- those become "failed" states with a reason.
     """
     tip = meta["tip"]
+    # Risk gate (t10): the lane decision happens HERE, before any claim, so
+    # the claimed state carries it and a retry push joins the deep pass's
+    # recorded verdict exactly like a slow fast-lane review. Escalation
+    # raises the tier fast -> deep and never lowers it; the deep budget lives
+    # with the supervisor, the inline `budget` here is unaffected.
+    if "tier" not in meta:
+        meta = dict(meta)
+        deep, reasons = _deep_escalation(meta)
+        meta["tier"] = "deep" if deep else "fast"
+        if reasons:
+            meta["deep_reasons"] = reasons
     state_path = _state_path(common_dir, tip, meta.get("base") or "")
     force = os.environ.get("OCR_FORCE_REVIEW", "").strip().lower() in ("1", "true", "yes")
     deadline = _HOOK_T0 + budget
@@ -3278,10 +3427,14 @@ def _supervise_run(state_path, run_id):
     push_ref = st.get("push_ref") or ""
     git_dir = st.get("git_dir") or _git_dir(repo_root)
     mode = st.get("mode") or "hook"
+    tier = st.get("tier") or "fast"   # lane recorded at claim time (t10)
     common_dir = common_dir_of(state_path)
     now = time.time()
+    # The deep pass's own wall-clock budget replaces the reviewer timeout:
+    # browsing past OCR_DEEP_TIMEOUT is a normal timeout failure, retried.
+    run_timeout = _DEEP_TIMEOUT if tier == "deep" else TIMEOUT
     st.update({"state": "running", "supervisor_pid": os.getpid(), "started_ts": now,
-               "heartbeat_ts": now, "deadline_ts": now + TIMEOUT})
+               "heartbeat_ts": now, "deadline_ts": now + run_timeout})
     try:
         _write_state(state_path, st)
     except Exception:
@@ -3341,11 +3494,20 @@ def _supervise_run(state_path, run_id):
             )
         _mark_phase("worktree", ok=bool(worktree))
 
+        _TELE["tier"] = tier
         force_review = os.environ.get("OCR_FORCE_REVIEW", "").strip().lower() in ("1", "true", "yes")
         fp = _compute_fingerprint(review_root, tip)
         _TELE.update(fp=fp, fp_parts=_fingerprint_parts(review_root, tip))
         _prune_ledger(common_dir)
-        plan, planner_warnings = _plan_review(review_root, base, tip, common_dir, fp, push_ref=push_ref)
+        # The deep lane (t10) skips the planner, chunking, segmentation and
+        # the ledger wholesale: ONE deep-reviewer pass interrogates the whole
+        # push, and fast-lane records must never replay in place of it (nor
+        # does a deep pass write fast-lane records). Its findings flow into
+        # the same falsify filter + compute_verdict verdict below -- the
+        # blocking bar is identical (ADR 0001: no new verdict authority).
+        plan, planner_warnings = (
+            (None, []) if tier == "deep"
+            else _plan_review(review_root, base, tip, common_dir, fp, push_ref=push_ref))
         _TELE["plan"] = [
             {"path": p["entry"]["path"], "mode": p["mode"],
              "miss_reason": p.get("miss_reason") or "",
@@ -3356,10 +3518,31 @@ def _supervise_run(state_path, run_id):
         _mark_phase("plan", files=len(plan or []))
 
         if plan is None or plan == []:
-            # git diff failed OR no allowed files: fall back to single-context (0.7.0 path).
-            result, ran, raw_name = _run_review_with_retry(
-                lambda: _run_review(review_root, mode, git_dir, tip, push_range)
-            )
+            # git diff failed OR no allowed files: fall back to single-context
+            # (0.7.0 path) -- or, in the deep lane, THE pass.
+            if tier == "deep":
+                deep_paths = [p for p in _push_paths({"repo_root": review_root, "tip": tip,
+                                                      "base": base, "range": push_range})
+                              if _is_allowed_path(p)]
+                _globs, deep_threshold = _risk_config(review_root)
+                manifest = _build_deep_manifest(deep_paths, st.get("deep_reasons") or [],
+                                                deep_threshold)
+                manifest_path = str(_async_dir(common_dir) / f"manifest-{run_id}-deep.json")
+                _write_manifest_file(manifest_path, manifest, "deep-review manifest")
+                try:
+                    result, ran, raw_name = _run_review_with_retry(
+                        lambda: _run_review(review_root, mode, git_dir, tip, push_range,
+                                            paths_file=manifest_path, timeout=_DEEP_TIMEOUT)
+                    )
+                finally:
+                    try:
+                        Path(manifest_path).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+            else:
+                result, ran, raw_name = _run_review_with_retry(
+                    lambda: _run_review(review_root, mode, git_dir, tip, push_range)
+                )
             chunks_new = 1 if ran else 0
             _mark_phase("review", chunks=chunks_new)
             if planner_warnings and isinstance(result, dict):
@@ -6044,6 +6227,31 @@ def _context_only(item):
     """A virtual item (Part S) whose work is caller checks alone."""
     return item.get("seg_file") is not None and not any(
         a["kind"] in ("unit", "filediff") for a in item["seg_work"])
+
+
+def _build_deep_manifest(paths, reasons, threshold):
+    """The tier-2 (t10) reviewer's manifest: ONE deep pass over the whole
+    push, no items[] (the deep reviewer reads diffs and repo state itself,
+    via the skill), no ledger carries. `deep_review` is what the skill's
+    escalation rule keys on to spawn agents/deep-reviewer.md instead of the
+    tier-1 reviewer; `spotter_model` stays because the session still runs
+    §2c/§2d to seed demands for the deep reviewer; `tier2_model` is pinned
+    because the headless session's allowlist cannot read OCR_TIER2_MODEL.
+    `risk_threshold` pins the score bar the session applied when claiming
+    this run (and would apply had it not already been escalated)."""
+    return {
+        "paths": list(paths),
+        "renames": [],
+        "other_changed": [],
+        "files": [{"path": p, "mode": "full", "from_oid": "", "to_oid": ""}
+                  for p in paths],
+        "carried": [],
+        "deep_review": True,
+        "deep_reasons": list(reasons or []),
+        "risk_threshold": threshold,
+        "spotter_model": _SPOTTER_MODEL,
+        "tier2_model": _TIER2_MODEL,
+    }
 
 
 def _build_review_manifest(common_dir, run_id, k, total, chunk_items, other_changed,
