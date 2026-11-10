@@ -336,6 +336,95 @@ def test_sh_adapter_gates_a_push_from_a_linked_worktree_of_a_husky_repo(tmp_path
     assert "review-gate" in reason
 
 
+def _installer_gated_husky_repo(tmp_path, name="repo"):
+    """The exact 2026-11-10 repository shape, laid out the way the INSTALLER
+    leaves a husky repo: the husky shim that was at .husky/_/pre-push is
+    preserved as .husky/_/pre-push.user and the installer-written gate
+    (hooks/git/pre-push, SCR_DIR stamped) now occupies .husky/_/pre-push,
+    chaining into pre-push.user -- which is the husky shim that sources ./h
+    and runs .husky/pre-push. The gate is therefore reachable only as
+    gate -> husky shim -> h -> user hook, from core.hooksPath=.husky/_."""
+    repo = _mkcommitted_repo(tmp_path, name)
+    shim = repo / ".husky" / "_"
+    shim.mkdir(parents=True)
+    template = (os.path.join(os.path.dirname(_SCRIPTS), "hooks", "git", "pre-push"))
+    stamped = open(template, encoding="utf-8").read()
+    stamped = stamped.replace("__SCR_DIR__", _SCRIPTS).replace("__SCR_VERSION__", "test")
+    (shim / "pre-push").write_text(stamped)
+    os.chmod(str(shim / "pre-push"), 0o755)
+    (shim / "pre-push.user").write_text('#!/usr/bin/env sh\n. "$(dirname "$0")/h"\n')
+    os.chmod(str(shim / "pre-push.user"), 0o755)
+    (shim / "h").write_text(_HUSKY_H)
+    # The user's own hook behind the whole chain: some foreign tool, never
+    # the gate (the installer did not touch it).
+    (repo / ".husky" / "pre-push").write_text("#!/bin/sh\nnpx lint-staged\n")
+    subprocess.run(["git", "config", "core.hooksPath", ".husky/_"],
+                   cwd=str(repo), check=True)
+    subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "installer chain"], cwd=str(repo), check=True)
+    return repo
+
+
+@needs_bash
+def test_sh_adapter_gates_a_push_from_a_linked_worktree_of_the_2026_11_10_installer_shape(tmp_path):
+    # THE blind spot, locked shut: a linked worktree of a husky repo where
+    # the gate was installed BY THE INSTALLER -- .husky/_/pre-push is the
+    # gate's own pre-push (stamped with SCR_DIR), the husky shim it displaced
+    # lives on as pre-push.user and chains back through h to .husky/pre-push.
+    # The desktop bash hook is fed a payload whose cwd is the linked worktree
+    # (its gitdir is .git/worktrees/<name>, so the old <gitdir>/hooks check
+    # went inert here). The guard must resolve hooks the way git does, see a
+    # gated repository, and hand the push to review-gate.py -- which starts a
+    # review and answers with the review-start block.
+    repo = _installer_gated_husky_repo(tmp_path)
+    wt = _add_worktree(repo, tmp_path)
+    proc = _push_from(wt)
+    assert proc.returncode == 0, proc.stderr
+    decision, reason = parse_pretooluse(proc.stdout)
+    assert decision == "deny", (proc.stdout, proc.stderr)
+    assert "review-gate" in reason
+    # The review-start shape (the decision a first push gets): the gate names
+    # the hook-mode retry contract instead of waving the push through.
+    assert "re-run this exact `git push` command" in reason, reason
+    assert "was NOT executed" in reason, reason
+
+
+@needs_bash
+def test_sh_adapter_runs_the_stub_reviewer_from_a_linked_worktree_of_the_installer_shape(tmp_path):
+    # Same shape, but with the reviewer seam pointed at the stub: the gate
+    # review-gate.py the guard exec'd must actually run a review (the stub
+    # traces the call) and the decision must stay a block.
+    repo = _installer_gated_husky_repo(tmp_path)
+    wt = _add_worktree(repo, tmp_path)
+    trace = tmp_path / "stub.trace"
+    env = {
+        "OCR_REVIEWER_CMD": f'"{sys.executable}" "'
+                            f'{os.path.join(_ROOT, "tests", "stub_reviewer.py")}"',
+        "STUB_TRACE": str(trace),
+        "STUB_VERDICT": "block",
+        "OCR_INLINE_BUDGET": "30",
+    }
+    argv = [_BASH, _SH]
+    proc = subprocess.run(argv, input=_payload("git push origin main", cwd=str(wt)),
+                          capture_output=True, text=True, env=_env(**env), timeout=120)
+    assert proc.returncode == 0, proc.stderr
+    decision, reason = parse_pretooluse(proc.stdout)
+    assert decision == "deny", (proc.stdout, proc.stderr)
+    assert "review-gate" in reason
+    assert trace.is_file() and trace.read_text().strip(), \
+        "the gate exec'd from the worktree must run the reviewer"
+
+
+@needs_bash
+def test_sh_adapter_stays_inert_for_a_push_from_a_linked_worktree_of_an_un_gated_repo(tmp_path):
+    # The mirror case: a linked worktree of a repo that never installed the
+    # gate (no hooks at all) must stay a silent pass-through -- chain
+    # following must arm the guard only where a gate actually exists.
+    repo = _mkcommitted_repo(tmp_path)
+    wt = _add_worktree(repo, tmp_path)
+    _assert_passes(_push_from(wt))
+
+
 @needs_bash
 def test_sh_adapter_gates_when_the_entry_hook_chains_to_the_gate(tmp_path):
     # Chaining shape the installer itself produces (and the spec calls out):
