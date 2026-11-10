@@ -386,3 +386,25 @@ class TestReviewGateWiring:
         warnings = review_gate._refresh_index(root, set())
         assert len(warnings) == 1
         assert "disk exploded" in warnings[0]
+
+
+# ===========================================================================
+# Availability probe (used by the t05 collectors)
+# ===========================================================================
+
+class TestIsAvailable:
+    def test_false_when_index_not_built(self, tmp_path):
+        assert ocr_index.is_available(str(tmp_path)) is False
+
+    def test_true_after_build(self, tmp_path):
+        root = _fixture_repo(tmp_path)
+        ocr_index.ensure_built(root)
+        assert ocr_index.is_available(root) is True
+
+    def test_false_on_corrupt_index(self, tmp_path):
+        root = _fixture_repo(tmp_path)
+        ocr_index.ensure_built(root)
+        path = os.path.join(root, ".ocr", "index", "index.json")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("{not json")
+        assert ocr_index.is_available(root) is False

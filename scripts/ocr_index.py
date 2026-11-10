@@ -523,8 +523,19 @@ def refresh(repo_root: str, changed_files, is_allowed: Callable[[str], bool] = N
 
 
 # ---------------------------------------------------------------------------
-# Public API — queries (read-only; never trigger a build)
+# Public API — availability probe + queries (read-only; never trigger a build)
 # ---------------------------------------------------------------------------
+
+def is_available(repo_root: str) -> bool:
+    """True when a version-matching index exists and parses (cheap probe).
+
+    Callers (the t05 collectors) use this to turn "no index" into explicit
+    ``unavailable`` evidence instead of silent empty query answers."""
+    try:
+        index, _ = _load_index(os.path.abspath(str(repo_root)))
+        return index is not None
+    except Exception:
+        return False
 
 def query_symbol_refs(repo_root: str, name: str) -> Dict:
     """Definitions and identifier-occurrence references for one symbol.
