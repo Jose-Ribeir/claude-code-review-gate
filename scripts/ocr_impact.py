@@ -855,23 +855,31 @@ def find_references(
     symbols: List[Dict],
     *,
     is_allowed: Optional[Callable] = None,
+    is_context_allowed: Optional[Callable] = None,
     max_sites: int = 500,
 ) -> Dict:
     """Find call sites for the given symbols in the repository at tip.
+
+    ``is_context_allowed`` filters the files searched for call sites. When
+    omitted it falls back to ``is_allowed``, so single-review-filter callers
+    behave exactly as before (back-compat).
 
     Returns {"sites": [...], "ref_counts": {name: int}, "warnings": [...]}.
     Never raises.
     """
     warnings = []
     try:
-        return _find_references_inner(run, tip, symbols, is_allowed=is_allowed,
+        if is_context_allowed is None:
+            is_context_allowed = is_allowed
+        return _find_references_inner(run, tip, symbols,
+                                      is_context_allowed=is_context_allowed,
                                       max_sites=max_sites, warnings=warnings)
     except Exception as exc:
         warnings.append(f"find_references: {exc}")
         return {"sites": [], "ref_counts": {}, "warnings": warnings}
 
 
-def _find_references_inner(run, tip, symbols, *, is_allowed, max_sites, warnings):
+def _find_references_inner(run, tip, symbols, *, is_context_allowed, max_sites, warnings):
     # Filter: only search symbols with these change types
     searchable_changes = {"removed", "renamed", "signature", "body", "module"}
     to_search = [s for s in symbols if s.get("change") in searchable_changes]
@@ -955,8 +963,8 @@ def _find_references_inner(run, tip, symbols, *, is_allowed, max_sites, warnings
 
         # Filter importer files
         importer_files = [p for p in raw_paths if p and p != def_file]
-        if is_allowed:
-            importer_files = [p for p in importer_files if is_allowed(p)]
+        if is_context_allowed:
+            importer_files = [p for p in importer_files if is_context_allowed(p)]
 
         if not importer_files:
             continue
@@ -980,7 +988,7 @@ def _find_references_inner(run, tip, symbols, *, is_allowed, max_sites, warnings
                         fpath, lineno, text = parsed
                         if fpath == def_file:
                             continue
-                        if is_allowed and not is_allowed(fpath):
+                        if is_context_allowed and not is_context_allowed(fpath):
                             continue
                         # Which name matched?
                         for nm in names:
@@ -1005,7 +1013,7 @@ def _find_references_inner(run, tip, symbols, *, is_allowed, max_sites, warnings
                 parsed = _parse_grep_line(line, tip)
                 if parsed:
                     fpath, lineno, text = parsed
-                    if is_allowed and not is_allowed(fpath):
+                    if is_context_allowed and not is_context_allowed(fpath):
                         continue
                     for nm in all_names:
                         if _uses_name(nm, text):
@@ -1337,23 +1345,31 @@ def find_siblings(
     *,
     push_paths: Set[str],
     is_allowed: Optional[Callable] = None,
+    is_context_allowed: Optional[Callable] = None,
     per_finding: int = 10,
 ) -> Dict:
     """Find files with the same code pattern as a given finding.
+
+    ``is_context_allowed`` filters the files searched for the pattern. When
+    omitted it falls back to ``is_allowed``, so single-review-filter callers
+    behave exactly as before (back-compat).
 
     Returns {"siblings": [...], "warnings": [...]}.  Never raises.
     """
     warnings = []
     try:
+        if is_context_allowed is None:
+            is_context_allowed = is_allowed
         return _find_siblings_inner(run, tip, finding, push_paths=push_paths,
-                                    is_allowed=is_allowed, per_finding=per_finding,
-                                    warnings=warnings)
+                                    is_context_allowed=is_context_allowed,
+                                    per_finding=per_finding, warnings=warnings)
     except Exception as exc:
         warnings.append(f"find_siblings: {exc}")
         return {"siblings": [], "warnings": warnings}
 
 
-def _find_siblings_inner(run, tip, finding, *, push_paths, is_allowed, per_finding, warnings):
+def _find_siblings_inner(run, tip, finding, *, push_paths, is_context_allowed,
+                         per_finding, warnings):
     existing_code = finding.get("existing_code", "") or ""
     sig = signature_line(existing_code)
     if not sig:
@@ -1387,7 +1403,7 @@ def _find_siblings_inner(run, tip, finding, *, push_paths, is_allowed, per_findi
             if (start_line - 3) <= lineno <= (end_line + 3):
                 continue
 
-        if is_allowed and not is_allowed(fpath):
+        if is_context_allowed and not is_context_allowed(fpath):
             continue
 
         sid = _sha1(f"{finding_id}:{fpath}:{lineno}")[:10]
