@@ -142,6 +142,9 @@ The gate assumes the commits being pushed are **untrusted input**:
   crashed review, a timeout, or unparseable reviewer output blocks the push.
   Three failed attempts put the tip in a sticky error state whose message
   points at the doctor command.
+- **Invariant: a push that lands without gate output means the gate was
+  absent — never infer a PASS from a landed push.** Silence is absence of
+  approval, not approval.
 - **The reviewer worker itself is sandboxed by a deny extension** (D13).
   Headless `-p` sessions ignore permission flags (verified on this build), so
   the worker loads `extensions/review-gate-deny.ts` via `-e` and runs with
