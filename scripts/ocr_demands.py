@@ -31,7 +31,10 @@ always exits 0: the demands contract can only *diminish* context, never block
 or crash the pipeline.
 """
 import json
+import os
 import sys
+
+import ocr_telemetry
 
 # The demand-list keys, in contract order. schemas/demands.schema.json is
 # GENERATED from this module (DEMANDS_SCHEMA below); do not edit it by hand.
@@ -232,6 +235,27 @@ def _schema():
 DEMANDS_SCHEMA = _schema()
 
 
+def _record_spotter_telemetry(text):
+    """The spotter tier's per-tier cost record (v2). The spotter subagent is
+    spawned inside the review session, so its output's mandatory passage
+    through this validator is the one deterministic seam that sees the call:
+    record what's known -- the configured model (mirrors review-gate.py's
+    OCR_SPOTTER_MODEL default) and a chars//4 estimate of the output bytes.
+    The call's duration never crosses this seam. Best-effort, never raises.
+    """
+    try:
+        common = ocr_telemetry.repo_common_dir(os.getcwd())
+        if not common:
+            return
+        model = (os.environ.get("OCR_SPOTTER_MODEL", "deepseek-v4-flash").strip()
+                 or "deepseek-v4-flash")
+        ocr_telemetry.record_tier_call(
+            common, ocr_telemetry.TIER_SPOTTER, model=model,
+            token_estimate=ocr_telemetry.estimate_tokens(len(text or "")))
+    except Exception:
+        pass
+
+
 def _main(argv=None):
     import argparse
     parser = argparse.ArgumentParser(
@@ -247,7 +271,9 @@ def _main(argv=None):
             with open(args.dump_schema, "w", encoding="utf-8") as fh:
                 fh.write(text)
         return 0
-    result = validate_demands(sys.stdin.read())
+    text = sys.stdin.read()
+    result = validate_demands(text)
+    _record_spotter_telemetry(text)
     json.dump(result, sys.stdout, ensure_ascii=False)
     sys.stdout.write("\n")
     return 0

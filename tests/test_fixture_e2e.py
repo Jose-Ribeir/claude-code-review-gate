@@ -24,8 +24,8 @@ _FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 for _p in (_SCRIPTS, _FIXTURES):
     sys.path.insert(0, _p)
 
-import glob
-import json
+import glob  # noqa: E402
+import json  # noqa: E402
 
 import builders  # noqa: E402
 
@@ -41,14 +41,16 @@ def _push_fixture(info, tmp_path):
 
 
 def _telemetry_records(info):
-    """The persisted run records of the fixture repo's gate log."""
+    """The persisted run records of the fixture repo's gate log. Tier-call
+    records (v2 per-tier cost events sharing the log) are not runs: they are
+    filtered out exactly like report() does."""
     common = builders.review_gate._git_common_dir(info["root"])
     records = []
     for path in sorted(glob.glob(os.path.join(common, "review-gate-telemetry",
                                               "*.jsonl"))):
         with open(path, encoding="utf-8") as fh:
             records += [json.loads(line) for line in fh if line.strip()]
-    return records
+    return [r for r in records if r.get("kind") != "tier_call"]
 
 
 class TestM1PushBuildsTheEventIndex:

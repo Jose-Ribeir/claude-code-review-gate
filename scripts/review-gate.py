@@ -94,12 +94,20 @@ _PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _MODEL = os.environ.get("OCR_MODEL", "sonnet").strip() or "sonnet"
 
 
+def _read_env_model(var, default):
+    """One env-configured review model (v2): ``os.environ[var]`` trimmed, or
+    the tier's default when unset or blank. Shared by the three tier readers
+    below; each keeps its own name (and docstring) because the tiers differ
+    in what the model is FOR, not in how it is read."""
+    return os.environ.get(var, default).strip() or default
+
+
 def _read_spotter_model():
     """Model for the context-spotter (agents/context-spotter.md), spawned by the
     review skill between rule resolution and reviewer spawn. Defaults to a fast
     codebase-scanning open model -- the spotter reads every push's diff, so it
     must stay cheap; OCR_SPOTTER_MODEL trades cost for demand quality."""
-    return os.environ.get("OCR_SPOTTER_MODEL", "deepseek-v4-flash").strip() or "deepseek-v4-flash"
+    return _read_env_model("OCR_SPOTTER_MODEL", "deepseek-v4-flash")
 
 
 _SPOTTER_MODEL = _read_spotter_model()
@@ -111,7 +119,7 @@ def _read_tier1_model():
     to the flagship open model positioned for correctness-critical review;
     the tier-1 reviewer reads every push's evidence, so OCR_TIER1_MODEL
     trades review depth for cost or a different provider."""
-    return os.environ.get("OCR_TIER1_MODEL", "kimi-k3").strip() or "kimi-k3"
+    return _read_env_model("OCR_TIER1_MODEL", "kimi-k3")
 
 
 _TIER1_MODEL = _read_tier1_model()
@@ -124,7 +132,7 @@ def _read_tier2_model():
     reviewer: the flagship open model positioned for correctness-critical
     review -- OCR_TIER2_MODEL lets a project spend more (or less) on the
     ~one-in-seven escalated pushes independently of the fast lane."""
-    return os.environ.get("OCR_TIER2_MODEL", "kimi-k3").strip() or "kimi-k3"
+    return _read_env_model("OCR_TIER2_MODEL", "kimi-k3")
 
 
 _TIER2_MODEL = _read_tier2_model()
@@ -2576,6 +2584,23 @@ def _tele_call(kind, seconds, outcome, manifest=None, stats=None):
     return entry
 
 
+def _record_tier_call(common_dir, tier, seconds, stats=None):
+    """The v2 per-tier cost record for ONE measured review call (t12 wiring).
+
+    The CLI's stream-json result carries durations and cost but no per-tier
+    token usage, so tokens_in/out stay None and the record carries what IS
+    known here: the tier's configured model, the call's wall duration, and
+    the CLI-reported cost when there is one. Best-effort -- record_tier_call
+    never raises, and telemetry never affects a review's outcome.
+    """
+    model = {ocr_telemetry.TIER_SPOTTER: _SPOTTER_MODEL,
+             ocr_telemetry.TIER_REVIEW: _TIER1_MODEL,
+             ocr_telemetry.TIER_DEEP: _TIER2_MODEL}.get(tier, "")
+    ocr_telemetry.record_tier_call(common_dir, tier, model=model,
+                                   cost_usd=(stats or {}).get("cost_usd"),
+                                   seconds=seconds)
+
+
 _PHASE_CLOCK = {"t": None}
 
 
@@ -2604,8 +2629,14 @@ def _tele_chunk(index, total, files, lines, outcome, seconds):
 
 
 def _run_review(repo_root, mode, git_dir=None, head_sha="", push_range="",
-                paths_file=None, timeout=None, raw_tag="", resolve_file=None):
-    """_run_review_once, timed into the run log."""
+                paths_file=None, timeout=None, raw_tag="", resolve_file=None,
+                tier="", common_dir=None):
+    """_run_review_once, timed into the run log.
+
+    tier is one of ocr_telemetry's v2 tier names when this call IS that
+    tier's model call (the fast lane's tier-1 review, the deep lane's tier-2
+    pass) and lands a per-tier cost record; "" for calls that are not one of
+    the four tiers (resolver/recheck), which record nothing."""
     kind = ("recheck" if "recheck" in raw_tag else "resolve") if resolve_file else "review"
     started = time.monotonic()
     outcome = "error"
@@ -2623,8 +2654,12 @@ def _run_review(repo_root, mode, git_dir=None, head_sha="", push_range="",
         outcome = "timeout" if getattr(exc, "is_timeout", False) else "error"
         raise
     finally:
-        _tele_call(kind, time.monotonic() - started, outcome, resolve_file or paths_file,
+        secs = time.monotonic() - started
+        _tele_call(kind, secs, outcome, resolve_file or paths_file,
                    stats=dict(_last_call_stats()))
+        if tier:
+            _record_tier_call(common_dir, tier, secs,
+                              stats=dict(_last_call_stats()))
 
 
 def _note_call_stats(out_text, started_at):
@@ -3532,7 +3567,9 @@ def _supervise_run(state_path, run_id):
                 try:
                     result, ran, raw_name = _run_review_with_retry(
                         lambda: _run_review(review_root, mode, git_dir, tip, push_range,
-                                            paths_file=manifest_path, timeout=_DEEP_TIMEOUT)
+                                            paths_file=manifest_path, timeout=_DEEP_TIMEOUT,
+                                            tier=ocr_telemetry.TIER_DEEP,
+                                            common_dir=common_dir)
                     )
                 finally:
                     try:
@@ -3541,7 +3578,9 @@ def _supervise_run(state_path, run_id):
                         pass
             else:
                 result, ran, raw_name = _run_review_with_retry(
-                    lambda: _run_review(review_root, mode, git_dir, tip, push_range)
+                    lambda: _run_review(review_root, mode, git_dir, tip, push_range,
+                                        tier=ocr_telemetry.TIER_REVIEW,
+                                        common_dir=common_dir)
                 )
             chunks_new = 1 if ran else 0
             _mark_phase("review", chunks=chunks_new)
@@ -3770,7 +3809,9 @@ def _supervise_run(state_path, run_id):
                     # Only with OCR_PRECOMPUTED_DIFFS=0: otherwise a manifest is
                     # always written, since the diffs reach the reviewer through it.
                     result, ran, raw_name = _single(
-                        lambda: _run_review(review_root, mode, git_dir, tip, push_range)
+                        lambda: _run_review(review_root, mode, git_dir, tip, push_range,
+                                            tier=ocr_telemetry.TIER_REVIEW,
+                                            common_dir=common_dir)
                     )
                     chunks_new = 1 if ran else 0
                 else:
@@ -3788,6 +3829,8 @@ def _supervise_run(state_path, run_id):
                             lambda: _run_review(
                                 review_root, mode, git_dir, tip, push_range,
                                 paths_file=manifest_path,
+                                tier=ocr_telemetry.TIER_REVIEW,
+                                common_dir=common_dir,
                             )
                         )
                     finally:
@@ -8075,6 +8118,8 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
                         paths_file=manifest_path,
                         timeout=_CHUNK_TIMEOUT,
                         raw_tag=f"-c{k}",
+                        tier=ocr_telemetry.TIER_REVIEW,
+                        common_dir=common_dir,
                     )
                     last_exc = None
                     break

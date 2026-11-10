@@ -132,6 +132,28 @@ def enabled():
     return os.environ.get("OCR_TELEMETRY", "1").strip().lower() not in ("0", "false", "no")
 
 
+def repo_common_dir(repo_root):
+    """The repo's git common dir (worktrees share one), or None when the path
+    is no repo or git is absent. The skill-side tier emitters (the demands
+    validator, the collectors CLI) know only the repo root; the log lives
+    under the common dir, and recording fails soft like everything else here."""
+    import subprocess
+    try:
+        out = subprocess.run(["git", "rev-parse", "--git-common-dir"],
+                             cwd=str(repo_root), capture_output=True, text=True,
+                             timeout=30)
+        if out.returncode != 0:
+            return None
+        path = out.stdout.strip()
+        if not path:
+            return None
+        if not os.path.isabs(path):
+            path = os.path.normpath(os.path.join(str(repo_root), path))
+        return path
+    except Exception:
+        return None
+
+
 def telemetry_dir(common_dir):
     return Path(common_dir) / TELEMETRY_DIR
 
@@ -456,11 +478,11 @@ def _tier_report_lines(records, add):
         if not recs:
             add(f"  {tier:<10} {0:>5}")
             continue
-        secs = [r.get("seconds") or 0 for r in recs if isinstance(r.get("seconds"), (int, float))]
-        tin = [r["tokens_in"] for r in recs if isinstance(r.get("tokens_in"), (int, float)) and not isinstance(r.get("tokens_in"), bool)]
-        tout = [r["tokens_out"] for r in recs if isinstance(r.get("tokens_out"), (int, float)) and not isinstance(r.get("tokens_out"), bool)]
-        est = [r["token_estimate"] for r in recs if isinstance(r.get("token_estimate"), (int, float)) and not isinstance(r.get("token_estimate"), bool)]
-        cost = [r["cost_usd"] for r in recs if isinstance(r.get("cost_usd"), (int, float)) and not isinstance(r.get("cost_usd"), bool)]
+        secs = [n for n in (_num(r.get("seconds")) for r in recs) if n is not None]
+        tin = [n for n in (_count(r.get("tokens_in")) for r in recs) if n is not None]
+        tout = [n for n in (_count(r.get("tokens_out")) for r in recs) if n is not None]
+        est = [n for n in (_count(r.get("token_estimate")) for r in recs) if n is not None]
+        cost = [n for n in (_num(r.get("cost_usd")) for r in recs) if n is not None]
         add(f"  {tier:<10} {len(recs):>5}  {_fmt(_avg(secs)):>7}  {_fmt(sum(secs) if secs else None):>7}"
             f"  {_fmt(sum(tin) if tin else None, '.0f'):>7}  {_fmt(sum(tout) if tout else None, '.0f'):>7}"
             f"  {_fmt(sum(est) if est else None, '.0f'):>7}  {_fmt(sum(cost) if cost else None, '.3f'):>7}")

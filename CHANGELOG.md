@@ -4,6 +4,71 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Context expansion beyond the diff ("v2"): the gate now spots what a change touches,
+collects the evidence deterministically, and reviews with that evidence in hand.
+Built from `.kimchi/plans/review-gate-v2-spec.md`; all flows degrade with a warning,
+never a silent loss of protection.
+
+### Added
+- **Context vs review allowlists.** A caller search may now look at files that are
+  excluded from review (specs/tests), so a changed helper no longer strands test
+  callers invisibly. Review admission is unchanged.
+- **Impact analysis upgrades.** Caller-collection caps raised (`per_symbol` 12,
+  `max_sites` 100) and adding an optional parameter to a *multi-line* definition is
+  now classified as a signature change, collecting callers.
+- **Docs resolver (global + per-surface).** `.ocr/rule.json` gains
+  `conventions: [{doc, applyTo}]` (default `**/*` — a doc in `docs/` applies to code
+  unless configured otherwise) plus walk-up ancestor docs (`AGENTS.md` /
+  `.ocr/conventions.md`, nearest wins). Per-doc (~800 lines) and total caps with
+  truncation warnings; injected per file into the reviewer's rules.
+- **Spotter (context-requirement classifier).** A cheap model reads the trimmed diff
+  and emits a demands list (callers, event couples, doc refs, conventions, pointers,
+  risk score) — never findings. Output validated gate-side, fail-closed; malformed
+  output degrades to the pre-v2 review behavior with a warning. Model via
+  `OCR_SPOTTER_MODEL` (default `deepseek-v4-flash`).
+- **Deterministic collectors + evidence bundle.** Demands are mapped to evidence
+  (callers via the context-filtered impact search, docs via the resolver, event
+  couples via the index, pointers via the resolver); every demand resolves to
+  evidence or an explicit `unresolved` entry the reviewer may cite as medium. The
+  bundle is size-capped (20k chars, largest-entry-first degradation + warnings) and
+  shape-validated before reaching the reviewer.
+- **Event-coupling index.** Deterministic three-edge repo index (symbol refs, event
+  couplings — emit/subscribe + framework tag strings, pointer utterances), lazily
+  built, incrementally refreshed per push. Optional tree-sitter with a warned regex
+  fallback; `OCR_INDEX=0` opts out.
+- **Dismissed-finding memory.** `/review-gate:dismiss <finding-id>` (also
+  `review-gate.py --dismiss`) records a local `.ocr/memory.jsonl` entry; matched
+  future findings are demoted to low with a "previously dismissed" note and a
+  warning — never silently suppressed. Nothing is learned from bypasses.
+- **Pointer resolution + forge lookup.** String references to reports/docs resolve
+  through: committed `.ocr/artifacts.json` registry → repo grep → sibling branch
+  tips → live `glab`/`gh` call (autodetected, hard 3s timeout, negative cache).
+  Unresolved + unregistered pointers surface as unresolved evidence; forge failures
+  degrade to the local tiers with a warning.
+- **T2 deep lane.** Risk-triggered (path globs + spotter risk score; escalation may
+  raise but never lower) deep review in the existing deny-and-join-on-retry
+  machinery, via the new read-only `deep-reviewer` agent. Blocking bar unchanged:
+  high severity + confidence ≥ 0.7 + survival of the independent falsify pass.
+  Model via `OCR_TIER2_MODEL` (default `kimi-k3`); timeout via `OCR_DEEP_TIMEOUT`.
+- **Model config + provider guard.** `OCR_TIER1_MODEL` (default `kimi-k3`),
+  `OCR_SPOTTER_MODEL`, `OCR_TIER2_MODEL`; a startup guard refuses Anthropic/OpenAI
+  model IDs (subscription account-lock terms) before any review begins.
+- **Per-tier telemetry.** `record_tier_call` emits `{"kind": "tier_call", tier, model,
+  tokens, cost_usd, seconds}` records at each tier's call site (spotter, tier-1,
+  tier-2, collectors), with a per-tier section in the telemetry report.
+- **Fixture suite.** `tests/fixtures/miss_categories/` — one synthetic repo per
+  miss category (remount/filter coupling, convention-doc violation, stranded spec
+  callers, dangling pointer) asserting old-misses → v2-catches, plus degradation
+  variants (no tree-sitter, offline forge, malformed spotter, oversized bundle).
+
+### Changed
+- `agents/code-reviewer.md` now documents the `demands` and `evidence_bundle`
+  inputs; an unresolved pointer utterance is citable as a medium dangling-pointer
+  finding naming the tiers searched.
+- `PROTOCOL_VERSION` 1 → 2.
+
 ## [0.13.0] - 2026-10-15
 
 Stacked branches get the right review base, and a finding that was fixed stays fixed. Built from

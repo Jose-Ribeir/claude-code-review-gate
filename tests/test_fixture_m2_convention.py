@@ -48,9 +48,9 @@ class TestFixtureSelfCheck:
         info = _m2(tmp_path)
         diff = builders.git(["diff", "%s..%s" % (info["tip"] + "~1", info["tip"]),
                              "--", info["src"]], info["root"])
-        added = [l[1:].lstrip() for l in diff.splitlines()
-                 if l.startswith("+") and not l.startswith("+++")
-                 and l[1:].lstrip().startswith("#")]
+        added = [ln[1:].lstrip() for ln in diff.splitlines()
+                 if ln.startswith("+") and not ln.startswith("+++")
+                 and ln[1:].lstrip().startswith("#")]
         assert added, diff
         assert any(len(line) > info["violating_column"] for line in added)
 
