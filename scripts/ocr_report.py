@@ -36,6 +36,10 @@ sys.path.insert(0, str(_HERE))
 import rg_store  # noqa: E402
 
 
+_SKIPPED_WARN = ("WARNING: {} unparseable verdict record(s) skipped — "
+                 "investigate the store")
+
+
 def _store_root():
     return rg_store.store_root()
 
@@ -105,8 +109,7 @@ def main(argv=None):
 
     if args.json:
         if skipped:
-            print(f"WARNING: {len(skipped)} unparseable verdict record(s) skipped — investigate the store",
-                  file=sys.stderr)
+            print(_SKIPPED_WARN.format(len(skipped)), file=sys.stderr)
         for d in verdicts:
             t = d["tip"]
             rec = {
@@ -134,7 +137,7 @@ def main(argv=None):
     # markdown summary
     print(f"# Gate review record — {len(verdicts)} reviews recorded\n")
     if skipped:
-        print(f"WARNING: {len(skipped)} unparseable verdict record(s) skipped — investigate the store")
+        print(_SKIPPED_WARN.format(len(skipped)))
     counts = {}
     for d in verdicts:
         counts[d.get("verdict") or "?"] = counts.get(d.get("verdict") or "?", 0) + 1

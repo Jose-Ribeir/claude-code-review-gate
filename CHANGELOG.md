@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- `scripts/ocr_report.py` — every recorded gate review in one analyzable
+  summary: aggregates the verdict store (all repos), and with `--repo` joins
+  that repo's finding-level records and raw-stream history. `--json` emits
+  machine-readable records for downstream analysis; unparseable store
+  records are counted and reported (stderr in json mode) rather than
+  silently dropped.
+
+
 All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
