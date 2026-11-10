@@ -104,6 +104,9 @@ def main(argv=None):
         findings_total = len(reviews)
 
     if args.json:
+        if skipped:
+            print(f"WARNING: {len(skipped)} unparseable verdict record(s) skipped — investigate the store",
+                  file=sys.stderr)
         for d in verdicts:
             t = d["tip"]
             rec = {
