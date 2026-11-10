@@ -139,6 +139,9 @@ manifest JSON. The manifest fields are:
 - `spotter_model` — (v2, review manifests only) the model to spawn the §2c
   context spotter with. The gate pins it there because the headless session's
   allowlist cannot read `OCR_SPOTTER_MODEL`.
+- `tier1_model` — (v2, review manifests only) the model to spawn the §3
+  code-reviewer subagent(s) with, pinned for the same reason: the allowlist
+  cannot read `OCR_TIER1_MODEL`.
 
 Use `--range` (from the command line) as the revision range.
 
@@ -620,6 +623,15 @@ precomputed `file` is never re-fetched, re-truncated or retyped:
   `diff_truncated: true`. **Never fully omit a file's entry.** A degraded entry is still
   an entry — the reviewer knows the file changed, sees hunk locations, and can Read it
   (see reviewer instructions for `diff_truncated` handling).
+
+**Model (v2) — tier-1 reviewer:** spawn the reviewer with
+`manifest.tier1_model` when a manifest was given; otherwise the environment
+variable `OCR_TIER1_MODEL`, defaulting to `kimi-k3`. The same model applies
+to every group subagent in the escalation path below. The gate validates the
+review-model variables at startup (provider guard, Python-side): a push
+configured with an anthropic/openai model is refused before any review work
+starts — if a review aborts with that refusal, surface it verbatim and do
+not work around it with a differently-spawned reviewer.
 
 **Default path (≤ 15 files):** spawn **one** `code-reviewer` subagent via the
 Agent tool. Pass it a prompt containing:
