@@ -104,9 +104,9 @@ chmod +x "$PRE_PUSH" || { echo "ERROR: could not chmod +x $PRE_PUSH." >&2; exit 
 # lie (the gate appears installed while pushes run ungated). Remove it, but
 # only after the new install succeeded (the gate must never go absent) and
 # only when it is recognizably ours; a foreign hook is never touched.
-  a=$(cd "$HOOKS_DIR" 2>/dev/null && pwd -P) || a="$HOOKS_DIR"
-  b=$(cd "$GITDIR/hooks" 2>/dev/null && pwd -P) || b="$GITDIR/hooks"
-  if [ "$a" != "$b" ] && [ -f "$GITDIR/hooks/pre-push" ] \
+  hooks_dir_real=$(cd "$HOOKS_DIR" 2>/dev/null && pwd -P) || hooks_dir_real="$HOOKS_DIR"
+  default_hooks_real=$(cd "$GITDIR/hooks" 2>/dev/null && pwd -P) || default_hooks_real="$GITDIR/hooks"
+  if [ "$hooks_dir_real" != "$default_hooks_real" ] && [ -f "$GITDIR/hooks/pre-push" ] \
      && grep -q "review-gate.py" "$GITDIR/hooks/pre-push" 2>/dev/null; then
   rm -f "$GITDIR/hooks/pre-push"
   echo "Removed a stale review-gate pre-push from $GITDIR/hooks:"

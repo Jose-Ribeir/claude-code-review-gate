@@ -6097,8 +6097,9 @@ def _chunk_avg_secs():
 
 
 def _run_budget_secs(chunks_total, slots, flat=None):
-    """The run budget in seconds (SPEC-08): chunk count x trailing per-chunk
-    average x parallel slots, clamped to [OCR_TIMEOUT, OCR_TIMEOUT_MAX]. With
+    """The run budget in seconds (SPEC-08): ceil(chunk count / slots) waves x
+    trailing per-chunk average -- the realistic wall clock, since chunks run
+    concurrently across the slots, clamped to [OCR_TIMEOUT, OCR_TIMEOUT_MAX]. With
     no prior chunk telemetry the per-chunk estimate is OCR_TIMEOUT-derived
     (one slot-wave's worth), so a first or small push budgets OCR_TIMEOUT --
     the flat behaviour this replaces. Budget exhaustion stays resumable, never
