@@ -297,6 +297,15 @@ try:
     _RUN_BUDGET = max(1, _RUN_BUDGET)
 except ValueError:
     _RUN_BUDGET = 3600
+# Hard ceiling for the chunk-aware run budget (SPEC-08). It only means anything
+# above OCR_TIMEOUT; a value that is not a positive integer or that does not
+# exceed OCR_TIMEOUT falls back to the 3600 s default.
+try:
+    _OCR_TIMEOUT_MAX = int(os.environ.get("OCR_TIMEOUT_MAX", "3600"))
+except ValueError:
+    _OCR_TIMEOUT_MAX = 3600
+if _OCR_TIMEOUT_MAX <= TIMEOUT:
+    _OCR_TIMEOUT_MAX = 3600
 try:
     _MAX_FILES = int(os.environ.get("OCR_MAX_FILES", "40"))
     _MAX_FILES = max(1, _MAX_FILES)
@@ -6016,6 +6025,65 @@ def _chunk_concurrency():
     return min(4, max(1, n))
 
 
+# --- chunk-aware run budget (SPEC-08) -----------------------------------------
+
+_CHUNK_SECS_KEEP = 20          # trailing per-chunk seconds the budget averages
+_CHUNK_SECS_CACHE = {"key": None, "secs": ()}
+_CHUNK_EVENT_RE = re.compile(r"event=chunk\b")
+_CHUNK_SECS_RE = re.compile(r"(?:^|\s)s=(\d+(?:\.\d+)?)(?:\s|$)")
+
+
+def _chunk_avg_secs():
+    """Trailing average of prior per-chunk seconds, from the debug-log
+    telemetry for this store (`chunk` metric lines carry `s=<seconds>`; runs
+    from every repo land in the same log, which is the telemetry there is).
+    Keeps the last _CHUNK_SECS_KEEP samples and caches them against the log's
+    stat so callers re-read only after the log changed. Returns None when no
+    chunk has ever been timed here."""
+    try:
+        path = _gate_data_dir() / "review-gate-debug.log"
+        st = path.stat()
+        key = (str(path), st.st_mtime_ns, st.st_size)
+        if _CHUNK_SECS_CACHE["key"] == key:
+            secs = _CHUNK_SECS_CACHE["secs"]
+            return sum(secs) / len(secs) if secs else None
+        secs = []
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if not _CHUNK_EVENT_RE.search(line):
+                continue
+            m = _CHUNK_SECS_RE.search(line)
+            if m:
+                secs.append(float(m.group(1)))
+        secs = secs[-_CHUNK_SECS_KEEP:]
+        _CHUNK_SECS_CACHE["key"] = key
+        _CHUNK_SECS_CACHE["secs"] = secs
+        return sum(secs) / len(secs) if secs else None
+    except Exception:
+        return None
+
+
+def _run_budget_secs(chunks_total, slots):
+    """The run budget in seconds (SPEC-08): chunk count x trailing per-chunk
+    average x parallel slots, clamped to [OCR_TIMEOUT, OCR_TIMEOUT_MAX]. With
+    no prior chunk telemetry the per-chunk estimate is OCR_TIMEOUT-derived
+    (one slot-wave's worth), so a first or small push budgets OCR_TIMEOUT --
+    the flat behaviour this replaces. Budget exhaustion stays resumable, never
+    an attempt. An explicit OCR_RUN_BUDGET keeps its flat meaning and
+    overrides the computation."""
+    explicit = os.environ.get("OCR_RUN_BUDGET", "").strip()
+    if explicit:
+        try:
+            return max(1, int(explicit))
+        except ValueError:
+            pass
+    total = max(1, int(chunks_total or 1))
+    n_slots = max(1, int(slots or 1))
+    avg = _chunk_avg_secs()
+    per_chunk = avg if avg is not None else TIMEOUT / n_slots
+    expected = int(total * per_chunk * n_slots)
+    return max(TIMEOUT, min(_OCR_TIMEOUT_MAX, expected))
+
+
 def _run_dir(common_dir, run_id):
     return _async_dir(common_dir) / f"run-{run_id}"
 
@@ -7992,7 +8060,7 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
     else:
         chunks = _plan_to_chunks(active_items, timeout_marks)
     total = len(chunks)
-    budget_end = time.monotonic() + _RUN_BUDGET
+    run_budget, budget_end = _RUN_BUDGET, time.monotonic() + _RUN_BUDGET
     results_by_k = {}
     progress_n = {"done": 0, "new": 0, "secs": 0.0}
 
@@ -8011,6 +8079,17 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
                 raise
         slots += extra_worktrees
         conc = len(slots)
+    # SPEC-08: the run budget is chunk-aware -- chunks x trailing per-chunk
+    # average x slots, clamped to [OCR_TIMEOUT, OCR_TIMEOUT_MAX]. Exhaustion
+    # stays resumable (see ReviewBudgetError below), never an attempt.
+    run_budget = _run_budget_secs(len(chunks), conc)
+    budget_end = time.monotonic() + run_budget
+    try:      # informational: align the state's deadline with the real budget
+        _update_state_owned(state_path, run_id, deadline_ts=time.time() + run_budget)
+    except _Fenced:
+        raise
+    except Exception:
+        pass
     stop_evt = threading.Event()   # a sibling failed hard: no more attempts
 
     def _prepare(k, chunk_items):
@@ -8197,7 +8276,7 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
                         chunks_running=len(inflight),
                     )
                     _fail(1, ReviewBudgetError(
-                        f"run budget ({_RUN_BUDGET}s) exhausted after "
+                        f"run budget ({run_budget}s) exhausted after "
                         f"{progress_n['done']}/{total} chunks; re-push to resume"))
                     break
                 # Write manifest for this chunk atomically; fail closed on error.
