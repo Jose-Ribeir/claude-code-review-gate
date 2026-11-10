@@ -33,8 +33,8 @@ _FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 for _p in (_SCRIPTS, _FIXTURES):
     sys.path.insert(0, _p)
 
-import glob
-import json
+import glob  # noqa: E402
+import json  # noqa: E402
 
 import builders  # noqa: E402
 
@@ -61,7 +61,9 @@ def _telemetry_records(info):
                                               "*.jsonl"))):
         with open(path, encoding="utf-8") as fh:
             records += [json.loads(line) for line in fh if line.strip()]
-    return records
+    # Tier-call records (v2 per-tier cost events sharing the log) are not
+    # runs: filter them out exactly like telemetry report() does.
+    return [r for r in records if r.get("kind") != "tier_call"]
 
 
 class TestM1PushBuildsTheEventIndex:
