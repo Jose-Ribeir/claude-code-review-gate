@@ -46,8 +46,8 @@ def _env(**extra):
     return env
 
 
-def _run(argv, cmd, **env):
-    return subprocess.run(argv, input=_payload(cmd), capture_output=True, text=True,
+def _run(argv, cmd, _cwd=None, **env):
+    return subprocess.run(argv, input=_payload(cmd, cwd=_cwd), capture_output=True, text=True,
                           env=_env(**env), timeout=120)
 
 
@@ -181,9 +181,9 @@ def test_sh_adapter_is_inert_outside_gated_repositories(tmp_path):
     repo.mkdir()
     subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
     # A repo WITHOUT our pre-push: a push command passes through untouched.
-    _assert_passes(_run([_BASH, _SH], "git push origin main", cwd=str(repo)))
+    _assert_passes(_run([_BASH, _SH], "git push origin main", _cwd=str(repo)))
     # Neither does a non-repo cwd.
-    _assert_passes(_run([_BASH, _SH], "git push origin main", cwd=str(tmp_path / "nope")))
+    _assert_passes(_run([_BASH, _SH], "git push origin main", _cwd=str(tmp_path / "nope")))
 
 
 @needs_bash
@@ -211,6 +211,181 @@ def test_sh_adapter_fails_closed_when_the_gate_is_missing_and_fail_open_passes(t
     # OCR_FAIL_OPEN lets the push go; it must not APPROVE it.
     proc = run_broken(fail_open=True)
     assert proc.returncode == 0 and parse_pretooluse(proc.stdout)[0] == "pass"
+
+
+# --- SPEC-04: the repo guard must resolve hooks the way git does -------------
+
+# husky 9.1.7's `h` script, verbatim (node_modules/husky): the shim it writes
+# is `#!/usr/bin/env sh\n. "$(dirname "$0")/h"` and h runs the user hook at
+# "$(dirname "$(dirname "$0")")/$(basename "$0")".
+_HUSKY_H = '''#!/usr/bin/env sh
+[ "$HUSKY" = "2" ] && set -x
+n=$(basename "$0")
+s=$(dirname "$(dirname "$0")")/$n
+
+[ ! -f "$s" ] && exit 0
+
+if [ -f "$HOME/.huskyrc" ]; then
+	echo "husky - '~/.huskyrc' is DEPRECATED, please move your code to ~/.config/husky/init.sh"
+fi
+i="${XDG_CONFIG_HOME:-$HOME/.config}/husky/init.sh"
+[ -f "$i" ] && . "$i"
+
+[ "${HUSKY-}" = "0" ] && exit 0
+
+export PATH="node_modules/.bin:$PATH"
+sh -e "$s" "$@"
+c=$?
+
+[ $c != 0 ] && echo "husky - $n script failed (code $c)"
+[ $c = 127 ] && echo "husky - command not found in PATH=$PATH"
+exit $c
+'''
+
+
+def _mkcommitted_repo(tmp_path, name="repo"):
+    repo = tmp_path / name
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    for k, v in (("user.email", "t@example.com"), ("user.name", "t"),
+                 ("commit.gpgsign", "false")):
+        subprocess.run(["git", "config", k, v], cwd=str(repo), check=True)
+    (repo / "a.txt").write_text("one\n")
+    subprocess.run(["git", "add", "."], cwd=str(repo), check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "base"], cwd=str(repo), check=True)
+    return repo
+
+
+def _add_worktree(repo, tmp_path, name="wt"):
+    wt = tmp_path / name
+    subprocess.run(["git", "worktree", "add", "-q", str(wt), "-b", "wt-branch"],
+                   cwd=str(repo), check=True)
+    return wt
+
+
+def _husky_gated_repo(tmp_path, name="repo"):
+    """A repo gated through the husky 9 shim chain, exactly as husky lays it
+    out: core.hooksPath=.husky/_, .husky/_/pre-push sources ./h, h runs
+    .husky/pre-push (which is where the gate was installed)."""
+    repo = _mkcommitted_repo(tmp_path, name)
+    shim = repo / ".husky" / "_"
+    shim.mkdir(parents=True)
+    (shim / "pre-push").write_text('#!/usr/bin/env sh\n. "$(dirname "$0")/h"\n')
+    (shim / "h").write_text(_HUSKY_H)
+    (repo / ".husky" / "pre-push").write_text("# review-gate\n")
+    subprocess.run(["git", "config", "core.hooksPath", ".husky/_"],
+                   cwd=str(repo), check=True)
+    # The husky files must be COMMITTED before any linked worktree is cut:
+    # a worktree checks out the committed tree, so uncommitted .husky content
+    # would be missing there and the chain could not resolve (SPEC-04).
+    subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "husky chain"], cwd=str(repo), check=True)
+    return repo
+
+
+def _push_from(cwd):
+    return subprocess.run(
+        [_BASH, _SH], input=_payload("git push origin main", cwd=str(cwd)),
+        capture_output=True, text=True, env=_env(), timeout=60,
+    )
+
+
+@needs_bash
+def test_sh_adapter_gates_a_push_behind_a_husky_shim_chain(tmp_path):
+    # The gate lives in .husky/pre-push, reachable only THROUGH the husky
+    # shim: the entry hook (.husky/_/pre-push) mentions nothing, so the guard
+    # must follow the chain before declaring the repo inert.
+    repo = _husky_gated_repo(tmp_path)
+    proc = _push_from(repo)
+    assert proc.returncode == 0, proc.stderr
+    decision, reason = parse_pretooluse(proc.stdout)
+    assert decision == "deny", (proc.stdout, proc.stderr)
+    assert "review-gate" in reason
+
+
+@needs_bash
+def test_sh_adapter_gates_a_push_from_a_linked_worktree_of_a_gated_repo(tmp_path):
+    # THE regression: a linked worktree's gitdir is .git/worktrees/<name>, so
+    # the old <gitdir>/hooks/pre-push check never saw the gate installed in
+    # the COMMON .git/hooks and the hook stayed inert on every push from a
+    # worktree. git's own --git-path hooks resolution finds the common dir.
+    repo = _gated_repo(tmp_path)
+    (repo / "a.txt").write_text("one\n")
+    subprocess.run(["git", "add", "."], cwd=str(repo), check=True)
+    subprocess.run(["git", "-c", "user.email=t@example.com", "-c",
+                    "user.name=t", "commit", "-q", "-m", "base"],
+                   cwd=str(repo), check=True)
+    wt = _add_worktree(repo, tmp_path)
+    proc = _push_from(wt)
+    assert proc.returncode == 0, proc.stderr
+    decision, reason = parse_pretooluse(proc.stdout)
+    assert decision == "deny", (proc.stdout, proc.stderr)
+    assert "review-gate" in reason
+
+
+@needs_bash
+def test_sh_adapter_gates_a_push_from_a_linked_worktree_of_a_husky_repo(tmp_path):
+    # core.hooksPath is repo-local config, so worktrees share the husky
+    # chain; the guard must stay armed there too.
+    repo = _husky_gated_repo(tmp_path)
+    wt = _add_worktree(repo, tmp_path)
+    proc = _push_from(wt)
+    assert proc.returncode == 0, proc.stderr
+    decision, reason = parse_pretooluse(proc.stdout)
+    assert decision == "deny", (proc.stdout, proc.stderr)
+    assert "review-gate" in reason
+
+
+@needs_bash
+def test_sh_adapter_gates_when_the_entry_hook_chains_to_the_gate(tmp_path):
+    # Chaining shape the installer itself produces (and the spec calls out):
+    # the entry pre-push execs a sibling script, and THAT script is the gate.
+    repo = _mkcommitted_repo(tmp_path)
+    hooks = repo / ".githooks"
+    hooks.mkdir()
+    (hooks / "pre-push").write_text('#!/bin/sh\nexec "$(dirname "$0")/pre-push.user"\n')
+    (hooks / "pre-push.user").write_text("#!/bin/sh\n# review-gate\n")
+    subprocess.run(["git", "config", "core.hooksPath", ".githooks"],
+                   cwd=str(repo), check=True)
+    proc = _push_from(repo)
+    assert proc.returncode == 0, proc.stderr
+    decision, reason = parse_pretooluse(proc.stdout)
+    assert decision == "deny", (proc.stdout, proc.stderr)
+    assert "review-gate" in reason
+
+
+@needs_bash
+def test_sh_adapter_gates_a_push_via_an_absolute_hooks_path(tmp_path):
+    # --git-path hooks must hand back the core.hooksPath dir verbatim.
+    repo = _mkcommitted_repo(tmp_path)
+    hooks = tmp_path / "abs-hooks"
+    hooks.mkdir()
+    (hooks / "pre-push").write_text("# review-gate\n")
+    subprocess.run(["git", "config", "core.hooksPath", str(hooks)],
+                   cwd=str(repo), check=True)
+    proc = _push_from(repo)
+    assert proc.returncode == 0, proc.stderr
+    decision, _ = parse_pretooluse(proc.stdout)
+    assert decision == "deny", proc.stdout
+
+
+@needs_bash
+def test_sh_adapter_stays_inert_when_the_hook_chain_lacks_the_gate(tmp_path):
+    # Chain-following must not over-gate: a foreign hook manager (chained,
+    # like the installer's own shim) whose chain never mentions review-gate
+    # leaves the bash hook inert.
+    repo = _mkcommitted_repo(tmp_path)
+    hooks = repo / ".githooks"
+    hooks.mkdir()
+    (hooks / "pre-push").write_text('#!/bin/sh\nexec "$(dirname "$0")/pre-push.user"\n')
+    (hooks / "pre-push.user").write_text("#!/bin/sh\nexit 0\n")
+    subprocess.run(["git", "config", "core.hooksPath", ".githooks"],
+                   cwd=str(repo), check=True)
+    _assert_passes(_push_from(repo))
+    # Same for a husky-shaped chain whose user hook is some other tool.
+    repo2 = _husky_gated_repo(tmp_path, name="repo2")
+    (repo2 / ".husky" / "pre-push").write_text("#!/bin/sh\nnpx lint-staged\n")
+    _assert_passes(_push_from(repo2))
 
 
 # --- A1/A2 spoof shapes: a gated repo must still DENY them --------------------

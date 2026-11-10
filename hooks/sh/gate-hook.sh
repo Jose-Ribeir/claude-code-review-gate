@@ -148,6 +148,69 @@ json_escape() {
 }
 
 # ---------------------------------------------------------------------------
+# Gated-repo detection: does the pre-push hook git would actually run reach
+# the review gate? The entry hook may be a shim (husky 9: .husky/_/pre-push
+# sources ./h, which runs .husky/pre-push), so every script the chain
+# sources/execs is checked for "review-gate", not just the entry file.
+# _hook_gated <entry-pre-push> — needs the globals hooksdir (the git-resolved
+# hooks dir) and hookcwd (the payload cwd); returns 0 when gated.
+# ---------------------------------------------------------------------------
+_hook_gated() {
+  local entry="$1" n="${1##*/}" f d text tok cand prev
+  local -a queue=("$entry")
+  local seen="" idx=0 total=1
+  # Bound the walk: a shim chain is short; a pathological script must not
+  # turn the guard into a file crawler.
+  while [ "$idx" -lt "$total" ] && [ "$idx" -lt 16 ]; do
+    f="${queue[$idx]}"
+    idx=$((idx + 1))
+    [ -f "$f" ] || continue
+    case " $seen " in *" $f "*) continue ;; esac
+    seen="$seen $f"
+    grep -q "review-gate" "$f" 2>/dev/null && return 0
+    d="$(dirname -- "$f")"
+    text="$(<"$f")"
+    # Resolve the $0-relative dirname/basename idioms to literal paths so the
+    # scripts a shim sources/execs become findable tokens (husky 9 writes
+    # exactly these shapes: . "$(dirname "$0")/h" and, in h,
+    # n=$(basename "$0") / s=$(dirname "$(dirname "$0")")/$n).
+    for prev in 1 2 3; do
+      tok="$text"
+      text="${text//'$(dirname -- "$0")'/$d}"
+      text="${text//'$(dirname "$0")'/$d}"
+      text="${text//'$(basename -- "$0")'/$n}"
+      text="${text//'$(basename "$0")'/$n}"
+      text="${text//'${0%/*}'/$d}"
+      [ "$text" = "$tok" ] && break
+    done
+    # Husky 9 layout: the shim dir is named "_" and the real user hook is its
+    # SIBLING — h runs "$(dirname "$(dirname "$0")")/$n", whose $n stays
+    # symbolic here, so enqueue the sibling hook directly.
+    if [ "${d##*/}" = "_" ]; then
+      queue+=("$d/../$n")
+      total=$((total + 1))
+    fi
+    # Every path-looking token is a candidate referenced script; try it
+    # against the shim's own dir, the hooks dir, and the payload cwd.
+    while IFS= read -r tok; do
+      [ -n "$tok" ] || continue
+      case "$tok" in
+        '~'/*) tok="$HOME${tok#'~'}" ;;
+      esac
+      case "$tok" in
+        /*) [ -f "$tok" ] && { queue+=("$tok"); total=$((total + 1)); } ;;
+        *)
+          for cand in "$d/$tok" "${hooksdir:-$d}/$tok" "${hookcwd:-$d}/$tok"; do
+            [ -f "$cand" ] && { queue+=("$cand"); total=$((total + 1)); break; }
+          done
+          ;;
+      esac
+    done < <(printf '%s\n' "$text" | grep -oE '[A-Za-z0-9_./~+-]+' | sort -u)
+  done
+  return 1
+}
+
+# ---------------------------------------------------------------------------
 # Heredoc stripping (port of _strip_heredocs): a heredoc BODY is data, never
 # code. Only strips when a terminator is found, matching upstream.
 # ---------------------------------------------------------------------------
@@ -478,14 +541,21 @@ shape_rc=$?
 [ "$shape_rc" = 2 ] && _pass                       # dry-run / delete: nothing to review
 
 # Repository guard: this hook is INERT outside repositories that installed the
-# gate (i.e. have our pre-push hook). Resolves the payload cwd, not the
-# process cwd.
+# gate (i.e. whose pre-push hook chain reaches review-gate). Resolves the
+# payload cwd, not the process cwd. The hook location comes from git's own
+# resolution (rev-parse --git-path hooks), which honours core.hooksPath and
+# the linked-worktree common dir — the old <gitdir>/hooks/pre-push check
+# never fired from a linked worktree. The effective chain is followed too:
+# a gate behind a husky shim counts as gated.
 json_get "$payload" "cwd" && hookcwd="$REPLY" || hookcwd=""
 [ -z "$hookcwd" ] && hookcwd="$PWD"
-gitdir="$(git -C "$hookcwd" rev-parse --absolute-git-dir 2>/dev/null)" || _pass
-if [ ! -f "$gitdir/hooks/pre-push" ] || ! grep -q "review-gate" "$gitdir/hooks/pre-push" 2>/dev/null; then
-  _pass                                            # not a gated repository
-fi
+hooksdir="$(git -C "$hookcwd" rev-parse --git-path hooks 2>/dev/null)" || _pass
+[ -n "$hooksdir" ] || _pass
+case "$hooksdir" in
+  /*) ;;
+  *) hooksdir="$hookcwd/$hooksdir" ;;
+esac
+_hook_gated "$hooksdir/pre-push" || _pass          # not a gated repository
 
 # Re-wrap Kimchi's payload into the upstream shape review-gate.py reads
 # ({tool_name, tool_input:{command}, cwd}) and hand over.
