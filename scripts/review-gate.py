@@ -68,6 +68,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ocr_verdict import compute_verdict  # noqa: E402
 import ocr_impact  # noqa: E402
 import ocr_index  # noqa: E402
+import ocr_memory  # noqa: E402
 import ocr_segment  # noqa: E402
 import ocr_telemetry  # noqa: E402
 
@@ -3801,6 +3802,13 @@ def _supervise_run(state_path, run_id):
             "severity": "info", "path": "review-gate", "start_line": "-",
             "end_line": "-", "content": cwd_note,
         }] + list(result.get("findings") or [])
+    # Memory (t08): at T1 verdict-assembly time, before the verdict is
+    # decided, a finding matching a dismissal recorded through the dismiss
+    # command drops to low severity with a "previously dismissed" prefix and
+    # a warning entry. Reads .ocr/memory.jsonl only -- the dismiss command is
+    # the sole writer, and bypasses never teach the store.
+    if isinstance(result, dict):
+        result = _apply_memory_demotion(repo_root, result)
     verdict = compute_verdict(result)
     if isinstance(result, dict):
         _TELE["findings"] = [
@@ -4296,6 +4304,130 @@ def _finding_id(f):
         f.get("content") or "",
     ])
     return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()
+
+
+def _apply_memory_demotion(repo_root, result):
+    """Demote findings previously dismissed for this repository.
+
+    A finding whose (category, path glob, signature_line) triple matches a
+    dismissal the user recorded through the dismiss command drops to severity
+    low and its content gains a "previously dismissed" prefix; every demotion
+    is logged as a warning so it stays auditable in the run's output, the
+    findings log, and telemetry. Findings already at low -- and non-dict
+    entries -- pass through untouched. Fail-soft: a missing or broken store
+    changes nothing.
+    """
+    if not isinstance(result, dict):
+        return result
+    try:
+        records = ocr_memory.load(repo_root)
+        if not records:
+            return result
+        out_findings = []
+        demoted = []
+        for f in result.get("findings") or []:
+            if isinstance(f, dict) and str(f.get("severity") or "").lower() != "low":
+                rec = ocr_memory.match_records(records, f)
+                if rec is not None:
+                    f = dict(f)
+                    f["severity"] = "low"
+                    f["content"] = "previously dismissed: " + str(f.get("content") or "")
+                    demoted.append((f, rec))
+            out_findings.append(f)
+        if not demoted:
+            return result
+        warnings = list(result.get("warnings") or [])
+        for f, rec in demoted:
+            warnings.append({
+                "file": str(f.get("path") or ""),
+                "message": (
+                    "memory: demoted previously dismissed finding "
+                    f"{_sanitize(f.get('path') or '?', 120)} to low severity "
+                    f"(dismissed {_sanitize(rec.get('at') or '?', 40)} as "
+                    f"'{_sanitize(rec.get('glob') or rec.get('path') or '?', 120)}')"
+                ),
+            })
+        return dict(result, findings=out_findings, warnings=warnings)
+    except Exception:
+        return result
+
+
+def _dismiss_finding(argv):
+    """`review-gate.py --dismiss <finding-id> [--glob PATTERN]`.
+
+    The ONLY writer of <repo>/.ocr/memory.jsonl: resolves <finding-id>
+    against the findings of the LAST recorded verdict (the findings log is
+    what the gate kept of that verdict -- reviewer-assigned ids are used
+    verbatim, otherwise the gate's stable _finding_id(f) sha is the id),
+    then records the dismissal. Future re-raises of the same defect class
+    (same category, same path glob, same signature_line) are demoted to low
+    severity with a note. An exact id wins; otherwise a prefix of at least 6
+    chars must identify exactly one finding.
+    """
+    args = argv[argv.index("--dismiss") + 1:]
+    fid = ""
+    glob = None
+    i = 0
+    while i < len(args):
+        if args[i] == "--glob":
+            glob = args[i + 1] if i + 1 < len(args) else None
+            i += 2
+        elif not fid and not args[i].startswith("--"):
+            fid = args[i]
+            i += 1
+        else:
+            i += 1
+    if not fid:
+        _warn("usage: review-gate.py --dismiss <finding-id> [--glob PATTERN]")
+        return 1
+    repo_root = _repo_root()
+    git_dir = _git_dir(repo_root)
+    if not git_dir:
+        _warn("not inside a git repository - no recorded verdicts here.")
+        return 1
+    entries = _read_history(git_dir, 1)
+    if not entries:
+        _warn(f"no recorded verdicts yet ({_findings_log_path(git_dir)}).")
+        return 1
+    entry = entries[-1]
+    candidates = []
+    for f in entry.get("findings") or []:
+        if not isinstance(f, dict):
+            continue
+        ids = {str(i)} if (i := f.get("id")) else set()
+        ids.add(_finding_id(f))
+        candidates.append((f, ids))
+    exact = [f for f, ids in candidates if fid in ids]
+    prefix = [f for f, ids in candidates
+              if len(fid) >= 6 and any(s.startswith(fid) for s in ids)]
+    matches = exact or prefix
+    if len(matches) != 1:
+        _warn(f"no unique finding '{_sanitize(fid, 80)}' in the last recorded "
+              f"verdict ({entry.get('at', '?')}, {entry.get('verdict', '?')}). "
+              "Dismissable finding ids:")
+        for f, ids in candidates:
+            sid = str(f.get("id") or _finding_id(f))
+            sys.stdout.write(
+                f"  {sid}  [{_sanitize(f.get('severity', '?'), 20)}] "
+                f"{_sanitize(f.get('path', '?'), 120)}: "
+                f"{_sanitize(f.get('content') or '', 100)}\n")
+        return 1
+    f = matches[0]
+    sid = str(f.get("id") or _finding_id(f))
+    record = ocr_memory.dismiss(
+        repo_root, dict(f, id=sid), glob=glob,
+        context={"verdict": str(entry.get("verdict") or ""),
+                 "head": str(entry.get("head") or ""),
+                 "branch": str(entry.get("branch") or "")})
+    if record.get("error"):
+        _warn(f"dismissal could not be recorded: {_sanitize(record['error'], 200)}")
+        return 1
+    sys.stdout.write(
+        f"dismissed [{_sanitize(f.get('severity', '?'), 20)}] "
+        f"{_sanitize(f.get('path', '?'), 120)}: {_sanitize(f.get('content') or '', 100)}\n"
+        f"recorded to {ocr_memory.store_path(repo_root)} -- future matches demote "
+        "to low severity with a 'previously dismissed' note.\n")
+    return 0
 
 
 def _record_path(common_dir, fp, key, head_oid):
@@ -8851,6 +8983,10 @@ def main(argv):
     # it never spawns a review, touches a marker, or needs a hook payload.
     if "--history" in argv:
         sys.exit(_print_history(argv))
+    if "--dismiss" in argv:
+        # Records a dismissal into .ocr/memory.jsonl -- the store's only write
+        # path. Standalone like --history: no review, no markers, no payload.
+        sys.exit(_dismiss_finding(argv))
     if "--telemetry-report" in argv:
         sys.exit(_print_telemetry_report(argv))
     if "--print-range" in argv:
