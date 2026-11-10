@@ -839,7 +839,8 @@ def _stub_gate(monkeypatch, tmp_path, result=_WARN_RESULT, calls=None):
     monkeypatch.delenv("OCR_FORCE_REVIEW", raising=False)
     _inline_supervisor(monkeypatch)
 
-    def _fake_review(repo_root, mode, git_dir=None, head_sha="", push_range=""):
+    def _fake_review(repo_root, mode, git_dir=None, head_sha="", push_range="",
+                     **_kw):
         if calls is not None:
             calls.append(head_sha)
         raw_name = review_gate._save_raw_output(git_dir, json.dumps(result), head_sha)
@@ -1868,7 +1869,8 @@ def _gate_hook(monkeypatch, command, **patches):
         seen["unpushed_root"] = repo_root
         return True
 
-    def _review(repo_root, mode, git_dir=None, head_sha="", push_range=""):
+    def _review(repo_root, mode, git_dir=None, head_sha="", push_range="",
+                **_kw):
         seen["review_root"] = repo_root
         return {"findings": []}, True, ""
 

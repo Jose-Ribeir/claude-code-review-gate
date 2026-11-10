@@ -226,14 +226,14 @@ class TestReport:
                  kind="tier_call", ts=4),
         ]
         out = ot.report(records)
-        tier1_line = next(l for l in out.splitlines() if l.strip().startswith("tier1"))
+        tier1_line = next(ln for ln in out.splitlines() if ln.strip().startswith("tier1"))
         # 2 calls; total 10000 in / 500 out; avg 40 s per call; total cost $0.05
         assert "10000" in tier1_line
         assert "500" in tier1_line
         assert "40" in tier1_line
         assert "0.050" in tier1_line or "0.05" in tier1_line
-        coll_line = next(l for l in out.splitlines()
-                         if l.strip().startswith("collectors"))
+        coll_line = next(ln for ln in out.splitlines()
+                         if ln.strip().startswith("collectors"))
         # collectors: exact tokens unknown -> the estimate column carries it
         assert "500" in coll_line
 

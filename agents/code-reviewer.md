@@ -195,9 +195,17 @@ instructions.
   event index was not built): it says nothing about the code. Never treat it
   as evidence of absence; never fabricate a finding from it; note it in your
   risk scan as uncovered demand context.
-- Prose-pointer `resolution` stubs are **deferred** (resolution happens in a
-  later pass): a pointer's presence in the bundle is proof an utterance
-  exists, never proof of its target's content.
+- Prose-pointer `resolution` is real: each utterance's target was looked up
+  through the resolution tiers (artifact registry, repo grep, sibling branch
+  tips, bounded forge call) before you see it. `resolved` names the locating
+  tier in `via` — the pointer is backed and needs no finding. `unresolved`
+  (`via: "none"`) means every tier that could run ran and nothing produced
+  or registered the target: cite it as a **medium-severity** dangling-pointer
+  finding naming the utterance and the tiers searched (the resolution's
+  `searched` list). `unavailable` means the forge tier could not execute, so
+  coverage was local-only — degraded coverage, never evidence of a dangling
+  pointer: cap confidence on any claim that would need the missing tier,
+  exactly like other unverified claims.
 
 **Context-window discipline.** Your context window is finite (kimi-k3: 262k
 tokens), and the collectors bound the bundle to their own budget BEFORE you

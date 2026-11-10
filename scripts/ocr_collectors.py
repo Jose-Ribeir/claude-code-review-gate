@@ -54,11 +54,13 @@ import json
 import os
 import re
 import sys
+import time
 
 import ocr_conventions
 import ocr_forge
 import ocr_impact
 import ocr_index
+import ocr_telemetry
 from ocr_demands import DEMAND_KEYS
 
 BUNDLE_VERSION = 1
@@ -695,6 +697,25 @@ _KIND_COLLECTORS = {
 # CLI
 # ---------------------------------------------------------------------------
 
+# The collectors are a v2 tier: the CLI run records its cost into the per-tier
+# telemetry log. Deterministic code has no model and no usage meter, so the
+# record carries the run's duration and a chars//4 estimate of the evidence
+# bytes the bundle delivered. Best-effort, like all telemetry.
+
+def _record_collect_telemetry(repo_root, bundle, seconds):
+    try:
+        common = ocr_telemetry.repo_common_dir(repo_root)
+        if not common:
+            return
+        ocr_telemetry.record_tier_call(
+            common, ocr_telemetry.TIER_COLLECTORS,
+            token_estimate=ocr_telemetry.estimate_tokens(
+                (bundle or {}).get("total_chars")),
+            seconds=seconds)
+    except Exception:
+        pass
+
+
 def _main(argv=None):
     parser = argparse.ArgumentParser(
         description="Map spotter demands to a bounded evidence bundle (stdin -> stdout).")
@@ -729,9 +750,12 @@ def _main(argv=None):
     # t09: the CLI call site resolves pointers for real (registry -> grep ->
     # branch tips -> bounded forge call); collect() itself stays deferred for
     # embedding callers that pass their own pointer_resolver.
+    started = time.monotonic()
     result = collect(args.repo_root, data, args.changed_files,
                      tip=args.tip, max_chars=args.max_chars,
                      pointer_resolver=ocr_forge.make_pointer_resolver(args.repo_root))
+    _record_collect_telemetry(args.repo_root, result.get("bundle"),
+                              time.monotonic() - started)
     result["warnings"] = pre_warn + result["warnings"]
     json.dump(result, sys.stdout, ensure_ascii=False)
     sys.stdout.write("\n")
