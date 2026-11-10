@@ -689,9 +689,11 @@ def test_raised_deadline_raises_the_default_ceiling_with_it(tmp_path):
 
 
 def test_trailing_telemetry_sizes_the_budget(tmp_path):
-    """Prior chunk telemetry feeds the budget: 3 chunks of 600 s average, 4
-    chunks, 2 slots -> 4 x 600 x 2 = 4800 s (under the raised cap). A `call`
-    metric line must not leak into the chunk average."""
+    """Prior chunk telemetry feeds the budget: 600 s per chunk on average, 4
+    chunks across 2 slots -> ceil(4/2) = 2 waves x 600 s = 1200 s of true wall
+    time, floored at OCR_TIMEOUT = 1800 s (a `call` metric line must not leak
+    into the chunk average). The dogfood review caught the old total-x-slots
+    formula as double-counting parallelism."""
     _seed_chunk_telemetry([_chunk_line(f"r{i}", 600) for i in range(3)]
                           + ["ts=2026-01-01T00:00:00Z event=call run=r9 "
                              "kind=review outcome=ok s=99999\n"])
@@ -699,7 +701,7 @@ def test_trailing_telemetry_sizes_the_budget(tmp_path):
     tip = _git(["rev-parse", "HEAD"], cwd=work)
     delta = _budget_of(work, tip,
                        _budget_env(tmp_path, OCR_TIMEOUT_MAX=9000), chunks_total=4)
-    assert 4800 <= delta < 4890, delta
+    assert 1800 <= delta < 1890, delta
 
 
 def test_run_budget_env_stays_a_flat_override(tmp_path):

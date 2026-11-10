@@ -2385,7 +2385,10 @@ def _rescue_verdict(obj):
     for k in ("standards", "spec"):
         if k in axes:
             _harvest_rescued_findings(axes[k], k, findings)
-    rest = {k: v for k, v in obj.items() if k not in axes}
+    # obj["review"] was already a harvest source (above): leaving it in `rest`
+    # would harvest its axes a second time under axis=None (duplicated findings
+    # with low-default severities).
+    rest = {k: v for k, v in obj.items() if k not in axes and k != "review"}
     _harvest_rescued_findings(rest, None, findings)
     counts = sum(_rescue_axis_counts(axes[k]) for k in axes)
     if findings:
@@ -5947,6 +5950,18 @@ def _clear_timeout_mark(common_dir, fp, key, head_oid):
         pass
 
 
+def _unparsed_message(paths):
+    """Terminal PARSE failure on a solo file (splitting did not recover it):
+    the failure mode is unparseable output, not a timeout -- say so, and point
+    at the retry that re-runs the review."""
+    names = ", ".join(sorted(paths)[:5]) + (" ..." if len(paths) > 5 else "")
+    return (
+        f"file {names} could not be reviewed: its review output stayed unparseable "
+        "after the retry and the split retries, so it is left unreviewed. "
+        "Re-run the push to retry it."
+    )
+
+
 def _unreviewable_message(paths, timeout_s):
     names = ", ".join(sorted(paths)[:5]) + (" ..." if len(paths) > 5 else "")
     return (
@@ -6096,7 +6111,11 @@ def _run_budget_secs(chunks_total, slots, flat=None):
     n_slots = max(1, int(slots or 1))
     avg = _chunk_avg_secs()
     per_chunk = avg if avg is not None else TIMEOUT / n_slots
-    expected = int(total * per_chunk * n_slots)
+    # Wall-clock estimate: chunks run CONCURRENTLY across the slots, so the
+    # realistic time is ceil(total/slots) waves x per-chunk average -- not
+    # total x slots, which would double-count parallelism. The clamp below
+    # still keeps the budget inside [OCR_TIMEOUT, OCR_TIMEOUT_MAX].
+    expected = int(-(-total // n_slots) * per_chunk)
     return max(TIMEOUT, min(_OCR_TIMEOUT_MAX, expected))
 
 
@@ -8338,7 +8357,7 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
                             _fail(2, exc)   # nothing recorded: retrying changes nothing
                         elif stuck:
                             _give_up(chunk_items, ReviewUnreviewableError(
-                                _unreviewable_message([stuck], _CHUNK_TIMEOUT)))
+                                _unparsed_message([stuck])))
                         else:
                             pieces = _split_marked_chunk(
                                 chunk_items,
