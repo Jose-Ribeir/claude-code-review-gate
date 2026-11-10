@@ -99,6 +99,18 @@ if ! sed -e "s|__SCR_DIR__|$SCR_DIR|g" -e "s|__SCR_VERSION__|$SCR_VERSION|g" \
 fi
 chmod +x "$PRE_PUSH" || { echo "ERROR: could not chmod +x $PRE_PUSH." >&2; exit 1; }
 
+# Stale-copy cleanup: when core.hooksPath points elsewhere, git never runs a
+# hook left in the default $GITDIR/hooks -- a gate copy there is a shadowed
+# lie (the gate appears installed while pushes run ungated). Remove it, but
+# only after the new install succeeded (the gate must never go absent) and
+# only when it is recognizably ours; a foreign hook is never touched.
+if [ "$HOOKS_DIR" != "$GITDIR/hooks" ] && [ -f "$GITDIR/hooks/pre-push" ] \
+   && grep -q "review-gate.py" "$GITDIR/hooks/pre-push" 2>/dev/null; then
+  rm -f "$GITDIR/hooks/pre-push"
+  echo "Removed a stale review-gate pre-push from $GITDIR/hooks:"
+  echo "  core.hooksPath points at $HOOKS_DIR, so git never ran that copy."
+fi
+
 # (b) the Kimchi bash hook (UX layer).
 mkdir -p "$KIMCHI_HOOKS_DIR"
 sed -e "s|__GATE_DIR__|$SCR_DIR|g" \
