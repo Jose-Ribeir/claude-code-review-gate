@@ -56,6 +56,7 @@ import re
 import sys
 
 import ocr_conventions
+import ocr_forge
 import ocr_impact
 import ocr_index
 from ocr_demands import DEMAND_KEYS
@@ -725,8 +726,12 @@ def _main(argv=None):
     if isinstance(data, dict) and "demands" in data and \
             not any(k in data for k in DEMAND_KEYS):
         data = data["demands"]
+    # t09: the CLI call site resolves pointers for real (registry -> grep ->
+    # branch tips -> bounded forge call); collect() itself stays deferred for
+    # embedding callers that pass their own pointer_resolver.
     result = collect(args.repo_root, data, args.changed_files,
-                     tip=args.tip, max_chars=args.max_chars)
+                     tip=args.tip, max_chars=args.max_chars,
+                     pointer_resolver=ocr_forge.make_pointer_resolver(args.repo_root))
     result["warnings"] = pre_warn + result["warnings"]
     json.dump(result, sys.stdout, ensure_ascii=False)
     sys.stdout.write("\n")
