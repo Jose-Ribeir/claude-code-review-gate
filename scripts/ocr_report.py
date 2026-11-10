@@ -27,7 +27,6 @@ Usage:
 import argparse
 import glob
 import json
-import os
 import sys
 import time
 from pathlib import Path
@@ -42,29 +41,32 @@ def _store_root():
 
 
 def _verdict_records():
-    """Every verdict in the store, newest first."""
+    """Every verdict in the store, newest first. Unparseable records are
+    counted (never silently skipped) and reported by the caller."""
     out = []
+    skipped = []
     for f in glob.glob(str(_store_root() / "verdicts" / "*.json")):
         try:
             d = json.loads(Path(f).read_text(encoding="utf-8"))
         except Exception:
+            skipped.append(f)
             continue
         if isinstance(d, dict) and d.get("tip"):
             out.append(d)
     out.sort(key=lambda d: d.get("ts") or 0, reverse=True)
-    return out
+    return out, skipped
 
 
 def _repo_reviews(repo):
     """(findings entries, history archives) for one repo's git dir."""
-    git_dir = Path(repo) / ".git"
-    if not git_dir.exists():
-        try:
-            import subprocess
-            git_dir = Path(subprocess.run(
-                ["git", "-C", str(repo), "rev-parse", "--absolute-git-dir"],
-                capture_output=True, text=True, check=True).stdout.strip())
-        except Exception:
+    import subprocess
+    try:
+        git_dir = Path(subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--absolute-git-dir"],
+            capture_output=True, text=True, check=True).stdout.strip())
+    except Exception:
+        git_dir = Path(repo) / ".git"
+        if not git_dir.is_dir():
             return [], []
     findings = []
     path = git_dir / "review-gate-findings.jsonl"
@@ -91,19 +93,19 @@ def main(argv=None):
                     help="machine-readable records instead of markdown")
     args = ap.parse_args(argv)
 
-    verdicts = _verdict_records()
+    verdicts, skipped = _verdict_records()
     findings_by_tip, history_count, findings_total = {}, 0, 0
     if args.repo:
         reviews, history = _repo_reviews(args.repo)
         history_count = len(history)
         for r in reviews:
-            t = _shorten(r.get("tip") or r.get("head"))
+            t = str(r.get("tip") or r.get("head") or "")
             findings_by_tip.setdefault(t, []).append(r)
         findings_total = len(reviews)
 
     if args.json:
         for d in verdicts:
-            t = _shorten(d["tip"])
+            t = d["tip"]
             rec = {
                 "ts": d.get("ts"),
                 "iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(d.get("ts") or 0)),
@@ -128,10 +130,12 @@ def main(argv=None):
 
     # markdown summary
     print(f"# Gate review record — {len(verdicts)} reviews recorded\n")
+    if skipped:
+        print(f"WARNING: {len(skipped)} unparseable verdict record(s) skipped — investigate the store")
     counts = {}
     for d in verdicts:
         counts[d.get("verdict") or "?"] = counts.get(d.get("verdict") or "?", 0) + 1
-    print(f"verdicts: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
+    print("verdicts: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
     blocked = sum(1 for d in verdicts if d.get("blocked"))
     print(f"blocked pushes: {blocked}\n")
     if args.repo:
