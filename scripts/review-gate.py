@@ -330,6 +330,11 @@ _TIMEOUT_MARK_TTL = 24 * 3600
 # The warning the skill emits for a truncated diff; the gate re-emits it for
 # every file whose recorded review was truncated (_surface_truncated).
 _TRUNCATED_MSG = "diff truncated; reviewer saw stat + hunk headers only"
+# The warning _mark_unreviewed re-emits for every file a terminal chunk failure
+# left unreviewed (SPEC-07): reusing the per-file warning plumbing so a partial
+# verdict can never read as a full one.
+_NOT_REVIEWED_MSG = ("not reviewed: the chunk holding this file failed to review "
+                     "and splitting it did not recover")
 # Cost rule: a file with a delta base is reviewed over its whole push range
 # instead when that diff is at most this many times the delta's size. It costs
 # about the same, and it also shows changes that are only harmful together --
@@ -4209,6 +4214,9 @@ def _supervise_run(state_path, run_id):
             "unreviewed_truncated": (
                 len(result.get("unreviewed_truncated") or []) if isinstance(result, dict) else 0
             ),
+            "unreviewed": (
+                len(result.get("unreviewed") or []) if isinstance(result, dict) else 0
+            ),
             "record": str(record) if record else "", "raw": raw_name,
         })
     except _Fenced:
@@ -5966,13 +5974,23 @@ def _plan_to_chunks(active_items, marks=None, sizes=None, budget=None):
         if not chunk:
             out.append(chunk)
             continue
-        cap = len(chunk)
-        for item in chunk:
-            mark = marks.get(item["entry"]["path"])
-            if mark:
-                cap = min(cap, max(1, int(mark.get("chunk_size") or 1) // 2))
-        out.extend(chunk[i:i + cap] for i in range(0, len(chunk), cap))
+        out.extend(_split_marked_chunk(chunk, marks) or [chunk])
     return out
+
+
+def _split_marked_chunk(chunk_items, marks):
+    """The pieces a chunk holding marked files (see _timeout_marks) is cut into:
+    half the size it failed at, down to one item. [] when the chunk cannot be
+    split any further. Shared by the next-push planner (_plan_to_chunks) and the
+    in-run split-retry of a chunk whose review failed (SPEC-07)."""
+    cap = len(chunk_items)
+    for item in chunk_items:
+        mark = marks.get(item["entry"]["path"])
+        if mark:
+            cap = min(cap, max(1, int(mark.get("chunk_size") or 1) // 2))
+    if cap >= len(chunk_items):
+        return []
+    return [chunk_items[i:i + cap] for i in range(0, len(chunk_items), cap)]
 
 
 # --- precomputed diffs (0.10.0) ----------------------------------------------
@@ -6315,6 +6333,28 @@ def _truncated_paths(result, owned=None):
     for f in (result.get("findings") or []):
         if isinstance(f, dict) and f.get("diff_truncated") and f.get("path")                 and f["path"] not in owned:
             out.add(f["path"])
+    return out
+
+
+def _mark_unreviewed(result, paths):
+    """Name what a terminal chunk failure left unreviewed (SPEC-07).
+
+    The verdict's findings cover exactly the reviewed files; every unreviewed
+    path gets a per-file warning (the truncation-warning plumbing), the paths go
+    to `unreviewed` (which _format_reasons prints and compute_verdict turns into
+    at least a warn), and the status says completed_with_warnings unless findings
+    already made it worse. Adds, never downgrades.
+    """
+    paths = sorted({p for p in paths if p})
+    if not isinstance(result, dict) or not paths:
+        return result
+    warnings = list(result.get("warnings") or [])
+    warnings.extend({"file": p, "message": _NOT_REVIEWED_MSG} for p in paths)
+    summary = dict(result["summary"]) if isinstance(result.get("summary"), dict) else {}
+    summary["unreviewed"] = len(paths)
+    out = dict(result, warnings=warnings, summary=summary, unreviewed=paths)
+    if out.get("status") not in ("completed_with_errors",):
+        out["status"] = "completed_with_warnings"
     return out
 
 
@@ -8116,6 +8156,21 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
         if rank > failure["rank"]:
             failure.update(rank=rank, exc=exc)
 
+    # SPEC-07: a chunk whose review stays unparseable after its retry and the
+    # splitter's bound (see _split_marked_chunk) is given up on: its files stay
+    # unreviewed while the remaining chunks finish. The run still delivers the
+    # merged verdict over the reviewed files when there is one (naming the
+    # unreviewed remainder, see _mark_unreviewed); a review with nothing to
+    # deliver fails closed as before.
+    unreviewed = set()
+    terminal = {"exc": None}
+
+    def _give_up(chunk_items, exc):
+        unreviewed.update(it["entry"]["path"] for it in chunk_items
+                          if not _context_only(it))
+        if terminal["exc"] is None:
+            terminal["exc"] = exc
+
     pool = _futures.ThreadPoolExecutor(max_workers=conc) if conc > 1 else _InlineExecutor()
     inflight = {}      # future -> (k, chunk_items, manifest, slot)
     free_slots = list(reversed(slots))
@@ -8181,7 +8236,31 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
                     _kill_active_children()
                     continue
                 except ReviewGateError as exc:
-                    _fail(2, exc)
+                    if (exc.is_parse_failure and not exc.is_timeout
+                            and fp and common_dir and _ledger_enabled()):
+                        # SPEC-07: an unparseable chunk costs itself, not the
+                        # run -- the timeout machinery marks its files, the
+                        # splitter halves it down to single items, and the
+                        # splits are re-queued while the siblings continue.
+                        stuck = _note_chunk_timeout(
+                            common_dir, fp, chunk_items, _CHUNK_TIMEOUT)
+                        if stuck is None:
+                            _fail(2, exc)   # nothing recorded: retrying changes nothing
+                        elif stuck:
+                            _give_up(chunk_items, ReviewUnreviewableError(
+                                _unreviewable_message([stuck], _CHUNK_TIMEOUT)))
+                        else:
+                            pieces = _split_marked_chunk(
+                                chunk_items,
+                                _timeout_marks(common_dir, fp, chunk_items))
+                            if pieces:
+                                chunks.extend(pieces)
+                            elif _chunk_members(chunk_items) == 1:
+                                chunks.append(chunk_items)  # one more try alone, then stuck
+                            else:
+                                _give_up(chunk_items, exc)  # cannot be split further
+                    else:
+                        _fail(2, exc)
                     continue
                 except Exception as exc:        # noqa: BLE001 -- a worker's crash is a gate error
                     _fail(2, exc)
@@ -8197,8 +8276,14 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
         for wt in extra_worktrees:
             _remove_worktree(review_root, wt)
 
+    if unreviewed and not results_by_k:
+        # Nothing was reviewed: there is no verdict to deliver, so the run
+        # fails closed (the splitter's bound was reached everywhere).
+        raise terminal["exc"] or ReviewGateError("chunks failed to review")
     merged = _merge_chunk_results([results_by_k[k] for k in sorted(results_by_k)],
                                   planner_warnings)
+    if unreviewed:
+        merged = _mark_unreviewed(merged, unreviewed)
     # The per-chunk snapshots each hold one chunk; the run's record and the
     # stable last-output path must show all of them.
     raw_name = _save_raw_output(
@@ -8519,6 +8604,16 @@ def _format_reasons(result, limit=20):
         out += ("\n" if out else "") + (
             f"  {n} file{'s' if n != 1 else ''} effectively unreviewed (truncated): the "
             f"reviewer saw only part of the diff - {names}")
+    paths = result.get("unreviewed") if isinstance(result, dict) else None
+    if isinstance(paths, list) and paths:
+        # Files a terminal chunk failure left unreviewed (see _mark_unreviewed):
+        # said on every verdict, because a pass over the remaining files is
+        # otherwise indistinguishable from a full review.
+        n = len(paths)
+        names = ", ".join(_sanitize(p, 120) for p in paths[:5]) + (" ..." if n > 5 else "")
+        out += ("\n" if out else "") + (
+            f"  {n} file{'s' if n != 1 else ''} not reviewed: their chunk failed to review "
+            f"and splitting did not recover it - {names}")
     return out
 
 
