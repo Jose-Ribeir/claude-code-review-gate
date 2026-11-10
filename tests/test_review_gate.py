@@ -3061,3 +3061,145 @@ def test_reap_async_skips_live_worktree(monkeypatch, tmp_path):
     os.utime(wt, (time.time() - MARKER_TTL - 60,) * 2)
     _reap_async(str(tmp_path))
     assert wt.is_dir(), "live worktree must not be deleted by reaper"
+
+
+# --- SPEC-06: conservative verdict rescue (axis + review-wrapped families) ---
+
+_final_verdict = review_gate._final_verdict
+
+# Axis family (evidence: review-gate-history/20261110T134146Z-de36b7e-c1.json):
+# per-axis counts as NUMBERS, free-text `worst`, model verdict "approved", no
+# findings list anywhere.
+_AXIS_COUNTS_STDOUT = json.dumps({
+    "chunk": {"index": 1, "total": 6},
+    "range": "02b68b66..de36b7e9",
+    "verdict": "approved",
+    "standards": {
+        "verdict": "approved", "hard_violations": 0, "judgement_calls": 4,
+        "worst": "src/connectorTitle.ts:24,60 — unnamed sentinel string literals",
+    },
+    "spec": {"verdict": "approved", "findings": 0, "observations": 1},
+})
+
+# Review-wrapped family (evidence: .../20261110T133919Z-de36b7e-c2.json): a
+# top-level `review` object plus a `standards` axis whose `findings` list holds
+# real finding objects (file/line/severity/message).
+_REVIEW_WRAPPED_STDOUT = json.dumps({
+    "review": {"range": "02b68b66..de36b7e9", "chunk": "2/6",
+               "files_reviewed": ["pkg/store.ts", "pkg/indicator.tsx"]},
+    "standards": {
+        "sources": ["CODING_STANDARDS.md"],
+        "findings": [
+            {"file": "pkg/store.ts", "line": 63, "severity": "minor",
+             "kind": "hard (redundant code)", "rule": "simplicity",
+             "message": "pointless Object.fromEntries copy"},
+            {"file": "pkg/indicator.tsx", "line": 19, "severity": "critical",
+             "kind": "hard", "message": "comment contradicts the code"},
+        ],
+        "suppressed": [{"file": "pkg/skip.ts", "rule": "Duplicated Code"}],
+    },
+    "summary": "Standards: 2 findings.",
+})
+
+
+def test_extract_json_rescues_review_wrapped_findings():
+    result = _extract_json(_REVIEW_WRAPPED_STDOUT)
+    assert result is not None and _is_valid_verdict(result)
+    assert result["rescued"] == "axis_rescue"
+    # file -> path, line -> start_line, prose -> content.
+    assert [f["path"] for f in result["findings"]] == ["pkg/store.ts", "pkg/indicator.tsx"]
+    assert result["findings"][0]["start_line"] == "63"
+    assert "pointless Object.fromEntries copy" in result["findings"][0]["content"]
+    # `suppressed` entries carry no location and sit outside findings-like
+    # lists: they must not be resurrected as findings.
+    assert all(f["path"] != "pkg/skip.ts" for f in result["findings"])
+
+
+def test_extract_json_rescue_recomputes_verdict_never_trusts_model_label():
+    # The model said "approved"; a critical finding must still block.
+    result = _extract_json(_REVIEW_WRAPPED_STDOUT)
+    assert result["verdict"] == "block"
+    assert compute_verdict(result) == "block"
+
+
+def test_extract_json_rescues_counts_only_axis_to_warn_fallback():
+    # Counts without reconstructable objects: never a silent pass.
+    result = _extract_json(_AXIS_COUNTS_STDOUT)
+    assert result is not None and _is_valid_verdict(result)
+    assert result["findings"] == []
+    assert result["rescued"] == "warn_fallback"
+    assert result["verdict"] == "warn"
+
+
+def test_extract_json_axis_zero_counts_is_honest_pass():
+    obj = {"verdict": "approved",
+           "standards": {"verdict": "approved", "hard_violations": 0,
+                         "judgement_calls": 0},
+           "spec": {"verdict": "approved", "findings": 0}}
+    result = _extract_json(json.dumps(obj))
+    assert result is not None and _is_valid_verdict(result)
+    assert result["findings"] == []
+    assert result["rescued"] == "axis_rescue"
+    assert result["verdict"] == "pass"
+
+
+def test_extract_json_partial_counts_still_warn_fallback():
+    # 4 judgement_calls counted but only 2 reconstructable finding objects:
+    # the reconstructed pair is kept, the lost signal downgrades to warn.
+    obj = {"verdict": "approved",
+           "standards": {"hard_violations": 0, "judgement_calls": 4,
+                         "findings": [
+                             {"file": "a.ts", "line": 1, "message": "x"},
+                             {"file": "b.ts", "line": 2, "message": "y"}]}}
+    result = _extract_json(json.dumps(obj))
+    assert result is not None
+    assert len(result["findings"]) == 2
+    assert result["rescued"] == "warn_fallback"
+    assert result["verdict"] == "warn"
+
+
+def test_extract_json_missing_severity_defaults_by_axis():
+    obj = {"standards": {"findings": [{"file": "a.ts", "line": 1, "message": "s"}]},
+           "spec": {"findings": [{"file": "b.ts", "line": 2, "message": "p"}]}}
+    result = _extract_json(json.dumps(obj))
+    by_path = {f["path"]: f for f in result["findings"]}
+    assert by_path["a.ts"]["severity"] == "medium"
+    assert by_path["b.ts"]["severity"] == "low"
+
+
+def test_extract_json_unrecognized_shape_stays_parse_failure():
+    # No standards/spec axes: improvised-but-unknown shapes stay fail-closed.
+    assert _extract_json(json.dumps(
+        {"chunk": {"index": 1}, "counts": {"symbols_found": 12}})) is None
+    assert _extract_json(json.dumps(
+        {"review": {"range": "a..b"}})) is None
+    assert _extract_json('{"verdict": "approved"}') is None
+
+
+def test_extract_from_stream_json_rescues_axis_report():
+    text = json.dumps({"type": "message_end", "message": {"content": [
+        {"type": "text", "text": "Review done.\n" + _AXIS_COUNTS_STDOUT}]}})
+    result = _extract_from_stream_json(text)
+    assert result is not None and _is_valid_verdict(result)
+    assert result["rescued"] == "warn_fallback"
+    assert result["verdict"] == "warn"
+
+
+def test_rescue_emits_distinct_telemetry_records(monkeypatch):
+    seen = []
+    monkeypatch.setattr(review_gate, "_metric_log", lambda event, **f: seen.append((event, f)))
+    _extract_json(_AXIS_COUNTS_STDOUT)
+    assert ("verdict_rescued", {"kind": "warn_fallback"}) in seen
+    _extract_json(_REVIEW_WRAPPED_STDOUT)
+    assert ("verdict_rescued", {"kind": "axis_rescue"}) in seen
+
+
+def test_final_verdict_honors_warn_fallback_after_recompute():
+    # compute_verdict stays the authority; the warn-fallback downgrade must
+    # survive the run-path recompute (never a silent pass).
+    assert _final_verdict({"rescued": "warn_fallback", "findings": []}) == "warn"
+    assert _final_verdict({"rescued": "axis_rescue", "findings": []}) == "pass"
+    assert _final_verdict({"status": "success", "verdict": "pass", "findings": []}) == "pass"
+    assert _final_verdict({"rescued": "axis_rescue", "findings": [
+        {"path": "a.ts", "start_line": "1", "end_line": "1", "content": "x",
+         "severity": "high"}]}) == "block"

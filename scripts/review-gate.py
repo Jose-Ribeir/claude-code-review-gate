@@ -2197,6 +2197,198 @@ def _normalize_verdict(obj):
     return shaped
 
 
+# --- SPEC-06: conservative rescue of improvised report families -------------
+# Two improvised shapes were observed in the field (archived under the studio
+# worktree's review-gate-history/): (a) axis reports -- top-level
+# standards/spec objects carrying per-axis COUNTS (hard_violations,
+# judgement_calls, findings as numbers) plus free-text fields like `worst`
+# (20261110T134146Z-de36b7e-c1.json); (b) review-wrapped reports -- a
+# top-level `review` object beside the same axes, whose findings lists hold
+# real finding objects under improvised keys (20261110T133919Z-c2.json).
+# The rescue is deliberately narrow: anything it cannot reconstruct with
+# confidence downgrades to warn (never a silent pass), and anything it does
+# not recognize at all stays a parse failure (fail-closed unchanged).
+
+# A dict counts as a located finding object when it has a path-or-file key
+# AND a line-ish key (the improvised vocabulary the field reports used).
+_RESCUE_LOC_KEYS = ("start_line", "line", "line_number", "lineno")
+# Prose keys harvested into `content`, mirroring _normalize_verdict's tuple
+# plus the kind/rule labels the axis reports carried.
+_RESCUE_CONTENT_KEYS = ("content", "message", "description", "issue", "detail",
+                        "text", "summary", "problem", "reason", "evidence",
+                        "title", "rule", "kind")
+# Only entries INSIDE lists with these names qualify as content-bearing
+# findings; a bare `worst`/`summary` string elsewhere is never promoted.
+_RESCUE_LIST_KEYS = ("findings", "issues", "observations")
+# Numeric per-axis counts. Only NUMBERS count -- a `findings` LIST is real
+# data harvested above, not a count.
+_RESCUE_COUNT_KEYS = ("hard_violations", "judgement_calls", "findings",
+                      "violations", "issues")
+
+
+def _rescue_located(d):
+    """True for a dict shaped like a located finding (path/file + line-ish)."""
+    if not isinstance(d, dict):
+        return False
+    if "path" not in d and "file" not in d:
+        return False
+    return any(d.get(k) is not None for k in _RESCUE_LOC_KEYS + ("end_line",))
+
+
+def _rescue_content_bearing(d):
+    """True for a dict carrying at least one non-empty prose field."""
+    return any(str(d.get(k) or "").strip() for k in _RESCUE_CONTENT_KEYS)
+
+
+def _rescued_finding(d, axis):
+    """Map an improvised finding object onto the contract keys.
+
+    file -> path, line -> start_line (+ end_line), prose -> content. A missing
+    severity defaults by axis: standards findings count as medium (they were
+    raised against the repo's own rules), spec findings as low (intent
+    questions, not breaches). compute_verdict stays the sole verdict
+    authority, so these defaults only ever sharpen toward warn, never block
+    (a medium without confidence cannot block).
+    """
+    g = {}
+    loc = d.get("path", d.get("file"))
+    if loc is not None:
+        g["path"] = str(loc)
+    line = next((d[k] for k in _RESCUE_LOC_KEYS if d.get(k) is not None), None)
+    if line is None and d.get("end_line") is not None:
+        line = d["end_line"]
+    if line is not None:
+        g["start_line"] = str(line)
+        g.setdefault("end_line", str(line))
+    parts = [str(d[k]).strip() for k in _RESCUE_CONTENT_KEYS
+             if k in d and str(d[k] or "").strip()]
+    if parts:
+        g["content"] = "\n".join(parts)
+    sev = d.get("severity")
+    g["severity"] = norm_severity(sev) if sev else (
+        "medium" if axis == "standards" else "low")
+    return g
+
+
+def _harvest_rescued_findings(node, axis, out):
+    """Collect real finding objects from anywhere in the JSON.
+
+    Two sources only: dicts with path/file + line-ish keys (wherever they
+    sit), and content-bearing entries inside lists named
+    findings/issues/observations. Everything else is ignored -- counts,
+    suppressed lists, and free text never become findings by themselves.
+    """
+    if isinstance(node, list):
+        for item in node:
+            _harvest_rescued_findings(item, axis, out)
+        return
+    if not isinstance(node, dict):
+        return
+    if _rescue_located(node):
+        out.append(_rescued_finding(node, axis))
+        return
+    for k, v in node.items():
+        child = k if k in ("standards", "spec") else axis
+        if isinstance(v, list) and k in _RESCUE_LIST_KEYS:
+            for item in v:
+                if isinstance(item, dict) and (_rescue_located(item)
+                                               or _rescue_content_bearing(item)):
+                    out.append(_rescued_finding(item, child))
+        else:
+            _harvest_rescued_findings(v, child, out)
+
+
+def _rescue_axis_counts(node):
+    """Sum the NUMERIC per-axis counts found anywhere in an axis subtree."""
+    if isinstance(node, dict):
+        total = 0
+        for k, v in node.items():
+            if k in _RESCUE_COUNT_KEYS and isinstance(v, (int, float)) \
+                    and not isinstance(v, bool):
+                total += int(v)
+            else:
+                total += _rescue_axis_counts(v)
+        return total
+    if isinstance(node, list):
+        return sum(_rescue_axis_counts(i) for i in node)
+    return 0
+
+
+def _rescue_verdict(obj):
+    """Rescue the two observed improvised report families, else None.
+
+    Runs ONLY after _normalize_verdict failed. Recognition requires at least
+    one standards/spec axis object (top-level, or wrapped inside a top-level
+    `review` object); a lone `review` key or unrelated counts dict is not a
+    verdict and stays unrecognized. Findings are reconstructed only from real
+    finding objects present in the JSON; per-axis counts with no
+    reconstructable objects (or counts exceeding them) downgrade the result
+    to a warn-fallback so unreconstructable signal can never pass silently.
+    The returned dict is contract-shaped with `rescued` marking the kind, and
+    the verdict recomputed by compute_verdict from the findings list -- the
+    model's own `verdict` key is never trusted.
+    """
+    if not isinstance(obj, dict):
+        return None
+    sources = [obj]
+    review = obj.get("review")
+    if isinstance(review, dict):
+        sources.append(review)
+    axes = {}
+    for source in sources:
+        for k in ("standards", "spec"):
+            v = source.get(k)
+            if isinstance(v, dict) and v and k not in axes:
+                axes[k] = v
+    if not axes:
+        return None
+    findings = []
+    for k in ("standards", "spec"):
+        if k in axes:
+            _harvest_rescued_findings(axes[k], k, findings)
+    rest = {k: v for k, v in obj.items() if k not in axes}
+    _harvest_rescued_findings(rest, None, findings)
+    counts = sum(_rescue_axis_counts(axes[k]) for k in axes)
+    if findings:
+        kind = "axis_rescue" if len(findings) >= counts else "warn_fallback"
+    else:
+        kind = "warn_fallback" if counts > 0 else "axis_rescue"
+    shaped = dict(obj)
+    shaped["findings"] = findings
+    shaped["rescued"] = kind
+    shaped.setdefault("status", "success")
+    shaped["verdict"] = compute_verdict(shaped)
+    if kind == "warn_fallback" and shaped["verdict"] == "pass":
+        # Counts-only reports carry real signal the JSON no longer holds;
+        # recomputing over the empty list would yield pass, so the fallback
+        # downgrade applies on top of compute_verdict (the honor-at-recompute
+        # rule in _final_verdict keeps it from being silently recomputed away).
+        shaped["verdict"] = "warn"
+    shaped.setdefault("summary", {
+        "files_reviewed": len({f.get("path") for f in findings if f.get("path")}),
+        "findings": len(findings),
+        "high": sum(1 for f in findings if str(f.get("severity")).lower() == "high"),
+        "medium": sum(1 for f in findings if str(f.get("severity")).lower() == "medium"),
+        "low": sum(1 for f in findings if str(f.get("severity")).lower() == "low"),
+    })
+    _metric_log("verdict_rescued", kind=kind)
+    return shaped
+
+
+def _verdict_candidate(obj):
+    """Contract dict from a parsed JSON value, or None.
+
+    Order is fixed: contract-valid as-is, then the near-miss normalizer,
+    then the conservative rescue. Anything else is not a verdict.
+    """
+    if _is_valid_verdict(obj):
+        return obj
+    norm = _normalize_verdict(obj)
+    if norm is not None:
+        return norm
+    return _rescue_verdict(obj)
+
+
 def _extract_json(text):
     """Pull the review JSON object out of claude's stdout. Returns dict or None."""
     if not text:
@@ -2205,11 +2397,9 @@ def _extract_json(text):
     # 1) whole thing
     try:
         obj = json.loads(text)
-        if _is_valid_verdict(obj):
-            return obj
-        obj = _normalize_verdict(obj)
-        if obj is not None:
-            return obj
+        candidate = _verdict_candidate(obj)
+        if candidate is not None:
+            return candidate
     except Exception:
         pass
     # 2) fenced ```json ... ``` block (last one)
@@ -2218,12 +2408,9 @@ def _extract_json(text):
     blocks = re.findall(r"```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```", text, re.DOTALL)
     for b in reversed(blocks):
         try:
-            obj = json.loads(b)
-            if _is_valid_verdict(obj):
-                return obj
-            obj = _normalize_verdict(obj)
-            if obj is not None:
-                return obj
+            candidate = _verdict_candidate(json.loads(b))
+            if candidate is not None:
+                return candidate
         except Exception:
             continue
     # 3) balanced scan from each '{' in turn (json.JSONDecoder.raw_decode stops
@@ -2244,12 +2431,9 @@ def _extract_json(text):
     while idx != -1:
         try:
             obj, end = decoder.raw_decode(text, idx)
-            if _is_valid_verdict(obj):
-                match = obj
-            else:
-                norm = _normalize_verdict(obj)
-                if norm is not None:
-                    match = norm
+            candidate = _verdict_candidate(obj)
+            if candidate is not None:
+                match = candidate
             idx = text.find("{", end)
         except json.JSONDecodeError:
             idx = text.find("{", idx + 1)
@@ -2344,6 +2528,21 @@ def _check_limit(out_text, err_text=""):
         if pat.search(combined):
             return True, _parse_resets_at(combined)
     return False, None
+
+
+def _final_verdict(result):
+    """The run's verdict: compute_verdict's recompute, plus the SPEC-06
+    warn-fallback honor rule. compute_verdict is the only verdict authority
+    for what the reviewer reported; the fallback downgrade on top exists
+    because a counts-only axis report carries signal the reconstructed (and
+    therefore empty) findings list can no longer express -- recomputing over
+    it would turn an unreconstructable report into an unearned silent pass.
+    """
+    verdict = compute_verdict(result)
+    if isinstance(result, dict) and result.get("rescued") == "warn_fallback" \
+            and verdict == "pass":
+        return "warn"
+    return verdict
 
 
 def _auth_hint(output):
@@ -3959,7 +4158,7 @@ def _supervise_run(state_path, run_id):
             "severity": "info", "path": "review-gate", "start_line": "-",
             "end_line": "-", "content": cwd_note,
         }] + list(result.get("findings") or [])
-    verdict = compute_verdict(result)
+    verdict = _final_verdict(result)
     if isinstance(result, dict):
         _TELE["findings"] = [
             {"id": f.get("id") or _finding_id(f), "path": f.get("path"),
