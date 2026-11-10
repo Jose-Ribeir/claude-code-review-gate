@@ -109,6 +109,9 @@ def compute_verdict(data):
             return "block"
         if rank >= _SEVERITY_RANK["medium"]:
             has_warn = True
+    if not has_warn and isinstance(data, dict) and data.get("unreviewed"):
+        # Files the review could not cover (SPEC-07): never a clean pass.
+        return "warn"
     return "warn" if has_warn else "pass"
 
 
