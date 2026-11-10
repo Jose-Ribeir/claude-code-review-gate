@@ -1059,6 +1059,36 @@ def test_a_running_review_past_the_budget_is_denied_not_allowed(tmp_path, monkey
     assert [n["kind"] for n in notes] == ["async"]
 
 
+# --- the deny texts: remaining budget, failure wording -------------------------
+
+def test_still_running_message_states_the_remaining_inline_budget(monkeypatch):
+    # The clause counts down from the inline deadline (process start + budget),
+    # not from the full budget: 600 s budget spent 90 s ago leaves 8 minutes.
+    st = {"tip": "a" * 40, "branch": "feat/x", "started_ts": time.time() - 120}
+    monkeypatch.setattr(review_gate, "_HOOK_T0", time.time() - 90)
+    text = review_gate._still_running_reason(st, 600, "hook")
+    assert "waits up to 8 more minutes" in text
+
+
+def test_still_running_message_drops_the_wait_clause_when_the_budget_is_spent(monkeypatch):
+    # A spent budget must never read as "the gate waits up to 0 more minutes":
+    # the whole clause is dropped, the retry guidance stays.
+    st = {"tip": "a" * 40, "branch": "feat/x", "started_ts": time.time() - 120}
+    monkeypatch.setattr(review_gate, "_HOOK_T0", time.time() - 10_000)
+    text = review_gate._still_running_reason(st, 60, "hook")
+    assert "more minutes" not in text
+    assert "0 more minutes" not in text
+    assert "re-run this exact `git push`" in text
+    assert "answers as soon as the review finishes" in text
+
+
+def test_failed_review_message_says_nothing_was_approved_and_how_to_retry():
+    st = {"state": "failed", "reason": "review", "detail": "boom", "attempts": 0}
+    text = review_gate._failed_reason(st, "hook")
+    assert "Nothing was approved" in text
+    assert "re-running the same `git push` retries the review" in text
+
+
 def test_a_review_whose_supervisor_went_silent_is_restarted(tmp_path, monkeypatch, capsys):
     calls = []
     _stub_gate(monkeypatch, tmp_path, calls=calls)

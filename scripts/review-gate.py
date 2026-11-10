@@ -8186,11 +8186,19 @@ def _still_running_reason(st, budget, mode):
         if isinstance(avg, (int, float)) and avg > 0:
             count += f", avg {int(avg) // 60}m{int(avg) % 60:02d}s per chunk"
     retry = "re-run this exact `git push` command" if mode == "hook" else "run the push again"
+    # The clause states the budget still LEFT, measured from the hook's own
+    # deadline - never a stale "up to 0 more minutes"; when nothing is left
+    # the clause is dropped entirely.
+    remaining = max(0, int(((_HOOK_T0 + budget) - time.time()) // 60))
+    wait = (
+        f"the gate waits up to {remaining} more minutes and answers as soon as the "
+        "review finishes. " if remaining
+        else "the gate answers as soon as the review finishes. "
+    )
     return (
         f"review-gate: the review of {branch} ({tip}{count}) is still running "
         f"(started {stamp}, {elapsed} min ago). The push was NOT executed.\n"
-        f"To get the verdict, {retry}: the gate waits up to {int(budget // 60)} more minutes "
-        "and answers as soon as the review finishes. Do not commit, amend or rebase this "
+        f"To get the verdict, {retry}: {wait}Do not commit, amend or rebase this "
         "branch meanwhile - a new tip discards the review. Unrelated work is fine; the "
         "result is also reported after your next executed Bash call once it is ready."
     )
@@ -8236,7 +8244,10 @@ def _failed_reason(st, mode):
             + "\n".join("  " + line for line in detail.splitlines()[:12]) + "\n"
             + _bypass_hint(mode)
         )
-    head = f"review-gate: the review could not complete ({why}) - blocking to preserve gate integrity.\n"
+    head = (
+        f"review-gate: the review could not complete ({why}) - blocking to preserve gate "
+        "integrity. Nothing was approved; re-running the same `git push` retries the review.\n"
+    )
     if attempts >= ATTEMPT_CAP:
         head += (
             f"  This tip failed {attempts} times; it will not be retried automatically for "
@@ -8745,8 +8756,8 @@ def _async_note(path, info, session_id):
     if s == "failed":
         _unlink(path)
         return (
-            f"review-gate: the review of {label} that was still running when the push was "
-            f"denied could not complete ({_sanitize(str(st.get('reason') or 'error'), 40)}). "
+            f"review-gate: the review of {label} did NOT finish - it failed "
+            f"({_sanitize(str(st.get('reason') or 'error'), 40)}), nothing was approved. "
             "Re-run the `git push` to see the reason and retry."
         )
     try:
