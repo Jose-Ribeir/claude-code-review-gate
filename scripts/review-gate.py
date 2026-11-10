@@ -292,11 +292,12 @@ try:
     _CHUNK_TIMEOUT = max(60, _CHUNK_TIMEOUT)
 except ValueError:
     _CHUNK_TIMEOUT = 1200
+_RUN_BUDGET_DEFAULT = 3600
 try:
-    _RUN_BUDGET = int(os.environ.get("OCR_RUN_BUDGET", "3600"))
+    _RUN_BUDGET = int(os.environ.get("OCR_RUN_BUDGET", str(_RUN_BUDGET_DEFAULT)))
     _RUN_BUDGET = max(1, _RUN_BUDGET)
 except ValueError:
-    _RUN_BUDGET = 3600
+    _RUN_BUDGET = _RUN_BUDGET_DEFAULT
 # Hard ceiling for the chunk-aware run budget (SPEC-08). It only means anything
 # above OCR_TIMEOUT; a value that is not a positive integer or that does not
 # exceed OCR_TIMEOUT falls back to the 3600 s default.
@@ -6062,20 +6063,24 @@ def _chunk_avg_secs():
         return None
 
 
-def _run_budget_secs(chunks_total, slots):
+def _run_budget_secs(chunks_total, slots, flat=None):
     """The run budget in seconds (SPEC-08): chunk count x trailing per-chunk
     average x parallel slots, clamped to [OCR_TIMEOUT, OCR_TIMEOUT_MAX]. With
     no prior chunk telemetry the per-chunk estimate is OCR_TIMEOUT-derived
     (one slot-wave's worth), so a first or small push budgets OCR_TIMEOUT --
     the flat behaviour this replaces. Budget exhaustion stays resumable, never
     an attempt. An explicit OCR_RUN_BUDGET keeps its flat meaning and
-    overrides the computation."""
+    overrides the computation: a `flat` budget that differs from the default
+    (an explicit OCR_RUN_BUDGET, or a _RUN_BUDGET overridden after import)
+    wins over the computed one."""
     explicit = os.environ.get("OCR_RUN_BUDGET", "").strip()
     if explicit:
         try:
             return max(1, int(explicit))
         except ValueError:
             pass
+    if flat is not None and flat != _RUN_BUDGET_DEFAULT:
+        return flat
     total = max(1, int(chunks_total or 1))
     n_slots = max(1, int(slots or 1))
     avg = _chunk_avg_secs()
@@ -8082,7 +8087,7 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
     # SPEC-08: the run budget is chunk-aware -- chunks x trailing per-chunk
     # average x slots, clamped to [OCR_TIMEOUT, OCR_TIMEOUT_MAX]. Exhaustion
     # stays resumable (see ReviewBudgetError below), never an attempt.
-    run_budget = _run_budget_secs(len(chunks), conc)
+    run_budget = _run_budget_secs(len(chunks), conc, _RUN_BUDGET)
     budget_end = time.monotonic() + run_budget
     try:      # informational: align the state's deadline with the real budget
         _update_state_owned(state_path, run_id, deadline_ts=time.time() + run_budget)
