@@ -301,6 +301,169 @@ def test_any_fail_makes_summary_exit_1(tmp_path):
     assert any(c["status"] == "fail" for c in checks)
     assert ocr_doctor.main([]) in (0, 1)  # sanity: never raises
 
+# --- the effective hook path (git's own resolution) -----------------------------
+
+def _gitcfg(repo, key, value):
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_TRACE")}
+    r = subprocess.run(["git", "-C", str(repo), "config", key, value],
+                       capture_output=True, text=True, env=env)
+    assert r.returncode == 0, r.stderr
+
+def _mkrepo_with_commit(tmp_path, name="repo"):
+    """A repo with one commit (a linked worktree needs a HEAD to branch from)."""
+    repo = tmp_path / name
+    repo.mkdir()
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_TRACE")}
+    for args in (["init", "-q"], ["config", "user.email", "t@example.com"],
+                 ["config", "user.name", "t"], ["config", "commit.gpgsign", "false"]):
+        r = subprocess.run(["git", "-C", str(repo), *args],
+                           capture_output=True, text=True, env=env)
+        assert r.returncode == 0, r.stderr
+    (repo / "a.txt").write_text("one\n")
+    r = subprocess.run(["git", "-C", str(repo), "add", "."],
+                       capture_output=True, text=True, env=env)
+    assert r.returncode == 0, r.stderr
+    r = subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "base"],
+                       capture_output=True, text=True, env=env)
+    assert r.returncode == 0, r.stderr
+    return repo
+
+def test_effective_path_reported_for_plain_repo(tmp_path):
+    """No core.hooksPath: the doctor reports the repo's own hooks dir and
+    says it is the default."""
+    env = _base_env(tmp_path)
+    repo, _ = _make_repo(tmp_path)
+    checks = _by_name(ocr_doctor.run_checks(env=env, repo=str(repo)))
+    eff = checks["effective-hook-path"]
+    assert eff["status"] == "ok"
+    assert "core.hooksPath" not in eff["detail"]
+    assert "default hooks dir" in eff["detail"]
+    assert os.path.realpath(str(repo / ".git" / "hooks")) in os.path.realpath(eff["detail"].split(" ")[0])
+
+def test_effective_path_reported_for_relative_hooks_path(tmp_path):
+    """A relative core.hooksPath resolves against the repo top, exactly git's
+    rule, and the report says so."""
+    env = _base_env(tmp_path)
+    repo, _ = _make_repo(tmp_path)
+    _gitcfg(repo, "core.hooksPath", ".husky/_")
+    checks = _by_name(ocr_doctor.run_checks(env=env, repo=str(repo)))
+    eff = checks["effective-hook-path"]
+    assert eff["status"] == "ok"
+    assert "core.hooksPath" in eff["detail"]
+    assert os.path.realpath(str(repo / ".husky" / "_")) in os.path.realpath(eff["detail"].split("->")[1].strip().split(" ")[0])
+
+def test_effective_path_for_absolute_hooks_path(tmp_path):
+    env = _base_env(tmp_path)
+    repo, _ = _make_repo(tmp_path)
+    custom = tmp_path / "abs-hooks"
+    custom.mkdir()
+    _gitcfg(repo, "core.hooksPath", str(custom))
+    checks = _by_name(ocr_doctor.run_checks(env=env, repo=str(repo)))
+    eff = checks["effective-hook-path"]
+    assert eff["status"] == "ok"
+    assert str(custom) in eff["detail"]
+
+def test_effective_path_for_linked_worktree_reports_common_hooks(tmp_path):
+    """A linked worktree has no hooks of its own: git runs hooks from the
+    main checkout's .git/hooks (the common dir), and the doctor must say
+    exactly that path."""
+    env = _base_env(tmp_path)
+    main = _mkrepo_with_commit(tmp_path)
+    genv = {k: v for k, v in os.environ.items() if not k.startswith("GIT_TRACE")}
+    r = subprocess.run(["git", "-C", str(main), "worktree", "add", "-q",
+                        str(tmp_path / "wt")], capture_output=True, text=True, env=genv)
+    assert r.returncode == 0, r.stderr
+    worktree = tmp_path / "wt"
+    checks = _by_name(ocr_doctor.run_checks(env=env, repo=str(worktree)))
+    eff = checks["effective-hook-path"]
+    assert eff["status"] == "ok"
+    assert os.path.realpath(str(main / ".git" / "hooks")) in \
+        os.path.realpath(eff["detail"].split(" ")[0])
+
+def test_gate_reached_through_husky_shim_chain(tmp_path):
+    """husky v9 layout: hooksPath=.husky/_ and .husky/_/pre-push is a shim
+    whose chain ends at .husky/pre-push. A gate there is REACHABLE, and the
+    report names the file the gate was reached through."""
+    env = _base_env(tmp_path)
+    repo, _ = _make_repo(tmp_path)
+    _gitcfg(repo, "core.hooksPath", ".husky/_")
+    (repo / ".husky" / "_").mkdir(parents=True)
+    (repo / ".husky" / "_" / "pre-push").write_text(
+        "#!/usr/bin/env sh\n. \"${0%/*}/h\"\n")
+    # husky's helper runs the real hook through variables no static scan
+    # resolves (`sh -e "$s/$h"`); the doctor must still follow the chain.
+    (repo / ".husky" / "_" / "h").write_text(
+        "#!/usr/bin/env sh\nh=\"${0##*/}\"\ns=\"${0%/*/*}\"\n"
+        "sh -e \"$s/$h\" \"$@\"\n")
+    (repo / ".husky" / "pre-push").write_text(
+        "#!/bin/sh\nexec review-gate \"$@\"\n")
+    checks = _by_name(ocr_doctor.run_checks(env=env, repo=str(repo)))
+    assert checks["pre-push-hook"]["status"] == "ok"
+    assert "reached through" in checks["pre-push-hook"]["detail"]
+    assert str(repo / ".husky" / "pre-push") in checks["pre-push-hook"]["detail"]
+
+def test_husky_chain_without_gate_fails(tmp_path):
+    """Same husky chain but the real hook never runs the gate: reachable
+    means the CHAIN, not just the shim file."""
+    env = _base_env(tmp_path)
+    repo, _ = _make_repo(tmp_path)
+    _gitcfg(repo, "core.hooksPath", ".husky/_")
+    (repo / ".husky" / "_").mkdir(parents=True)
+    (repo / ".husky" / "_" / "pre-push").write_text(
+        "#!/usr/bin/env sh\n. \"${0%/*}/h\"\n")
+    (repo / ".husky" / "_" / "h").write_text(
+        "#!/usr/bin/env sh\nh=\"${0##*/}\"\ns=\"${0%/*/*}\"\n"
+        "sh -e \"$s/$h\" \"$@\"\n")
+    (repo / ".husky" / "pre-push").write_text("#!/bin/sh\necho husky ran\n")
+    checks = _by_name(ocr_doctor.run_checks(env=env, repo=str(repo)))
+    assert checks["pre-push-hook"]["status"] == "fail"
+    assert "does not run the gate" in checks["pre-push-hook"]["detail"]
+
+def test_stale_gate_copy_in_default_dir_is_flagged(tmp_path):
+    """core.hooksPath points elsewhere while a gate hook still sits in the
+    default hooks dir: that copy is shadowed (git will never run it) and is
+    reported as a failure."""
+    env = _base_env(tmp_path)
+    repo, _ = _make_repo(tmp_path)
+    custom = tmp_path / "custom-hooks"
+    custom.mkdir()
+    (custom / "pre-push").write_text("#!/bin/sh\nexec review-gate \"$@\"\n")
+    _gitcfg(repo, "core.hooksPath", str(custom))
+    (repo / ".git" / "hooks" / "pre-push").write_text(
+        "#!/bin/sh\nexec review-gate \"$@\"\n")
+    checks = _by_name(ocr_doctor.run_checks(env=env, repo=str(repo)))
+    stale = checks["stale-hook-copy"]
+    assert stale["status"] == "fail"
+    assert "stale" in stale["detail"]
+    assert str(repo / ".git" / "hooks" / "pre-push") in stale["detail"]
+    # The effective copy is still healthy, and the shadowed copy must not
+    # be confused with it.
+    assert checks["pre-push-hook"]["status"] == "ok"
+    assert str(custom / "pre-push") in checks["pre-push-hook"]["detail"]
+
+def test_no_stale_flag_when_default_dir_is_the_effective_one(tmp_path):
+    """No hooksPath: a gate hook in .git/hooks IS the installed hook, not a
+    stale copy."""
+    env = _base_env(tmp_path)
+    repo, _ = _make_repo(tmp_path)
+    (repo / ".git" / "hooks" / "pre-push").write_text(
+        "#!/bin/sh\nexec review-gate \"$@\"\n")
+    checks = _by_name(ocr_doctor.run_checks(env=env, repo=str(repo)))
+    assert checks["stale-hook-copy"]["status"] == "ok"
+    assert checks["pre-push-hook"]["status"] == "ok"
+
+def test_no_gate_repo_reports_not_installed_at_effective_path(tmp_path):
+    """A repo with no gate anywhere: the effective path is still reported,
+    and the hook check fails as not installed there."""
+    env = _base_env(tmp_path)
+    repo, _ = _make_repo(tmp_path)
+    checks = _by_name(ocr_doctor.run_checks(env=env, repo=str(repo)))
+    assert checks["effective-hook-path"]["status"] == "ok"
+    assert checks["pre-push-hook"]["status"] == "fail"
+    assert "not installed" in checks["pre-push-hook"]["detail"]
+    assert os.path.realpath(str(repo / ".git" / "hooks")) in \
+        os.path.realpath(checks["pre-push-hook"]["detail"])
+
 # --- the CLI, end to end --------------------------------------------------------
 
 def _cli(env, *args):
