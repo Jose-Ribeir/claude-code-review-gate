@@ -960,6 +960,22 @@ def test_passing_review_persists_its_findings_and_reports_them(tmp_path, monkeyp
     assert (tmp_path / entry["raw"]).exists()
 
 
+def test_a_noop_push_says_so_instead_of_staying_silent(tmp_path, monkeypatch, capsys):
+    """SPEC-11's invariant: a present gate must never produce the absent-gate
+    signature. The empty-range allow lands the push with no review at all, so
+    it says so -- one informational, non-blocking line on stderr -- while the
+    decision itself (allow, exit 0) is unchanged."""
+    _stub_gate(monkeypatch, tmp_path)
+    monkeypatch.setattr(review_gate, "_hook_target", lambda repo_root, cmd: (
+        "allow", {"why": "remote already has these commits"}))
+    _run_hook(monkeypatch)
+    captured = capsys.readouterr()
+    decision, _ = parse_pretooluse(captured.out)
+    assert decision == "pass"   # allow: the push goes through
+    assert "nothing to review" in captured.err
+    assert "remote already holds every commit" in captured.err
+
+
 def test_the_paired_adapters_short_circuit_replays_instead_of_silencing(tmp_path, monkeypatch, capsys):
     calls = []
     _stub_gate(monkeypatch, tmp_path, calls=calls)

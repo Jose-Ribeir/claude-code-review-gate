@@ -10,6 +10,58 @@
   records are counted and reported (stderr in json mode) rather than
   silently dropped.
 
+### Changed
+- **The installer cleans up its own stale copies, and `/review-gate:doctor`
+  reports the hook path git actually resolves.** The installer now removes
+  superseded copies of itself from earlier installs (uninstall is symmetric),
+  and the doctor checks the *effective* hook path — what git resolves through
+  `core.hooksPath` and the chain — not just the file the installer wrote, so a
+  shadowed or stale install is named instead of silently passing.
+- **The desktop bash hook guards the git hook by resolved path and chain.**
+  The PreToolUse guard checks that the git hook it is about to rely on is the
+  gate's own hook, resolved the way git resolves it (path and hook chain), so
+  a repo-local `core.hooksPath` or a stale copy no longer makes the desktop
+  adapter believe a gate exists when none does.
+- **Chunk sessions must run their summary through the formatter subagent.** A
+  chunked review's per-chunk output goes through the same formatter subagent
+  a single-run review uses; a chunk session that skips it is a defect, not a
+  style choice.
+- **The run budget is chunk-aware, bounded by `OCR_TIMEOUT_MAX` (SPEC-08).**
+  The budget is computed from chunk count, trailing per-chunk telemetry and
+  parallel slots, clamped to `[OCR_TIMEOUT, OCR_TIMEOUT_MAX]`; an explicit
+  `OCR_RUN_BUDGET` keeps its flat meaning and overrides the computation. The
+  cap's degenerate clamp is fixed: a resolved `OCR_TIMEOUT_MAX` at or below
+  `OCR_TIMEOUT` no longer resets to 3600 — the effective ceiling is
+  `max(resolved, OCR_TIMEOUT)` — so an operator who raises `OCR_TIMEOUT` past
+  3600 is no longer silently pinned to the flat deadline.
+- **Unseeded huge ranges are refused, not attempted (SPEC-11).** A push whose
+  range exceeds `OCR_FULL_HISTORY_LIMIT` commits (default 500) without prior
+  chunk telemetry is refused with remedy text (`--depth`, the limit variable,
+  or an explicit override) instead of starting a review that would run for
+  hours.
+
+### Fixed
+- **A conservative verdict is rescued once, with a warn fallback (SPEC-06).**
+  A verdict that is merely conservative is retried once under a stricter
+  contract; if the rescue still cannot land, the push proceeds with a
+  non-blocking warning rather than a silent pass. Telemetry distinguishes
+  `verdict_rescued` kinds from ordinary outcomes.
+- **One failed chunk no longer fails the run (SPEC-07).** A chunk that fails
+  (including an unparseable one, which now emits its own
+  `chunk_parse_failure` telemetry instead of a generic error) has its files
+  marked, the chunk split in half, and the splits re-queued while sibling
+  chunks continue; what genuinely could not be reviewed is reported as
+  unreviewed in the verdict rather than hidden. Resuming a segmented run and
+  scheduling caller checks still work under the isolation.
+- **A no-op push says so.** When the remote already holds every commit in the
+  push, the gate allowed it with zero output — indistinguishable from an
+  absent gate, which the absent-gate invariant says must be the only way to
+  see that signature. It now prints one informational, non-blocking line to
+  stderr in both modes; the allow itself is unchanged.
+- **Reporting text fixes.** Failure and still-running messages no longer read
+  as almost-done: wording was corrected so a failed or refused review is not
+  mistaken for a nearly finished one.
+
 
 All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres

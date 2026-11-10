@@ -298,15 +298,18 @@ try:
     _RUN_BUDGET = max(1, _RUN_BUDGET)
 except ValueError:
     _RUN_BUDGET = _RUN_BUDGET_DEFAULT
-# Hard ceiling for the chunk-aware run budget (SPEC-08). It only means anything
-# above OCR_TIMEOUT; a value that is not a positive integer or that does not
-# exceed OCR_TIMEOUT falls back to the 3600 s default.
+# Hard ceiling for the chunk-aware run budget (SPEC-08). A value that is not a
+# positive integer falls back to the 3600 s default. A resolved cap at or below
+# OCR_TIMEOUT no longer resets to 3600: it would silently pin the budget to
+# OCR_TIMEOUT whenever an operator raises OCR_TIMEOUT past 3600. Instead the
+# effective ceiling is max(resolved, OCR_TIMEOUT), so the budget can always
+# rise above the flat deadline the cap bounds.
 try:
     _OCR_TIMEOUT_MAX = int(os.environ.get("OCR_TIMEOUT_MAX", "3600"))
 except ValueError:
     _OCR_TIMEOUT_MAX = 3600
-if _OCR_TIMEOUT_MAX <= TIMEOUT:
-    _OCR_TIMEOUT_MAX = 3600
+if _OCR_TIMEOUT_MAX < TIMEOUT:
+    _OCR_TIMEOUT_MAX = TIMEOUT
 try:
     _MAX_FILES = int(os.environ.get("OCR_MAX_FILES", "40"))
     _MAX_FILES = max(1, _MAX_FILES)
@@ -1910,6 +1913,21 @@ def _parse_push(cmd):
     if out["tags"] and not specs:
         out["kind"] = "tags"
     return out
+
+
+def _noop_push_note():
+    """The informational line for a push that needs no review (SPEC-11's
+    absent-gate invariant): the remote already holds every commit, so the
+    gate lands the push with no review output at all -- indistinguishable
+    from a gate that was never there. One non-blocking line to stderr in
+    both modes closes that signature; it is never a block and never reaches
+    the model."""
+    try:
+        sys.stderr.write("review-gate: nothing to review — the remote already holds "
+                         "every commit in this push.\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
 
 
 def _hook_target(repo_root, cmd):
@@ -8322,6 +8340,10 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
                 except ReviewGateError as exc:
                     if (exc.is_parse_failure and not exc.is_timeout
                             and fp and common_dir and _ledger_enabled()):
+                        # US 25: parse failures are countable apart from the
+                        # generic chunk errors (and from the verdict_rescued
+                        # kinds SPEC-06 emits for the rescue/warn fallback).
+                        _metric_log("chunk_parse_failure")
                         # SPEC-07: an unparseable chunk costs itself, not the
                         # run -- the timeout machinery marks its files, the
                         # splitter halves it down to single items, and the
@@ -9691,8 +9713,10 @@ def _main_inner(argv, mode):
             # falling through to a whole-repo one.
             push_range = _head_range(repo_root)[0]
             if not _has_unpushed_commits(repo_root, push_range):
+                _noop_push_note()
                 allow()
         elif not _has_unpushed_commits(repo_root, push_range):
+            _noop_push_note()
             allow()
         if push_range and ".." in push_range:
             base, tip = push_range.split("..", 1)
@@ -9709,6 +9733,10 @@ def _main_inner(argv, mode):
     else:
         decision, info = _hook_target(repo_root, cmd)
         if decision == "allow":
+            # An allow from _hook_target is always the empty range: the
+            # remote already holds every commit in this push. Say so (see
+            # _noop_push_note) instead of landing the push silently.
+            _noop_push_note()
             allow()
         if decision == "deny":
             if _fail_open_requested():
@@ -9719,6 +9747,7 @@ def _main_inner(argv, mode):
         push_ref = _norm_push_ref(info.get("dst"))
         base, push_range = info.get("base") or "", info.get("range") or ""
         if not push_range and not _has_unpushed_commits(repo_root, ""):
+            _noop_push_note()
             allow()
 
     # Anchored on repo_root, which is now genuinely the repo being pushed

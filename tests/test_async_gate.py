@@ -649,24 +649,43 @@ def test_the_cap_env_is_honored(tmp_path):
 
 
 def test_invalid_cap_falls_back_to_3600(tmp_path):
-    """A non-integer cap, and one that does not exceed OCR_TIMEOUT, both fall
-    back to the 3600 s default. Large telemetry is seeded first so the
-    UNCLAMPED budget far exceeds 3600 s -- otherwise the chunk-aware floor
-    (max budget, OCR_TIMEOUT) would legitimately give 1800 s and the test
-    could not tell cap fallback from floor (the stub reviews of a previous
-    iteration seed tiny averages into the per-test store)."""
-    for i, raw in enumerate(("abc", "100")):  # 100 < OCR_TIMEOUT: no effect
-        sub = tmp_path / f"r{i}"
-        sub.mkdir()
-        # Re-seed per iteration: each push appends its own (fast stub) chunk
-        # lines, and only the trailing 20 are averaged -- without this, the
-        # previous iteration's tiny chunks would set the average.
-        _seed_chunk_telemetry([_chunk_line(f"r-{i}-{j}", 600) for j in range(25)])
-        work = _big_repo(sub, n_files=21)
-        tip = _git(["rev-parse", "HEAD"], cwd=work)
-        delta = _budget_of(work, tip, _budget_env(sub, OCR_TIMEOUT_MAX=raw),
-                           chunks_total=21)
-        assert 3600 <= delta < 3690, (raw, delta)
+    """A non-integer cap falls back to the 3600 s default. Large telemetry is
+    seeded first so the UNCLAMPED budget far exceeds 3600 s -- otherwise the
+    chunk-aware floor (max budget, OCR_TIMEOUT) would legitimately give 1800 s
+    and the test could not tell cap fallback from floor (the stub reviews of a
+    previous iteration seed tiny averages into the per-test store)."""
+    _seed_chunk_telemetry([_chunk_line(f"r-{j}", 600) for j in range(25)])
+    work = _big_repo(tmp_path, n_files=21)
+    tip = _git(["rev-parse", "HEAD"], cwd=work)
+    delta = _budget_of(work, tip, _budget_env(tmp_path, OCR_TIMEOUT_MAX="abc"),
+                       chunks_total=21)
+    assert 3600 <= delta < 3690, delta
+
+
+def test_cap_below_the_deadline_clamps_to_the_deadline(tmp_path):
+    """A cap at or below OCR_TIMEOUT no longer resets to 3600 (the old reset
+    would pin the budget to the flat deadline whenever OCR_TIMEOUT itself was
+    raised past 3600): the effective ceiling is max(cap, OCR_TIMEOUT), so the
+    budget clamps to the flat deadline."""
+    _seed_chunk_telemetry([_chunk_line(f"r-{j}", 600) for j in range(25)])
+    work = _big_repo(tmp_path, n_files=21)
+    tip = _git(["rev-parse", "HEAD"], cwd=work)
+    delta = _budget_of(work, tip, _budget_env(tmp_path, OCR_TIMEOUT_MAX=100),
+                       chunks_total=21)
+    assert 1800 <= delta < 1890, delta
+
+
+def test_raised_deadline_raises_the_default_ceiling_with_it(tmp_path):
+    """OCR_TIMEOUT=7200 with no OCR_TIMEOUT_MAX: the effective ceiling is
+    max(3600, OCR_TIMEOUT), so the budget can exceed 3600 -- it sits at the
+    raised flat deadline instead of being dragged back down to the default
+    cap."""
+    _seed_chunk_telemetry([_chunk_line(f"r-{j}", 600) for j in range(25)])
+    work = _big_repo(tmp_path, n_files=21)
+    tip = _git(["rev-parse", "HEAD"], cwd=work)
+    delta = _budget_of(work, tip, _budget_env(tmp_path, OCR_TIMEOUT=7200),
+                       chunks_total=21)
+    assert 7200 <= delta < 7290, delta
 
 
 def test_trailing_telemetry_sizes_the_budget(tmp_path):
