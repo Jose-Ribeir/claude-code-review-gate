@@ -217,6 +217,29 @@ def test_a_missing_reviewer_denies_instead_of_failing_open(repo, tmp_path):
     assert "kimchi" in reason
 
 
+def test_the_failed_async_note_never_reads_as_finished(tmp_path):
+    # A flush of a note whose review FAILED must be unambiguous in the first
+    # sentence: the review did not finish, so nothing was approved.
+    tip = "a" * 40
+    state_path = tmp_path / "state.json"
+    review_gate._write_state(str(state_path), {
+        "state": "failed", "run_id": "r1", "tip": tip, "branch": "main",
+        "failed_ts": time.time(), "attempts": 1, "reason": "review",
+        "detail": "boom", "protocol_version": review_gate.PROTOCOL_VERSION,
+    })
+    note_path = tmp_path / "note.json"
+    note_path.write_text(json.dumps(
+        {"kind": "async", "state": str(state_path), "repo": str(tmp_path), "head": tip}),
+        encoding="utf-8")
+    note = review_gate._async_note(str(note_path),
+                                   {"state": str(state_path), "repo": str(tmp_path),
+                                    "head": tip}, "s1")
+    assert "did NOT finish" in note
+    assert "failed" in note
+    assert "has finished" not in note
+    assert "Re-run the `git push`" in note
+
+
 # --- past the budget ----------------------------------------------------------
 
 def test_a_long_review_is_denied_past_the_budget_and_joined_by_the_retry(repo, tmp_path):
