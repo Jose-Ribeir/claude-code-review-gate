@@ -581,3 +581,112 @@ def test_the_history_limit_refusal_honors_fail_open(tmp_path):
     assert decision == "pass"
     assert "OCR_FULL_HISTORY_LIMIT" in (reason or "") or "OCR_FULL_HISTORY_LIMIT" in stderr
     assert _trace(tmp_path) == []
+
+
+# --- SPEC-08: chunk-aware run budget ------------------------------------------
+
+def _budget_env(tmp_path, threshold="3", files="1", **extra):
+    """Chunked-push env WITHOUT OCR_RUN_BUDGET, so the chunk-aware budget runs."""
+    e = _env(tmp_path, **extra)
+    e["OCR_CHUNK_THRESHOLD"] = threshold   # >threshold files -> chunked review
+    e["OCR_CHUNK_FILES"] = files           # files per chunk
+    e["OCR_CHUNK_LINES"] = "99999"         # don't split on lines
+    if "OCR_RUN_BUDGET" not in extra:
+        e.pop("OCR_RUN_BUDGET", None)      # else the flat override would win
+    return e
+
+
+def _budget_of(work, tip, env, chunks_total, timeout=180):
+    """Push through the hook, wait for the verdict, and return the state's
+    budget seconds: deadline_ts is realigned with the run budget once the
+    chunk plan is known, so deadline_ts - started_ts is the budget."""
+    decision, reason, _, stderr = _hook(work, "git push origin main", env, timeout=timeout)
+    assert decision == "pass", (reason, stderr)
+    st = _wait_state(work, tip, {"done"}, timeout=timeout)
+    assert st.get("verdict") == "pass", st
+    assert st.get("chunks_total") == chunks_total, st   # the chunked path ran
+    return st["deadline_ts"] - st["started_ts"]
+
+
+def _seed_chunk_telemetry(lines):
+    """Prior per-chunk telemetry in this test's private store's debug log."""
+    import rg_store
+    data = rg_store.store_root() / "data"
+    data.mkdir(parents=True, exist_ok=True)
+    (data / "review-gate-debug.log").write_text("".join(lines), encoding="utf-8")
+
+
+def _chunk_line(run, secs):
+    return (f"ts=2026-01-01T00:00:00Z event=chunk run={run} index=0 of=3 "
+            f"files=2 lines=100 outcome=ok s={secs}\n")
+
+
+def test_small_chunked_push_budgets_ocr_timeout(tmp_path):
+    """First run, no telemetry: a 1-chunk push budgets exactly OCR_TIMEOUT --
+    the flat behaviour the chunk-aware computation replaces."""
+    work = _big_repo(tmp_path, n_files=2)
+    tip = _git(["rev-parse", "HEAD"], cwd=work)
+    delta = _budget_of(work, tip, _budget_env(tmp_path, threshold="1", files="2"),
+                       chunks_total=1)
+    assert 1800 <= delta < 1890, delta        # OCR_TIMEOUT (+ planning slop)
+
+
+def test_big_plan_budgets_the_cap(tmp_path):
+    """21 chunks, no telemetry: the scaled budget is far above the flat
+    OCR_TIMEOUT deadline and is clamped to the OCR_TIMEOUT_MAX cap."""
+    work = _big_repo(tmp_path, n_files=21)
+    tip = _git(["rev-parse", "HEAD"], cwd=work)
+    delta = _budget_of(work, tip, _budget_env(tmp_path), chunks_total=21)
+    assert 3600 <= delta < 3690, delta        # capped at the 3600 s default
+
+
+def test_the_cap_env_is_honored(tmp_path):
+    work = _big_repo(tmp_path, n_files=21)
+    tip = _git(["rev-parse", "HEAD"], cwd=work)
+    delta = _budget_of(work, tip, _budget_env(tmp_path, OCR_TIMEOUT_MAX=7200),
+                       chunks_total=21)
+    assert 7200 <= delta < 7290, delta
+
+
+def test_invalid_cap_falls_back_to_3600(tmp_path):
+    """A non-integer cap, and one that does not exceed OCR_TIMEOUT, both fall
+    back to the 3600 s default. Large telemetry is seeded first so the
+    UNCLAMPED budget far exceeds 3600 s -- otherwise the chunk-aware floor
+    (max budget, OCR_TIMEOUT) would legitimately give 1800 s and the test
+    could not tell cap fallback from floor (the stub reviews of a previous
+    iteration seed tiny averages into the per-test store)."""
+    for i, raw in enumerate(("abc", "100")):  # 100 < OCR_TIMEOUT: no effect
+        sub = tmp_path / f"r{i}"
+        sub.mkdir()
+        # Re-seed per iteration: each push appends its own (fast stub) chunk
+        # lines, and only the trailing 20 are averaged -- without this, the
+        # previous iteration's tiny chunks would set the average.
+        _seed_chunk_telemetry([_chunk_line(f"r-{i}-{j}", 600) for j in range(25)])
+        work = _big_repo(sub, n_files=21)
+        tip = _git(["rev-parse", "HEAD"], cwd=work)
+        delta = _budget_of(work, tip, _budget_env(sub, OCR_TIMEOUT_MAX=raw),
+                           chunks_total=21)
+        assert 3600 <= delta < 3690, (raw, delta)
+
+
+def test_trailing_telemetry_sizes_the_budget(tmp_path):
+    """Prior chunk telemetry feeds the budget: 3 chunks of 600 s average, 4
+    chunks, 2 slots -> 4 x 600 x 2 = 4800 s (under the raised cap). A `call`
+    metric line must not leak into the chunk average."""
+    _seed_chunk_telemetry([_chunk_line(f"r{i}", 600) for i in range(3)]
+                          + ["ts=2026-01-01T00:00:00Z event=call run=r9 "
+                             "kind=review outcome=ok s=99999\n"])
+    work = _big_repo(tmp_path, n_files=4)
+    tip = _git(["rev-parse", "HEAD"], cwd=work)
+    delta = _budget_of(work, tip,
+                       _budget_env(tmp_path, OCR_TIMEOUT_MAX=9000), chunks_total=4)
+    assert 4800 <= delta < 4890, delta
+
+
+def test_run_budget_env_stays_a_flat_override(tmp_path):
+    """An explicit OCR_RUN_BUDGET keeps today's flat meaning."""
+    work = _big_repo(tmp_path, n_files=4)
+    tip = _git(["rev-parse", "HEAD"], cwd=work)
+    delta = _budget_of(work, tip, _budget_env(tmp_path, OCR_RUN_BUDGET=6000),
+                       chunks_total=4)
+    assert 6000 <= delta < 6090, delta
