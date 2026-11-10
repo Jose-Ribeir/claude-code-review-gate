@@ -1,0 +1,14 @@
+{
+  "symbol_callers": [
+    {"symbol": "render_report", "defined_in": "src/reporting.py",
+     "why": "default parameter changed; callers may rely on the old default"}
+  ],
+  "event_couples": [
+    {"producer": "undo(tag: 'filter-reset')", "consumer": "useFilters policy check"}
+  ],
+  "doc_refs": ["docs/data-contracts.md"],
+  "conventions": ["house style: no positional booleans"],
+  "prose_pointers": ["src/reporting.py: string references report from MR !482"],
+  "risk": {"score": 6, "reasons": ["shared helper with eleven callers",
+                                   "behavior depends on untracked filter policy"]}
+}
