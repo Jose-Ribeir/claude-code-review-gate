@@ -67,6 +67,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ocr_verdict import compute_verdict  # noqa: E402
 import ocr_impact  # noqa: E402
+import ocr_index  # noqa: E402
 import ocr_segment  # noqa: E402
 import ocr_telemetry  # noqa: E402
 
@@ -3289,6 +3290,14 @@ def _supervise_run(state_path, run_id):
                 plan, tip, review_root, common_dir, fp, run_id
             )
             _mark_phase("priors", priors=len(to_resolve) + len(carried_findings))
+            # Event-graph index (t06): built lazily on the first push, then
+            # refreshed incrementally from this push's changed-file list so
+            # collectors (t05/t09) can query event couplings, symbol refs,
+            # and pointer utterances. Runtime state under .ocr/index/ — never
+            # committed; failures here are telemetry warnings, never fatal.
+            index_warnings = _refresh_index(review_root, push_paths)
+            if index_warnings:
+                _TELE["index_warnings"] = index_warnings[:50]
             impact = _compute_impact(review_root, tip, active_items)
             if impact and impact.get("warnings"):
                 _TELE["impact_warnings"] = impact["warnings"][:50]
@@ -4764,6 +4773,32 @@ def _classify_priors(plan_items, tip, review_root, common_dir, fp, run_id):
 
 def _impact_enabled():
     return os.environ.get("OCR_IMPACT", "1").strip().lower() not in ("0", "false", "no")
+
+
+def _index_enabled():
+    return os.environ.get("OCR_INDEX", "1").strip().lower() not in ("0", "false", "no")
+
+
+def _refresh_index(review_root, push_paths):
+    """Lazy-build or incrementally refresh the .ocr/index event-graph index.
+
+    Uses the context filter (t01): spec/test files are indexed as
+coupling/ref sources even though they are never review targets. Returns a
+list of warning strings (empty when disabled or clean); fail-soft exactly
+like _compute_impact.
+    """
+    if not _index_enabled():
+        return []
+    try:
+        built = ocr_index.ensure_built(review_root, is_allowed=_is_context_allowed_path)
+        warnings = list(built.get("warnings") or [])
+        if not built.get("built"):
+            got = ocr_index.refresh(review_root, sorted(push_paths or ()),
+                                    is_allowed=_is_context_allowed_path)
+            warnings += got.get("warnings") or []
+        return warnings
+    except Exception as exc:
+        return [f"index refresh failed: {exc}"]
 
 
 def _siblings_enabled():
