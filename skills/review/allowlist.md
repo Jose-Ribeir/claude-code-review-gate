@@ -27,7 +27,22 @@ does not match an exclusion. Binary files and deletions are always skipped.
 Config/markup files (`.json .yaml .yml .toml .xml .md .gradle .properties`) are
 reviewed only when a project rule explicitly opts them in, or in `--scan` mode.
 
-## Default exclusions (never auto-reviewed)
+## Two filters: review vs context search
+
+The orchestrator applies two related admission filters:
+
+- **Review filter** — decides which changed (or scanned) files are *reviewed*.
+  Everything in "Default exclusions" below applies.
+- **Context-search filter** — decides which repository files may be *searched*
+  for callers, cross-file references, and sibling occurrences of a defect
+  (impact analysis). Spec/test files are **not** review targets, but a caller
+  living in a spec or test file is exactly where impact analysis must look;
+  excluding them there stranded real call sites. The context filter therefore
+  drops only the test-family exclusions (**Tests** below) and keeps everything
+  else: the vendored/generated, VCS, lockfile, and generated-suffix exclusions
+  plus the extension allowlist all still apply.
+
+## Default exclusions (never auto-reviewed, tests still context-searchable)
 
 - **Tests:** `**/*_test.go`, `**/*.test.{js,jsx,ts,tsx}`, `**/*.spec.{js,jsx,ts,tsx}`,
   `**/test_*.py`, `**/*_test.py`, `**/tests/**`, `**/__tests__/**`, `**/testdata/**`
