@@ -286,3 +286,62 @@ def test_repo_with_only_a_changelog_is_no_docs_never_checked(tmp_path):
     assert decision == "pass", reason
     assert _gen_calls(tmp_path, "t.trace") == []
     assert "docs_context" not in _review_manifest(tmp_path, "t.trace")
+
+
+# --- regression, docs-gate 07: real-worker stream extraction -----------------
+#
+# Live against kimchi-studio (docs-gate 07 acceptance run): kimchi `--mode
+# json` emits pi-mono NDJSON, and the generator confirms in a LATER, shorter
+# turn ("delivered in the previous turn"). The pre-fix extractor looked only
+# for a {"result": ...} wrapper and fell back to the RAW STREAM: an 18 MB
+# "summary" of session telemetry poisoned docs_context and the checker found
+# nothing.
+
+
+def _ndjson_event(role, blocks, etype="message_end"):
+    return json.dumps({"type": etype, "message": {
+        "role": role,
+        "content": ([{"type": "thinking", "thinking": "let me read the docs"}]
+                    if role == "assistant-thinking" else
+                    [{"type": "text", "text": b} for b in blocks])}})
+
+
+def test_extract_worker_text_picks_the_summary_out_of_a_real_ndjson_stream():
+    summary = ("# Documentation summary\n\n"
+               "- CLI spawn goes through the ACP service layer only "
+               "(source: docs/adr/0085-cli-spawn-only-via-acp-service.md)\n"
+               "- electron-vite is the build tool "
+               "(source: docs/adr/0001-electron-vite-build-tooling.md)\n")
+    stream = "\n".join([
+        '{"type":"session","version":3,"id":"01a1cb6a","timestamp":"t"}',
+        '{"type":"agent_start"}',
+        json.dumps({"type": "message_start", "message": {
+            "role": "user", "content": [{"type": "text", "text": "Summarize..."}]}}),
+        _ndjson_event("assistant-thinking", []),
+        # The summary lands in an EARLY turn...
+        _ndjson_event("assistant", [summary]),
+        # ...and the final turn is a short completion ack.
+        _ndjson_event("assistant", ["Done -- the summary was delivered in the "
+                                    "previous turn. All 310 files were read."]),
+        '{"type":"agent_settled","aborted":false}',
+    ])
+    assert review_gate._extract_worker_text(stream) == summary.strip()
+
+
+def test_extract_worker_text_accepts_a_claude_style_result_event():
+    out = json.dumps({"type": "result", "result": "# Summary\n\n- point\n"})
+    assert review_gate._extract_worker_text(out) == "# Summary\n\n- point"
+
+
+def test_extract_worker_text_ndjson_with_no_text_is_empty_never_the_stream():
+    stream = "\n".join([
+        '{"type":"session","version":3,"id":"x"}',
+        _ndjson_event("assistant-thinking", []),
+        '{"type":"agent_settled","aborted":false}',
+    ])
+    assert review_gate._extract_worker_text(stream) == ""
+
+
+def test_extract_worker_text_plain_output_passes_through_untouched():
+    raw = "# Documentation summary\n\n- a bullet (source: README.md)\n"
+    assert review_gate._extract_worker_text(raw) == raw.strip()

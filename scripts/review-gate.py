@@ -6487,8 +6487,18 @@ def _docs_summary_failed_message(why):
 
 
 def _extract_worker_text(out):
-    """The worker's final text: `--mode json` wraps it in {"result": ...};
-    the test stub emits the raw summary."""
+    """The worker's final text, from whichever stream shape the worker emits.
+
+    kimchi `--mode json` emits pi-mono NDJSON: assistant text lives in the
+    content blocks of message_end/turn_end events (and a claude-style
+    `result` event carries it in `result`). The test stub emits the raw
+    summary. The docs-summary worker confirms in a later, shorter turn ("done
+    -- delivered in the previous turn"), so within the NDJSON the summary is
+    the LONGEST assistant text block, not the last one. Falling back to the
+    raw stream poisons the artifact with megabytes of session telemetry
+    (verified live against kimchi-studio, docs-gate 07), so an NDJSON stream
+    whose text blocks are all empty yields "" -- and the caller fails closed.
+    """
     out = (out or "").strip()
     if not out:
         return ""
@@ -6501,7 +6511,32 @@ def _extract_worker_text(out):
             continue
         if isinstance(parsed, dict) and isinstance(parsed.get("result"), str):
             return parsed["result"].strip()
-    return out
+    blocks = []
+    saw_event = False
+    for line in out.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict) or event.get("type") not in (
+                "message_end", "turn_end", "assistant"):
+            continue
+        saw_event = True
+        message = event.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        for block in content or []:
+            if isinstance(block, dict) and block.get("type") == "text":
+                text = (block.get("text") or "").strip()
+                if text:
+                    blocks.append(text)
+    if blocks:
+        return max(blocks, key=len)
+    # An NDJSON session stream with no text blocks is a broken capture, never
+    # a summary; plain non-JSON output (the stub) passes through untouched.
+    return "" if saw_event else out
 
 
 def _run_docs_summary_once(review_root, tip, doc_paths):
