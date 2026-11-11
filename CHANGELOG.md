@@ -12,15 +12,17 @@ Built from `.kimchi/plans/review-gate-v2-spec.md`; all flows degrade with a warn
 never a silent loss of protection.
 
 ### Added
-- **Intent context: commit messages and linked tickets.** The pushed commits'
+- **Intent context: commit messages and linked tickets (2026-11-11).** The pushed commits'
   messages (subjects + bodies + touched files) ride the manifest-extras seam
   as `commit_intent`, fenced as untrusted author-controlled *claims* — verbatim
   for the newest commits inside a token budget, subject-only beyond it with a
   visible trim notice, and scoped per chunk by touched-file intersection
   (zero-intersection chunks get subjects-only background). Opt-in ticket
   enrichment (`intent.tickets`, default off) discovers keys from a per-repo
-  override, the branch name, then commit messages, fetches title + description
-  only through the maintainer's own `gh`/`glab` sign-in (GitHub/GitLab),
+  override, the branch name, then commit messages (`scripts/ocr_tickets.py`,
+  cap of 3 fetched, the rest ID-only), fetches title + description only
+  through the maintainer's own `gh`/`glab` sign-in
+  (`scripts/ocr_ticket_fetch.py`, GitHub/GitLab),
   caches 24h, and silently notes — never fails on — any miss. **Jira is not
   supported in this variant** (the review worker hard-blocks MCP, so the
   Kimchi variant's Jira side-fetch worker does not port): a `jira` entry in
