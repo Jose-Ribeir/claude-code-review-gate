@@ -58,6 +58,51 @@ def _findings(data):
     return []
 
 
+# --- intent_gap: a contracted finding family (spec: intent findings) --------
+# An intent_gap is NOT a defect: it says the diff contradicts an author's
+# claim (a commit message, a ticket, or the manual requirement text). Its
+# severity vocabulary is its own: "blocking" (the claimed work is entirely
+# absent from the changes) or "warning" (any other mismatch). Neither maps
+# onto the defect severities low/medium/high -- _SEVERITY_ALIASES must never
+# learn them, or a defect-shaped severity would rank an intent finding.
+_INTENT_SEVERITIES = ("blocking", "warning")
+
+
+def _is_intent_finding(f):
+    """True for findings of the contracted intent_gap family."""
+    return isinstance(f, dict) and \
+        str(f.get("type") or "").strip().lower() == "intent_gap"
+
+
+def _intent_self_check_ok(f):
+    """The reviewer's single-pass self-check, enforced gate-side.
+
+    An intent finding is kept only if it (a) quotes the exact claim text,
+    (b) quotes the contradicting code in against.evidence, and (c) shows the
+    implied correction would not break the behaviour the claim describes
+    (self_check.fix_safe is true, with a rationale). Anything else is
+    dropped: the model's self-marking is advisory, and an unverifiable
+    intent mismatch must never reach the verdict or the report.
+    """
+    if str(f.get("severity") or "").strip().lower() not in _INTENT_SEVERITIES:
+        return False
+    if not str(f.get("claim") or "").strip():
+        return False
+    against = f.get("against")
+    if not isinstance(against, dict) or not str(against.get("evidence") or "").strip():
+        return False
+    sc = f.get("self_check")
+    return isinstance(sc, dict) and sc.get("fix_safe") is True and \
+        bool(str(sc.get("rationale") or "").strip())
+
+
+def drop_failed_intent_findings(findings):
+    """Gate-side normalization: defect findings pass through untouched; an
+    intent_gap finding survives only when its self-check holds."""
+    return [f for f in findings
+            if not _is_intent_finding(f) or _intent_self_check_ok(f)]
+
+
 def _is_actionable(f):
     """A finding with no description or no valid location is not something a
     human can act on -- most likely the reviewer dropped required fields
@@ -97,6 +142,18 @@ def compute_verdict(data):
     has_warn = False
     for f in findings:
         if not isinstance(f, dict):
+            continue
+        if _is_intent_finding(f):
+            # Intent findings: dropped when the self-check fails; 'blocking'
+            # (the claim's work entirely absent from the changes) blocks;
+            # 'warning' warns and can never block. Intent findings can only
+            # ever ADD a verdict tier -- a defect finding below is decided
+            # entirely on its own terms (the asymmetry invariant).
+            if not _intent_self_check_ok(f):
+                continue
+            if str(f.get("severity") or "").strip().lower() == "blocking":
+                return "block"
+            has_warn = True
             continue
         rank = _SEVERITY_RANK.get(norm_severity(f.get("severity")), -1)
         try:

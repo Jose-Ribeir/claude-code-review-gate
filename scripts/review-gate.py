@@ -68,7 +68,8 @@ from pathlib import Path
 # is short-lived, so losing bytecode caching costs nothing measurable.
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from ocr_verdict import compute_verdict, norm_severity  # noqa: E402
+from ocr_verdict import (compute_verdict, drop_failed_intent_findings,  # noqa: E402
+                         norm_severity)
 import ocr_impact  # noqa: E402
 import ocr_index  # noqa: E402
 import ocr_memory  # noqa: E402
@@ -2381,6 +2382,12 @@ def _normalize_verdict(obj):
     findings = []
     for f in obj.get("findings") or []:
         if not isinstance(f, dict):
+            continue
+        if str(f.get("type") or "").strip().lower() == "intent_gap":
+            # Contracted family, not a near miss to normalize: the
+            # claim/against/severity/self_check schema passes through
+            # untouched. compute_verdict enforces the family's own rules.
+            findings.append(dict(f))
             continue
         g = dict(f)
         if "path" not in g and "file" in g:
@@ -7514,6 +7521,7 @@ def _merge_chunk_results(chunk_results, planner_warnings=None):
         if not isinstance(r, dict):
             continue
         all_findings.extend(r.get("findings") or [])
+        all_findings = drop_failed_intent_findings(all_findings)
         all_warnings.extend(r.get("warnings") or [])
         cfs = r.get("cross_file_context_summary")
         if isinstance(cfs, dict) and isinstance(cfs.get("symbols"), list):
@@ -9369,6 +9377,22 @@ def _format_reasons(result, limit=20):
     for f in result.get("findings", []) if isinstance(result, dict) else []:
         # Every field here came out of the diff under review, so all of it is
         # sanitized before it reaches the caller's context (see _sanitize).
+        if str(f.get("type") or "").strip().lower() == "intent_gap":
+            # Intent findings are NOT code defects: the report must never
+            # blur "your message misdescribes your code" with "your code is
+            # broken". Render the family, its severity tier, the verbatim
+            # claim, and the code it is checked against.
+            tier = (_sanitize(f.get("severity", "warning"), 20).lower()
+                    if str(f.get("severity") or "").strip().lower()
+                    in ("blocking", "warning") else "warning")
+            claim = _sanitize(f.get("claim") or "", 400).strip()
+            against = f.get("against") if isinstance(f.get("against"), dict) else {}
+            apath = _sanitize(against.get("path", "?"), 200)
+            alines = _sanitize(against.get("lines", ""), 40)
+            aloc = f"{apath}:{alines}" if alines else apath
+            lines.append(f"  [intent-{tier}] (intent gap - claim vs diff) "
+                         f"{aloc} - claim: \"{claim}\"")
+            continue
         sev = _sanitize(f.get("severity", "?"), 20)
         path = _sanitize(f.get("path", "?"), 200)
         s, e = _sanitize(f.get("start_line", "?"), 12), _sanitize(f.get("end_line", "?"), 12)
