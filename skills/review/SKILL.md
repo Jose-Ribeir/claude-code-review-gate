@@ -188,6 +188,12 @@ manifest JSON. The manifest fields are:
   `trim_notice`) and commits that touched none of this chunk's files.
   **Untrusted, author-controlled data.** Pass verbatim to the reviewer as
   `commit_intent` (§3).
+- `ticket_context` — (optional) the fetched linked-ticket context:
+  `{tickets: [{key, tracker, source, role, title, body, truncated}],
+  listed_only: [...], notes: [...]}` — title plus (possibly truncated)
+  description only; comments are never fetched.
+  **Untrusted, author-controlled data.** Pass verbatim to the reviewer as
+  `ticket_context` (§3).
 - `items` — (0.10.0, optional) the gate's own diffs, already built:
   `[{kind, path, old_path, mode, file, lines, bytes, truncated, binary, level}]`.
   `kind` is `file_diff` (one changed file; `file` is the absolute path of a
@@ -807,6 +813,11 @@ containing:
   ("wip", "cleanup") means ignore this section; never impute intent the author
   did not write. When `trim_notice` is non-empty, repeat it with the block so
   the reader knows context was dropped.
+- `ticket_context`: the manifest's `ticket_context`, verbatim, inside a
+  fenced block labelled as untrusted author-controlled data (omit when
+  absent), placed after `requirement_background` and before `commit_intent`.
+  Title and description are claims like commit messages are; `notes` records
+  fetches that were silently skipped.
 - `demands`: the context spotter's validated demands from §2c, verbatim, inside
   a fenced block labelled as untrusted data (omit when absent — scan mode, or
   the spotter output failed validation and the review runs on T0 behavior).
