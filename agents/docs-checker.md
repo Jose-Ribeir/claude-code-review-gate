@@ -56,9 +56,19 @@ You may read any file at the tip for verification. You never modify anything.
    dependency, a new top-level module, new public API surface (routes,
    handlers, exported entry points), a config or environment-variable change,
    a data-shape change — and no commit in the diff records a decision for it.
-3. **Stale documentation.** The change makes an existing documentation
-   passage wrong. Quote the exact stale passage and the code that contradicts
-   it.
+3. **Stale documentation (drift).** The change makes an existing passage of
+   a README, runbook, or reference doc wrong — a now-false instruction, an
+   option that no longer exists, a renamed entry point. Mark the finding
+   `docs_kind: "stale_docs"` and quote BOTH sides verbatim: the exact stale
+   passage (`stale_passage`, naming the file it lives in via `doc_path`) and
+   the code that contradicts it (`existing_code`). This class never vetoes on
+   decision grounds — "the change breaks a recorded decision" is class 1
+   (contradiction), never drift. Severity is `medium`; assign confidence
+   ≥ 0.7 only when you have verified both quotes verbatim against the actual
+   document and code, otherwise keep it below 0.7. A drift finding without
+   both quotes is not worth emitting: drop it. If one slips through, the
+   gate downgrades it to a warning — an unquoted drift finding can never
+   block, whatever severity or confidence it claims.
 
 Rules for every finding:
 
@@ -91,6 +101,12 @@ exact code-reviewer shape. Each finding:
   "suggestion": "the concrete fix"
 }
 ```
+
+A drift (class 3) finding additionally carries `docs_kind: "stale_docs"`,
+`stale_passage` (the verbatim doc quote) and `doc_path` (the file it came
+from). `content` still embeds both quotes — the denial message a blocked
+pusher reads is built from `content`, so the passage and the code must both
+appear in it word for word.
 
 Severity: `high` for a contradiction of a binding decision; `medium` for a
 missing decision record or stale documentation. No findings, empty array `[]`.

@@ -41,10 +41,14 @@ unit_diff is `unit:<path>:<unit>:<part>` and a context item `context:<role>:<pat
 
 0.11.0 (Part S) knobs:
   STUB_DOCS_FINDING  JSON {content, severity?, path?, category?, existing_code?,
-                     source_doc?} -- a documentation-checker finding, only when the
-                     manifest carries docs_context (docs-gate 01). Dropped per the
-                     checker's contract (docs-gate 03) when either quote is missing
-                     or source_doc names a document outside docs_context.corpus.
+                     source_doc?, confidence?, docs_kind?, stale_passage?,
+                     doc_path?} -- a documentation-checker finding, only when the
+                     manifest carries docs_context (docs-gate 01). Contradiction
+                     class (docs-gate 03): dropped per the checker's contract when
+                     either quote is missing or source_doc names a document outside
+                     docs_context.corpus. Drift class (docs-gate 04): docs_kind/
+                     stale_passage/doc_path pass through verbatim when scripted; a
+                     scripted confidence overrides the tier default.
   STUB_FILTER_DROP   JSON [substring, ...] -- simulate the skill's §3b falsify
                      pass: would-be-blocking findings whose content carries one of
                      the substrings are dropped, code and doc findings alike.
@@ -429,14 +433,20 @@ if docs_finding and _docs_ctx:
         corpus = [_p for cls in (_docs_ctx.get("corpus") or {}).values() for _p in cls]
         if content and code_quote and (source_doc is None or source_doc in corpus):
             anchor = spec.get("path") or (manifest.get("paths") or ["?"])[0]
-            findings.append({
-                "path": anchor, "start_line": 1, "end_line": 2, "confidence": 0.95,
+            sev = spec.get("severity", "high")
+            f = {
+                "path": anchor, "start_line": 1, "end_line": 2,
+                "confidence": _confidence(sev, spec),
                 "category": spec.get("category", "documentation"),
                 "evidence": "docs_context",
-                "severity": spec.get("severity", "high"),
+                "severity": sev,
                 "content": content,
                 "existing_code": code_quote,
-            })
+            }
+            for k in ("docs_kind", "stale_passage", "doc_path"):
+                if k in spec:
+                    f[k] = spec[k]
+            findings.append(f)
     except Exception:
         pass
 
