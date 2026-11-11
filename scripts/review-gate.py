@@ -66,12 +66,16 @@ from pathlib import Path
 # is short-lived, so losing bytecode caching costs nothing measurable.
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from ocr_verdict import compute_verdict  # noqa: E402
+from ocr_verdict import (compute_verdict,  # noqa: E402
+                        drop_failed_intent_findings)  # noqa: E402
 import ocr_impact  # noqa: E402
 import ocr_index  # noqa: E402
+import ocr_intent_config  # noqa: E402  # single settings read (intent.* switches)
 import ocr_memory  # noqa: E402
 import ocr_segment  # noqa: E402
 import ocr_telemetry  # noqa: E402
+import ocr_ticket_fetch  # noqa: E402  # gh/glab fetch + 24h cache, fail-open
+import ocr_tickets  # noqa: E402  # ticket key discovery
 
 PROMPT = "/review-gate:review --unpushed --json"
 # With an explicit range the skill reviews exactly what the remote is about to
@@ -363,6 +367,16 @@ try:
     _MAX_FILES = max(1, _MAX_FILES)
 except ValueError:
     _MAX_FILES = 40
+# --- commit intent (commit messages -> review payload) -----------------------
+# The pushed commits' messages ride the manifest-extras seam as `commit_intent`,
+# fenced for the reviewer as untrusted author-controlled claims. The newest
+# _INTENT_VERBATIM_COMMITS commits are kept verbatim (subject, body, touched
+# files) until ~_INTENT_TOKEN_BUDGET tokens (~4 chars/token) are spent; the rest
+# drop to subject lines, marked by trim_notice. Tuning knobs, fixed here, not
+# configurable: intent context restores upstream's default, it is not a dial.
+_INTENT_VERBATIM_COMMITS = 10
+_INTENT_TOKEN_BUDGET = 4000
+_INTENT_SUBJECT_TAIL = 100    # subject lines kept past the budget; older count in trim_notice
 
 
 def _read_deep_timeout():
@@ -1254,7 +1268,8 @@ def _prune_history(dirpath):
         pass  # housekeeping must never break the gate
 
 
-def _record_review(git_dir, head_sha, branch, mode, verdict, advisory, blocked, result, raw_name=""):
+def _record_review(git_dir, head_sha, branch, mode, verdict, advisory, blocked,
+                   result, raw_name="", intent=None):
     """Append this review to FINDINGS_LOG. Returns the log path, or None.
 
     Written for EVERY completed review, blocking or not, because the
@@ -1263,6 +1278,12 @@ def _record_review(git_dir, head_sha, branch, mode, verdict, advisory, blocked, 
     re-reads, and is then overwritten in review-gate-last-output.json by the
     next run. Findings are stored verbatim (JSON-encoded, so control characters
     cannot escape the line); readers sanitize at print time.
+
+    `intent` is an optional extras dict recording the intent context the
+    review actually used (sources present, the intent text, counts, fetch
+    notes) -- provenance for a later before/after quality study. The log is
+    schema-loose JSONL, so the extra key needs no protocol change and older
+    records simply do not carry it.
 
     One line, one buffered append per process, so concurrent adapters interleave
     records rather than corrupting each other's.
@@ -1287,6 +1308,12 @@ def _record_review(git_dir, head_sha, branch, mode, verdict, advisory, blocked, 
             "truncated": False,
             "raw": f"{HISTORY_DIR}/{raw_name}" if raw_name else "",
         }
+        if intent is not None:
+            # An extras dict, copied so a later caller-side mutation cannot
+            # reach into the record. A stray non-dict value is kept as text
+            # rather than dropped (an extra is never a reason to fail a write).
+            entry["intent"] = (dict(intent) if isinstance(intent, dict)
+                               else {"text": str(intent)})
         unreviewed = result.get("unreviewed_truncated") if isinstance(result, dict) else None
         if isinstance(unreviewed, list) and unreviewed:
             entry["unreviewed_truncated"] = len(unreviewed)
@@ -3506,6 +3533,8 @@ def _supervise_run(state_path, run_id):
     progress = {"new": 0}
     plan_summary = ""
     diffs = None     # precomputed diffs (_build_diffs); None on the 0.9.x path
+    intent_commits = None    # pushed-commit messages (_collect_commit_intent)
+    ticket_context = None    # fetched linked-ticket block (_collect_ticket_context)
     try:
         # Provider guard, belt and braces for the worker path: the push hook
         # already vetted, but a supervisor can also be started out of band
@@ -3622,6 +3651,16 @@ def _supervise_run(state_path, run_id):
             defects, defect_notes = [], []   # sought after the resolver (below)
             _mark_phase("impact", sites=len((_TELE.get("impact") or {}).get("sites") or []))
 
+            # Commit intent: one git log over the push range, then scoped per
+            # chunk by touched-file intersection. Collected once here (manifest
+            # build time), best-effort: None leaves every payload untouched.
+            intent_commits = _collect_commit_intent(review_root, push_range)
+            # Linked tickets: only when settings intent.tickets is on; fetched
+            # on the real repo (gh/glab resolve its remotes), never in the
+            # review worktree. None leaves every payload untouched.
+            ticket_context = _collect_ticket_context(repo_root, branch,
+                                                     intent_commits)
+
             def _review_extras(k, chunk_paths, chunk_items=None):
                 extras = {}
                 bundle = _impact_bundle(review_root, tip, impact, chunk_paths,
@@ -3630,6 +3669,11 @@ def _supervise_run(state_path, run_id):
                     extras["impact"] = bundle
                 if defects and k == 0:  # each defect needs judging once
                     extras["known_defects"] = defects
+                if ticket_context:  # between requirement_background and commit_intent
+                    extras["ticket_context"] = ticket_context
+                intent = _intent_extra(intent_commits, chunk_paths, push_range)
+                if intent:
+                    extras["commit_intent"] = intent
                 return extras
 
             # Files that timed out in an earlier run: retried in smaller chunks (even
@@ -3808,6 +3852,8 @@ def _supervise_run(state_path, run_id):
                     # Golden argv: byte-identical to 0.7.0 (no --paths-file).
                     # Only with OCR_PRECOMPUTED_DIFFS=0: otherwise a manifest is
                     # always written, since the diffs reach the reviewer through it.
+                    # Commit intent also diverts to a manifest: it enters via
+                    # `extras`, so a flagged-off push with commits lands below.
                     result, ran, raw_name = _single(
                         lambda: _run_review(review_root, mode, git_dir, tip, push_range,
                                             tier=ocr_telemetry.TIER_REVIEW,
@@ -4054,7 +4100,12 @@ def _supervise_run(state_path, run_id):
     reasons = _format_reasons(result)
     advisory = _is_advisory(repo_root)
     blocked = verdict == "block" and not advisory
-    record = _record_review(git_dir, tip, branch, mode, verdict, advisory, blocked, result, raw_name)
+    # Intent provenance for the record: which intent sources fed this review,
+    # the used texts, counts and fetch notes -- provenance for a later
+    # before/after quality study. The findings log tolerates the extra key.
+    intent_record = _intent_record(intent_commits, ticket_context)
+    record = _record_review(git_dir, tip, branch, mode, verdict, advisory, blocked,
+                            result, raw_name, intent=intent_record)
     if not blocked:
         # The pass-only legacy marker, unchanged: an older global git hook
         # reads its presence as "reviewed and passed", so a block must never
@@ -4067,7 +4118,7 @@ def _supervise_run(state_path, run_id):
             except Exception:
                 pass
     try:
-        _update_state_owned(state_path, run_id, **{
+        done_fields = {
             "state": "done", "done_ts": time.time(), "verdict": verdict,
             "blocked": bool(blocked), "reasons": reasons,
             "finding_count": (
@@ -4077,7 +4128,10 @@ def _supervise_run(state_path, run_id):
                 len(result.get("unreviewed_truncated") or []) if isinstance(result, dict) else 0
             ),
             "record": str(record) if record else "", "raw": raw_name,
-        })
+        }
+        if intent_record:  # intent provenance rides the done state when present
+            done_fields["intent"] = intent_record
+        _update_state_owned(state_path, run_id, **done_fields)
     except _Fenced:
         return 0  # superseded just before the final write; say nothing
     except Exception:
@@ -6272,6 +6326,165 @@ def _context_only(item):
         a["kind"] in ("unit", "filediff") for a in item["seg_work"])
 
 
+def _collect_commit_intent(review_root, push_range):
+    """The pushed commits' messages for `push_range`, newest first:
+    [{sha, subject, body, files}], from ONE git log call (subjects, bodies and
+    name-only touched-file lists). None when the range is empty, unevaluable,
+    or carries no commits -- intent context is best-effort background and must
+    never fail a review.
+    """
+    if not push_range or push_range == _MULTI_REF or ".." not in push_range:
+        return None
+    base, tip = push_range.split("..", 1)
+    # A first push (empty-tree base) is not a log range; log the tip alone,
+    # exactly as the rev-list count in the verdict backing does.
+    rng = tip if base == _EMPTY_TREE else push_range
+    # \x1e opens a commit record; \x1f separates sha / subject / body / the
+    # name-only file list git appends after the format line. Commit messages
+    # cannot carry those control bytes through git, so the split is safe.
+    out, rc = _git(
+        ["log", "--no-renames", "--format=%x1e%H%x1f%s%x1f%b%x1f", "--name-only", rng],
+        cwd=review_root)
+    if rc != 0 or not out.strip():
+        return None
+    commits = []
+    for record in out.split("\x1e"):
+        record = record.strip("\n")
+        if not record:
+            continue
+        parts = record.split("\x1f", 3)
+        if len(parts) < 4:
+            continue
+        sha, subject, body, files_blob = parts
+        commits.append({
+            "sha": sha.strip(),
+            "subject": subject.strip(),
+            "body": body.strip("\n"),
+            "files": [ln for ln in (ln.strip() for ln in files_blob.splitlines()) if ln],
+        })
+    return commits or None
+
+
+def _intent_tokens(text):
+    """~4 chars a token: a fixed local estimate, no tokenizer dependency."""
+    return max(1, (len(text) + 3) // 4)
+
+
+def _collect_ticket_context(repo_root, branch, intent_commits):
+    """The manifest `ticket_context` value: the fetched titles+descriptions
+    of the push's discovered ticket keys, plus the keys discovery listed by
+    ID only and every miss note.
+
+    Off by default -- discovery and fetching run only when the settings'
+    intent.tickets is on; discovery/fetch/fail-open rules live in ocr_tickets
+    and ocr_ticket_fetch. Comments are never fetched. The block rides the
+    same extras seam as commit_intent and sits between manual
+    requirement_background and commit messages in precedence. Everything is
+    best-effort: even an internal bug becomes a note, never an exception.
+    """
+    try:
+        settings = ocr_intent_config.load_settings(repo_root)
+        if not (settings and settings.get("intent", {}).get("tickets")):
+            return None
+        messages = [f"{c['subject']}\n{c['body']}".strip()
+                    for c in (intent_commits or ())]
+        discovered = ocr_tickets.discover_ticket_keys(settings, branch=branch,
+                                                      commit_messages=messages)
+        fetched = ocr_ticket_fetch.fetch_tickets(settings, discovered,
+                                                 repo_root=repo_root)
+        block = {"tickets": fetched["tickets"],
+                 "listed_only": list(discovered.get("extras") or []),
+                 "notes": (list(discovered.get("notes") or [])
+                           + list(fetched["notes"]))}
+        if not block["tickets"] and not block["listed_only"] and not block["notes"]:
+            return None
+        return block
+    except Exception as exc:  # tickets never fail a review; a bug is a note
+        return {"tickets": [], "listed_only": [],
+                "notes": [f"ticket fetching skipped: {exc}"]}
+
+
+def _intent_extra(commits, chunk_paths, push_range=""):
+    """The manifest `commit_intent` value for one chunk (or the single-context
+    review when chunk_paths is None).
+
+    The newest _INTENT_VERBATIM_COMMITS commits stay verbatim
+    (subject+body+files) inside ~_INTENT_TOKEN_BUDGET tokens -- the newest
+    message is verbatim even when it alone overflows. A chunk receives those
+    in full only for commits whose touched files intersect its own
+    (chunk_paths None: no scoping, a single-chunk/squash range is a no-op over
+    the full set); every other commit -- older ones past the budget, and
+    commits that touched none of this chunk's files -- appears subject-only,
+    with budget trims marked by trim_notice. None when there is nothing to say.
+    """
+    if not commits:
+        return None
+    verbatim, trimmed = [], []
+    used = 0
+    for c in commits:
+        cost = _intent_tokens(c["subject"] + "\n" + c["body"])
+        if (not verbatim or
+                (len(verbatim) < _INTENT_VERBATIM_COMMITS
+                 and used + cost <= _INTENT_TOKEN_BUDGET)):
+            verbatim.append(c)
+            used += cost
+        else:
+            trimmed.append(c)
+    chunk_set = set(chunk_paths) if chunk_paths is not None else None
+
+    def _in_chunk(c):
+        return chunk_set is None or not chunk_set.isdisjoint(c["files"])
+
+    full = [{"sha": c["sha"][:12], "subject": c["subject"], "body": c["body"],
+             "files": c["files"]} for c in verbatim if _in_chunk(c)]
+    background = [c for c in verbatim if not _in_chunk(c)] + trimmed
+    subject_only = [{"sha": c["sha"][:12], "subject": c["subject"]}
+                    for c in background[:_INTENT_SUBJECT_TAIL]]
+    omitted = len(background) - len(subject_only)
+    notices = []
+    if trimmed:
+        notices.append(
+            f"{len(trimmed)} older commit(s) trimmed to subject lines only "
+            f"(verbatim budget: newest {_INTENT_VERBATIM_COMMITS} commits, "
+            f"~{_INTENT_TOKEN_BUDGET} tokens)")
+    if omitted:
+        notices.append(f"{omitted} older commit(s) omitted entirely")
+    return {
+        "range": push_range,
+        "commit_count": len(commits),
+        "commits": full,
+        "subject_only": subject_only,
+        "trimmed": bool(trimmed or omitted),
+        "trim_notice": "; ".join(notices),
+    }
+
+
+def _intent_record(commits, ticket_context):
+    """The `intent` extras dict stored in the verdict record (and the done
+    state): which intent sources fed this review, the used texts in compact
+    form, counts, and every discovery/fetch note -- provenance for a later
+    before/after quality study without rebuilding history. None when no
+    intent context was collected at all.
+    """
+    if not commits and not ticket_context:
+        return None
+    sources, text_parts, notes = [], [], []
+    counts = {"messages": 0, "tickets": 0}
+    if ticket_context:
+        tickets = ticket_context.get("tickets") or []
+        if tickets:
+            sources.append("ticket")
+            counts["tickets"] = len(tickets)
+            text_parts += [f"{t.get('key')}: {t.get('title')}" for t in tickets]
+        notes += list(ticket_context.get("notes") or [])
+    if commits:
+        sources.append("commit_messages")
+        counts["messages"] = len(commits)
+        text_parts += [c["subject"] for c in commits]
+    return {"sources": sources, "text": "\n".join(text_parts),
+            "counts": counts, "notes": notes}
+
+
 def _build_deep_manifest(paths, reasons, threshold):
     """The tier-2 (t10) reviewer's manifest: ONE deep pass over the whole
     push, no items[] (the deep reviewer reads diffs and repo state itself,
@@ -6764,6 +6977,7 @@ def _merge_chunk_results(chunk_results, planner_warnings=None):
         if not isinstance(r, dict):
             continue
         all_findings.extend(r.get("findings") or [])
+        all_findings = drop_failed_intent_findings(all_findings)
         all_warnings.extend(r.get("warnings") or [])
         cfs = r.get("cross_file_context_summary")
         if isinstance(cfs, dict) and isinstance(cfs.get("symbols"), list):
@@ -8456,6 +8670,22 @@ def _format_reasons(result, limit=20):
     for f in result.get("findings", []) if isinstance(result, dict) else []:
         # Every field here came out of the diff under review, so all of it is
         # sanitized before it reaches the caller's context (see _sanitize).
+        if str(f.get("type") or "").strip().lower() == "intent_gap":
+            # Intent findings are NOT code defects: the report must never
+            # blur "your message misdescribes your code" with "your code is
+            # broken". Render the family, its severity tier, the verbatim
+            # claim, and the code it is checked against.
+            tier = (_sanitize(f.get("severity", "warning"), 20).lower()
+                    if str(f.get("severity") or "").strip().lower()
+                    in ("blocking", "warning") else "warning")
+            claim = _sanitize(f.get("claim") or "", 400).strip()
+            against = f.get("against") if isinstance(f.get("against"), dict) else {}
+            apath = _sanitize(against.get("path", "?"), 200)
+            alines = _sanitize(against.get("lines", ""), 40)
+            aloc = f"{apath}:{alines}" if alines else apath
+            lines.append(f"  [intent-{tier}] (intent gap - claim vs diff) "
+                         f"{aloc} - claim: \"{claim}\"")
+            continue
         sev = _sanitize(f.get("severity", "?"), 20)
         path = _sanitize(f.get("path", "?"), 200)
         s, e = _sanitize(f.get("start_line", "?"), 12), _sanitize(f.get("end_line", "?"), 12)
