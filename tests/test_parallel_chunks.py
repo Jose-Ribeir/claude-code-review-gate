@@ -75,14 +75,17 @@ def test_concurrency_is_clamped_and_defaults_to_two(monkeypatch):
 def test_two_chunks_run_at_once_each_in_its_own_worktree(tmp_path):
     work = ag._big_repo(tmp_path, n_files=4)
     tip = ag._git(["rev-parse", "HEAD"], cwd=work)
-    decision, reason, _, _ = _push(work, _env(tmp_path, STUB_SLEEP=3))
+    # Sleep 6 s per chunk; two slots means calls 0 and 1 start together.
+    # The 4 s overlap threshold tolerates a slow second-worktree spawn on a
+    # loaded machine (was 3 s sleep / 2 s threshold, which flaked).
+    decision, reason, _, _ = _push(work, _env(tmp_path, STUB_SLEEP=6))
     st = ag._wait_state(work, tip, {"done"}, timeout=90)
     assert st["verdict"] == "pass", st
     calls = _reviews(tmp_path)
     assert len(calls) == 4
     starts = _overlap(calls)
-    # Two slots: the first two calls start together, well inside one call's 3 s.
-    assert starts[1] - starts[0] < 2.0, starts
+    # Two slots: the first two calls start together, well inside one call's 6 s.
+    assert starts[1] - starts[0] < 4.0, starts
     cwds = {os.path.realpath(c["cwd"]) for c in calls}
     assert len(cwds) == 2, cwds
     for cwd in cwds:
@@ -135,15 +138,16 @@ def test_a_limit_stops_the_sibling_but_finished_chunks_keep_their_records(tmp_pa
     work = ag._big_repo(tmp_path, n_files=4)
     tip = ag._git(["rev-parse", "HEAD"], cwd=work)
     env = _env(tmp_path, STUB_CHUNK_VERDICT=json.dumps({"2": "limit"}),
-               STUB_CHUNK_SLEEP=json.dumps({"3": 30}))
+               STUB_CHUNK_SLEEP=json.dumps({"3": 45}))
     decision, reason, _, _ = _push(work, env)
     assert decision == "deny", reason
     st = ag._wait_state(work, tip, {"failed"}, timeout=60)
     assert st.get("reason") == "limit" and int(st.get("attempts") or 0) == 0, st
     calls = _reviews(tmp_path)
     assert sorted(c["manifest"]["chunk_index"] for c in calls) == [0, 1, 2, 3]
-    # chunk 3 (30 s) was killed: the run did not wait for it
-    assert time.time() - min(c["ts"] for c in calls) < 25
+    # chunk 3 (45 s) was killed: the run did not wait for it. The 40 s bound
+    # tolerates kill-pipeline latency under load (was 30 s sleep / 25 s bound).
+    assert time.time() - min(c["ts"] for c in calls) < 40
     recorded = _recorded(work)
     assert {"mod0.py", "mod1.py"} <= recorded, recorded
     assert "mod3.py" not in recorded and "mod2.py" not in recorded, recorded
