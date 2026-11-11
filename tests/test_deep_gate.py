@@ -285,7 +285,12 @@ class TestDeepLaneE2E:
         retry joins the recorded verdict -- no second review."""
         work = _repo(tmp_path, {"a.txt": "one\n"})
         tip = _commit(work, {"db/migrations/001_users.py": "x = 1\n"})
-        env = _env(tmp_path, STUB_SLEEP=35, STUB_VERDICT="block")
+        # Sleep must satisfy BOTH: > 30 (push 1's inline budget misses, so it
+        # claims the async deep pass and denies) and < ~55 (the retry's join
+        # window from claim time: completion lands inside it, so the retry
+        # collects the verdict). 40 sits centred in the window; the old 35
+        # sat too close to the retry boundary under load.
+        env = _env(tmp_path, STUB_SLEEP=40, STUB_VERDICT="block")
         decision, reason = _push(work, env, timeout=90)
         assert decision == "deny" and "still running" in reason
         # The lane was recorded at claim time, before the supervisor did any

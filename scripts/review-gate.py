@@ -3540,6 +3540,21 @@ def _write_state(path, data):
     raise last if last else OSError("could not write state")
 
 
+def _write_state_if_owned(state_path, data):
+    """Terminal-writer fencing: skip silently when another run_id holds the
+    tip. The fenced supervisor's heartbeat/claim paths already folded; its
+    terminal `failed`/`skipped` write must not revert the new owner's claim
+    (chunk-loop writes go through _update_state_owned; the last state write
+    of _supervise_run predates it and raced a takeover)."""
+    try:
+        cur = _read_state(state_path) or {}
+        if cur.get("run_id") and cur.get("run_id") != data.get("run_id"):
+            return
+        _write_state(state_path, data)
+    except Exception:
+        pass
+
+
 class _StateLock:
     """O_EXCL lock file guarding every state transition for one tip.
 
@@ -4608,17 +4623,14 @@ def _supervise_run(state_path, run_id):
                 "attempts": new_attempts,
                 "reason": failure[0], "detail": _sanitize(failure[1], 1500),
             })
-        try:
-            _write_state(state_path, st)
-        except Exception:
-            pass
+        _write_state_if_owned(state_path, st)
         return 1
     if not ran:
         # claude not installed: the one deliberately fail-open case.
         st.update({"state": "done", "done_ts": time.time(), "verdict": "skipped",
                    "blocked": False, "reasons": "", "finding_count": 0,
                    "note": "no reviewer ran - review skipped (fail-open escape)."})
-        _write_state(state_path, st)
+        _write_state_if_owned(state_path, st)
         return 0
     if cwd_note and isinstance(result, dict):
         result = dict(result)
