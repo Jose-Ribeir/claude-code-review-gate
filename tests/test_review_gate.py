@@ -275,6 +275,42 @@ def test_complete_high_confidence_finding_blocks():
     assert compute_verdict(result) == "block"
 
 
+def test_medium_finding_blocks_at_high_confidence():
+    # D15's medium branch: a medium-severity finding blocks when it is
+    # actionable and its confidence reaches OCR_BLOCK_CONFIDENCE (0.7).
+    result = {
+        "findings": [
+            {
+                "severity": "medium",
+                "confidence": 0.8,
+                "path": "a.py",
+                "start_line": 3,
+                "end_line": 3,
+                "content": "questionable but above threshold",
+            }
+        ]
+    }
+    assert compute_verdict(result) == "block"
+
+
+def test_medium_finding_below_the_confidence_threshold_warns():
+    # The other half of D15's medium branch: the same finding below
+    # OCR_BLOCK_CONFIDENCE is advisory -- a warn, never a block.
+    result = {
+        "findings": [
+            {
+                "severity": "medium",
+                "confidence": 0.5,
+                "path": "a.py",
+                "start_line": 3,
+                "end_line": 3,
+                "content": "questionable but below threshold",
+            }
+        ]
+    }
+    assert compute_verdict(result) == "warn"
+
+
 def test_incomplete_finding_cannot_block_even_at_high_confidence():
     # The exact shape observed in production: severity/confidence/path present
     # (enough to pass the old block check) but content/lines missing -- nothing
