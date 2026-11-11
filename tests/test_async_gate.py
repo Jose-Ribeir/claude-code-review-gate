@@ -167,7 +167,10 @@ def test_a_reviewer_failure_fails_closed_with_the_reason(repo, tmp_path):
 
 def test_a_long_review_is_denied_past_the_budget_and_joined_by_the_retry(repo, tmp_path):
     tip = _commit(repo)
-    env = _env(tmp_path, STUB_SLEEP=45)  # budget is 30
+    # Budget is 30; sleep 35 leaves the deny margin narrow but the retry's
+    # join window wide enough that a slow supervisor spawn cannot push the
+    # verdict arrival past it (was 45: the join missed by seconds under load).
+    env = _env(tmp_path, STUB_SLEEP=35)  # budget is 30
     decision, reason, elapsed, _ = _hook(repo, "git push origin main", env, timeout=90)
     assert decision == "deny", reason
     assert "still running" in reason and "re-run this exact `git push`" in reason
@@ -492,8 +495,9 @@ def test_fenced_supervisor_writes_no_ledger_records(tmp_path):
     tip = _git(["rev-parse", "HEAD"], cwd=repo)
     common = review_gate._git_common_dir(str(repo))
 
-    # STUB_SLEEP=8 gives us time to swap the run_id while chunk 0 is running.
-    env = _chunk_env(tmp_path, STUB_SLEEP=8)
+    # STUB_SLEEP=15 gives the run-id swap room even on a loaded machine
+    # (was 8: chunk 0 could finish before the swap landed).
+    env = _chunk_env(tmp_path, STUB_SLEEP=15)
 
     # Launch the hook asynchronously so we can race with it.
     payload = json.dumps({"session_id": "s1", "tool_name": "Bash",
