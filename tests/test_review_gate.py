@@ -126,6 +126,23 @@ def test_is_valid_verdict_accepts_resolutions():
     assert _is_valid_verdict({"resolutions": {"f-0": {"status": "resolved"}}})
 
 
+def test_is_valid_verdict_resolver_shape_never_a_review_verdict():
+    """docs-gate 07 S2 live-run defect: the review path must refuse the
+    resolver contract -- a degenerate worker that merely ECHOES the skill's
+    `{"resolutions": ...}` example would otherwise 'pass' with zero findings
+    and no review having run (fail-open). Resolver calls pass resolver=True
+    (the default): the shape stays valid there, empty fallback included."""
+    assert not _is_valid_verdict({"resolutions": {}}, resolver=False)
+    assert not _is_valid_verdict({"resolutions": {"f-0": {"status": "resolved"}}},
+                                 resolver=False)
+    assert _is_valid_verdict({"resolutions": {}}, resolver=True)  # SKILL.md step 4 fallback
+    # A full verdict keeps validating in both modes, whatever else it carries.
+    full = {"status": "success", "verdict": "pass", "findings": [],
+            "resolutions": {"f-0": {"status": "resolved"}}}
+    assert _is_valid_verdict(full, resolver=False)
+    assert _is_valid_verdict(full, resolver=True)
+
+
 def test_is_valid_verdict_rejects_missing_keys():
     assert not _is_valid_verdict({"findings": []})  # no status/verdict
     assert not _is_valid_verdict({"status": "ok"})  # no verdict/findings
@@ -210,6 +227,23 @@ def test_extract_from_stream_json_returns_none_for_pure_prose():
     ]
     result = _extract_from_stream_json("\n".join(lines))
     assert result is None
+
+
+def test_extract_from_stream_json_review_path_rejects_echoed_resolver_example():
+    """The exact live-run failure (docs-gate 07 S2, 2026-11-11): the worker's
+    final turn regurgitated its prompt, including the review skill's resolver
+    contract example `{"resolutions": {}}`. The review path must not accept
+    that as a verdict."""
+    lines = [
+        _assistant_event("Skill text: print ONLY the subagent's JSON object, "
+                         '{"resolutions": {...}}; on failure print {"resolutions": {}}.'),
+        _stream_event("result", subtype="success",
+                      result='Done. {"resolutions": {}}', num_turns=3),
+    ]
+    assert _extract_from_stream_json("\n".join(lines), resolver=False) is None
+    # The resolver call itself still accepts its own contract, empty included.
+    result = _extract_from_stream_json("\n".join(lines), resolver=True)
+    assert result == {"resolutions": {}}
 
 
 def test_extract_from_stream_json_prefers_last_valid_turn():

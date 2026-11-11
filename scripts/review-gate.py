@@ -2115,13 +2115,24 @@ def _hookspath_shadowed(repo_root):
     return True
 
 
-def _is_valid_verdict(obj):
-    """Return True only if obj is a properly-shaped verdict or resolver result."""
+def _is_valid_verdict(obj, resolver=True):
+    """Return True only if obj is a properly-shaped verdict or resolver result.
+
+    `resolver=False` (a REVIEW call) refuses the resolutions-only shape: the
+    resolver's `{"resolutions": {...}}` contract (incl. its empty "no answer"
+    fallback, SKILL.md step 4) is an answer to a resolver question, never a
+    review verdict. Accepting it as one is fail-open: a worker that merely
+    ECHOES the skill's example (observed live, docs-gate 07 S2: a degenerate
+    session whose final turn regurgitated the prompt) would pass a push with
+    zero findings and no review ever having run.
+    """
     if not isinstance(obj, dict):
         return False
+    if "status" in obj and "verdict" in obj and "findings" in obj:
+        return True
     if "resolutions" in obj:
-        return True  # resolver path
-    return "status" in obj and "verdict" in obj and "findings" in obj
+        return resolver  # resolver path only; see the docstring
+    return False
 
 
 def _num_turns_from_stream_json(text):
@@ -2147,7 +2158,7 @@ def _num_turns_from_stream_json(text):
     return turns if saw_event else None
 
 
-def _extract_from_stream_json(text):
+def _extract_from_stream_json(text, resolver=True):
     """Scan ALL turn-carrying events for a valid verdict; last match wins.
 
     With --mode json, kimchi emits pi-mono NDJSON: each event is one line, and
@@ -2178,7 +2189,7 @@ def _extract_from_stream_json(text):
             continue
         etype = event.get("type")
         if etype == "result":
-            candidate = _extract_json(event.get("result") or "")
+            candidate = _extract_json(event.get("result") or "", resolver=resolver)
             if candidate is not None:
                 match = candidate
             continue
@@ -2188,7 +2199,7 @@ def _extract_from_stream_json(text):
         content = message.get("content") if isinstance(message, dict) else None
         for block in content or []:
             if isinstance(block, dict) and block.get("type") == "text":
-                candidate = _extract_json(block.get("text", ""))
+                candidate = _extract_json(block.get("text", ""), resolver=resolver)
                 if candidate is not None:
                     match = candidate
     return match
@@ -2417,13 +2428,13 @@ def _rescue_verdict(obj):
     return shaped
 
 
-def _verdict_candidate(obj):
+def _verdict_candidate(obj, resolver=True):
     """Contract dict from a parsed JSON value, or None.
 
     Order is fixed: contract-valid as-is, then the near-miss normalizer,
     then the conservative rescue. Anything else is not a verdict.
     """
-    if _is_valid_verdict(obj):
+    if _is_valid_verdict(obj, resolver=resolver):
         return obj
     norm = _normalize_verdict(obj)
     if norm is not None:
@@ -2431,7 +2442,7 @@ def _verdict_candidate(obj):
     return _rescue_verdict(obj)
 
 
-def _extract_json(text):
+def _extract_json(text, resolver=True):
     """Pull the review JSON object out of claude's stdout. Returns dict or None."""
     if not text:
         return None
@@ -2439,7 +2450,7 @@ def _extract_json(text):
     # 1) whole thing
     try:
         obj = json.loads(text)
-        candidate = _verdict_candidate(obj)
+        candidate = _verdict_candidate(obj, resolver=resolver)
         if candidate is not None:
             return candidate
     except Exception:
@@ -2450,7 +2461,7 @@ def _extract_json(text):
     blocks = re.findall(r"```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```", text, re.DOTALL)
     for b in reversed(blocks):
         try:
-            candidate = _verdict_candidate(json.loads(b))
+            candidate = _verdict_candidate(json.loads(b), resolver=resolver)
             if candidate is not None:
                 return candidate
         except Exception:
@@ -2473,7 +2484,7 @@ def _extract_json(text):
     while idx != -1:
         try:
             obj, end = decoder.raw_decode(text, idx)
-            candidate = _verdict_candidate(obj)
+            candidate = _verdict_candidate(obj, resolver=resolver)
             if candidate is not None:
                 match = candidate
             idx = text.find("{", end)
@@ -3190,7 +3201,12 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
             f"{_auth_hint(detail)}"
             f"{bypass}"
         )
-    result = _extract_from_stream_json(out_text) or _extract_json(out_text)
+    # A resolver call's contract IS `{"resolutions": ...}`; a review call's
+    # is the verdict shape -- refusing the resolver shape here keeps an echoed
+    # skill example from standing in for a verdict (fail-open, see
+    # _is_valid_verdict).
+    result = (_extract_from_stream_json(out_text, resolver=bool(resolve_file))
+              or _extract_json(out_text, resolver=bool(resolve_file)))
     if result is None:
         # Exit 0 but no JSON. Check for limit before auth hint.
         is_limit, resets_at = _check_limit(out_text)
