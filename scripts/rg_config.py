@@ -17,6 +17,9 @@ Resolution order -- later wins, key by key:
 
     intent.messages : commit-message injection into the review  (default ON)
     intent.tickets  : linked-ticket fetching                    (default OFF)
+    intent.ticket   : explicit ticket-key override              (per-repo
+                      only -- it names an issue for the repo it sits in, so
+                      a global value is refused with a note)
     intent.tracker_order : tracker backends tried, in order
     jira            : Jira server coordinates block (e.g. {"server": ...,
                       "project": ...}); the Kimchi variant's ticket backend
@@ -45,6 +48,7 @@ def _defaults():
         "intent": {
             "tickets": False,
             "messages": True,
+            "ticket": None,
             "tracker_order": list(_KNOWN_TRACKERS),
         },
         "jira": {},
@@ -122,6 +126,23 @@ def _merge_intent(resolved, notes, path, label, intent):
         ok, value = _as_tracker_order(intent["tracker_order"], notes, path, label)
         if ok:
             resolved["tracker_order"] = value
+    if "ticket" in intent:
+        _merge_ticket(resolved, notes, path, label, intent["ticket"])
+
+
+def _merge_ticket(resolved, notes, path, label, ticket):
+    """An explicit ticket-key override. Per-repo by design: a global value
+    would name one issue for every repo on the machine, so it is refused.
+    Whether the value is a plausible key is discovery's call (rg_tickets),
+    not the settings read's."""
+    if isinstance(ticket, str) and label == "repo":
+        resolved["ticket"] = ticket
+    elif isinstance(ticket, str):
+        notes.append(f"{label} config {path}: intent.ticket is a per-repo "
+                     "override; the global value is ignored")
+    else:
+        notes.append(f"{label} config {path}: invalid intent.ticket value "
+                     f"{ticket!r}; current value kept")
 
 
 def _merge_jira(resolved, notes, path, label, jira):
