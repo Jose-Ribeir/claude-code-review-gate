@@ -110,6 +110,12 @@ def test_a_timeout_keeps_the_partial_stream_and_never_changes_the_error(monkeypa
                 raise subprocess.TimeoutExpired("claude", timeout)
             return partial, ""
 
+        def wait(self, timeout=None):
+            # The startup canary engages fine: no canary file is written,
+            # so the sandbox check passes and the timeout comes from the
+            # review worker's communicate() below.
+            return None
+
         def kill(self):
             pass
 
