@@ -76,6 +76,9 @@ import ocr_memory  # noqa: E402
 import ocr_segment  # noqa: E402
 import ocr_telemetry  # noqa: E402
 import rg_store  # noqa: E402  # the Kimchi port's external verdict store + sandbox
+import rg_config  # noqa: E402  # t15: single settings read (intent.* switches)
+import rg_tickets  # noqa: E402  # t16: ticket key discovery
+import rg_ticket_fetch  # noqa: E402  # t17: gh/glab fetch + 24h cache, fail-open
 
 PROMPT = "/skill:review --unpushed --json"
 # With an explicit range the skill reviews exactly what the remote is about to
@@ -4159,6 +4162,11 @@ def _supervise_run(state_path, run_id):
             # chunk by touched-file intersection. Collected once here (manifest
             # build time), best-effort: None leaves every payload untouched.
             intent_commits = _collect_commit_intent(review_root, push_range)
+            # Linked tickets (t17): only when settings intent.tickets is on;
+            # fetched on the real repo (gh/glab resolve its remotes), never
+            # in the sandbox clone. None leaves every payload untouched.
+            ticket_context = _collect_ticket_context(repo_root, branch,
+                                                     intent_commits)
 
             def _review_extras(k, chunk_paths, chunk_items=None):
                 extras = {}
@@ -4168,6 +4176,8 @@ def _supervise_run(state_path, run_id):
                     extras["impact"] = bundle
                 if defects and k == 0:  # each defect needs judging once
                     extras["known_defects"] = defects
+                if ticket_context:  # between requirement_background and commit_intent
+                    extras["ticket_context"] = ticket_context
                 intent = _intent_extra(intent_commits, chunk_paths, push_range)
                 if intent:
                     extras["commit_intent"] = intent
@@ -6950,6 +6960,40 @@ def _collect_commit_intent(review_root, push_range):
 def _intent_tokens(text):
     """~4 chars a token: a fixed local estimate, no tokenizer dependency."""
     return max(1, (len(text) + 3) // 4)
+
+
+def _collect_ticket_context(repo_root, branch, intent_commits):
+    """The manifest `ticket_context` value: the fetched titles+descriptions
+    of the push's discovered ticket keys, plus the keys discovery listed by
+    ID only and every miss note (t17).
+
+    Off by default -- discovery and fetching run only when the settings'
+    intent.tickets is on; discovery/fetch/fail-open rules live in rg_tickets
+    and rg_ticket_fetch. Comments are never fetched. The block rides the
+    same extras seam as commit_intent and sits between manual
+    requirement_background and commit messages in precedence. Everything is
+    best-effort: even an internal bug becomes a note, never an exception.
+    """
+    try:
+        settings = rg_config.load_settings(repo_root)
+        if not (settings and settings.get("intent", {}).get("tickets")):
+            return None
+        messages = [f"{c['subject']}\n{c['body']}".strip()
+                    for c in (intent_commits or ())]
+        discovered = rg_tickets.discover_ticket_keys(settings, branch=branch,
+                                                     commit_messages=messages)
+        fetched = rg_ticket_fetch.fetch_tickets(settings, discovered,
+                                                repo_root=repo_root)
+        block = {"tickets": fetched["tickets"],
+                 "listed_only": list(discovered.get("extras") or []),
+                 "notes": (list(discovered.get("notes") or [])
+                           + list(fetched["notes"]))}
+        if not block["tickets"] and not block["listed_only"] and not block["notes"]:
+            return None
+        return block
+    except Exception as exc:  # tickets never fail a review; a bug is a note
+        return {"tickets": [], "listed_only": [],
+                "notes": [f"ticket fetching skipped: {exc}"]}
 
 
 def _intent_extra(commits, chunk_paths, push_range=""):
