@@ -122,7 +122,12 @@ DEFAULT_KIMI_ARGS = [
     # Pin the model rather than inheriting the parent session's.
     "--model", _MODEL,
     # Load the deny extension (D13): -p sessions run yolo, the extension is
-    # the layer that actually blocks write/edit/web tools in the worker.
+    # the layer that actually blocks write/edit/web tools in the worker. It
+    # is also (DOCS-GATE-08) the carrier that registers this plugin's review
+    # skill in the worker: its resources_discover handler returns
+    # skills/review/SKILL.md so "/skill:review" resolves to OUR skill, not a
+    # foreign global one -- verified live, the child prompt arrives as
+    # <skill name="review" location="<plugin>/skills/review/SKILL.md">.
     "-e", _DENY_EXT,
     # No MCP servers. A code review needs read/grep/find and nothing else.
     "--mcp-config", '{"mcpServers":{}}',
@@ -1046,7 +1051,8 @@ def _in_review():
     """True when this process is running inside the headless review session.
 
     _run_review sets OCR_IN_REVIEW=1 in the child environment; the child is
-    given --plugin-dir, so this plugin's push gate is registered there too.
+    given -e <deny extension>, which registers this plugin's review skill
+    (DOCS-GATE-08) there too.
     """
     return os.environ.get("OCR_IN_REVIEW", "").strip().lower() in ("1", "true", "yes")
 
@@ -2976,10 +2982,12 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
     else:
         args = list(DEFAULT_KIMI_ARGS)
         args += shlex.split(os.environ.get("OCR_KIMI_EXTRA_ARGS", ""))
-    # The child is given -e/--plugin wiring, so THIS gate -- including its
-    # push hooks -- is registered inside the review session too. Without a
-    # marker in the environment, every Bash call the reviewer makes pays a
-    # Python spawn, and a push from inside a review would nest a whole
+    # The child is given -e wiring (the deny extension), which also puts
+    # THIS plugin's review skill on the worker's skill-resolution path
+    # (DOCS-GATE-08; without it "/skill:review" resolved to a foreign global
+    # skill and the verdict contract + docs-checker pass never ran). The env
+    # marker guards re-entry: without it, every Bash call the reviewer makes
+    # pays a Python spawn, and a push from inside a review would nest a whole
     # second review. Both adapters short-circuit on this (see _in_review).
     child_env = dict(os.environ)
     child_env["OCR_IN_REVIEW"] = "1"
@@ -10182,8 +10190,8 @@ def main(argv):
     if _mode_arg == "post":
         try:
             # Inside the headless review session this plugin is loaded via
-            # --plugin-dir, so this hook is registered there too and would fire
-            # on every Bash call the reviewer makes.
+            # -e (deny extension), so this hook is registered there too and
+            # would fire on every Bash call the reviewer makes.
             sys.exit(0 if _in_review() else _mode_post(argv))
         except SystemExit:
             raise
@@ -10206,8 +10214,8 @@ def main(argv):
 
 
 def _main_inner(argv, mode):
-    # Re-entry guard. _run_review passes --plugin-dir to the child, so this
-    # plugin's own push gate is registered inside the review session. Without
+    # Re-entry guard. _run_review passes -e <deny extension> to the child,
+    # so this plugin's own push gate is registered inside the review session. Without
     # this, every Bash call the reviewer makes spawns a Python process, and a
     # push from inside a review would recurse into a second full review.
     #

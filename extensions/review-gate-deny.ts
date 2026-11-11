@@ -20,6 +20,8 @@
 // bash payload we cannot even find in the event, is DENIED -- the reviewer
 // loses a tool call, the push never loses its sandbox.
 
+import { fileURLToPath } from "node:url"
+
 // --- what the reviewer may run -------------------------------------------------
 
 const GIT_READ_VERBS = new Set([
@@ -333,6 +335,30 @@ function decide(toolName, input) {
   return undefined
 }
 
+// --- skill wiring (DOCS-GATE-08) -------------------------------------------------
+//
+// `kimchi -p "/skill:review ..."` does NOT expand slash commands in a
+// headless prompt: the text reaches the model verbatim, which then resolves
+// the skill by NAME (observed: skill_view name="review") against the loaded
+// skill catalogue -- and the catalogue only holds the user's global skills
+// (config.json skillPaths), where a `code-review` skill shadows the lookup
+// and the gate's real review skill never ran. Verified live 2026-11-11.
+//
+// The mechanism kimchi natively supports for a per-invocation fix (no
+// mutation of the user's global config): a `-e` extension's resources_discover
+// handler may return skillPaths, which the runner extends into the resource
+// loader at session start (print mode included) and then rebuilds the system
+// prompt. The deny extension is ALREADY loaded into the worker via -e, so it
+// doubles as the carrier: while OCR_IN_REVIEW=1 it contributes this plugin's
+// own skills/review/SKILL.md (frontmatter name: review), making the worker's
+// `skill:review` / skill_view("review") resolve to THIS file -- including its
+// docs-checker pass -- instead of any foreign global skill.
+
+// Absolute path of <plugin>/skills/review/SKILL.md: extensions/../skills/...
+// Same import.meta.url idiom the harness's own bundled extensions use.
+const _REVIEW_SKILL_PATH =
+  fileURLToPath(new URL("../skills/review/SKILL.md", import.meta.url))
+
 export default function denyExtension(pi) {
   pi.on("tool_call", (event) => {
     if (!event) return undefined
@@ -341,6 +367,11 @@ export default function denyExtension(pi) {
       : (event.toolInput !== undefined ? event.toolInput
         : (event.tool_input !== undefined ? event.tool_input : event.args))
     return decide(toolName, input)
+  })
+  pi.on("resources_discover", () => {
+    // Same inertness rule as the sandbox: only inside the review worker.
+    if (process.env.OCR_IN_REVIEW !== "1") return undefined
+    return { skillPaths: [_REVIEW_SKILL_PATH] }
   })
 }
 

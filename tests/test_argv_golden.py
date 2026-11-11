@@ -90,6 +90,58 @@ def test_golden_has_correct_model():
     assert fixture[idx + 1] == "kimchi-dev/kimi-k3"
 
 
+def test_golden_loads_the_deny_extension():
+    """The -e deny extension is the worker's sandbox AND (DOCS-GATE-08) the
+    carrier that puts this plugin's review skill on the resolution path."""
+    fixture = _load_fixture()
+    assert "-e" in fixture
+    assert fixture[fixture.index("-e") + 1] == "<deny-ext>"
+
+
+_DENY_EXT_SRC = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..",
+    "extensions", "review-gate-deny.ts")
+
+
+_REVIEW_SKILL = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..",
+    "skills", "review", "SKILL.md")
+
+
+def test_worker_skill_resolution_wiring():
+    """DOCS-GATE-08: `kimchi -p "/skill:review ..."` must resolve to THIS
+    plugin's review skill, not a foreign global one.
+
+    Live finding (ticket 07): headless `-p` prompts are not slash-expanded
+    unless the CLI knows a `skill:review` command, and the worker's skill
+    catalogue holds only the user's global skills (config.json skillPaths),
+    where a `code-review` skill shadowed the lookup -- the foreign skill
+    answered instead, so the verdict contract and the docs-checker pass
+    never ran. The native fix: the `-e` deny extension also answers
+    `resources_discover` with the absolute path of this plugin's
+    skills/review/SKILL.md (top-level skills become `skill:<name>`
+    commands), resolving `/skill:review` to this file. Verified live:
+    the child prompt arrives as `<skill name="review" location="...">`
+    with this repository's SKILL.md inline."""
+    with open(_DENY_EXT_SRC, encoding="utf-8") as fh:
+        src = fh.read()
+    # The extension carries a resources_discover handler ...
+    assert 'pi.on("resources_discover"' in src
+    # ... returning THIS plugin's review SKILL.md ...
+    assert "skills/review/SKILL.md" in src
+    # ... with the same inertness gate as the sandbox.
+    rd = src[src.index('pi.on("resources_discover"'):]
+    assert 'process.env.OCR_IN_REVIEW !== "1"' in rd[:600]
+
+
+def test_review_skill_frontmatter_names_it_review():
+    """skill:review resolves by the SKILL.md frontmatter `name`; pin it."""
+    assert os.path.isfile(_REVIEW_SKILL)
+    with open(_REVIEW_SKILL, encoding="utf-8") as fh:
+        head = fh.read(400)
+    assert "\nname: review\n" in head
+
+
 def test_golden_approves_project_local_files():
     """A6: the worker argv carries --approve so skill discovery works in the
     untrusted --no-hardlinks clone (spelling verified against `kimchi --help`)."""
