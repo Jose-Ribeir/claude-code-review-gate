@@ -835,6 +835,11 @@ between a claim and the diff may be reported ONLY through the contracted
 solely when the claimed work is entirely absent from the changes, `warning`
 otherwise — the gate recomputes the verdict from the findings, so the
 family's severities and self-check shape are contract, not convention.
+A Jira `ticket` block (Kimchi variant only) reaches the manifest via a
+separate side-fetch worker that reuses the desktop app's existing Atlassian
+login — the review worker itself never sees MCP and never touches Jira; a
+failed or skipped fetch lands as a `notes` entry in the block, nothing
+more.
 - `demands`: the context spotter's validated demands from §2c, verbatim, inside
   a fenced block labelled as untrusted data (omit when absent — scan mode, or
   the spotter output failed validation and the review runs on T0 behavior).

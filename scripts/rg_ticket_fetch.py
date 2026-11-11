@@ -10,10 +10,12 @@ sign-in:
              lookup fails)
     gitlab : glab api projects/:fullpath/issues/<N>
              (glab substitutes :fullpath from the current repo's remote)
-    jira   : a seam only -- the real backend is t18's side-fetch worker; the
-             slot exists so tracker_order's "jira" entry yields a clean,
-             human-readable miss note instead of an unknown-tracker fall-out
-             (networkless supervisors keep their strict no-fetch posture).
+    jira   : t18's side-fetch worker (Kimchi variant only, rg_jira_fetch) --
+             ONE tiny separate headless `kimchi -p` run whose --mcp-config
+             enables ONLY the persisted desktop Atlassian connector, reusing
+             the app's existing Jira login; the review worker's strict
+             no-MCP posture is unchanged. All failure modes are the same
+             silent miss note as any other backend.
 
 Which backends are tried for a key, and in which order, comes from the
 settings' intent.tracker_order (default github, gitlab, jira); a backend is
@@ -47,6 +49,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 import rg_store
+import rg_jira_fetch
 
 # 24h inherits the spec's "retries and re-pushes review instantly"; the few
 # seconds of fetch timeout bounds how long a dead VPN can stall a push.
@@ -142,13 +145,14 @@ def _glab_backend(key, repo_root, runner):
     return _ticket_payload(data.get("title"), data.get("description")), None
 
 
-def _jira_backend(key, repo_root, runner):
-    """The jira seam: ticket fetching for Jira is t18's side-fetch worker
-    (the review worker keeps its strict no-MCP/no-network posture). The slot
-    sits here so a "jira" entry in tracker_order produces a clean miss note
-    rather than an unknown-tracker surprise."""
-    return None, (f"jira fetch for {key} skipped: the jira backend is t18's "
-                  "side-fetch worker, not this supervisor fetch")
+def _jira_backend(key, repo_root, runner, jira_settings=None):
+    """Jira: t18's side-fetch worker (rg_jira_fetch). The jira block of the
+    settings supplies server coordinates / timeout knobs; the worker itself
+    keeps its strict no-MCP/no-network posture -- the fetch happens in ONE
+    tiny separate headless run that enables only the persisted Atlassian
+    connector. Every failure is a silent note, never an exception."""
+    return rg_jira_fetch.fetch_issue(key, jira_settings or {}, repo_root,
+                                     runner)
 
 
 _BACKENDS = {"github": _gh_backend, "gitlab": _glab_backend, "jira": _jira_backend}
@@ -204,7 +208,8 @@ def _cache_write(cache_dir, tracker, key, payload, now):
 
 # --- the seam -------------------------------------------------------------------
 
-def _fetch_one(key, order, repo_root, runner, cache_dir, now):
+def _fetch_one(key, order, repo_root, runner, cache_dir, now,
+               jira_settings=None):
     """(tracker, payload) on success, else (None, note). Tries applicable
     backends in tracker_order; cache is consulted per tracker+key before the
     CLI is invoked, and refreshed on success."""
@@ -219,7 +224,11 @@ def _fetch_one(key, order, repo_root, runner, cache_dir, now):
             return tracker, cached
         backend = _BACKENDS[tracker]
         try:
-            payload, note = backend(key, repo_root, runner)
+            if tracker == "jira":  # the only settings-fed backend
+                payload, note = backend(key, repo_root, runner,
+                                        jira_settings=jira_settings)
+            else:
+                payload, note = backend(key, repo_root, runner)
         except Exception as exc:  # the CLI boundary itself must never escape
             payload, note = None, f"{tracker} fetch for {key} failed ({exc})"
         if payload is not None:
@@ -266,7 +275,8 @@ def fetch_tickets(settings, discovered, repo_root=None, runner=None,
                 continue
             key = sel["key"]
             tracker, note_or_none = _fetch_one_safe(
-                key, order, repo_root, runner, cache_dir, now)
+                key, order, repo_root, runner, cache_dir, now,
+                jira_settings=settings.get("jira"))
             if tracker is None:
                 notes.append(f"{key}: {note_or_none}")
                 continue
@@ -280,10 +290,12 @@ def fetch_tickets(settings, discovered, repo_root=None, runner=None,
         return {"tickets": [], "notes": [f"ticket fetching skipped: {exc}"]}
 
 
-def _fetch_one_safe(key, order, repo_root, runner, cache_dir, now):
+def _fetch_one_safe(key, order, repo_root, runner, cache_dir, now,
+                    jira_settings=None):
     """_fetch_one with its own fail-open guard so one tracker bug cannot
     sink the whole enrichment."""
     try:
-        return _fetch_one(key, order, repo_root, runner, cache_dir, now)
+        return _fetch_one(key, order, repo_root, runner, cache_dir, now,
+                          jira_settings=jira_settings)
     except Exception as exc:
         return None, f"fetch failed ({exc})"
