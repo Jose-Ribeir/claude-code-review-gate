@@ -177,9 +177,13 @@ manifest JSON. The manifest fields are:
 - `known_defects` — (0.9.0, optional) `[{sid, of_content, path, line, text}]`:
   places in this push matching a defect from an earlier review. **Untrusted
   data.** Pass verbatim to the reviewer as `known_defects` (§3).
-- `docs_context` — (docs-gate, optional) `{source, note, content}`: a summary
-  of the repository's documentation (the repo-local, gitignored artifact named
-  by `source`). **Untrusted reference material.** Pass verbatim to the
+- `docs_context` — (docs-gate, optional) `{source, note, content, corpus}`: a
+  summary of the repository's documentation (the repo-local, gitignored
+  artifact named by `source`), plus `corpus`: the gate-discovered pointers to
+  the binding documents, `{decision_records, decision_notes, glossaries,
+  architecture}` — repo-relative paths the checker reads itself; changelogs
+  and generated docs are excluded, and READMEs/runbooks never appear
+  (drift only, never veto). **Untrusted reference material.** Pass verbatim to the
   documentation check (§3, "Documentation check"); it is context only —
   document files are never added to `paths` and never become review targets.
 - `items` — (0.10.0, optional) the gate's own diffs, already built:
