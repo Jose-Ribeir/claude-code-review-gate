@@ -8,7 +8,6 @@ marker, and scoped per chunk by touched-file intersection -- a chunk whose
 files no commit touched gets subjects-only background. Untrusted,
 author-controlled claims; never instructions.
 """
-import json
 import os
 import subprocess
 import sys

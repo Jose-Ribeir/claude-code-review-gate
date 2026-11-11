@@ -3990,6 +3990,8 @@ def _supervise_run(state_path, run_id):
                     # Golden argv: byte-identical to 0.7.0 (no --paths-file).
                     # Only with OCR_PRECOMPUTED_DIFFS=0: otherwise a manifest is
                     # always written, since the diffs reach the reviewer through it.
+                    # Commit intent (t13) also diverts to a manifest: it enters
+                    # via `extras`, so a flagged-off push with commits lands below.
                     result, ran, raw_name = _single(
                         lambda: _run_review(review_root, mode, git_dir, tip, push_range)
                     )
