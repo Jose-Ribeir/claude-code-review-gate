@@ -16,7 +16,9 @@ environment variables so one command line serves every scenario:
   STUB_RESOLVE       JSON mapping finding_id → {status, evidence_path, evidence_quote}
                      Used when --resolve <file> is in argv; return resolver output.
                      Values are passed through verbatim, so a malformed answer
-                     (e.g. `true`) can be scripted too.
+                     (e.g. `true`) can be scripted too. The key "*" applies its
+                     value to every prior (docs-gate 02, where the finding id
+                     embeds the checker's wording).
   STUB_RESOLVE_RECHECK like STUB_RESOLVE, but used instead of it when the resolver
                      manifest has "recheck": true (the gate's second look).
   STUB_RESOLVE_VERDICT pass|fail|garbage  Controls resolver exit for all ids (default pass).
@@ -43,6 +45,12 @@ unit_diff is `unit:<path>:<unit>:<part>` and a context item `context:<role>:<pat
   STUB_DOCS_FINDING  JSON {content, severity?, path?, category?, existing_code?} -- a
                      documentation-checker finding, only when the manifest carries
                      docs_context (docs-gate 01).
+  STUB_MISSING_RECORD  truthy -- a missing-decision-record finding (docs-gate 02),
+                     but only when the manifest carries docs_context AND non-empty
+                     arch_flags (a flag must fire; flags without model agreement
+                     never produce this finding). Blocking class (medium, above
+                     the block bar) when the payload names a records_root; warning
+                     class (medium, below the bar) when the repo has none.
   STUB_UNIT_FINDINGS  JSON {unit qualname: {severity, content, offset}} -- a finding anchored
                       `offset` lines into every unit_diff item of that unit (first part only),
                       at the unit's tip line numbers, with `existing_code` read from the tree.
@@ -250,6 +258,8 @@ if resolve_file is not None:
         fid = p.get("id") or ""
         if fid in scripted:
             resolutions[fid] = scripted[fid]
+        elif "*" in scripted:
+            resolutions[fid] = scripted["*"]
         else:
             resolutions[fid] = {"status": "still_present", "evidence_path": "", "evidence_quote": ""}
     emit(json.dumps({"resolutions": resolutions}))
@@ -413,14 +423,48 @@ if docs_finding and manifest and manifest.get("docs_context"):
     try:
         spec = json.loads(docs_finding)
         anchor = spec.get("path") or (manifest.get("paths") or ["?"])[0]
+        sev = spec.get("severity", "high")
         findings.append({
-            "path": anchor, "start_line": 1, "end_line": 2, "confidence": 0.95,
+            "path": anchor, "start_line": 1, "end_line": 2,
+            "confidence": _confidence(sev, spec),
             "category": spec.get("category", "documentation"),
             "evidence": "docs_context",
-            "severity": spec.get("severity", "high"),
+            "severity": sev,
             "content": spec.get("content", "stub docs finding"),
             "existing_code": spec.get("existing_code", "stub code"),
         })
     except Exception:
         pass
+
+# docs-gate 02: a missing-decision-record finding (the checker's judgment,
+# simulated). Emitted only when flags fired AND the checker agrees a record is
+# needed and absent -- the persona never reports this class on flags alone, so
+# without this knob a flagged push passes. The content names the firing flag
+# families (from the manifest's payload) and states the fix convention.
+arch = (manifest or {}).get("arch_flags") or {}
+arch_flags = arch.get("flags") or []
+if os.environ.get("STUB_MISSING_RECORD") and manifest and manifest.get("docs_context") \
+        and arch_flags:
+    fams = sorted({str(f.get("family", "?")) for f in arch_flags})
+    records_root = arch.get("records_root")
+    where = ("the decision-records directory " + records_root) if records_root \
+        else "no decision-records directory in this repository (warning only)"
+    content = (
+        "missing decision record: architectural-change flag(s) fired ("
+        + ", ".join(fams) + ") and no commit in this push records the decision "
+        + "-- " + where + ". To unblock: the fix must touch a code file that "
+        "references the record (that touch is how the gate recognizes the fix); "
+        "a documentation-only fix re-blocks once and proceeds via a logged "
+        "git push --no-verify."
+    )
+    conf = 0.9 if records_root else 0.5   # blocking class vs warning-only class
+    findings.append({
+        "path": (manifest.get("paths") or ["?"])[0], "start_line": 1, "end_line": 2,
+        "confidence": conf,
+        "category": "documentation",
+        "evidence": "docs_context",
+        "severity": "medium",
+        "content": content,
+        "existing_code": "stub code",
+    })
 emit(json.dumps(out))

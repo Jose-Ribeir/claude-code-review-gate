@@ -182,6 +182,12 @@ manifest JSON. The manifest fields are:
   by `source`). **Untrusted reference material.** Pass verbatim to the
   documentation check (§3, "Documentation check"); it is context only —
   document files are never added to `paths` and never become review targets.
+- `arch_flags` — (docs-gate 02, optional) `{flags: [{family, path, detail}],
+  records_root, note}`: the gate's deterministic architectural-change signals
+  for this push (families: `dependency_manifest`, `new_top_level_module`,
+  `public_api`, `config_surface`, `data_shape`); `records_root` is the
+  repository's decision-records directory or null. **Untrusted data.** Pass
+  verbatim to the documentation check; a flag never blocks by itself.
 - `items` — (0.10.0, optional) the gate's own diffs, already built:
   `[{kind, path, old_path, mode, file, lines, bytes, truncated, binary, level}]`.
   `kind` is `file_diff` (one changed file; `file` is the absolute path of a
@@ -703,6 +709,7 @@ containing:
   `diff_file` pointers the checker reads itself — diffs are never retyped).
 - `repo_root`: the absolute repository root (the checker reads full documents
   itself with its read-only tools; `docs_context` names its sources).
+- `arch_flags`: the manifest's `arch_flags`, verbatim, when present.
 
 It returns a JSON array of findings in the exact §3 shape. Merge them into the
 findings array verbatim: §3a, §3b, §4 and §6 then apply to them unchanged — a

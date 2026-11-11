@@ -3761,6 +3761,11 @@ def _supervise_run(state_path, run_id):
                 result["warnings"] = (_planner_warning_objs(planner_warnings)
                                       + list(result.get("warnings") or []))
         else:
+            # docs-gate 02: push-wide architectural-change flags. The checker
+            # pass is the only consumer, so they are computed only when a docs
+            # context exists in this repo (no artifact = behavior is today).
+            docs_context = _docs_context(review_root)
+            arch_flags = _arch_flags(review_root, base, tip) if docs_context else None
             # Part S: a flagged-truncated record of a file that CAN be reviewed in
             # units is no longer carried -- the file gets its proper review.
             seg = None
@@ -3956,7 +3961,7 @@ def _supervise_run(state_path, run_id):
                     tip, push_range, active_items, planner_warnings, fenced, progress,
                     fp=fp, carry_paths=carry_paths, chunk_extras=_review_extras,
                     timeout_marks=timeout_marks, diffs=diffs, seg=seg, impact=impact,
-                    own_items=plan, push_ref=push_ref,
+                    own_items=plan, push_ref=push_ref, arch_flags=arch_flags,
                 )
                 n_delta = sum(1 for p in active_items if p["mode"] == "delta")
                 n_full = len(active_items) - n_delta
@@ -3968,7 +3973,6 @@ def _supervise_run(state_path, run_id):
                 # Single-context path.
                 all_full = all(p["mode"] == "full" for p in active_items)
                 extras = _review_extras(0, [p["entry"]["path"] for p in active_items])
-                docs_context = _docs_context(review_root)
                 if diffs is None and all_full and not carry_items and not extras \
                         and docs_context is None:
                     # Golden argv: byte-identical to 0.7.0 (no --paths-file).
@@ -3985,7 +3989,7 @@ def _supervise_run(state_path, run_id):
                     )
                     manifest = _build_review_manifest(
                         common_dir, run_id, None, None, active_items, [], carry_paths,
-                        extras, diffs, docs_context=docs_context)
+                        extras, diffs, docs_context=docs_context, arch_flags=arch_flags)
                     _write_manifest_file(manifest_path, manifest,
                                          "single-context manifest")
                     try:
@@ -6363,8 +6367,172 @@ def _docs_context(review_root):
     }
 
 
+# --- architectural-change flags (docs-gate 02) ------------------------------
+# Deterministic, push-wide signals that a change is architectural. A flag
+# never blocks by itself: it rides the manifest into the documentation-checker
+# pass, which judges whether the change needs a decision record that is absent
+# (flags AND model agreement; see agents/docs-checker.md). Detection failures
+# are fail-open: flags only route a push to judgment, so an error must never
+# change the outcome.
+
+_RECORD_ROOTS = ("docs/adr", "docs/adrs", "docs/decisions", "docs/decision-records",
+                 "adr")
+
+_DEP_MANIFEST_NAMES = frozenset({
+    "package.json", "pyproject.toml", "setup.py", "setup.cfg", "go.mod",
+    "gemfile", "cargo.toml", "composer.json", "pom.xml", "build.gradle",
+    "build.gradle.kts", "package.swift", "pubspec.yaml",
+})
+_DEP_MANIFEST_TXT_RE = re.compile(r"^(requirements|constraints)[^/]*\.txt$", re.IGNORECASE)
+_DEP_MANIFEST_SUFFIXES = (".gemspec", ".csproj")
+
+_CONFIG_SUFFIXES = (".ini", ".cfg", ".conf")
+_CONFIG_DIR_SUFFIXES = (".yaml", ".yml", ".toml", ".json", ".properties")
+_CONFIG_DIRS = frozenset({"config", "configs", "conf", ".config"})
+
+_DATA_EXTS = (".sql", ".proto", ".graphql", ".gql", ".avsc", ".xsd")
+_DATA_DIRS = frozenset({"migrations", "migration", "alembic", "schemas", "schema"})
+_DATA_NAME_RE = re.compile(r"^schema\.|^openapi.*\.(ya?ml|json)$|_schema\.json$",
+                          re.IGNORECASE)
+
+_API_SURFACE_RE = re.compile(
+    r"@(?:app|router|bp|api)\.(?:route|get|post|put|delete|patch|head|options)\b"
+    r"|\b(?:app|router)\.(?:get|post|put|delete|patch)\("
+    r"|\bexport\s+(?:default\s+)?(?:async\s+)?(?:function|class|const|let|var)\b"
+    r"|\bfunc\s+[A-Z]\w*\s*\("
+    r"|\bpub\s+(?:fn|struct|enum|trait|mod)\b"
+    r"|\burlpatterns\s*\+?="
+)
+_ENV_CLI_RE = re.compile(
+    r"\bos\.environ\b|\bos\.getenv\(|\bgetenv\(|\bprocess\.env\.[A-Z_]"
+    r"|\badd_argument\(|@click\.option\(|@app\.command\(|\bflag\.(?:String|Int|Bool)\("
+)
+
+
+def _is_dep_manifest(norm):
+    name = norm.rsplit("/", 1)[-1].lower()
+    return (name in _DEP_MANIFEST_NAMES or bool(_DEP_MANIFEST_TXT_RE.match(name))
+            or name.endswith(_DEP_MANIFEST_SUFFIXES))
+
+
+def _is_config_path(norm):
+    name = norm.rsplit("/", 1)[-1].lower()
+    if name == ".env" or name.startswith(".env."):
+        return True
+    if name in ("dockerfile", "docker-compose.yml", "docker-compose.yaml"):
+        return True
+    if name.endswith(_CONFIG_SUFFIXES):
+        return True
+    first = norm.split("/", 1)[0].lower()
+    return first in _CONFIG_DIRS and name.endswith(_CONFIG_DIR_SUFFIXES)
+
+
+def _is_data_shape(norm):
+    parts = norm.lower().split("/")
+    name = parts[-1]
+    return (name.endswith(_DATA_EXTS)
+            or any(seg in _DATA_DIRS for seg in parts[:-1])
+            or bool(_DATA_NAME_RE.search(name)))
+
+
+def _added_lines_by_path(root, base, tip):
+    """{path: [added lines]} of the range (no context lines), for flag detectors."""
+    out, rc = _git(["diff", "--no-color", "-U0", "-M", f"{base}..{tip}"], cwd=root)
+    if rc != 0 or not out:
+        return {}
+    result, current = {}, None
+    for line in out.splitlines():
+        if line.startswith("+++ "):
+            p = line[4:].strip()
+            current = None if p == "/dev/null" else (p[2:] if p.startswith("b/") else p)
+        elif current is not None and line.startswith("+"):
+            result.setdefault(current, []).append(line[1:])
+    return result
+
+
+def _first_segments_at_base(root, base, segments):
+    """The subset of `segments` (top-level names) present at `base` (one ls-tree)."""
+    if not segments:
+        return set()
+    out, rc = _git(["ls-tree", "--full-tree", "-z", base, "--"] + sorted(segments),
+                   cwd=root)
+    if rc != 0:
+        return set(segments)  # fail-open: flags are advisory, never criteria
+    found = set()
+    for rec in out.split("\0"):
+        tab = rec.find("\t")
+        if tab != -1:
+            found.add(rec[tab + 1:])
+    return found
+
+
+def _records_root(review_root):
+    """The repo's decision-records directory at its conventional location, or None."""
+    for rel in _RECORD_ROOTS:
+        if (Path(review_root) / rel).is_dir():
+            return rel
+    return None
+
+
+def _arch_flags(root, base, tip):
+    """Push-wide architectural-change flags for the docs-checker, or None.
+
+    Runs over EVERY changed entry of base..tip (dependency manifests, data
+    shapes and config files are mostly NOT on the review allowlist -- the
+    flag detector must see them anyway). Returns {flags: [{family, path,
+    detail}], records_root, note} when at least one of the five families
+    fired; None (no manifest key) otherwise or on any error.
+    """
+    try:
+        if not base:
+            base = _EMPTY_TREE
+        entries, _warnings = _collect_diff_entries(root, base, tip)
+        if not entries:
+            return None
+        added = _added_lines_by_path(root, base, tip)
+        additions = [e for e in entries if e["status"].startswith(("A", "C"))]
+        segments = {e["path"].replace("\\", "/").split("/", 1)[0]
+                    for e in additions if "/" in e["path"].replace("\\", "/")}
+        at_base = _first_segments_at_base(root, base, segments)
+        flags = []
+        for e in sorted(entries, key=lambda x: x["path"]):
+            path = e["path"]
+            norm = path.replace("\\", "/")
+            lines = added.get(path) or []
+            gained = any(t and t not in ("{", "}", "[", "]", ",")
+                         for t in (line.strip() for line in lines))
+            hit = set()
+            if _is_dep_manifest(norm) and gained:
+                hit.add(("dependency_manifest", "dependency manifest gained content"))
+            if _is_config_path(norm) or any(_ENV_CLI_RE.search(line) for line in lines):
+                hit.add(("config_surface", "config/env/CLI surface changed"))
+            if _is_data_shape(norm):
+                hit.add(("data_shape", "migration/schema/protocol definition changed"))
+            if any(_API_SURFACE_RE.search(line) for line in lines):
+                hit.add(("public_api", "new public API surface (route/handler/export)"))
+            if e["status"].startswith(("A", "C")) and not hit:
+                ext = os.path.splitext(norm.rsplit("/", 1)[-1])[1].lower()
+                if ext in _ALLOWED_EXTS and (
+                        "/" not in norm or norm.split("/", 1)[0] not in at_base):
+                    hit.add(("new_top_level_module", "new top-level module"))
+            for family, detail in sorted(hit):
+                flags.append({"family": family, "path": path, "detail": detail})
+        if not flags:
+            return None
+        return {
+            "flags": flags,
+            "records_root": _records_root(root),
+            "note": ("Deterministic signals of architectural change. A flag never "
+                     "blocks by itself: the documentation check judges whether "
+                     "the change needs a decision record that is absent."),
+        }
+    except Exception:
+        return None
+
+
 def _build_review_manifest(common_dir, run_id, k, total, chunk_items, other_changed,
-                           carry_paths, extras=None, diffs=None, docs_context=None):
+                           carry_paths, extras=None, diffs=None, docs_context=None,
+                           arch_flags=None):
     """The reviewer's manifest for one chunk (k, total) or the single-context
     review (k None). The one builder for both.
 
@@ -6426,6 +6594,8 @@ def _build_review_manifest(common_dir, run_id, k, total, chunk_items, other_chan
     manifest.update(extras or {})
     if docs_context:
         manifest["docs_context"] = docs_context
+    if arch_flags:
+        manifest["arch_flags"] = arch_flags
     return manifest
 
 
@@ -8066,7 +8236,7 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
                  tip, push_range, active_items, planner_warnings, fenced,
                  progress=None, fp="", carry_paths=None, chunk_extras=None,
                  timeout_marks=None, diffs=None, seg=None, impact=None, own_items=None,
-                 push_ref=""):
+                 push_ref="", arch_flags=None):
     """Run per-chunk reviews with fencing, budget and retry.
 
     diffs ({path: _build_item_diff result}, see _build_diffs) switches on the
@@ -8171,7 +8341,7 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
             extras = chunk_extras(k, chunk_paths)
         manifest = _build_review_manifest(
             common_dir, run_id, k, len(chunks), chunk_items, other_changed, carry_paths,
-            extras, diffs, docs_context=docs_context)
+            extras, diffs, docs_context=docs_context, arch_flags=arch_flags)
         _write_manifest_file(manifest_path, manifest, f"chunk manifest for chunk {k}")
         return manifest, manifest_path
 

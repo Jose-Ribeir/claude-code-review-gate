@@ -213,3 +213,210 @@ def test_checker_persona_is_fingerprinted(tmp_path):
     assert digest == __import__("hashlib").sha256(persona.read_bytes()).hexdigest()[:16]
     # Editing the persona must change the fingerprint: covered with a throwaway
     # plugin copy in test_ledger_scenarios.py (agents/docs-checker.md is criteria).
+
+
+# --- docs-gate 02: architectural-change flags + missing-record judgment -----
+#
+# Five deterministic detectors run over the push's changed entries and ride
+# the manifest as `arch_flags` (push-wide, {flags: [{family, path, detail}],
+# records_root}). A flag never blocks alone: blocking requires flags AND the
+# checker's judgment that a decision record is needed and absent
+# (STUB_MISSING_RECORD in the stub plays that judgment -- see the persona's
+# missing-record class in agents/docs-checker.md).
+
+_RECORD_V1 = "# 0001: verdict computation\n\nBinding: verdicts are computed in Python.\n"
+_REQS_GAIN = "flask==3.0\nrequests==2.31\n"
+_API_V2 = (
+    "def verdict():\n    return 'ok'\n\n\n"
+    "@app.route('/v2/ping')\ndef ping():\n    return 'pong'\n"
+)
+
+
+def _write_records_dir(work):
+    """A decision-records directory at the conventional location, committed."""
+    p = work / "docs" / "adr" / "0001-verdict-computation.md"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(_RECORD_V1, encoding="utf-8")
+
+
+def _flag_families(manifest):
+    arch = (manifest or {}).get("arch_flags") or {}
+    return {(f["family"], f["path"]) for f in arch.get("flags") or []}
+
+
+def test_flag_dependency_manifest_gain_fires_and_flag_alone_never_blocks(tmp_path):
+    """A push gaining a requirement carries arch_flags naming that family/path;
+    with a calm checker (model does not agree) the push still passes: flags
+    without model agreement never block."""
+    work = _repo(tmp_path, {"app.py": _APP_V1, "requirements.txt": "flask==3.0\n"})
+    _write_docs_summary(work)
+    _write_records_dir(work)
+    _commit(work, {"app.py": _APP_V2, "requirements.txt": _REQS_GAIN})
+    decision, reason = _push(work, _env(tmp_path, "t.trace"))
+    assert decision == "pass", reason
+    manifest = _review_manifest(tmp_path, "t.trace")
+    fams = _flag_families(manifest)
+    assert fams == {("dependency_manifest", "requirements.txt")}, fams
+    assert manifest["arch_flags"]["records_root"] == "docs/adr"
+
+
+def test_dependency_manifest_without_a_gain_does_not_fire(tmp_path):
+    """Removing an entry is not 'gains an entry': no added lines, no flag."""
+    work = _repo(tmp_path, {"app.py": _APP_V1, "requirements.txt": _REQS_GAIN})
+    _write_docs_summary(work)
+    _write_records_dir(work)
+    _commit(work, {"app.py": _APP_V2, "requirements.txt": "flask==3.0\n"})
+    decision, reason = _push(work, _env(tmp_path, "t.trace"))
+    assert decision == "pass", reason
+    manifest = _review_manifest(tmp_path, "t.trace")
+    assert "arch_flags" not in (manifest or {})
+
+
+def test_flag_new_top_level_module(tmp_path):
+    work = _repo(tmp_path, {"app.py": _APP_V1})
+    _write_docs_summary(work)
+    _write_records_dir(work)
+    _commit(work, {"app.py": _APP_V2,
+                   "billing/__init__.py": '\"\"\"Billing domain.\"\"\"\n'})
+    decision, reason = _push(work, _env(tmp_path, "t.trace"))
+    assert decision == "pass", reason
+    fams = _flag_families(_review_manifest(tmp_path, "t.trace"))
+    assert fams == {("new_top_level_module", "billing/__init__.py")}, fams
+
+
+def test_no_new_top_level_module_when_directory_exists_at_base(tmp_path):
+    work = _repo(tmp_path, {"app.py": _APP_V1,
+                            "billing/__init__.py": '\"\"\"Billing.\"\"\"\n'})
+    _write_docs_summary(work)
+    _write_records_dir(work)
+    _commit(work, {"app.py": _APP_V2, "billing/invoices.py": "def total():\n    return 0\n"})
+    decision, reason = _push(work, _env(tmp_path, "t.trace"))
+    assert decision == "pass", reason
+    assert "arch_flags" not in (_review_manifest(tmp_path, "t.trace") or {})
+
+
+def test_flag_public_api_surface(tmp_path):
+    work = _repo(tmp_path, {"app.py": _APP_V1})
+    _write_docs_summary(work)
+    _write_records_dir(work)
+    _commit(work, {"app.py": _API_V2})
+    decision, reason = _push(work, _env(tmp_path, "t.trace"))
+    assert decision == "pass", reason
+    fams = _flag_families(_review_manifest(tmp_path, "t.trace"))
+    assert fams == {("public_api", "app.py")}, fams
+
+
+def test_flag_config_env_cli_surface(tmp_path):
+    work = _repo(tmp_path, {"app.py": _APP_V1})
+    _write_docs_summary(work)
+    _write_records_dir(work)
+    _commit(work, {"app.py": _APP_V2, ".env.example": "FEATURE_X=1\n"})
+    decision, reason = _push(work, _env(tmp_path, "t.trace"))
+    assert decision == "pass", reason
+    fams = _flag_families(_review_manifest(tmp_path, "t.trace"))
+    assert fams == {("config_surface", ".env.example")}, fams
+
+
+def test_flag_data_shape(tmp_path):
+    work = _repo(tmp_path, {"app.py": _APP_V1})
+    _write_docs_summary(work)
+    _write_records_dir(work)
+    _commit(work, {"app.py": _APP_V2,
+                   "migrations/0034_users.sql":
+                       "ALTER TABLE users ADD COLUMN email TEXT;\n"})
+    decision, reason = _push(work, _env(tmp_path, "t.trace"))
+    assert decision == "pass", reason
+    fams = _flag_families(_review_manifest(tmp_path, "t.trace"))
+    assert fams == {("data_shape", "migrations/0034_users.sql")}, fams
+
+
+def test_clean_push_has_no_arch_flags_key(tmp_path):
+    work = _repo(tmp_path, {"app.py": _APP_V1})
+    _write_docs_summary(work)
+    _write_records_dir(work)
+    _commit(work, {"app.py": _APP_V2})
+    decision, reason = _push(work, _env(tmp_path, "t.trace"))
+    assert decision == "pass", reason
+    manifest = _review_manifest(tmp_path, "t.trace")
+    assert "arch_flags" not in (manifest or {})
+
+
+def test_missing_record_blocks_and_the_message_names_the_flags(tmp_path):
+    """Flag fired AND the checker's judgment agrees (the repo HAS a decision-
+    records directory): the blocking class flows through the verdict machinery
+    and the denial message distinguishes the finding kind and names the flag(s)."""
+    work = _repo(tmp_path, {"app.py": _APP_V1, "requirements.txt": "flask==3.0\n"})
+    _write_docs_summary(work)
+    _write_records_dir(work)
+    tip = _commit(work, {"app.py": _APP_V2, "requirements.txt": _REQS_GAIN})
+    env = _env(tmp_path, "t.trace", STUB_MISSING_RECORD="1")
+    decision, reason = _push(work, env)
+    assert decision == "deny", reason
+    assert "missing decision record" in reason, reason          # the finding kind
+    assert "dependency_manifest" in reason, reason              # names the firing flag(s)
+    manifest = _review_manifest(tmp_path, "t.trace")
+    assert (manifest.get("arch_flags") or {}).get("flags"), manifest
+    st = _state(work, tip)
+    assert st.get("verdict") == "block", st
+
+
+def test_repo_without_records_directory_warns_but_never_blocks(tmp_path):
+    """No decision-records directory at tip: the same flag+agreement yields the
+    warning class only -- visible in the verdict, never a block."""
+    work = _repo(tmp_path, {"app.py": _APP_V1, "requirements.txt": "flask==3.0\n"})
+    _write_docs_summary(work)
+    tip = _commit(work, {"app.py": _APP_V2, "requirements.txt": _REQS_GAIN})
+    env = _env(tmp_path, "t.trace", STUB_MISSING_RECORD="1")
+    decision, reason = _push(work, env)
+    assert decision == "pass", reason
+    manifest = _review_manifest(tmp_path, "t.trace")
+    assert manifest["arch_flags"]["flags"], manifest
+    assert manifest["arch_flags"]["records_root"] is None
+    st = _state(work, tip)
+    assert st.get("verdict") == "warn", st
+
+
+def _record_push_1(tmp_path):
+    """The shared first act: a flagged push, blocked for the missing record."""
+    work = _repo(tmp_path, {"app.py": _APP_V1, "requirements.txt": "flask==3.0\n"})
+    _write_docs_summary(work)
+    _write_records_dir(work)
+    tip1 = _commit(work, {"app.py": _APP_V2, "requirements.txt": _REQS_GAIN})
+    decision, reason = _push(work, _env(tmp_path, "t1.trace", STUB_MISSING_RECORD="1"))
+    assert decision == "deny", reason
+    assert "missing decision record" in reason
+    return work, tip1
+
+
+def test_fix_referencing_the_record_in_a_code_touch_resolves(tmp_path):
+    """The fix-recognition convention: the record alone is not enough; the fix
+    is recognized when a code file the fix touches references it (the resolver
+    sees the prior doc finding, evidence on the added side of an allowlisted
+    file's diff) and the re-push passes."""
+    work, _ = _record_push_1(tmp_path)
+    _commit(work, {
+        "app.py": _APP_V2 + "\n# decision: docs/adr/0002-requests.md\n",
+        "docs/adr/0002-requests.md": "# 0002\nWe depend on requests for HTTP.\n",
+    })
+    resolve = json.dumps({"*": {"status": "resolved",
+                                "evidence_path": "app.py",
+                                "evidence_quote": "# decision: docs/adr/0002-requests.md"}})
+    decision, reason = _push(work, _env(tmp_path, "t2.trace", STUB_RESOLVE=resolve))
+    assert decision == "pass", reason
+    resolvers = [c for c in _calls(tmp_path, "t2.trace") if c.get("resolve_file")]
+    assert len(resolvers) == 1, "the prior doc finding must reach the resolver once"
+    priors = json.dumps(resolvers[0].get("resolve_manifest") or {})
+    assert '"documentation"' in priors, priors
+
+
+def test_documentation_only_fix_reblocks_with_the_options_message(tmp_path):
+    """A fix that only adds the record (no code touch) can never resolve the
+    finding: the re-push is denied again and the message states the two options
+    plainly -- a referencing code touch, or a logged --no-verify."""
+    work, _ = _record_push_1(tmp_path)
+    _commit(work, {"docs/adr/0002-requests.md": "# 0002\nWe depend on requests for HTTP.\n"})
+    env = _env(tmp_path, "t2.trace", STUB_MISSING_RECORD="1")
+    decision, reason = _push(work, env)
+    assert decision == "deny", reason
+    assert ("documentation-only fix re-blocks once and proceeds via a logged "
+            "git push --no-verify") in reason, reason
