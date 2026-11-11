@@ -3,6 +3,45 @@
 ## [Unreleased]
 
 ### Added
+- **Intent context: commit messages and linked tickets (2026-11-11).** The
+  pushed commits' messages (subjects + bodies + touched files, verbatim) ride
+  the manifest-extras seam as `commit_intent`, fenced for the reviewer as
+  untrusted author-controlled *claims* — verbatim for the newest 10 commits
+  inside a ~4k-token budget, subject-only past it with a visible
+  `trim_notice`, and scoped per chunk by touched-file intersection
+  (zero-intersection chunks get subjects-only background). Opt-in ticket
+  enrichment (`intent.tickets`, default off) discovers keys in the order
+  override file > branch name > commit messages, fetches title + description
+  only (never comments), caches hits for 24 hours, and records every miss as
+  a note — a fetch can never delay, fail, or block a review.
+- **`scripts/rg_ticket_fetch.py` + `scripts/rg_tickets.py`** — deterministic
+  ticket key discovery (cap of 3 fetched, the rest listed by ID only) and the
+  read-only, fail-open fetch backends: GitHub via `gh issue view` (PR
+  fallback), GitLab via `glab api`, both riding the maintainer's existing CLI
+  sign-in.
+- **`scripts/rg_jira_fetch.py`** — the Kimchi-only Jira side-fetch worker: one
+  tiny separate headless `kimchi -p` run whose `--mcp-config` enables ONLY
+  the persisted desktop Atlassian connector (read verbatim from
+  `~/.config/kimchi/harness/mcp.json`, overridable with
+  `OCR_JIRA_MCP_CONFIG`), reusing the app's existing Jira login; the review
+  worker's strict no-MCP posture is unchanged, and no token is stored in gate
+  config. All failure modes are silent miss notes; hits land in the shared
+  24 h cache.
+- **`intent_gap`: a contracted finding family for intent-vs-diff mismatches.**
+  A finding is kept only if its self-check holds (verbatim claim quoted,
+  contradicting code quoted, fix-safety rationale); severity `blocking`
+  solely when the claimed work is entirely absent from the changes — every
+  other mismatch warns and can never block. `compute_verdict` remains the
+  sole verdict authority (ADR 0001), and the asymmetry invariant holds:
+  intent adds findings, it never removes a defect finding. Reports render
+  intent findings distinctly (`[intent-blocking]` / `[intent-warning]`).
+- **`scripts/rg_config.py` + intent provenance.** A single settings read
+  resolves built-in defaults <- the global config (`<store root>/config.json`)
+  <- per-repo `.ocr/config.json`, key by key: `intent.messages` on,
+  `intent.tickets` off, `intent.tracker_order`, per-repo `intent.ticket`
+  override, and a `jira` coordinates block. Verdict records carry the intent
+  context actually used (sources, text capped at 2,000 chars, per-chunk
+  counts, fetch notes) as tolerated extra fields — no protocol version bump.
 - `scripts/ocr_report.py` — every recorded gate review in one analyzable
   summary: aggregates the verdict store (all repos), and with `--repo` joins
   that repo's finding-level records and raw-stream history. `--json` emits
@@ -10,10 +49,127 @@
   records are counted and reported (stderr in json mode) rather than
   silently dropped.
 
+### Changed
+- **The installer cleans up its own stale copies, and `/review-gate:doctor`
+  reports the hook path git actually resolves.** The installer now removes
+  superseded copies of itself from earlier installs (uninstall is symmetric),
+  and the doctor checks the *effective* hook path — what git resolves through
+  `core.hooksPath` and the chain — not just the file the installer wrote, so a
+  shadowed or stale install is named instead of silently passing.
+- **The desktop bash hook guards the git hook by resolved path and chain.**
+  The PreToolUse guard checks that the git hook it is about to rely on is the
+  gate's own hook, resolved the way git resolves it (path and hook chain), so
+  a repo-local `core.hooksPath` or a stale copy no longer makes the desktop
+  adapter believe a gate exists when none does.
+- **Chunk sessions must run their summary through the formatter subagent.** A
+  chunked review's per-chunk output goes through the same formatter subagent
+  a single-run review uses; a chunk session that skips it is a defect, not a
+  style choice.
+- **The run budget is chunk-aware, bounded by `OCR_TIMEOUT_MAX` (SPEC-08).**
+  The budget is computed from chunk count, trailing per-chunk telemetry and
+  parallel slots, clamped to `[OCR_TIMEOUT, OCR_TIMEOUT_MAX]`; an explicit
+  `OCR_RUN_BUDGET` keeps its flat meaning and overrides the computation. The
+  cap's degenerate clamp is fixed: a resolved `OCR_TIMEOUT_MAX` at or below
+  `OCR_TIMEOUT` no longer resets to 3600 — the effective ceiling is
+  `max(resolved, OCR_TIMEOUT)` — so an operator who raises `OCR_TIMEOUT` past
+  3600 is no longer silently pinned to the flat deadline.
+- **Unseeded huge ranges are refused, not attempted (SPEC-11).** A push whose
+  range exceeds `OCR_FULL_HISTORY_LIMIT` commits (default 500) without prior
+  chunk telemetry is refused with remedy text (`--depth`, the limit variable,
+  or an explicit override) instead of starting a review that would run for
+  hours.
+
+### Fixed
+- **A conservative verdict is rescued once, with a warn fallback (SPEC-06).**
+  A verdict that is merely conservative is retried once under a stricter
+  contract; if the rescue still cannot land, the push proceeds with a
+  non-blocking warning rather than a silent pass. Telemetry distinguishes
+  `verdict_rescued` kinds from ordinary outcomes.
+- **One failed chunk no longer fails the run (SPEC-07).** A chunk that fails
+  (including an unparseable one, which now emits its own
+  `chunk_parse_failure` telemetry instead of a generic error) has its files
+  marked, the chunk split in half, and the splits re-queued while sibling
+  chunks continue; what genuinely could not be reviewed is reported as
+  unreviewed in the verdict rather than hidden. Resuming a segmented run and
+  scheduling caller checks still work under the isolation.
+- **A no-op push says so.** When the remote already holds every commit in the
+  push, the gate allowed it with zero output — indistinguishable from an
+  absent gate, which the absent-gate invariant says must be the only way to
+  see that signature. It now prints one informational, non-blocking line to
+  stderr in both modes; the allow itself is unchanged.
+- **Reporting text fixes.** Failure and still-running messages no longer read
+  as almost-done: wording was corrected so a failed or refused review is not
+  mistaken for a nearly finished one.
+
 
 All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+Context expansion beyond the diff ("v2"): the gate now spots what a change touches,
+collects the evidence deterministically, and reviews with that evidence in hand.
+Built from `.kimchi/plans/review-gate-v2-spec.md`; all flows degrade with a warning,
+never a silent loss of protection.
+
+### Added
+- **Context vs review allowlists.** A caller search may now look at files that are
+  excluded from review (specs/tests), so a changed helper no longer strands test
+  callers invisibly. Review admission is unchanged.
+- **Impact analysis upgrades.** Caller-collection caps raised (`per_symbol` 12,
+  `max_sites` 100) and adding an optional parameter to a *multi-line* definition is
+  now classified as a signature change, collecting callers.
+- **Docs resolver (global + per-surface).** `.ocr/rule.json` gains
+  `conventions: [{doc, applyTo}]` (default `**/*` — a doc in `docs/` applies to code
+  unless configured otherwise) plus walk-up ancestor docs (`AGENTS.md` /
+  `.ocr/conventions.md`, nearest wins). Per-doc (~800 lines) and total caps with
+  truncation warnings; injected per file into the reviewer's rules.
+- **Spotter (context-requirement classifier).** A cheap model reads the trimmed diff
+  and emits a demands list (callers, event couples, doc refs, conventions, pointers,
+  risk score) — never findings. Output validated gate-side, fail-closed; malformed
+  output degrades to the pre-v2 review behavior with a warning. Model via
+  `OCR_SPOTTER_MODEL` (default `deepseek-v4-flash`).
+- **Deterministic collectors + evidence bundle.** Demands are mapped to evidence
+  (callers via the context-filtered impact search, docs via the resolver, event
+  couples via the index, pointers via the resolver); every demand resolves to
+  evidence or an explicit `unresolved` entry the reviewer may cite as medium. The
+  bundle is size-capped (20k chars, largest-entry-first degradation + warnings) and
+  shape-validated before reaching the reviewer.
+- **Event-coupling index.** Deterministic three-edge repo index (symbol refs, event
+  couplings — emit/subscribe + framework tag strings, pointer utterances), lazily
+  built, incrementally refreshed per push. Optional tree-sitter with a warned regex
+  fallback; `OCR_INDEX=0` opts out.
+- **Dismissed-finding memory.** `/review-gate:dismiss <finding-id>` (also
+  `review-gate.py --dismiss`) records a local `.ocr/memory.jsonl` entry; matched
+  future findings are demoted to low with a "previously dismissed" note and a
+  warning — never silently suppressed. Nothing is learned from bypasses.
+- **Pointer resolution + forge lookup.** String references to reports/docs resolve
+  through: committed `.ocr/artifacts.json` registry → repo grep → sibling branch
+  tips → live `glab`/`gh` call (autodetected, hard 3s timeout, negative cache).
+  Unresolved + unregistered pointers surface as unresolved evidence; forge failures
+  degrade to the local tiers with a warning.
+- **T2 deep lane.** Risk-triggered (path globs + spotter risk score; escalation may
+  raise but never lower) deep review in the existing deny-and-join-on-retry
+  machinery, via the new read-only `deep-reviewer` agent. Blocking bar unchanged:
+  high severity + confidence ≥ 0.7 + survival of the independent falsify pass.
+  Model via `OCR_TIER2_MODEL` (default `kimi-k3`); timeout via `OCR_DEEP_TIMEOUT`.
+- **Model config + provider guard.** `OCR_TIER1_MODEL` (default `kimi-k3`),
+  `OCR_SPOTTER_MODEL`, `OCR_TIER2_MODEL`; a startup guard refuses Anthropic/OpenAI
+  model IDs (subscription account-lock terms) before any review begins.
+- **Per-tier telemetry.** `record_tier_call` emits `{"kind": "tier_call", tier, model,
+  tokens, cost_usd, seconds}` records at each tier's call site (spotter, tier-1,
+  tier-2, collectors), with a per-tier section in the telemetry report.
+- **Fixture suite.** `tests/fixtures/miss_categories/` — one synthetic repo per
+  miss category (remount/filter coupling, convention-doc violation, stranded spec
+  callers, dangling pointer) asserting old-misses → v2-catches, plus degradation
+  variants (no tree-sitter, offline forge, malformed spotter, oversized bundle).
+
+### Changed
+- `agents/code-reviewer.md` now documents the `demands` and `evidence_bundle`
+  inputs; an unresolved pointer utterance is citable as a medium dangling-pointer
+  finding naming the tiers searched.
+- `PROTOCOL_VERSION` 1 → 2.
 
 ## [0.13.0] - 2026-10-15
 

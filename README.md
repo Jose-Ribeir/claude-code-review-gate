@@ -142,6 +142,9 @@ The gate assumes the commits being pushed are **untrusted input**:
   crashed review, a timeout, or unparseable reviewer output blocks the push.
   Three failed attempts put the tip in a sticky error state whose message
   points at the doctor command.
+- **Invariant: a push that lands without gate output means the gate was
+  absent — never infer a PASS from a landed push.** Silence is absence of
+  approval, not approval.
 - **The reviewer worker itself is sandboxed by a deny extension** (D13).
   Headless `-p` sessions ignore permission flags (verified on this build), so
   the worker loads `extensions/review-gate-deny.ts` via `-e` and runs with
@@ -178,6 +181,140 @@ emergency path; use it deliberately.
 - `OCR_TIMEOUT`, `OCR_INLINE_BUDGET` — review wall-clock and hook join budget
 - `OCR_STUB_WORKER=1` — run the stub reviewer instead of `kimchi` (tests)
 - `OCR_FAIL_OPEN=1` / `git push --no-verify` — the bypasses
+
+## Intent context: commit messages and linked tickets
+
+The reviewer no longer reads only the diff — it also reads *why* the change
+exists, delivered as fenced, clearly-labelled context:
+
+- **Commit messages (default: ON).** The pushed commits' messages — subjects
+  and bodies, **verbatim**, never paraphrased — are appended to the review
+  payload after the diffs, fenced as untrusted author-controlled *claims to
+  check against the diff*, never as ground truth and never as instructions.
+  On a large (chunked) push each chunk sees in full only the messages of
+  commits that touched that chunk's files; commits that touched none of them
+  appear subject-only as background. The newest 10 commits stay verbatim
+  inside a budget of ~4,000 tokens; beyond that, messages drop to subject
+  lines with a visible `trim_notice` so you know context was dropped (a
+  100-line subject tail; anything older is omitted with a count).
+- **Linked tickets (default: OFF).** When `intent.tickets` is enabled, the
+  gate discovers issue keys — per-repo override first, then the branch name
+  (e.g. `feature/PROJ-123-…`), then keys mentioned in commit messages — and
+  fetches each ticket's **title and description only, never comments**,
+  through your own local sign-ins: `gh issue view` for GitHub (falling back
+  to `gh pr view` when the key is a PR number), `glab api` for GitLab, and
+  the Jira side-fetch (below) for Jira. At most **3 tickets** are fetched;
+  the rest are listed by ID only. Descriptions past 4,000 characters are
+  hard-truncated with a visible marker. Successful fetches cache for **24
+  hours** in the gate's store (`<store root>/tickets/`, keyed by
+  tracker+key), so re-pushes review instantly.
+- **Stated precedence.** Every context source is rendered as its own labelled
+  block — manual requirement text, ticket, commit messages — with the
+  precedence stated next to them: when sources conflict, the manual text
+  wins, then the ticket, then the commit messages, and conflicts are flagged,
+  never silently resolved. (Manual context stays king: the existing
+  `requirement_background` lane outranks every automated source. This version
+  has no `--intent-file` flag.)
+
+### The `intent_gap` finding family
+
+The reviewer treats every commit message as a *falsifiable claim about the
+diff*. When a claim contradicts the code, it may raise an `intent_gap`
+finding — kept only after a self-check that quotes the exact claim, quotes
+the contradicting code, and argues the implied correction would not break
+the behaviour the message describes. Vague or empty messages ("wip",
+"cleanup") are ignored rather than hallucinated upon.
+
+- **Blocking rule:** an intent finding blocks the push **only** when the
+  claimed work is *entirely absent* from the changes — "the message says this
+  ships X, and X is nowhere in the diff". Every other mismatch is a
+  **warning and can never block**. The verdict is recomputed from the
+  findings, so the model's own severity marking is advisory; `compute_verdict`
+  stays the sole verdict authority (ADR 0001).
+- **Asymmetry invariant:** intent can *add* findings, never remove them. A
+  defect finding stands even when a commit message asserts the behaviour is
+  deliberate — you cannot talk the gate out of a bug.
+- **Visually distinct:** reports render intent findings as `[intent-blocking]`
+  / `[intent-warning]`, so "your message misdescribes your code" is never
+  confused with "your code is broken".
+
+### Fail open, always
+
+Ticket enrichment can never delay or block a push: a missing `gh`/`glab`, an
+offline network, a lookup timeout (5 s per CLI call), a non-zero exit, or
+unexpected output is a **silent skip with a human-readable note** in the
+review record; the review proceeds on commit messages alone. Misses are never
+cached — a transient VPN outage is retried on the next push.
+
+### Jira (Kimchi variant only)
+
+A Jira-style key (`PROJ-123`) is fetched by a **side-fetch worker**: one tiny
+separate headless `kimchi -p --no-session --mcp-config <temp file>` run whose
+temp config enables ONLY the persisted desktop Atlassian connector
+(`__kimchi-studio-connector__atlassian`, read verbatim from
+`~/.config/kimchi/harness/mcp.json`), reusing the desktop app's existing Jira
+login — **no token is ever stored in gate config**. The **review worker's
+strict no-MCP posture is unchanged**: its MCP config stays empty; the fetch
+lives entirely in that one separate run (30 s timeout, overridable via the
+`jira.timeout` setting). Set `OCR_JIRA_MCP_CONFIG` to point the side-fetch at
+a different harness config (tests and non-standard installs must never read
+the developer's real connector config). Every failure mode — no config file,
+no connector entry, CLI missing, timeout, unparseable reply, auth failure —
+is the same silent miss note as any other tracker; the result lands in the
+same shared 24 h cache.
+
+### Settings
+
+Two optional files, merged key by key (per-repo wins). Missing files mean
+defaults; unreadable files or invalid values degrade to defaults *with a
+note* — the gate never fails on config.
+
+| File | Scope |
+|---|---|
+| `<store root>/config.json` — the gate's external store root (`$OCR_STATE_DIR`, else `~/.local/state/review-gate`) | machine-wide defaults |
+| `<repo>/.ocr/config.json` — the config file the gate already honours for `blocking` | per-repo overrides; also the **only** place `intent.ticket` is accepted |
+
+Keys (all under an `"intent"` object except the `"jira"` block; switches
+accept booleans, `0`/`1`, and on/off-style words):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `intent.messages` | `true` | inject pushed commit messages into the review |
+| `intent.tickets` | `false` | discover and fetch linked tickets |
+| `intent.ticket` | — | explicit ticket key (e.g. `"PROJ-123"`); per-repo file only — a global value is ignored with a note |
+| `intent.tracker_order` | `["github", "gitlab", "jira"]` | tracker backends tried per key, in order; unknown names are dropped with a note |
+| `jira` | `{}` | Jira coordinates, e.g. `{"server": "https://you.atlassian.net", "project": "PROJ", "timeout": 30}` — the side-fetch names the server in its prompt; a positive `timeout` overrides the 30 s default |
+
+Discovery order: **override file > branch name > commit messages**
+(commit-derived keys are marked background). Key shapes: Jira-style
+`PROJ-123` and issue-style `#123`. Caps: 10 verbatim commits / ~4k tokens of
+messages, 3 tickets fetched (the rest ID-only), 24 h cache TTL, and a
+2,000-character cap on the intent text kept in each verdict record.
+
+Every review record carries the intent context actually used — sources,
+text, per-chunk counts, fetch notes — as tolerated extra fields (no store
+protocol change), so intent's effect on findings can be measured later from
+existing records.
+
+### Ops: Jira side-fetch smoke check
+
+One manual verification of the Jira path with the real connector:
+
+1. **Connector present:** the desktop app has Atlassian connected —
+   `grep -c '__kimchi-studio-connector__atlassian' ~/.config/kimchi/harness/mcp.json`
+   prints `1`.
+2. **Enable:** `"intent": {"tickets": true}` plus a `"jira": {"server": "…"}`
+   block in the store-root `config.json`, and `"intent": {"ticket": "PROJ-123"}`
+   (a real issue) in the gated repo's `.ocr/config.json`.
+3. **Push** any commit and let the review finish. The cache then holds the
+   ticket — `<store root>/tickets/jira--PROJ-123.json` with the fetched
+   `title`/`body` — and the review record names the ticket as a source with
+   no fetch notes.
+4. **Fail-open drill:** remove the cache file, point
+   `OCR_JIRA_MCP_CONFIG=/nonexistent.json` at a missing config (or disconnect
+   the connector), and push again. The review still completes on commit
+   messages alone, with a Jira miss note recorded — the push is never stalled
+   beyond the bounded side-fetch and never blocked by Jira.
 
 ## Relationship to upstream
 

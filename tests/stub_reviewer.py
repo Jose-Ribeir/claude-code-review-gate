@@ -12,7 +12,8 @@ environment variables so one command line serves every scenario:
   STUB_CHUNK_VERDICT JSON {chunk_index: verdict} -- STUB_VERDICT for that chunk only
   STUB_CHUNK_SLEEP   JSON {chunk_index: seconds} -- sleep that long in that chunk only
   STUB_VERDICT_FOR   path — the chunk containing this path returns block
-  STUB_FINDINGS_FOR  JSON mapping path → {severity, content} for path-scripted verdicts
+  STUB_FINDINGS_FOR  JSON mapping path → {severity, content, confidence?} for
+                     path-scripted verdicts (confidence is severity-tier-aware)
   STUB_RESOLVE       JSON mapping finding_id → {status, evidence_path, evidence_quote}
                      Used when --resolve <file> is in argv; return resolver output.
                      Values are passed through verbatim, so a malformed answer
@@ -272,15 +273,26 @@ if verdict == "limit":
     sys.stdout.write("You've hit your session limit · resets 3:20pm (Europe/Lisbon)\n")
     sys.exit(1)
 
+def _confidence(severity, spec=None):
+    """Severity-tier default confidence: high findings must block (0.95, above
+    the D15 high-confidence bar); medium/low findings are advisory (0.5, below
+    OCR_BLOCK_CONFIDENCE so they warn). A scripted spec's "confidence" always wins."""
+    if spec and "confidence" in spec:
+        return float(spec["confidence"])
+    return 0.95 if severity == "high" else 0.5
+
+
 finding = {
-    "path": "app/x.py", "start_line": 1, "end_line": 2, "confidence": 0.95,
+    "path": "app/x.py", "start_line": 1, "end_line": 2,
     "category": "correctness", "evidence": "stub",
 }
 findings = []
 if verdict == "warn":
-    findings = [dict(finding, severity="medium", content="stub medium finding")]
+    findings = [dict(finding, severity="medium", confidence=_confidence("medium"),
+                     content="stub medium finding")]
 elif verdict == "block":
-    findings = [dict(finding, severity="high", content="stub high finding")]
+    findings = [dict(finding, severity="high", confidence=_confidence("high"),
+                     content="stub high finding")]
 
 # STUB_FINDINGS_FOR: per-path scripted findings (path → {severity, content}).
 findings_for_raw = os.environ.get("STUB_FINDINGS_FOR", "")
@@ -294,14 +306,27 @@ if findings_for_raw:
         for path in chunk_paths:
             if path in findings_map:
                 spec = findings_map[path]
+                sev = spec.get("severity", "high")
                 findings.append({
                     "path": path,
-                    "start_line": 1, "end_line": 2, "confidence": 0.95,
+                    "start_line": 1, "end_line": 2,
+                    "confidence": _confidence(sev, spec),
                     "category": "correctness", "evidence": "stub",
-                    "severity": spec.get("severity", "high"),
+                    "severity": sev,
                     "content": spec.get("content", "stub scripted finding"),
                     "existing_code": spec.get("existing_code", "stub code"),
                 })
+    except Exception:
+        pass
+
+# STUB_INTENT_FINDINGS: a JSON list of verbatim intent_gap findings appended to
+# the verdict (the E2E intent fixture seeds the reviewer's whole verdict this way).
+intent_findings_raw = os.environ.get("STUB_INTENT_FINDINGS", "")
+if intent_findings_raw:
+    try:
+        for f in json.loads(intent_findings_raw):
+            if isinstance(f, dict):
+                findings.append(f)
     except Exception:
         pass
 
@@ -328,7 +353,7 @@ if impact.get("sites"):
         for s in impact["sites"]:
             findings.append({
                 "path": s["path"], "start_line": s["line"], "end_line": s["line"],
-                "severity": "high", "confidence": 0.95, "category": "correctness",
+                "severity": "high", "confidence": _confidence("high"), "category": "correctness",
                 "content": f"caller broken by the change to {s['name']}",
                 "existing_code": s.get("text") or "", "evidence": "impact_sites",
                 "impact_site": s["id"],
@@ -349,7 +374,7 @@ if unit_findings and manifest:
         except Exception:
             code = ""
         findings.append({
-            "path": it["path"], "start_line": line, "end_line": line, "confidence": 0.95,
+            "path": it["path"], "start_line": line, "end_line": line, "confidence": _confidence(spec.get("severity", "high"), spec),
             "category": "correctness", "evidence": "stub", "severity": spec.get("severity", "high"),
             "content": spec.get("content", "stub unit finding"), "existing_code": code.strip()})
 tasks = (manifest or {}).get("tasks") or []
@@ -372,7 +397,7 @@ if tasks and dep_mode != "missing":
             if v == "broken":
                 findings.append({
                     "path": t["caller"]["path"], "start_line": t["caller"]["start_line"],
-                    "end_line": t["caller"]["start_line"], "severity": "high", "confidence": 0.95,
+                    "end_line": t["caller"]["start_line"], "severity": "high", "confidence": _confidence("high"),
                     "category": "correctness", "content": "caller broken by the change to " + str(t["callee"]["unit"]),
                     "existing_code": "", "evidence": "dep_check", "dep_task": t["id"]})
         if seen_path:
@@ -383,7 +408,7 @@ if os.environ.get("STUB_CONFIRM_SIBLINGS") == "1":
     for d in (manifest or {}).get("known_defects") or []:
         findings.append({
             "path": d["path"], "start_line": d["line"], "end_line": d["line"],
-            "severity": "high", "confidence": 0.95, "category": "security",
+            "severity": "high", "confidence": _confidence("high"), "category": "security",
             "content": "same defect as the earlier finding", "existing_code": d.get("text") or "",
             "evidence": "known_defects", "sibling_of": d["sid"],
         })

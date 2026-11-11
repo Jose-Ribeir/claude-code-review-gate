@@ -76,7 +76,8 @@ def _env(tmp_path, **stub):
     inherited in-review/bypass state, the 3 s hook budget."""
     env = scrub_git_trace(dict(os.environ))
     for k in ("OCR_IN_REVIEW", "OCR_FAIL_OPEN", "OCR_ADVISORY", "OCR_FORCE_REVIEW",
-              "OCR_LEGACY_RANGE", "OCR_INLINE_BUDGET", "STUB_SLEEP", "STUB_VERDICT", "STUB_TRACE"):
+              "OCR_LEGACY_RANGE", "OCR_INLINE_BUDGET", "STUB_SLEEP", "STUB_VERDICT", "STUB_TRACE",
+              "OCR_FULL_HISTORY_LIMIT"):
         env.pop(k, None)
     # OCR_STATE_DIR is inherited from conftest's per-test private store: the
     # in-process review_gate module reads the same one, so state written by the
@@ -214,6 +215,29 @@ def test_a_missing_reviewer_denies_instead_of_failing_open(repo, tmp_path):
     decision, reason, _, _ = _hook(repo, "git push origin main", env)
     assert decision == "deny"
     assert "kimchi" in reason
+
+
+def test_the_failed_async_note_never_reads_as_finished(tmp_path):
+    # A flush of a note whose review FAILED must be unambiguous in the first
+    # sentence: the review did not finish, so nothing was approved.
+    tip = "a" * 40
+    state_path = tmp_path / "state.json"
+    review_gate._write_state(str(state_path), {
+        "state": "failed", "run_id": "r1", "tip": tip, "branch": "main",
+        "failed_ts": time.time(), "attempts": 1, "reason": "review",
+        "detail": "boom", "protocol_version": review_gate.PROTOCOL_VERSION,
+    })
+    note_path = tmp_path / "note.json"
+    note_path.write_text(json.dumps(
+        {"kind": "async", "state": str(state_path), "repo": str(tmp_path), "head": tip}),
+        encoding="utf-8")
+    note = review_gate._async_note(str(note_path),
+                                   {"state": str(state_path), "repo": str(tmp_path),
+                                    "head": tip}, "s1")
+    assert "did NOT finish" in note
+    assert "failed" in note
+    assert "has finished" not in note
+    assert "Re-run the `git push`" in note
 
 
 # --- past the budget ----------------------------------------------------------
@@ -475,3 +499,215 @@ def _record(common, fp, e):
     key = review_gate._record_key(e["path"], e.get("old_path") or "", e["status"], e["old_oid"])
     return review_gate._read_ledger_record(
         review_gate._record_path(common, fp, key, e["new_oid"]), fp, key, e["new_oid"])
+
+
+# --- huge-range guard (SPEC-09) ----------------------------------------------
+
+def _fresh_repo(tmp_path, commits=3):
+    """A repo whose remote holds NO branches: every push has no bounding ref,
+    so resolve_review_base lands on _EMPTY_TREE (the unseeded-remote case)."""
+    remote = tmp_path / "bare-origin.git"
+    work = tmp_path / "fresh-work"
+    _git(["init", "--bare", "-b", "main", str(remote)], cwd=tmp_path)
+    _git(["init", "-b", "main", str(work)], cwd=tmp_path)
+    _git(["config", "user.email", "t@example.com"], cwd=work)
+    _git(["config", "user.name", "t"], cwd=work)
+    _git(["config", "commit.gpgsign", "false"], cwd=work)
+    hooks = tmp_path / "fresh-no-hooks"
+    hooks.mkdir(exist_ok=True)
+    _git(["config", "core.hooksPath", str(hooks)], cwd=work)
+    if commits:
+        marks = []
+        for i in range(commits):
+            marks.append(
+                "commit refs/heads/main\n"
+                f"mark :{i + 1}\n"
+                f"committer t <t@example.com> {1600000000 + i} +0000\n"
+                f"data {len(f'c{i}')}\nc{i}\n"
+                + (f"from :{i}\n" if i else "")
+                + "M 644 inline f.txt\n"
+                + f"data {len(str(i)) + 1}\n{i}\n")
+        proc = subprocess.run(["git", "fast-import", "--quiet"], cwd=str(work),
+                              input="".join(marks), capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr
+    return work
+
+
+def test_an_unseeded_remote_push_past_the_history_limit_is_refused(tmp_path):
+    work = _fresh_repo(tmp_path, commits=1000)
+    decision, reason, _, _ = _hook(work, "git push origin main", _env(tmp_path))
+    assert decision == "deny", reason
+    assert "OCR_FULL_HISTORY_LIMIT" in reason
+    assert "500" in reason and "1000" in reason
+    # Remedy text: seed the remote (push base/main first) or narrow the base.
+    assert "push origin main" in reason
+    assert "narrow" in reason.lower()
+    # A brand-new repository's first push legitimately hits this path; the
+    # remedy must say exactly what to do about it.
+    assert "first push" in reason
+    # Refused BEFORE any review spawns.
+    assert _trace(tmp_path) == []
+
+
+def test_an_unseeded_remote_push_under_the_limit_reviews_normally(tmp_path):
+    work = _fresh_repo(tmp_path, commits=3)
+    env = _env(tmp_path, OCR_FULL_HISTORY_LIMIT=10)
+    decision, reason, _, _ = _hook(work, "git push origin main", env)
+    assert decision == "pass", reason
+    assert len(_trace(tmp_path)) == 1
+
+
+def test_full_history_limit_zero_disables_the_guard(tmp_path):
+    work = _fresh_repo(tmp_path, commits=1000)
+    env = _env(tmp_path, OCR_FULL_HISTORY_LIMIT=0)
+    decision, reason, _, _ = _hook(work, "git push origin main", env)
+    assert decision == "pass", reason
+
+
+def test_a_bounded_range_never_trips_the_history_limit(repo, tmp_path):
+    # Non-empty base: origin/main bounds the range, however many commits it
+    # carries -- the guard is only for the unbounded (_EMPTY_TREE) case.
+    for i in range(3):
+        _commit(repo, f"f{i}", f"change {i}")
+    env = _env(tmp_path, OCR_FULL_HISTORY_LIMIT=1)
+    decision, reason, _, _ = _hook(repo, "git push origin main", env)
+    assert decision == "pass", reason
+
+
+def test_the_history_limit_refusal_honors_fail_open(tmp_path):
+    work = _fresh_repo(tmp_path, commits=1000)
+    env = _env(tmp_path, OCR_FAIL_OPEN=1)
+    decision, reason, _, stderr = _hook(work, "git push origin main", env)
+    assert decision == "pass"
+    assert "OCR_FULL_HISTORY_LIMIT" in (reason or "") or "OCR_FULL_HISTORY_LIMIT" in stderr
+    assert _trace(tmp_path) == []
+
+
+# --- SPEC-08: chunk-aware run budget ------------------------------------------
+
+def _budget_env(tmp_path, threshold="3", files="1", **extra):
+    """Chunked-push env WITHOUT OCR_RUN_BUDGET, so the chunk-aware budget runs."""
+    e = _env(tmp_path, **extra)
+    e["OCR_CHUNK_THRESHOLD"] = threshold   # >threshold files -> chunked review
+    e["OCR_CHUNK_FILES"] = files           # files per chunk
+    e["OCR_CHUNK_LINES"] = "99999"         # don't split on lines
+    if "OCR_RUN_BUDGET" not in extra:
+        e.pop("OCR_RUN_BUDGET", None)      # else the flat override would win
+    return e
+
+
+def _budget_of(work, tip, env, chunks_total, timeout=180):
+    """Push through the hook, wait for the verdict, and return the state's
+    budget seconds: deadline_ts is realigned with the run budget once the
+    chunk plan is known, so deadline_ts - started_ts is the budget."""
+    decision, reason, _, stderr = _hook(work, "git push origin main", env, timeout=timeout)
+    assert decision == "pass", (reason, stderr)
+    st = _wait_state(work, tip, {"done"}, timeout=timeout)
+    assert st.get("verdict") == "pass", st
+    assert st.get("chunks_total") == chunks_total, st   # the chunked path ran
+    return st["deadline_ts"] - st["started_ts"]
+
+
+def _seed_chunk_telemetry(lines):
+    """Prior per-chunk telemetry in this test's private store's debug log."""
+    import rg_store
+    data = rg_store.store_root() / "data"
+    data.mkdir(parents=True, exist_ok=True)
+    (data / "review-gate-debug.log").write_text("".join(lines), encoding="utf-8")
+
+
+def _chunk_line(run, secs):
+    return (f"ts=2026-01-01T00:00:00Z event=chunk run={run} index=0 of=3 "
+            f"files=2 lines=100 outcome=ok s={secs}\n")
+
+
+def test_small_chunked_push_budgets_ocr_timeout(tmp_path):
+    """First run, no telemetry: a 1-chunk push budgets exactly OCR_TIMEOUT --
+    the flat behaviour the chunk-aware computation replaces."""
+    work = _big_repo(tmp_path, n_files=2)
+    tip = _git(["rev-parse", "HEAD"], cwd=work)
+    delta = _budget_of(work, tip, _budget_env(tmp_path, threshold="1", files="2"),
+                       chunks_total=1)
+    assert 1800 <= delta < 1890, delta        # OCR_TIMEOUT (+ planning slop)
+
+
+def test_big_plan_budgets_the_cap(tmp_path):
+    """21 chunks, no telemetry: the scaled budget is far above the flat
+    OCR_TIMEOUT deadline and is clamped to the OCR_TIMEOUT_MAX cap."""
+    work = _big_repo(tmp_path, n_files=21)
+    tip = _git(["rev-parse", "HEAD"], cwd=work)
+    delta = _budget_of(work, tip, _budget_env(tmp_path), chunks_total=21)
+    assert 3600 <= delta < 3690, delta        # capped at the 3600 s default
+
+
+def test_the_cap_env_is_honored(tmp_path):
+    work = _big_repo(tmp_path, n_files=21)
+    tip = _git(["rev-parse", "HEAD"], cwd=work)
+    delta = _budget_of(work, tip, _budget_env(tmp_path, OCR_TIMEOUT_MAX=7200),
+                       chunks_total=21)
+    assert 7200 <= delta < 7290, delta
+
+
+def test_invalid_cap_falls_back_to_3600(tmp_path):
+    """A non-integer cap falls back to the 3600 s default. Large telemetry is
+    seeded first so the UNCLAMPED budget far exceeds 3600 s -- otherwise the
+    chunk-aware floor (max budget, OCR_TIMEOUT) would legitimately give 1800 s
+    and the test could not tell cap fallback from floor (the stub reviews of a
+    previous iteration seed tiny averages into the per-test store)."""
+    _seed_chunk_telemetry([_chunk_line(f"r-{j}", 600) for j in range(25)])
+    work = _big_repo(tmp_path, n_files=21)
+    tip = _git(["rev-parse", "HEAD"], cwd=work)
+    delta = _budget_of(work, tip, _budget_env(tmp_path, OCR_TIMEOUT_MAX="abc"),
+                       chunks_total=21)
+    assert 3600 <= delta < 3690, delta
+
+
+def test_cap_below_the_deadline_clamps_to_the_deadline(tmp_path):
+    """A cap at or below OCR_TIMEOUT no longer resets to 3600 (the old reset
+    would pin the budget to the flat deadline whenever OCR_TIMEOUT itself was
+    raised past 3600): the effective ceiling is max(cap, OCR_TIMEOUT), so the
+    budget clamps to the flat deadline."""
+    _seed_chunk_telemetry([_chunk_line(f"r-{j}", 600) for j in range(25)])
+    work = _big_repo(tmp_path, n_files=21)
+    tip = _git(["rev-parse", "HEAD"], cwd=work)
+    delta = _budget_of(work, tip, _budget_env(tmp_path, OCR_TIMEOUT_MAX=100),
+                       chunks_total=21)
+    assert 1800 <= delta < 1890, delta
+
+
+def test_raised_deadline_raises_the_default_ceiling_with_it(tmp_path):
+    """OCR_TIMEOUT=7200 with no OCR_TIMEOUT_MAX: the effective ceiling is
+    max(3600, OCR_TIMEOUT), so the budget can exceed 3600 -- it sits at the
+    raised flat deadline instead of being dragged back down to the default
+    cap."""
+    _seed_chunk_telemetry([_chunk_line(f"r-{j}", 600) for j in range(25)])
+    work = _big_repo(tmp_path, n_files=21)
+    tip = _git(["rev-parse", "HEAD"], cwd=work)
+    delta = _budget_of(work, tip, _budget_env(tmp_path, OCR_TIMEOUT=7200),
+                       chunks_total=21)
+    assert 7200 <= delta < 7290, delta
+
+
+def test_trailing_telemetry_sizes_the_budget(tmp_path):
+    """Prior chunk telemetry feeds the budget: 600 s per chunk on average, 4
+    chunks across 2 slots -> ceil(4/2) = 2 waves x 600 s = 1200 s of true wall
+    time, floored at OCR_TIMEOUT = 1800 s (a `call` metric line must not leak
+    into the chunk average). The dogfood review caught the old total-x-slots
+    formula as double-counting parallelism."""
+    _seed_chunk_telemetry([_chunk_line(f"r{i}", 600) for i in range(3)]
+                          + ["ts=2026-01-01T00:00:00Z event=call run=r9 "
+                             "kind=review outcome=ok s=99999\n"])
+    work = _big_repo(tmp_path, n_files=4)
+    tip = _git(["rev-parse", "HEAD"], cwd=work)
+    delta = _budget_of(work, tip,
+                       _budget_env(tmp_path, OCR_TIMEOUT_MAX=9000), chunks_total=4)
+    assert 1800 <= delta < 1890, delta
+
+
+def test_run_budget_env_stays_a_flat_override(tmp_path):
+    """An explicit OCR_RUN_BUDGET keeps today's flat meaning."""
+    work = _big_repo(tmp_path, n_files=4)
+    tip = _git(["rev-parse", "HEAD"], cwd=work)
+    delta = _budget_of(work, tip, _budget_env(tmp_path, OCR_RUN_BUDGET=6000),
+                       chunks_total=4)
+    assert 6000 <= delta < 6090, delta

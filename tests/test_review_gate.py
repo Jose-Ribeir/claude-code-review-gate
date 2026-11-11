@@ -876,7 +876,8 @@ def _stub_gate(monkeypatch, tmp_path, result=_WARN_RESULT, calls=None):
     monkeypatch.delenv("OCR_FORCE_REVIEW", raising=False)
     _inline_supervisor(monkeypatch)
 
-    def _fake_review(repo_root, mode, git_dir=None, head_sha="", push_range=""):
+    def _fake_review(repo_root, mode, git_dir=None, head_sha="", push_range="",
+                     **_kw):
         if calls is not None:
             calls.append(head_sha)
         raw_name = review_gate._save_raw_output(git_dir, json.dumps(result), head_sha)
@@ -958,6 +959,22 @@ def test_passing_review_persists_its_findings_and_reports_them(tmp_path, monkeyp
     assert entry["verdict"] == "warn" and entry["blocked"] is False
     assert entry["findings"][0]["content"] == "unchecked index"
     assert (tmp_path / entry["raw"]).exists()
+
+
+def test_a_noop_push_says_so_instead_of_staying_silent(tmp_path, monkeypatch, capsys):
+    """SPEC-11's invariant: a present gate must never produce the absent-gate
+    signature. The empty-range allow lands the push with no review at all, so
+    it says so -- one informational, non-blocking line on stderr -- while the
+    decision itself (allow, exit 0) is unchanged."""
+    _stub_gate(monkeypatch, tmp_path)
+    monkeypatch.setattr(review_gate, "_hook_target", lambda repo_root, cmd: (
+        "allow", {"why": "remote already has these commits"}))
+    _run_hook(monkeypatch)
+    captured = capsys.readouterr()
+    decision, _ = parse_pretooluse(captured.out)
+    assert decision == "pass"   # allow: the push goes through
+    assert "nothing to review" in captured.err
+    assert "remote already holds every commit" in captured.err
 
 
 def test_the_paired_adapters_short_circuit_replays_instead_of_silencing(tmp_path, monkeypatch, capsys):
@@ -1057,6 +1074,36 @@ def test_a_running_review_past_the_budget_is_denied_not_allowed(tmp_path, monkey
     notes = [json.loads((tmp_path / "gate-data" / "data" / n).read_text())
              for n in _pending_files(tmp_path)]
     assert [n["kind"] for n in notes] == ["async"]
+
+
+# --- the deny texts: remaining budget, failure wording -------------------------
+
+def test_still_running_message_states_the_remaining_inline_budget(monkeypatch):
+    # The clause counts down from the inline deadline (process start + budget),
+    # not from the full budget: 600 s budget spent 90 s ago leaves 8 minutes.
+    st = {"tip": "a" * 40, "branch": "feat/x", "started_ts": time.time() - 120}
+    monkeypatch.setattr(review_gate, "_HOOK_T0", time.time() - 90)
+    text = review_gate._still_running_reason(st, 600, "hook")
+    assert "waits up to 8 more minutes" in text
+
+
+def test_still_running_message_drops_the_wait_clause_when_the_budget_is_spent(monkeypatch):
+    # A spent budget must never read as "the gate waits up to 0 more minutes":
+    # the whole clause is dropped, the retry guidance stays.
+    st = {"tip": "a" * 40, "branch": "feat/x", "started_ts": time.time() - 120}
+    monkeypatch.setattr(review_gate, "_HOOK_T0", time.time() - 10_000)
+    text = review_gate._still_running_reason(st, 60, "hook")
+    assert "more minutes" not in text
+    assert "0 more minutes" not in text
+    assert "re-run this exact `git push`" in text
+    assert "answers as soon as the review finishes" in text
+
+
+def test_failed_review_message_says_nothing_was_approved_and_how_to_retry():
+    st = {"state": "failed", "reason": "review", "detail": "boom", "attempts": 0}
+    text = review_gate._failed_reason(st, "hook")
+    assert "Nothing was approved" in text
+    assert "re-running the same `git push` retries the review" in text
 
 
 def test_a_review_whose_supervisor_went_silent_is_restarted(tmp_path, monkeypatch, capsys):
@@ -1928,7 +1975,8 @@ def _gate_hook(monkeypatch, command, **patches):
         seen["unpushed_root"] = repo_root
         return True
 
-    def _review(repo_root, mode, git_dir=None, head_sha="", push_range=""):
+    def _review(repo_root, mode, git_dir=None, head_sha="", push_range="",
+                **_kw):
         seen["review_root"] = repo_root
         return {"findings": []}, True, ""
 
@@ -2670,6 +2718,105 @@ def test_allowed_exts_parity_with_allowlist_md():
     )
 
 
+# --- allowlist split: review filter vs context filter (t01) ------------------
+# _is_allowed_path decides what is REVIEWED; _is_context_allowed_path decides
+# what is searchable for callers/cross-file refs/siblings. Test files are
+# excluded from review but included in context search; vendored/generated/VCS/
+# lockfile exclusions apply to both.
+
+_CONTEXT_ONLY_PATHS = [
+    "app/helper.spec.ts", "app/helper.test.js", "pkg/x_test.go",
+    "tests/test_utils.py", "pkg/utils_test.py", "__tests__/x.ts",
+    "testdata/x.py", "demo/test_app.py",
+]
+
+_ALWAYS_EXCLUDED_PATHS = [
+    "vendor/lib.py", "node_modules/pkg/index.js", "dist/bundle.py",
+    "build/out.py", "target/gen.py", ".next/static/x.js",
+    "__generated__/types.py", "app/b.min.js", "pkg/a.pb.go",
+    "x.generated.py", ".git/hooks/hook.py", ".idea/misc.py",
+    "package-lock.json", "yarn.lock", "README.md",
+]
+
+
+def test_is_allowed_path_is_unchanged_review_filter():
+    # Characterization pin: the review filter still rejects all test paths.
+    for p in _CONTEXT_ONLY_PATHS:
+        assert not _is_allowed_path(p), f"review filter must reject test path {p}"
+    assert _is_allowed_path("src/app.py")
+    for p in _ALWAYS_EXCLUDED_PATHS:
+        assert not _is_allowed_path(p), f"review filter must reject {p}"
+
+
+def test_is_context_allowed_admits_test_paths():
+    pred = review_gate._is_context_allowed_path
+    for p in _CONTEXT_ONLY_PATHS:
+        assert pred(p), f"context filter must admit test path {p}"
+    for p in _ALWAYS_EXCLUDED_PATHS:
+        assert not pred(p), f"context filter must reject {p}"
+    assert pred("src/app.py")
+
+
+def test_allowlist_md_documents_context_filter():
+    # Parity: the split must be documented next to the allowlist.
+    p = os.path.join(os.path.dirname(_SCRIPTS), "skills", "review", "allowlist.md")
+    text = open(p, encoding="utf-8").read().lower()
+    assert "context search" in text, "allowlist.md must document the context filter"
+
+
+def test_compute_impact_passes_both_filters(monkeypatch):
+    monkeypatch.delenv("OCR_IMPACT", raising=False)
+    captured = {}
+
+    def fake_run(args, _cwd=None):
+        if args[:2] == ["cat-file", "-p"]:
+            return "def helper():\n    pass\n", 0
+        return "", 0
+
+    monkeypatch.setattr(review_gate.ocr_impact, "git_runner", lambda cwd: fake_run)
+    monkeypatch.setattr(
+        review_gate.ocr_impact, "changed_symbols",
+        lambda path, old, new: {"symbols": [{
+            "name": "helper", "qualname": "helper", "kind": "function",
+            "change": "body", "defined_in": path, "line": 1,
+            "old_signature": "", "new_signature": "", "renamed_to": "",
+            "lines_changed": 1,
+        }], "supported": True, "warnings": []})
+
+    def fake_refs(run, tip, symbols, **kw):
+        captured.update(kw)
+        return {"sites": [], "ref_counts": {}, "warnings": []}
+
+    monkeypatch.setattr(review_gate.ocr_impact, "find_references", fake_refs)
+    items = [{"entry": {"path": "pkg/utils.py", "old_oid": "0" * 40,
+                        "new_oid": "1" * 40, "status": "M"}, "mode": "full"}]
+    got = review_gate._compute_impact(".", "deadbeef", items)
+    assert got is not None
+    assert captured.get("is_allowed") is _is_allowed_path
+    assert captured.get("is_context_allowed") is review_gate._is_context_allowed_path
+
+
+def test_know_defects_and_new_notes_use_context_filter(monkeypatch):
+    # Sibling sweeps must search with the context filter, not the review filter.
+    monkeypatch.delenv("OCR_SIBLINGS", raising=False)
+    seen = []
+
+    def fake_siblings(run, tip, finding, **kw):
+        seen.append(kw)
+        return {"siblings": [], "warnings": []}
+
+    monkeypatch.setattr(review_gate.ocr_impact, "find_siblings", fake_siblings)
+    monkeypatch.setattr(review_gate, "_fix_added_lines", lambda *a, **k: {})
+    finding = {"id": "f1", "path": "a.py", "start_line": 1, "severity": "high",
+               "content": "c", "existing_code": "    result = some_important_func(x)"}
+    review_gate._known_defects(".", "deadbeef", [dict(finding)], {"a.py"})
+    review_gate._new_finding_notes(".", "deadbeef", [dict(finding)], {"a.py"})
+    assert len(seen) == 2
+    for kw in seen:
+        assert kw.get("is_allowed") is _is_allowed_path
+        assert kw.get("is_context_allowed") is review_gate._is_context_allowed_path
+
+
 # --- _plan_chunks: threshold and limits ---------------------------------------
 
 def _make_entries(n, ext=".py", lines_each=10):
@@ -3031,3 +3178,145 @@ def test_reap_async_skips_live_worktree(monkeypatch, tmp_path):
     os.utime(wt, (time.time() - MARKER_TTL - 60,) * 2)
     _reap_async(str(tmp_path))
     assert wt.is_dir(), "live worktree must not be deleted by reaper"
+
+
+# --- SPEC-06: conservative verdict rescue (axis + review-wrapped families) ---
+
+_final_verdict = review_gate._final_verdict
+
+# Axis family (evidence: review-gate-history/20261110T134146Z-de36b7e-c1.json):
+# per-axis counts as NUMBERS, free-text `worst`, model verdict "approved", no
+# findings list anywhere.
+_AXIS_COUNTS_STDOUT = json.dumps({
+    "chunk": {"index": 1, "total": 6},
+    "range": "02b68b66..de36b7e9",
+    "verdict": "approved",
+    "standards": {
+        "verdict": "approved", "hard_violations": 0, "judgement_calls": 4,
+        "worst": "src/connectorTitle.ts:24,60 — unnamed sentinel string literals",
+    },
+    "spec": {"verdict": "approved", "findings": 0, "observations": 1},
+})
+
+# Review-wrapped family (evidence: .../20261110T133919Z-de36b7e-c2.json): a
+# top-level `review` object plus a `standards` axis whose `findings` list holds
+# real finding objects (file/line/severity/message).
+_REVIEW_WRAPPED_STDOUT = json.dumps({
+    "review": {"range": "02b68b66..de36b7e9", "chunk": "2/6",
+               "files_reviewed": ["pkg/store.ts", "pkg/indicator.tsx"]},
+    "standards": {
+        "sources": ["CODING_STANDARDS.md"],
+        "findings": [
+            {"file": "pkg/store.ts", "line": 63, "severity": "minor",
+             "kind": "hard (redundant code)", "rule": "simplicity",
+             "message": "pointless Object.fromEntries copy"},
+            {"file": "pkg/indicator.tsx", "line": 19, "severity": "critical",
+             "kind": "hard", "message": "comment contradicts the code"},
+        ],
+        "suppressed": [{"file": "pkg/skip.ts", "rule": "Duplicated Code"}],
+    },
+    "summary": "Standards: 2 findings.",
+})
+
+
+def test_extract_json_rescues_review_wrapped_findings():
+    result = _extract_json(_REVIEW_WRAPPED_STDOUT)
+    assert result is not None and _is_valid_verdict(result)
+    assert result["rescued"] == "axis_rescue"
+    # file -> path, line -> start_line, prose -> content.
+    assert [f["path"] for f in result["findings"]] == ["pkg/store.ts", "pkg/indicator.tsx"]
+    assert result["findings"][0]["start_line"] == "63"
+    assert "pointless Object.fromEntries copy" in result["findings"][0]["content"]
+    # `suppressed` entries carry no location and sit outside findings-like
+    # lists: they must not be resurrected as findings.
+    assert all(f["path"] != "pkg/skip.ts" for f in result["findings"])
+
+
+def test_extract_json_rescue_recomputes_verdict_never_trusts_model_label():
+    # The model said "approved"; a critical finding must still block.
+    result = _extract_json(_REVIEW_WRAPPED_STDOUT)
+    assert result["verdict"] == "block"
+    assert compute_verdict(result) == "block"
+
+
+def test_extract_json_rescues_counts_only_axis_to_warn_fallback():
+    # Counts without reconstructable objects: never a silent pass.
+    result = _extract_json(_AXIS_COUNTS_STDOUT)
+    assert result is not None and _is_valid_verdict(result)
+    assert result["findings"] == []
+    assert result["rescued"] == "warn_fallback"
+    assert result["verdict"] == "warn"
+
+
+def test_extract_json_axis_zero_counts_is_honest_pass():
+    obj = {"verdict": "approved",
+           "standards": {"verdict": "approved", "hard_violations": 0,
+                         "judgement_calls": 0},
+           "spec": {"verdict": "approved", "findings": 0}}
+    result = _extract_json(json.dumps(obj))
+    assert result is not None and _is_valid_verdict(result)
+    assert result["findings"] == []
+    assert result["rescued"] == "axis_rescue"
+    assert result["verdict"] == "pass"
+
+
+def test_extract_json_partial_counts_still_warn_fallback():
+    # 4 judgement_calls counted but only 2 reconstructable finding objects:
+    # the reconstructed pair is kept, the lost signal downgrades to warn.
+    obj = {"verdict": "approved",
+           "standards": {"hard_violations": 0, "judgement_calls": 4,
+                         "findings": [
+                             {"file": "a.ts", "line": 1, "message": "x"},
+                             {"file": "b.ts", "line": 2, "message": "y"}]}}
+    result = _extract_json(json.dumps(obj))
+    assert result is not None
+    assert len(result["findings"]) == 2
+    assert result["rescued"] == "warn_fallback"
+    assert result["verdict"] == "warn"
+
+
+def test_extract_json_missing_severity_defaults_by_axis():
+    obj = {"standards": {"findings": [{"file": "a.ts", "line": 1, "message": "s"}]},
+           "spec": {"findings": [{"file": "b.ts", "line": 2, "message": "p"}]}}
+    result = _extract_json(json.dumps(obj))
+    by_path = {f["path"]: f for f in result["findings"]}
+    assert by_path["a.ts"]["severity"] == "medium"
+    assert by_path["b.ts"]["severity"] == "low"
+
+
+def test_extract_json_unrecognized_shape_stays_parse_failure():
+    # No standards/spec axes: improvised-but-unknown shapes stay fail-closed.
+    assert _extract_json(json.dumps(
+        {"chunk": {"index": 1}, "counts": {"symbols_found": 12}})) is None
+    assert _extract_json(json.dumps(
+        {"review": {"range": "a..b"}})) is None
+    assert _extract_json('{"verdict": "approved"}') is None
+
+
+def test_extract_from_stream_json_rescues_axis_report():
+    text = json.dumps({"type": "message_end", "message": {"content": [
+        {"type": "text", "text": "Review done.\n" + _AXIS_COUNTS_STDOUT}]}})
+    result = _extract_from_stream_json(text)
+    assert result is not None and _is_valid_verdict(result)
+    assert result["rescued"] == "warn_fallback"
+    assert result["verdict"] == "warn"
+
+
+def test_rescue_emits_distinct_telemetry_records(monkeypatch):
+    seen = []
+    monkeypatch.setattr(review_gate, "_metric_log", lambda event, **f: seen.append((event, f)))
+    _extract_json(_AXIS_COUNTS_STDOUT)
+    assert ("verdict_rescued", {"kind": "warn_fallback"}) in seen
+    _extract_json(_REVIEW_WRAPPED_STDOUT)
+    assert ("verdict_rescued", {"kind": "axis_rescue"}) in seen
+
+
+def test_final_verdict_honors_warn_fallback_after_recompute():
+    # compute_verdict stays the authority; the warn-fallback downgrade must
+    # survive the run-path recompute (never a silent pass).
+    assert _final_verdict({"rescued": "warn_fallback", "findings": []}) == "warn"
+    assert _final_verdict({"rescued": "axis_rescue", "findings": []}) == "pass"
+    assert _final_verdict({"status": "success", "verdict": "pass", "findings": []}) == "pass"
+    assert _final_verdict({"rescued": "axis_rescue", "findings": [
+        {"path": "a.ts", "start_line": "1", "end_line": "1", "content": "x",
+         "severity": "high"}]}) == "block"

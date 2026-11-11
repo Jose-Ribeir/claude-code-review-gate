@@ -132,15 +132,22 @@ def test_first_push_sends_callers_in_untouched_files(tmp_path):
     assert _state(work, tip).get("state") == "done"
 
 
-def test_no_callers_keeps_the_golden_command_line(tmp_path):
+def test_no_callers_but_commit_intent_still_writes_a_manifest(tmp_path):
     """0.10.0 writes a manifest for every review (the diffs reach the reviewer
-    through it); the bare 0.7.0 command line is what OCR_PRECOMPUTED_DIFFS=0 keeps."""
+    through it); OCR_PRECOMPUTED_DIFFS=0 restores the bare 0.7.0 command line
+    only when nothing else rides the extras seam -- commit intent (t13) does,
+    so a flagged-off push with pushed commits still gets a manifest."""
     work = _repo(tmp_path, {"lib.py": _LIB_V1})
     _commit(work, {"lib.py": _LIB_V2})
     decision, _ = _push(work, _env(tmp_path, "t.trace", OCR_PRECOMPUTED_DIFFS="0"),
                         cmd="git push origin main")
     assert decision == "pass"
-    assert all(c.get("paths_file") is None for c in _calls(tmp_path, "t.trace"))
+    manifest = _review_manifest(tmp_path, "t.trace")
+    assert manifest["paths"] == ["lib.py"] and "impact" not in manifest
+    intent = manifest["commit_intent"]
+    assert intent["commit_count"] == 1
+    assert [c["subject"] for c in intent["commits"]] == ["c"]
+    assert [c["files"] for c in intent["commits"]] == [["lib.py"]]
 
 
 def test_no_callers_means_a_manifest_without_impact(tmp_path):

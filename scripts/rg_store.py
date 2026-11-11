@@ -83,10 +83,18 @@ def verdict_path(remote, tip):
     return store_root() / "verdicts" / f"{_remote_key(remote)}-{tip}.json"
 
 
-def record_verdict(remote, tip, base, verdict, blocked, reasons, commits, note=""):
-    """Write the verdict record for (remote, tip) with its covered commit set."""
+def record_verdict(remote, tip, base, verdict, blocked, reasons, commits, note="",
+                   intent=None):
+    """Write the verdict record for (remote, tip) with its covered commit set.
+
+    `intent` is an optional extras dict recording the intent context the
+    review actually used (sources present, the intent text, counts, fetch
+    notes) -- provenance for a later before/after quality study. The store
+    tolerates extra keys at protocol_version 1, so this adds NO version bump,
+    and load_verdict tolerates its absence in older records.
+    """
     commits = [str(c) for c in (commits or [])][:_MAX_COMMITS]
-    return _write_json(verdict_path(remote, tip), {
+    record = {
         "remote": str(remote or ""),
         "tip": str(tip or ""),
         "base": str(base or ""),
@@ -98,7 +106,13 @@ def record_verdict(remote, tip, base, verdict, blocked, reasons, commits, note="
         "note": str(note or ""),
         "ts": _now(),
         "protocol_version": 1,
-    })
+    }
+    if intent is not None:
+        # An extras dict, copied so a later caller-side mutation cannot reach
+        # into the record. A stray non-dict value is kept as text rather than
+        # dropped (an extra is never a reason to fail a verdict write).
+        record["intent"] = dict(intent) if isinstance(intent, dict) else {"text": str(intent)}
+    return _write_json(verdict_path(remote, tip), record)
 
 
 def load_verdict(remote, tip):

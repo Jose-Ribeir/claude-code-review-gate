@@ -185,6 +185,77 @@ def test_uninstall_removes_from_the_configured_path_and_restores_the_user_hook(t
     assert "review-gate.py" not in (hooks / "pre-push").read_text()
 
 
+def test_install_removes_a_stale_gate_copy_from_the_default_hooks_dir(tmp_path):
+    """A gate copy left in .git/hooks from before core.hooksPath was set is
+    shadowed: git never runs it, so leaving it is a stale lie. Install must
+    remove it (with a notice) rather than leave it behind."""
+    work = _mkrepo(tmp_path)
+    default_hooks = work / ".git" / "hooks"
+    default_hooks.mkdir(parents=True, exist_ok=True)
+    (default_hooks / "pre-push").write_text(
+        "#!/bin/sh\n# installed by install-kimchi-hook.sh\nexec python review-gate.py\n"
+    )
+    os.chmod(str(default_hooks / "pre-push"), 0o755)
+    proc = subprocess.run(["bash", _INSTALL], cwd=str(work), env=_overridden_env(tmp_path),
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stderr
+    assert not (default_hooks / "pre-push").exists(), \
+        "the shadowed gate copy in the default hooks dir must be removed"
+    assert "stale" in proc.stdout.lower(), "the removal must be announced"
+    hook = work / ".githooks" / "pre-push"
+    assert hook.is_file(), "the gate itself still installs into core.hooksPath"
+    assert "review-gate.py" in hook.read_text()
+
+
+def test_install_leaves_a_foreign_hook_in_the_default_hooks_dir_alone(tmp_path):
+    """Only recognizably-ours hooks are stale-copy candidates; a hook someone
+    else put in .git/hooks is never touched, shadowed or not."""
+    work = _mkrepo(tmp_path)
+    default_hooks = work / ".git" / "hooks"
+    default_hooks.mkdir(parents=True, exist_ok=True)
+    (default_hooks / "pre-push").write_text("#!/bin/sh\nexit 0\n")
+    os.chmod(str(default_hooks / "pre-push"), 0o755)
+    proc = subprocess.run(["bash", _INSTALL], cwd=str(work), env=_overridden_env(tmp_path),
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stderr
+    assert (default_hooks / "pre-push").is_file()
+    assert (default_hooks / "pre-push").read_text().strip() == "#!/bin/sh\nexit 0"
+
+
+def test_uninstall_leaves_no_stale_copy_anywhere(tmp_path):
+    """Full symmetry: with a stale gate copy in the default hooks dir and a
+    user hook under core.hooksPath, install + uninstall must end with the
+    user hook restored and no review-gate hook file left in either dir."""
+    work = _mkrepo(tmp_path)
+    hooks = work / ".githooks"
+    default_hooks = work / ".git" / "hooks"
+    default_hooks.mkdir(parents=True, exist_ok=True)
+    (default_hooks / "pre-push").write_text(
+        "#!/bin/sh\n# installed by install-kimchi-hook.sh\nexec python review-gate.py\n"
+    )
+    os.chmod(str(default_hooks / "pre-push"), 0o755)
+    hooks.mkdir(parents=True, exist_ok=True)
+    (hooks / "pre-push").write_text("#!/bin/sh\nexit 0\n")
+    os.chmod(str(hooks / "pre-push"), 0o755)
+    env = _overridden_env(tmp_path)
+    assert subprocess.run(["bash", _INSTALL], cwd=str(work), env=env,
+                          capture_output=True, timeout=120).returncode == 0
+
+    proc = subprocess.run(["bash", _UNINSTALL], cwd=str(work), env=env,
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stderr
+    # The user hook is back where core.hooksPath points; no gate copy remains
+    # in either hook directory.
+    assert (hooks / "pre-push").read_text().strip() == "#!/bin/sh\nexit 0"
+    assert "review-gate.py" not in (hooks / "pre-push").read_text()
+    for dir in (hooks, default_hooks):
+        pre_push = dir / "pre-push"
+        if pre_push.exists():
+            assert "review-gate" not in pre_push.read_text(), \
+                f"stale gate copy left behind at {pre_push}"
+    assert not (default_hooks / "pre-push.user").exists()
+
+
 def test_install_into_an_unwritable_hooks_path_fails_loudly(tmp_path):
     if os.geteuid() == 0:
         pytest.skip("running as root: permission-based failure cannot be reproduced")

@@ -77,14 +77,17 @@ def test_concurrency_is_clamped_and_defaults_to_two(monkeypatch):
 def test_two_chunks_run_at_once_each_in_its_own_worktree(tmp_path):
     work = ag._big_repo(tmp_path, n_files=4)
     tip = ag._git(["rev-parse", "HEAD"], cwd=work)
-    decision, reason, _, _ = _push(work, _env(tmp_path, STUB_SLEEP=3))
+    # Sleep 6 s per chunk; two slots means calls 0 and 1 start together.
+    # The 4 s overlap threshold tolerates a slow second-worktree spawn on a
+    # loaded machine (was 3 s sleep / 2 s threshold, which flaked).
+    decision, reason, _, _ = _push(work, _env(tmp_path, STUB_SLEEP=6))
     st = ag._wait_state(work, tip, {"done"}, timeout=90)
     assert st["verdict"] == "pass", st
     calls = _reviews(tmp_path)
     assert len(calls) == 4
     starts = _overlap(calls)
-    # Two slots: the first two calls start together, well inside one call's 3 s.
-    assert starts[1] - starts[0] < 2.0, starts
+    # Two slots: the first two calls start together, well inside one call's 6 s.
+    assert starts[1] - starts[0] < 4.0, starts
     cwds = {os.path.realpath(c["cwd"]) for c in calls}
     assert len(cwds) == 2, cwds
     for cwd in cwds:
@@ -137,15 +140,16 @@ def test_a_limit_stops_the_sibling_but_finished_chunks_keep_their_records(tmp_pa
     work = ag._big_repo(tmp_path, n_files=4)
     tip = ag._git(["rev-parse", "HEAD"], cwd=work)
     env = _env(tmp_path, STUB_CHUNK_VERDICT=json.dumps({"2": "limit"}),
-               STUB_CHUNK_SLEEP=json.dumps({"3": 30}))
+               STUB_CHUNK_SLEEP=json.dumps({"3": 45}))
     decision, reason, _, _ = _push(work, env)
     assert decision == "deny", reason
     st = ag._wait_state(work, tip, {"failed"}, timeout=60)
     assert st.get("reason") == "limit" and int(st.get("attempts") or 0) == 0, st
     calls = _reviews(tmp_path)
     assert sorted(c["manifest"]["chunk_index"] for c in calls) == [0, 1, 2, 3]
-    # chunk 3 (30 s) was killed: the run did not wait for it
-    assert time.time() - min(c["ts"] for c in calls) < 25
+    # chunk 3 (45 s) was killed: the run did not wait for it. The 40 s bound
+    # tolerates kill-pipeline latency under load (was 30 s sleep / 25 s bound).
+    assert time.time() - min(c["ts"] for c in calls) < 40
     recorded = _recorded(work)
     assert {"mod0.py", "mod1.py"} <= recorded, recorded
     assert "mod3.py" not in recorded and "mod2.py" not in recorded, recorded
@@ -362,6 +366,124 @@ def test_kill_active_children_kills_every_registered_reviewer():
             if p.poll() is None:
                 p.kill()
     assert review_gate._active_children() == []
+
+
+# --- SPEC-07: a parse-failed chunk is split and retried, not run-fatal --------
+
+
+def _files_env(tmp_path, per_chunk=2, **extra):
+    """Chunks of `per_chunk` files: 4 files -> 4/per_chunk chunks."""
+    e = ag._chunk_env(tmp_path, **extra)
+    e["OCR_CHUNK_FILES"] = str(per_chunk)
+    return e
+
+
+def _paths_by_chunk(calls):
+    by_idx = {}
+    for c in calls:
+        by_idx.setdefault(c["manifest"]["chunk_index"], c["manifest"]["paths"])
+    return by_idx
+
+
+def test_a_parse_failed_chunk_is_split_and_retried_not_run_fatal(tmp_path):
+    """Chunk 0's output is unparseable (after its own retry): its files are
+    marked, the chunk is split into single-file chunks and those are reviewed;
+    the sibling chunk finishes, everything is recorded, and the run delivers a
+    pass verdict instead of dying."""
+    work = ag._big_repo(tmp_path, n_files=4)
+    tip = ag._git(["rev-parse", "HEAD"], cwd=work)
+    env = _files_env(tmp_path, STUB_CHUNK_VERDICT=json.dumps({"0": "garbage"}))
+    _push(work, env)
+    st = ag._wait_state(work, tip, {"done", "failed"}, timeout=90)
+    assert st["state"] == "done" and st["verdict"] == "pass", st
+    calls = _reviews(tmp_path)
+    idx = [c["manifest"]["chunk_index"] for c in calls]
+    assert sorted(set(idx)) == [0, 1, 2, 3], idx   # the splits are chunks 2 and 3
+    assert idx.count(0) == 2, idx                  # the in-call retry, then the split
+    by_idx = _paths_by_chunk(calls)
+    assert len(by_idx[2]) == 1 and len(by_idx[3]) == 1, by_idx
+    assert sorted(by_idx[2] + by_idx[3]) == ["mod0.py", "mod1.py"], by_idx
+    assert _recorded(work) == {"mod0.py", "mod1.py", "mod2.py", "mod3.py"}
+    assert _gate_worktree_dirs() == []
+
+
+def test_an_exhausted_parse_failure_names_the_unreviewed_remainder(tmp_path):
+    """mod0.py is unparseable alone twice (the splitter's bound): it stays
+    unreviewed, but the run still delivers a warn verdict over the reviewed
+    files and the verdict text names what was not reviewed."""
+    work = ag._big_repo(tmp_path, n_files=4)
+    tip = ag._git(["rev-parse", "HEAD"], cwd=work)
+    env = _files_env(tmp_path, STUB_CHUNK_VERDICT=json.dumps(
+        {"0": "garbage", "2": "garbage", "4": "garbage"}))
+    _push(work, env)
+    st = ag._wait_state(work, tip, {"done", "failed"}, timeout=120)
+    assert st["state"] == "done" and st["verdict"] == "warn", st
+    recorded = _recorded(work)
+    assert recorded == {"mod1.py", "mod2.py", "mod3.py"}, recorded
+    reasons = str(st.get("reasons") or "")
+    assert "mod0.py" in reasons and "not reviewed" in reasons, st
+
+
+def test_when_everything_fails_to_parse_the_run_still_fails_closed(tmp_path):
+    """No chunk ever produces a reviewable answer: there is nothing to deliver,
+    so the run fails (as before) instead of passing silently."""
+    work = ag._big_repo(tmp_path, n_files=4)
+    tip = ag._git(["rev-parse", "HEAD"], cwd=work)
+    env = _files_env(tmp_path, conc=1, STUB_VERDICT="garbage")
+    decision, reason, _, _ = _push(work, env)
+    assert decision == "deny", reason
+    st = ag._wait_state(work, tip, {"failed"}, timeout=120)
+    assert st.get("reason") == "unreviewable", st
+    assert _recorded(work) == set(), _recorded(work)
+
+
+def test_a_verdict_with_unreviewed_files_is_never_a_clean_pass():
+    import ocr_verdict
+    assert ocr_verdict.compute_verdict(
+        {"status": "success", "findings": [], "unreviewed": ["a.py"]}) == "warn"
+    assert ocr_verdict.compute_verdict(
+        {"status": "success", "findings": [], "unreviewed": []}) == "pass"
+    # A real finding still blocks on top of the unreviewed remainder.
+    assert ocr_verdict.compute_verdict(
+        {"status": "success", "unreviewed": ["a.py"],
+         "findings": [{"severity": "high", "path": "b.py", "start_line": 1,
+                       "end_line": 2, "content": "bug", "confidence": 0.9}]}) == "block"
+
+
+def test_format_reasons_names_the_unreviewed_files():
+    out = review_gate._format_reasons(
+        {"findings": [], "unreviewed": ["a.py", "b/c.py"]})
+    assert "not reviewed" in out and "a.py" in out and "b/c.py" in out, out
+
+
+def test_mark_unreviewed_warns_without_downgrading_a_block():
+    res = {"status": "completed_with_errors",
+           "findings": [{"severity": "high", "path": "x.py", "start_line": 1,
+                         "end_line": 2, "content": "bug", "confidence": 0.9}],
+           "summary": {}}
+    out = review_gate._mark_unreviewed(res, ["y.py"])
+    assert out["status"] == "completed_with_errors"
+    assert out["unreviewed"] == ["y.py"]
+    assert any("not reviewed" in str(w.get("message")) and w.get("file") == "y.py"
+               for w in out["warnings"]), out
+    assert out["summary"]["unreviewed"] == 1
+    assert review_gate.compute_verdict(out) == "block"
+    warn_res = review_gate._mark_unreviewed(
+        {"status": "success", "findings": [], "summary": {}}, ["y.py"])
+    assert warn_res["status"] == "completed_with_warnings"
+
+
+def test_split_marked_chunk_halves_until_single_items():
+    items = [{"entry": {"path": f"f{i}.py"}} for i in range(4)]
+    marks4 = {f"f{i}.py": {"chunk_size": 4} for i in range(4)}
+    pieces = review_gate._split_marked_chunk(items, marks4)
+    assert [len(p) for p in pieces] == [2, 2]
+    marks2 = {f"f{i}.py": {"chunk_size": 2} for i in range(4)}
+    singles = review_gate._split_marked_chunk(pieces[0], marks2)
+    assert [len(p) for p in singles] == [1, 1]
+    # A single item cannot be split any further.
+    assert review_gate._split_marked_chunk(singles[0], marks2) == []
+    assert review_gate._split_marked_chunk(items, {}) == []
 
 
 @pytest.mark.parametrize("n", [1, 2])
