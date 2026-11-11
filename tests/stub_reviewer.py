@@ -12,7 +12,8 @@ environment variables so one command line serves every scenario:
   STUB_CHUNK_VERDICT JSON {chunk_index: verdict} -- STUB_VERDICT for that chunk only
   STUB_CHUNK_SLEEP   JSON {chunk_index: seconds} -- sleep that long in that chunk only
   STUB_VERDICT_FOR   path — the chunk containing this path returns block
-  STUB_FINDINGS_FOR  JSON mapping path → {severity, content} for path-scripted verdicts
+  STUB_FINDINGS_FOR  JSON mapping path → {severity, content, confidence?} for
+                     path-scripted verdicts (confidence defaults to 0.95)
   STUB_RESOLVE       JSON mapping finding_id → {status, evidence_path, evidence_quote}
                      Used when --resolve <file> is in argv; return resolver output.
                      Values are passed through verbatim, so a malformed answer
@@ -296,7 +297,8 @@ if findings_for_raw:
                 spec = findings_map[path]
                 findings.append({
                     "path": path,
-                    "start_line": 1, "end_line": 2, "confidence": 0.95,
+                    "start_line": 1, "end_line": 2,
+                    "confidence": float(spec.get("confidence", 0.95)),
                     "category": "correctness", "evidence": "stub",
                     "severity": spec.get("severity", "high"),
                     "content": spec.get("content", "stub scripted finding"),

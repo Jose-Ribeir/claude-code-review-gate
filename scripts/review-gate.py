@@ -43,6 +43,7 @@
 #
 # The orchestrated review methodology this drives is adapted from open-code-review
 # (ocr): https://github.com/alibaba/open-code-review (Apache-2.0). See NOTICE.
+import fnmatch
 import hashlib
 import io
 import json
@@ -69,6 +70,8 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ocr_verdict import compute_verdict, norm_severity  # noqa: E402
 import ocr_impact  # noqa: E402
+import ocr_index  # noqa: E402
+import ocr_memory  # noqa: E402
 import ocr_segment  # noqa: E402
 import ocr_telemetry  # noqa: E402
 import rg_store  # noqa: E402  # the Kimchi port's external verdict store + sandbox
@@ -106,6 +109,116 @@ _DOCTOR_CMD = "python3 " + os.path.join(
 # in skills/review/SKILL.md) via its Agent spawn regardless. OCR_MODEL
 # overrides this session pin for experimentation.
 _MODEL = os.environ.get("OCR_MODEL", "kimchi-dev/kimi-k3").strip() or "kimchi-dev/kimi-k3"
+
+
+def _read_env_model(var, default):
+    """One env-configured review model (v2): ``os.environ[var]`` trimmed, or
+    the tier's default when unset or blank. Shared by the three tier readers
+    below; each keeps its own name (and docstring) because the tiers differ
+    in what the model is FOR, not in how it is read."""
+    return os.environ.get(var, default).strip() or default
+
+
+def _read_spotter_model():
+    """Model for the context-spotter (agents/context-spotter.md), spawned by the
+    review skill between rule resolution and reviewer spawn. Defaults to a fast
+    codebase-scanning open model -- the spotter reads every push's diff, so it
+    must stay cheap; OCR_SPOTTER_MODEL trades cost for demand quality."""
+    return _read_env_model("OCR_SPOTTER_MODEL", "deepseek-v4-flash")
+
+
+_SPOTTER_MODEL = _read_spotter_model()
+
+
+def _read_tier1_model():
+    """Model for the tier-1 (fast-lane) reviewer subagent
+    (agents/code-reviewer.md), spawned by the review skill's step 3. Defaults
+    to the flagship open model positioned for correctness-critical review;
+    the tier-1 reviewer reads every push's evidence, so OCR_TIER1_MODEL
+    trades review depth for cost or a different provider."""
+    return _read_env_model("OCR_TIER1_MODEL", "kimi-k3")
+
+
+_TIER1_MODEL = _read_tier1_model()
+
+
+def _read_tier2_model():
+    """Model for the tier-2 (slow-lane) deep-reviewer subagent
+    (agents/deep-reviewer.md), spawned by the review skill's step 3 ONLY for
+    pushes the risk gate (t10) escalated. Same default as the tier-1
+    reviewer: the flagship open model positioned for correctness-critical
+    review -- OCR_TIER2_MODEL lets a project spend more (or less) on the
+    ~one-in-seven escalated pushes independently of the fast lane."""
+    return _read_env_model("OCR_TIER2_MODEL", "kimi-k3")
+
+
+_TIER2_MODEL = _read_tier2_model()
+
+# Provider guard (spec "Models"; story 18). The account's subscription terms
+# forbid routing the gate's automated review traffic to Anthropic or OpenAI
+# models (account-lock grounds), so the review models below are vetted after
+# config/env resolution and BEFORE any review work: a blocked provider fails
+# loudly then, never mid-run. OCR_MODEL is deliberately absent from
+# _GUARDED_MODEL_VARS: it pins the headless harness session itself (the
+# pre-existing v1 surface), not a review model the v2 gate routes traffic to.
+_BLOCKED_PROVIDERS = ("anthropic", "openai")
+
+_GUARDED_MODEL_VARS = (
+    ("OCR_TIER1_MODEL", lambda: _read_tier1_model()),
+    ("OCR_SPOTTER_MODEL", lambda: _read_spotter_model()),
+    ("OCR_TIER2_MODEL", lambda: _read_tier2_model()),
+)
+
+# First-token families, lowercased. Anthropic ids are `claude-*` plus the
+# bare `sonnet`/`haiku`/`opus` shorthands; OpenAI ids are `gpt-*`,
+# `chatgpt-*`, and the reasoning series `o1`/`o3`/`o4`.
+_PROVIDER_FIRST_TOKENS = (
+    ("anthropic", ("claude", "sonnet", "haiku", "opus")),
+    ("openai", ("gpt", "chatgpt", "o1", "o3", "o4")),
+)
+
+
+def _model_provider(model):
+    """Provider family for a model id, or "" when it is unrecognized. The
+    guard is a deny-list for subscription-violating providers, so unknown
+    providers pass."""
+    first = (model or "").strip().lower().split("-", 1)[0]
+    for provider, tokens in _PROVIDER_FIRST_TOKENS:
+        if first in tokens:
+            return provider
+    return ""
+
+
+def _provider_guard_violations():
+    """[(var, model, provider)] for every configured review model from a
+    blocked provider. Reads the RESOLVED value of each guarded var (the
+    defaults are open models, so an unset var never trips)."""
+    out = []
+    for var, read in _GUARDED_MODEL_VARS:
+        model = read()
+        provider = _model_provider(model)
+        if provider in _BLOCKED_PROVIDERS:
+            out.append((var, model, provider))
+    return out
+
+
+def _check_provider_guard():
+    """Raise ReviewGateError when any configured review model names a blocked
+    provider. Called after config/env resolution and before any review work:
+    in the push hook (fail-closed with this message) and in the supervisor
+    (recorded as the run's failure)."""
+    bad = _provider_guard_violations()
+    if not bad:
+        return
+    detail = "\n".join(f"  - {var}={model!r} (provider: {provider})"
+                       for var, model, provider in bad)
+    raise ReviewGateError(
+        "provider guard refused to start: configured review model(s) come from"
+        " a provider whose use would violate the subscription account-lock"
+        " terms (providers " + ", ".join(_BLOCKED_PROVIDERS) + " are blocked):\n"
+        + detail +
+        "\nSet the variable to an allowed open model (e.g. kimi-k3, glm-5.3,"
+        " deepseek-v4-flash) or unset it to use the default.")
 
 DEFAULT_KIMI_ARGS = [
     # Kimchi headless worker argv (port spec section 4). The read-only sandbox
@@ -315,6 +428,21 @@ try:
     _MAX_FILES = max(1, _MAX_FILES)
 except ValueError:
     _MAX_FILES = 40
+
+
+def _read_deep_timeout():
+    """Wall-clock budget (seconds) for one tier-2 deep-review run (t10).
+    The deep lane exists to let a strong model browse the repo for minutes,
+    so it gets its own budget, longer than a chunk's but bounded: past it
+    the supervisor kills the reviewer and records a normal timeout failure
+    for the retry to pick up. Default 10 minutes per the v2 spec."""
+    try:
+        return max(60, int(os.environ.get("OCR_DEEP_TIMEOUT", "600")))
+    except ValueError:
+        return 600
+
+
+_DEEP_TIMEOUT = _read_deep_timeout()
 # --- review ledger (0.8.0) ---------------------------------------------------
 LEDGER_DIR = "review-gate-ledger"
 # 30 days: a branch picked up again after a week or two keeps its review
@@ -359,13 +487,18 @@ _COST_RULE_RATIO = 1.5
 # how the reviewer runs, not what it is asked to find.
 _FINGERPRINT_ENV_VARS = (
     "OCR_MODEL", "OCR_BLOCK_SEVERITY", "OCR_BLOCK_CONFIDENCE",
+    "OCR_SPOTTER_MODEL", "OCR_TIER1_MODEL", "OCR_TIER2_MODEL",
 )
 # Agents whose prompts decide which findings exist. The resolver only judges
-# whether a known finding was fixed, so editing it keeps the ledger.
-_FINGERPRINT_AGENTS = ("code-reviewer.md", "code-filter.md")
+# whether a known finding was fixed, so editing it keeps the ledger. The
+# spotter prompt steers the reviewer's context input, which steers findings in
+# the same direction, so it is fingerprinted too. So is the deep-reviewer: an
+# escalated push's findings could depend on its prompt.
+_FINGERPRINT_AGENTS = ("code-reviewer.md", "code-filter.md", "context-spotter.md",
+                       "deep-reviewer.md")
 # -----------------------------------------------------------------------------
 
-PROTOCOL_VERSION = 1   # bumped whenever state-file semantics change
+PROTOCOL_VERSION = 2   # bumped whenever state-file semantics change (2: tier/deep_reasons, t10)
 
 _EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 # git exports these to its own hooks (pre-push runs with GIT_DIR set, among
@@ -662,22 +795,26 @@ def _read_push_updates_from(lines, with_ref=False):
     commits past the gate. _range_for_refs reviews an `others` entry only when
     it carries commits the pushed branches do not.
 
-    Deletions (local sha all-zero) are skipped: there is no content to review.
+    Deletions (local sha all-zero) are skipped from both lists -- there is no
+    content to review -- and counted in the third return so a push that is
+    ENTIRELY deletions can be told apart from empty stdin: the former must
+    allow, the latter falls back to the HEAD heuristic.
     """
-    branches, others = [], []
+    branches, others, deleted = [], [], 0
     for line in lines:
         parts = line.split()
         if len(parts) != 4:
             continue
         local_ref, local_sha, remote_ref, remote_sha = parts
         if local_sha == _ZERO_SHA:
-            continue  # branch deletion: no content to review
+            deleted += 1  # branch deletion: no content to review
+            continue
         if remote_ref and not remote_ref.startswith("refs/heads/"):
             others.append((local_sha, remote_sha))
         else:
             branches.append((local_sha, remote_sha, remote_ref) if with_ref
                             else (local_sha, remote_sha))
-    return branches, others
+    return branches, others, deleted
 
 
 def _read_push_updates(with_ref=False):
@@ -692,14 +829,24 @@ def _read_push_updates(with_ref=False):
     reviewed none of them. Observed in a real repo, not hypothesised.
 
     Returns ([], []) when stdin is empty or unreadable, which puts callers back
-    on the old heuristic rather than failing.
+    on the old heuristic rather than failing. See _read_push_updates_ex for
+    the variant that also reports how many ref updates were deletions.
     """
+    return _read_push_updates_ex(with_ref)[:2]
+
+
+def _read_push_updates_ex(with_ref=False):
+    """`_read_push_updates` plus the deletion count: a push whose every ref
+    update is a deletion (local sha all zeros) carries no commits, and its
+    caller must allow it instead of falling back to the HEAD heuristic the
+    way an empty stdin does (that fallback once blocked a plain branch
+    deletion behind a review of commits the push did not send)."""
     try:
         if sys.stdin is None or sys.stdin.isatty():
-            return [], []
+            return [], [], 0
         raw = sys.stdin.read()
     except Exception:
-        return [], []
+        return [], [], 0
     return _read_push_updates_from((raw or "").splitlines(), with_ref)
 
 
@@ -1915,6 +2062,17 @@ def _parse_push(cmd):
     return out
 
 
+def _delete_push_note():
+    """The informational line for a push that only deletes remote refs: no
+    commits are sent, so there is nothing to review -- same invariant as
+    _noop_push_note, for the deletion shape."""
+    try:
+        sys.stderr.write("review-gate: nothing to review — this push only deletes "
+                         "remote refs.\n")
+    except Exception:
+        pass
+
+
 def _noop_push_note():
     """The informational line for a push that needs no review (SPEC-11's
     absent-gate invariant): the remote already holds every commit, so the
@@ -2840,6 +2998,23 @@ def _tele_call(kind, seconds, outcome, manifest=None, stats=None):
     return entry
 
 
+def _record_tier_call(common_dir, tier, seconds, stats=None):
+    """The v2 per-tier cost record for ONE measured review call (t12 wiring).
+
+    The CLI's stream-json result carries durations and cost but no per-tier
+    token usage, so tokens_in/out stay None and the record carries what IS
+    known here: the tier's configured model, the call's wall duration, and
+    the CLI-reported cost when there is one. Best-effort -- record_tier_call
+    never raises, and telemetry never affects a review's outcome.
+    """
+    model = {ocr_telemetry.TIER_SPOTTER: _SPOTTER_MODEL,
+             ocr_telemetry.TIER_REVIEW: _TIER1_MODEL,
+             ocr_telemetry.TIER_DEEP: _TIER2_MODEL}.get(tier, "")
+    ocr_telemetry.record_tier_call(common_dir, tier, model=model,
+                                   cost_usd=(stats or {}).get("cost_usd"),
+                                   seconds=seconds)
+
+
 _PHASE_CLOCK = {"t": None}
 
 
@@ -2868,8 +3043,14 @@ def _tele_chunk(index, total, files, lines, outcome, seconds):
 
 
 def _run_review(repo_root, mode, git_dir=None, head_sha="", push_range="",
-                paths_file=None, timeout=None, raw_tag="", resolve_file=None):
-    """_run_review_once, timed into the run log."""
+                paths_file=None, timeout=None, raw_tag="", resolve_file=None,
+                tier="", common_dir=None):
+    """_run_review_once, timed into the run log.
+
+    tier is one of ocr_telemetry's v2 tier names when this call IS that
+    tier's model call (the fast lane's tier-1 review, the deep lane's tier-2
+    pass) and lands a per-tier cost record; "" for calls that are not one of
+    the four tiers (resolver/recheck), which record nothing."""
     kind = ("recheck" if "recheck" in raw_tag else "resolve") if resolve_file else "review"
     started = time.monotonic()
     outcome = "error"
@@ -2887,8 +3068,12 @@ def _run_review(repo_root, mode, git_dir=None, head_sha="", push_range="",
         outcome = "timeout" if getattr(exc, "is_timeout", False) else "error"
         raise
     finally:
-        _tele_call(kind, time.monotonic() - started, outcome, resolve_file or paths_file,
+        secs = time.monotonic() - started
+        _tele_call(kind, secs, outcome, resolve_file or paths_file,
                    stats=dict(_last_call_stats()))
+        if tier:
+            _record_tier_call(common_dir, tier, secs,
+                              stats=dict(_last_call_stats()))
 
 
 def _note_call_stats(out_text, started_at):
@@ -3479,6 +3664,112 @@ def _spawn_supervisor(state_path, run_id, repo_root):
         return subprocess.Popen(cmd, start_new_session=True, **kw).pid
 
 
+# --- risk gate (t10): which lane this push reviews in ----------------------
+# Deterministic escalation only: git paths, config and fnmatch -- no model
+# call ever happens at this layer. The spotter's risk score is the second
+# escalation trigger, but the spotter runs INSIDE the review session, so the
+# skill (skills/review/SKILL.md §3) applies it mid-run against the pinned
+# risk_threshold. Both triggers may raise the tier fast -> deep; neither may
+# ever lower it.
+_DEFAULT_RISK_GLOBS = (
+    # Migrations: a bad one corrupts production state irreversibly.
+    "**/migrations/**", "**/migrate*.py", "**/alembic/**",
+    # Identity, sessions and permissions.
+    "**/auth/**", "**/auth/*.py", "**/oauth*", "**/session*.py", "**/permission*",
+    # Money movement.
+    "**/payments/**", "**/payment*.py", "**/billing/**", "**/checkout/**",
+    # Concurrency: races and lock coupling.
+    "**/concurrency/**", "**/locks*.py", "**/*_lock.py",
+    # Public API surface: consumers compile against it.
+    "**/api/**", "**/public_api*",
+)
+
+
+def _risk_glob_match(path, glob):
+    """fnmatch of a repo-relative path against one risk glob. fnmatch's `*`
+    spans separators; a leading `**/` is made optional so the glob also
+    matches at the repo root (`auth/login.py` matches `**/auth/**`)."""
+    path = (path or "").strip("/")
+    glob = (glob or "").strip()
+    if not path or not glob:
+        return False
+    if fnmatch.fnmatchcase(path, glob):
+        return True
+    if glob.startswith("**/") and fnmatch.fnmatchcase(path, glob[3:]):
+        return True
+    return False
+
+
+def _risk_config(repo_root):
+    """(risk_globs, risk_threshold) from <repo_root>/.ocr/rule.json, fail-soft
+    to the defaults: the starter set above and a spotter-score threshold of 7.
+    `risk_globs` EXTENDS the starter set; `risk_threshold` (0..10) overrides
+    the default the skill escalates the spotter's score against. A malformed
+    or unreadable file changes nothing (never raises)."""
+    globs, threshold = list(_DEFAULT_RISK_GLOBS), 7
+    try:
+        rule = Path(repo_root) / ".ocr" / "rule.json" if repo_root else None
+        data = json.loads(rule.read_text(encoding="utf-8")) if rule and rule.is_file() else None
+        if isinstance(data, dict):
+            extra = data.get("risk_globs")
+            if isinstance(extra, list):
+                globs += [g.strip() for g in extra
+                          if isinstance(g, str) and g.strip()]
+            t = data.get("risk_threshold")
+            if isinstance(t, (int, float)) and not isinstance(t, bool):
+                threshold = max(0, min(10, int(t)))
+    except Exception:
+        pass
+    return globs, threshold
+
+
+def _push_paths(meta):
+    """Changed path list for the push meta describes -- [] when git cannot
+    say (the caller then escalates nothing)."""
+    repo_root = meta.get("repo_root") or ""
+    tip = meta.get("tip") or ""
+    base = meta.get("base") or _EMPTY_TREE
+    rng = meta.get("range") or (base + ".." + tip if tip else "")
+    if not repo_root or not rng:
+        return []
+    out, rc = _git(["diff", "--name-only", rng], cwd=repo_root)
+    if rc != 0 and rng != base + ".." + tip:
+        out, rc = _git(["diff", "--name-only", base + ".." + tip], cwd=repo_root)
+    if rc != 0:
+        return []
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
+def _deep_escalation(meta):
+    """(True, reasons) iff this push warrants the tier-2 slow lane.
+
+    Gate-side evaluation, run by _drive_review BEFORE any state is claimed so
+    the whole deny-first-push / retry-join machine covers the deep pass
+    exactly like a slow fast-lane review. Deterministic trigger: any
+    review-admitted changed path hitting a risk glob. The spotter risk-score
+    trigger happens inside the review session (it owns the spotter); this
+    side only ever RAISES fast to deep.
+
+    Fail-soft: git/config trouble means NO escalation -- a classifier failure
+    degrades the pipeline to the fast lane, it never stalls it (spec story 27
+    discipline).
+    """
+    try:
+        globs, _threshold = _risk_config(meta.get("repo_root") or "")
+        reasons = []
+        for path in _push_paths(meta):
+            if not _is_allowed_path(path):
+                # Only review content can escalate: a risky-glob match on an
+                # excluded file (a test, a lockfile) reviews nothing.
+                continue
+            hit = next((g for g in globs if _risk_glob_match(path, g)), None)
+            if hit:
+                reasons.append(f"{path} (risk glob `{hit}`)")
+        return bool(reasons), reasons
+    except Exception:
+        return False, []
+
+
 def _drive_review(common_dir, repo_root, meta, mode, budget):
     """Get a verdict for meta["tip"], starting a review if none is under way.
 
@@ -3487,6 +3778,17 @@ def _drive_review(common_dir, repo_root, meta, mode, budget):
     a review problem -- those become "failed" states with a reason.
     """
     tip = meta["tip"]
+    # Risk gate (t10): the lane decision happens HERE, before any claim, so
+    # the claimed state carries it and a retry push joins the deep pass's
+    # recorded verdict exactly like a slow fast-lane review. Escalation
+    # raises the tier fast -> deep and never lowers it; the deep budget lives
+    # with the supervisor, the inline `budget` here is unaffected.
+    if "tier" not in meta:
+        meta = dict(meta)
+        deep, reasons = _deep_escalation(meta)
+        meta["tier"] = "deep" if deep else "fast"
+        if reasons:
+            meta["deep_reasons"] = reasons
     state_path = _state_path(common_dir, tip, meta.get("base") or "")
     force = os.environ.get("OCR_FORCE_REVIEW", "").strip().lower() in ("1", "true", "yes")
     deadline = _HOOK_T0 + budget
@@ -3676,10 +3978,14 @@ def _supervise_run(state_path, run_id):
     push_ref = st.get("push_ref") or ""
     git_dir = st.get("git_dir") or _git_dir(repo_root)
     mode = st.get("mode") or "hook"
+    tier = st.get("tier") or "fast"   # lane recorded at claim time (t10)
     common_dir = common_dir_of(state_path)
     now = time.time()
+    # The deep pass's own wall-clock budget replaces the reviewer timeout:
+    # browsing past OCR_DEEP_TIMEOUT is a normal timeout failure, retried.
+    run_timeout = _DEEP_TIMEOUT if tier == "deep" else TIMEOUT
     st.update({"state": "running", "supervisor_pid": os.getpid(), "started_ts": now,
-               "heartbeat_ts": now, "deadline_ts": now + TIMEOUT})
+               "heartbeat_ts": now, "deadline_ts": now + run_timeout})
     try:
         _write_state(state_path, st)
     except Exception:
@@ -3717,6 +4023,10 @@ def _supervise_run(state_path, run_id):
     plan_summary = ""
     diffs = None     # precomputed diffs (_build_diffs); None on the 0.9.x path
     try:
+        # Provider guard, belt and braces for the worker path: the push hook
+        # already vetted, but a supervisor can also be started out of band
+        # (retries, force). A violation is recorded as the run's failure.
+        _check_provider_guard()
         worktree = _make_worktree(repo_root, tip, run_id)
         if worktree:
             review_root = worktree
@@ -3735,11 +4045,20 @@ def _supervise_run(state_path, run_id):
             )
         _mark_phase("worktree", ok=bool(worktree))
 
+        _TELE["tier"] = tier
         force_review = os.environ.get("OCR_FORCE_REVIEW", "").strip().lower() in ("1", "true", "yes")
         fp = _compute_fingerprint(review_root, tip)
         _TELE.update(fp=fp, fp_parts=_fingerprint_parts(review_root, tip))
         _prune_ledger(common_dir)
-        plan, planner_warnings = _plan_review(review_root, base, tip, common_dir, fp, push_ref=push_ref)
+        # The deep lane (t10) skips the planner, chunking, segmentation and
+        # the ledger wholesale: ONE deep-reviewer pass interrogates the whole
+        # push, and fast-lane records must never replay in place of it (nor
+        # does a deep pass write fast-lane records). Its findings flow into
+        # the same falsify filter + compute_verdict verdict below -- the
+        # blocking bar is identical (ADR 0001: no new verdict authority).
+        plan, planner_warnings = (
+            (None, []) if tier == "deep"
+            else _plan_review(review_root, base, tip, common_dir, fp, push_ref=push_ref))
         _TELE["plan"] = [
             {"path": p["entry"]["path"], "mode": p["mode"],
              "miss_reason": p.get("miss_reason") or "",
@@ -3750,10 +4069,35 @@ def _supervise_run(state_path, run_id):
         _mark_phase("plan", files=len(plan or []))
 
         if plan is None or plan == []:
-            # git diff failed OR no allowed files: fall back to single-context (0.7.0 path).
-            result, ran, raw_name = _run_review_with_retry(
-                lambda: _run_review(review_root, mode, git_dir, tip, push_range)
-            )
+            # git diff failed OR no allowed files: fall back to single-context
+            # (0.7.0 path) -- or, in the deep lane, THE pass.
+            if tier == "deep":
+                deep_paths = [p for p in _push_paths({"repo_root": review_root, "tip": tip,
+                                                      "base": base, "range": push_range})
+                              if _is_allowed_path(p)]
+                _globs, deep_threshold = _risk_config(review_root)
+                manifest = _build_deep_manifest(deep_paths, st.get("deep_reasons") or [],
+                                                deep_threshold)
+                manifest_path = str(_async_dir(common_dir) / f"manifest-{run_id}-deep.json")
+                _write_manifest_file(manifest_path, manifest, "deep-review manifest")
+                try:
+                    result, ran, raw_name = _run_review_with_retry(
+                        lambda: _run_review(review_root, mode, git_dir, tip, push_range,
+                                            paths_file=manifest_path, timeout=_DEEP_TIMEOUT,
+                                            tier=ocr_telemetry.TIER_DEEP,
+                                            common_dir=common_dir)
+                    )
+                finally:
+                    try:
+                        Path(manifest_path).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+            else:
+                result, ran, raw_name = _run_review_with_retry(
+                    lambda: _run_review(review_root, mode, git_dir, tip, push_range,
+                                        tier=ocr_telemetry.TIER_REVIEW,
+                                        common_dir=common_dir)
+                )
             chunks_new = 1 if ran else 0
             _mark_phase("review", chunks=chunks_new)
             if planner_warnings and isinstance(result, dict):
@@ -3780,6 +4124,14 @@ def _supervise_run(state_path, run_id):
                 plan, tip, review_root, common_dir, fp, run_id
             )
             _mark_phase("priors", priors=len(to_resolve) + len(carried_findings))
+            # Event-graph index (t06): built lazily on the first push, then
+            # refreshed incrementally from this push's changed-file list so
+            # collectors (t05/t09) can query event couplings, symbol refs,
+            # and pointer utterances. Runtime state under .ocr/index/ — never
+            # committed; failures here are telemetry warnings, never fatal.
+            index_warnings = _refresh_index(review_root, push_paths)
+            if index_warnings:
+                _TELE["index_warnings"] = index_warnings[:50]
             impact = _compute_impact(review_root, tip, active_items)
             if impact and impact.get("warnings"):
                 _TELE["impact_warnings"] = impact["warnings"][:50]
@@ -3973,7 +4325,9 @@ def _supervise_run(state_path, run_id):
                     # Only with OCR_PRECOMPUTED_DIFFS=0: otherwise a manifest is
                     # always written, since the diffs reach the reviewer through it.
                     result, ran, raw_name = _single(
-                        lambda: _run_review(review_root, mode, git_dir, tip, push_range)
+                        lambda: _run_review(review_root, mode, git_dir, tip, push_range,
+                                            tier=ocr_telemetry.TIER_REVIEW,
+                                            common_dir=common_dir)
                     )
                     chunks_new = 1 if ran else 0
                 else:
@@ -3991,6 +4345,8 @@ def _supervise_run(state_path, run_id):
                             lambda: _run_review(
                                 review_root, mode, git_dir, tip, push_range,
                                 paths_file=manifest_path,
+                                tier=ocr_telemetry.TIER_REVIEW,
+                                common_dir=common_dir,
                             )
                         )
                     finally:
@@ -4194,6 +4550,13 @@ def _supervise_run(state_path, run_id):
             "severity": "info", "path": "review-gate", "start_line": "-",
             "end_line": "-", "content": cwd_note,
         }] + list(result.get("findings") or [])
+    # Memory (t08): at T1 verdict-assembly time, before the verdict is
+    # decided, a finding matching a dismissal recorded through the dismiss
+    # command drops to low severity with a "previously dismissed" prefix and
+    # a warning entry. Reads .ocr/memory.jsonl only -- the dismiss command is
+    # the sole writer, and bypasses never teach the store.
+    if isinstance(result, dict):
+        result = _apply_memory_demotion(repo_root, result)
     verdict = _final_verdict(result)
     if isinstance(result, dict):
         _TELE["findings"] = [
@@ -4392,6 +4755,12 @@ _EXCLUDED_DIRS = frozenset({
     "tests", "__tests__", "testdata",
 })
 
+# Test-family directory names: excluded from review, but SEARCHABLE for
+# callers / cross-file references / siblings (the context filter below).
+_TEST_FAMILY_DIRS = frozenset({"tests", "__tests__", "testdata"})
+
+_CONTEXT_EXCLUDED_DIRS = _EXCLUDED_DIRS - _TEST_FAMILY_DIRS
+
 # Exact filenames that are always excluded (lockfiles).
 _EXCLUDED_FILES = frozenset({
     "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "go.sum",
@@ -4423,6 +4792,30 @@ def _is_allowed_path(path):
     if any(p.lower() in _EXCLUDED_DIRS for p in parts[:-1]):
         return False
     if _EXCLUDED_TEST_RE.search(norm):
+        return False
+    return True
+
+
+def _is_context_allowed_path(path):
+    """True if this path may be searched for callers, cross-file references,
+    and siblings (allowlist split, see skills/review/allowlist.md).
+
+    Same rules as _is_allowed_path minus the test-family exclusions: spec/test
+    files are not review targets, but a caller living in one is exactly where
+    impact analysis must look. Vendored/generated dirs, VCS dirs, lockfiles,
+    generated suffixes, and the extension allowlist still apply.
+    """
+    name = os.path.basename(path)
+    if name.lower() in _EXCLUDED_FILES:
+        return False
+    ext = os.path.splitext(name)[1].lower()
+    if ext not in _ALLOWED_EXTS:
+        return False
+    if _EXCLUDED_SUFFIX_RE.search(name):
+        return False
+    norm = path.replace("\\", "/")
+    parts = norm.split("/")
+    if any(p.lower() in _CONTEXT_EXCLUDED_DIRS for p in parts[:-1]):
         return False
     return True
 
@@ -4663,6 +5056,130 @@ def _finding_id(f):
         f.get("content") or "",
     ])
     return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()
+
+
+def _apply_memory_demotion(repo_root, result):
+    """Demote findings previously dismissed for this repository.
+
+    A finding whose (category, path glob, signature_line) triple matches a
+    dismissal the user recorded through the dismiss command drops to severity
+    low and its content gains a "previously dismissed" prefix; every demotion
+    is logged as a warning so it stays auditable in the run's output, the
+    findings log, and telemetry. Findings already at low -- and non-dict
+    entries -- pass through untouched. Fail-soft: a missing or broken store
+    changes nothing.
+    """
+    if not isinstance(result, dict):
+        return result
+    try:
+        records = ocr_memory.load(repo_root)
+        if not records:
+            return result
+        out_findings = []
+        demoted = []
+        for f in result.get("findings") or []:
+            if isinstance(f, dict) and str(f.get("severity") or "").lower() != "low":
+                rec = ocr_memory.match_records(records, f)
+                if rec is not None:
+                    f = dict(f)
+                    f["severity"] = "low"
+                    f["content"] = "previously dismissed: " + str(f.get("content") or "")
+                    demoted.append((f, rec))
+            out_findings.append(f)
+        if not demoted:
+            return result
+        warnings = list(result.get("warnings") or [])
+        for f, rec in demoted:
+            warnings.append({
+                "file": str(f.get("path") or ""),
+                "message": (
+                    "memory: demoted previously dismissed finding "
+                    f"{_sanitize(f.get('path') or '?', 120)} to low severity "
+                    f"(dismissed {_sanitize(rec.get('at') or '?', 40)} as "
+                    f"'{_sanitize(rec.get('glob') or rec.get('path') or '?', 120)}')"
+                ),
+            })
+        return dict(result, findings=out_findings, warnings=warnings)
+    except Exception:
+        return result
+
+
+def _dismiss_finding(argv):
+    """`review-gate.py --dismiss <finding-id> [--glob PATTERN]`.
+
+    The ONLY writer of <repo>/.ocr/memory.jsonl: resolves <finding-id>
+    against the findings of the LAST recorded verdict (the findings log is
+    what the gate kept of that verdict -- reviewer-assigned ids are used
+    verbatim, otherwise the gate's stable _finding_id(f) sha is the id),
+    then records the dismissal. Future re-raises of the same defect class
+    (same category, same path glob, same signature_line) are demoted to low
+    severity with a note. An exact id wins; otherwise a prefix of at least 6
+    chars must identify exactly one finding.
+    """
+    args = argv[argv.index("--dismiss") + 1:]
+    fid = ""
+    glob = None
+    i = 0
+    while i < len(args):
+        if args[i] == "--glob":
+            glob = args[i + 1] if i + 1 < len(args) else None
+            i += 2
+        elif not fid and not args[i].startswith("--"):
+            fid = args[i]
+            i += 1
+        else:
+            i += 1
+    if not fid:
+        _warn("usage: review-gate.py --dismiss <finding-id> [--glob PATTERN]")
+        return 1
+    repo_root = _repo_root()
+    git_dir = _git_dir(repo_root)
+    if not git_dir:
+        _warn("not inside a git repository - no recorded verdicts here.")
+        return 1
+    entries = _read_history(git_dir, 1)
+    if not entries:
+        _warn(f"no recorded verdicts yet ({_findings_log_path(git_dir)}).")
+        return 1
+    entry = entries[-1]
+    candidates = []
+    for f in entry.get("findings") or []:
+        if not isinstance(f, dict):
+            continue
+        ids = {str(i)} if (i := f.get("id")) else set()
+        ids.add(_finding_id(f))
+        candidates.append((f, ids))
+    exact = [f for f, ids in candidates if fid in ids]
+    prefix = [f for f, ids in candidates
+              if len(fid) >= 6 and any(s.startswith(fid) for s in ids)]
+    matches = exact or prefix
+    if len(matches) != 1:
+        _warn(f"no unique finding '{_sanitize(fid, 80)}' in the last recorded "
+              f"verdict ({entry.get('at', '?')}, {entry.get('verdict', '?')}). "
+              "Dismissable finding ids:")
+        for f, ids in candidates:
+            sid = str(f.get("id") or _finding_id(f))
+            sys.stdout.write(
+                f"  {sid}  [{_sanitize(f.get('severity', '?'), 20)}] "
+                f"{_sanitize(f.get('path', '?'), 120)}: "
+                f"{_sanitize(f.get('content') or '', 100)}\n")
+        return 1
+    f = matches[0]
+    sid = str(f.get("id") or _finding_id(f))
+    record = ocr_memory.dismiss(
+        repo_root, dict(f, id=sid), glob=glob,
+        context={"verdict": str(entry.get("verdict") or ""),
+                 "head": str(entry.get("head") or ""),
+                 "branch": str(entry.get("branch") or "")})
+    if record.get("error"):
+        _warn(f"dismissal could not be recorded: {_sanitize(record['error'], 200)}")
+        return 1
+    sys.stdout.write(
+        f"dismissed [{_sanitize(f.get('severity', '?'), 20)}] "
+        f"{_sanitize(f.get('path', '?'), 120)}: {_sanitize(f.get('content') or '', 100)}\n"
+        f"recorded to {ocr_memory.store_path(repo_root)} -- future matches demote "
+        "to low severity with a 'previously dismissed' note.\n")
+    return 0
 
 
 def _record_path(common_dir, fp, key, head_oid):
@@ -5237,6 +5754,32 @@ def _impact_enabled():
     return os.environ.get("OCR_IMPACT", "1").strip().lower() not in ("0", "false", "no")
 
 
+def _index_enabled():
+    return os.environ.get("OCR_INDEX", "1").strip().lower() not in ("0", "false", "no")
+
+
+def _refresh_index(review_root, push_paths):
+    """Lazy-build or incrementally refresh the .ocr/index event-graph index.
+
+    Uses the context filter (t01): spec/test files are indexed as
+coupling/ref sources even though they are never review targets. Returns a
+list of warning strings (empty when disabled or clean); fail-soft exactly
+like _compute_impact.
+    """
+    if not _index_enabled():
+        return []
+    try:
+        built = ocr_index.ensure_built(review_root, is_allowed=_is_context_allowed_path)
+        warnings = list(built.get("warnings") or [])
+        if not built.get("built"):
+            got = ocr_index.refresh(review_root, sorted(push_paths or ()),
+                                    is_allowed=_is_context_allowed_path)
+            warnings += got.get("warnings") or []
+        return warnings
+    except Exception as exc:
+        return [f"index refresh failed: {exc}"]
+
+
 def _siblings_enabled():
     return os.environ.get("OCR_SIBLINGS", "1").strip().lower() not in ("0", "false", "no")
 
@@ -5268,7 +5811,9 @@ def _compute_impact(review_root, tip, active_items):
                 unsupported.append(e["path"])
             symbols += [s for s in got.get("symbols") or [] if s.get("change") != "added"]
             warnings += got.get("warnings") or []
-        refs = ocr_impact.find_references(run, tip, symbols, is_allowed=_is_allowed_path)
+        refs = ocr_impact.find_references(run, tip, symbols,
+                                          is_allowed=_is_allowed_path,
+                                          is_context_allowed=_is_context_allowed_path)
         return {"symbols": symbols, "sites": refs.get("sites") or [],
                 "ref_counts": refs.get("ref_counts") or {}, "unsupported": unsupported,
                 "warnings": warnings + list(refs.get("warnings") or [])}
@@ -5369,7 +5914,8 @@ def _known_defects(review_root, tip, prior_findings, push_paths):
             continue
         try:
             got = ocr_impact.find_siblings(run, tip, dict(f, id=f.get("id") or _finding_id(f)),
-                                           push_paths=push_paths, is_allowed=_is_allowed_path)
+                                           push_paths=push_paths, is_allowed=_is_allowed_path,
+                                           is_context_allowed=_is_context_allowed_path)
         except Exception:
             continue
         added = fixed.get((f.get("path") or "", f.get("target_oid") or ""), set())
@@ -5412,7 +5958,8 @@ def _new_finding_notes(review_root, tip, new_findings, push_paths):
             continue
         try:
             got = ocr_impact.find_siblings(run, tip, dict(f, id=f.get("id") or _finding_id(f)),
-                                           push_paths=push_paths, is_allowed=_is_allowed_path)
+                                           push_paths=push_paths, is_allowed=_is_allowed_path,
+                                           is_context_allowed=_is_context_allowed_path)
         except Exception:
             continue
         for s in got.get("siblings") or []:
@@ -6334,6 +6881,31 @@ def _context_only(item):
         a["kind"] in ("unit", "filediff") for a in item["seg_work"])
 
 
+def _build_deep_manifest(paths, reasons, threshold):
+    """The tier-2 (t10) reviewer's manifest: ONE deep pass over the whole
+    push, no items[] (the deep reviewer reads diffs and repo state itself,
+    via the skill), no ledger carries. `deep_review` is what the skill's
+    escalation rule keys on to spawn agents/deep-reviewer.md instead of the
+    tier-1 reviewer; `spotter_model` stays because the session still runs
+    §2c/§2d to seed demands for the deep reviewer; `tier2_model` is pinned
+    because the headless session's allowlist cannot read OCR_TIER2_MODEL.
+    `risk_threshold` pins the score bar the session applied when claiming
+    this run (and would apply had it not already been escalated)."""
+    return {
+        "paths": list(paths),
+        "renames": [],
+        "other_changed": [],
+        "files": [{"path": p, "mode": "full", "from_oid": "", "to_oid": ""}
+                  for p in paths],
+        "carried": [],
+        "deep_review": True,
+        "deep_reasons": list(reasons or []),
+        "risk_threshold": threshold,
+        "spotter_model": _SPOTTER_MODEL,
+        "tier2_model": _TIER2_MODEL,
+    }
+
+
 def _build_review_manifest(common_dir, run_id, k, total, chunk_items, other_changed,
                            carry_paths, extras=None, diffs=None):
     """The reviewer's manifest for one chunk (k, total) or the single-context
@@ -6395,6 +6967,12 @@ def _build_review_manifest(common_dir, run_id, k, total, chunk_items, other_chan
                for p in manifest["carried"]])
         manifest["tasks"] = tasks
     manifest.update(extras or {})
+    # The headless review session's allowlist has no env-reading Bash, so the
+    # skill learns which model to spawn the context spotter with from here.
+    manifest["spotter_model"] = _SPOTTER_MODEL
+    # Same channel for the tier-1 reviewer model (skills/review/SKILL.md step
+    # 3 reads it to spawn the code-reviewer subagent).
+    manifest["tier1_model"] = _TIER1_MODEL
     return manifest
 
 
@@ -8173,6 +8751,8 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
                         paths_file=manifest_path,
                         timeout=_CHUNK_TIMEOUT,
                         raw_tag=f"-c{k}",
+                        tier=ocr_telemetry.TIER_REVIEW,
+                        common_dir=common_dir,
                     )
                     last_exc = None
                     break
@@ -9502,6 +10082,10 @@ def main(argv):
     # it never spawns a review, touches a marker, or needs a hook payload.
     if "--history" in argv:
         sys.exit(_print_history(argv))
+    if "--dismiss" in argv:
+        # Records a dismissal into .ocr/memory.jsonl -- the store's only write
+        # path. Standalone like --history: no review, no markers, no payload.
+        sys.exit(_dismiss_finding(argv))
     if "--telemetry-report" in argv:
         sys.exit(_print_telemetry_report(argv))
     if "--print-range" in argv:
@@ -9697,7 +10281,7 @@ def _main_inner(argv, mode):
     # is all there is -- and since 0.6.0 it is read rather than ignored.
     push_range, tip, branch, base, push_ref = "", "", "", "", ""
     if mode == "git":
-        refs3, other_refs = _read_push_updates(with_ref=True)
+        refs3, other_refs, n_deleted = _read_push_updates_ex(with_ref=True)
         refs = [r[:2] for r in refs3]
         push_range = _range_for_refs(refs, repo_root, _pushed_remote_arg(argv, repo_root),
                                      extra=other_refs)
@@ -9711,6 +10295,12 @@ def _main_inner(argv, mode):
                 "unreviewed, so it is refused instead.\n\nPush the branches separately, or "
                 "set OCR_FAIL_OPEN=1 for a one-shot bypass.",
             )
+        if not refs and not other_refs and n_deleted:
+            # Every ref update is a deletion: the push carries no commits at
+            # all, so reviewing anything (let alone the HEAD fallback) reviews
+            # commits this push does not even send.
+            _delete_push_note()
+            allow()
         if not refs and not other_refs and not _base_v1():
             # Git told us nothing readable. Ask the same helper what HEAD would
             # send, so the review still gets an ancestor-based range instead of
@@ -9817,6 +10407,11 @@ def _main_inner(argv, mode):
     }
     budget = _inline_budget(mode)
     try:
+        # Provider guard: refuse a misconfigured review model BEFORE any
+        # review state is claimed, a supervisor spawned, or a token flows
+        # (spec story 18). A ReviewGateError becomes a fail-closed deny
+        # carrying the offending variable and value.
+        _check_provider_guard()
         st = _drive_review(common_dir, repo_root, meta, mode, budget)
     except ReviewGateError as exc:
         if _fail_open_requested():
