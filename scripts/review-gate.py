@@ -2693,6 +2693,28 @@ def _metric_log(event, **fields):
         pass
 
 
+def _log_gate_skipped(why, mode="", repo_root="", push_range=""):
+    """A gate_skipped telemetry line for an OCR_FAIL_OPEN bypass the gate honored.
+
+    Every honored bypass is auditable after the fact: the line names the
+    repository (basename for a human, a stable digest to disambiguate
+    same-named checkouts) and the revision range that went unreviewed, when
+    the decision point knew it. git push --no-verify never invokes this gate
+    at all, so it can never appear here -- that escape is documented in the
+    README, not faked as detection. The no-paths rule of metric_line is why
+    base/tip travel as their own fields: a 40-hex sha is its longest safe
+    token, a base..tip range is not."""
+    base, tip = "", ""
+    if push_range and ".." in push_range:
+        base, tip = push_range.split("..", 1)
+    _metric_log(
+        "gate_skipped", via="OCR_FAIL_OPEN", why=why or None, mode=mode or None,
+        repo=(os.path.basename(repo_root.rstrip("/\\")) or None) if repo_root else None,
+        repo_id=_marker_digest(repo_root) if repo_root else None,
+        base=base or None, tip=tip or None,
+    )
+
+
 # Cheap secondary hardening with no supporting evidence either way: isolates
 # the reviewer child from the parent's console on Windows (no shared process
 # group, so a Ctrl-Break/Ctrl-C broadcast to the console can't reach the
@@ -9775,13 +9797,14 @@ def _huge_range_reason(count, limit):
     )
 
 
-def _refuse_huge_range(mode, allow, count, limit):
+def _refuse_huge_range(mode, allow, count, limit, repo_root="", push_range=""):
     """Block an unbounded (_EMPTY_TREE-base) push past OCR_FULL_HISTORY_LIMIT.
 
     Honors OCR_FAIL_OPEN like every sibling refusal: a requested bypass warns
     and allows; otherwise the push fails closed with the remedy text.
     """
     if _fail_open_requested():
+        _log_gate_skipped("huge_range", mode, repo_root, push_range)
         _warn(_huge_range_reason(count, limit))
         allow()
     _fail_closed(mode, _huge_range_reason(count, limit))
@@ -9975,6 +9998,7 @@ def _main_inner(argv, mode):
             # applies to every other "cannot run" case: a gate that does not
             # know what it is looking at must not wave a push through.
             if _fail_open_requested():
+                _log_gate_skipped("repo_unresolved", mode)
                 _pass_through()
             _fail_closed(
                 mode,
@@ -10039,6 +10063,7 @@ def _main_inner(argv, mode):
                                      extra=other_refs)
         if push_range == _MULTI_REF:
             if _fail_open_requested():
+                _log_gate_skipped("multi_ref", mode, repo_root)
                 allow()
             _fail_closed(
                 mode,
@@ -10080,6 +10105,8 @@ def _main_inner(argv, mode):
             allow()
         if decision == "deny":
             if _fail_open_requested():
+                _log_gate_skipped("target_refused", mode, repo_root,
+                                  str(info.get("range") or ""))
                 allow()
             _fail_closed(mode, str(info.get("why") or "review-gate: refused."))
         tip, branch = info["tip"], info.get("branch") or ""
@@ -10096,6 +10123,7 @@ def _main_inner(argv, mode):
     git_dir = _git_dir(repo_root)
     if not tip or not git_dir:
         if _fail_open_requested():
+            _log_gate_skipped("tip_unresolved", mode, repo_root, push_range)
             allow()
         _fail_closed(mode, "review-gate: could not resolve the commit to review - blocking.")
     common_dir = _git_common_dir(repo_root) or git_dir
@@ -10110,10 +10138,12 @@ def _main_inner(argv, mode):
     backing = _verdict_backing(common_dir, tip, base, remote_id, repo_root, push_range)
     if backing == "corrupt":
         if _fail_open_requested():
+            _log_gate_skipped("backing_corrupt", mode, repo_root, push_range)
             allow()
         _fail_closed(mode, _unbacked_reason("corrupt", mode))
     if backing == "uncovered":
         if _fail_open_requested():
+            _log_gate_skipped("backing_uncovered", mode, repo_root, push_range)
             allow()
         _fail_closed(mode, _unbacked_reason("uncovered", mode))
     # The legacy pass marker: the other adapter, or an older gate, already
@@ -10144,7 +10174,7 @@ def _main_inner(argv, mode):
     limit = _full_history_limit()
     if (base == _EMPTY_TREE and limit > 0 and count.isdigit()
             and int(count) > limit):
-        _refuse_huge_range(mode, allow, count, limit)
+        _refuse_huge_range(mode, allow, count, limit, repo_root, push_range)
     meta = {
         "tip": tip, "branch": branch, "base": base, "range": push_range,
         "repo_root": repo_root, "git_dir": git_dir, "commit_count": count,
@@ -10156,6 +10186,7 @@ def _main_inner(argv, mode):
         st = _drive_review(common_dir, repo_root, meta, mode, budget)
     except ReviewGateError as exc:
         if _fail_open_requested():
+            _log_gate_skipped("review_error", mode, repo_root, push_range)
             allow()
         _fail_closed(mode, f"review-gate: {exc} - blocking commit to preserve gate integrity.")
         return  # unreachable
@@ -10168,6 +10199,7 @@ def _main_inner(argv, mode):
         _park_pending(session_id, repo_root, tip, kind="async",
                       extra={"state": str(_state_path(common_dir, tip, base))})
         if _fail_open_requested():
+            _log_gate_skipped("still_running", mode, repo_root, push_range)
             allow()
         _fail_closed(mode, _still_running_reason(cur, budget, mode))
         return  # unreachable
@@ -10178,6 +10210,7 @@ def _main_inner(argv, mode):
 
     if st.get("state") == "failed":
         if _fail_open_requested():
+            _log_gate_skipped("failed_review", mode, repo_root, push_range)
             _warn(
                 "OCR_FAIL_OPEN=1 set - bypassing fail-closed gate. Reason:\n  "
                 f"{_sanitize(str(st.get('detail') or st.get('reason') or ''), 400)}\n"
@@ -10200,6 +10233,8 @@ def _main_inner(argv, mode):
         # the invalidation above and the supervisor's final write). Deny, never
         # allow -- re-running the push re-evaluates.
         if _fail_open_requested():
+            _log_gate_skipped("backing_" + str(backing or "?"), mode, repo_root,
+                              push_range)
             allow()
         _fail_closed(mode, _unbacked_reason(backing, mode))
         return  # unreachable

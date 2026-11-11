@@ -40,9 +40,12 @@ name (0.10.0), read at call time. (A file_diff is keyed `review:<path>`; since 0
 unit_diff is `unit:<path>:<unit>:<part>` and a context item `context:<role>:<path>:<n>`.)
 
 0.11.0 (Part S) knobs:
-  STUB_DOCS_FINDING  JSON {content, severity?, path?, category?, existing_code?} -- a
+  STUB_DOCS_FINDING  JSON {content, severity?, path?, category?, existing_code?,
+                     confidence?, docs_kind?, stale_passage?, doc_path?} -- a
                      documentation-checker finding, only when the manifest carries
-                     docs_context (docs-gate 01).
+                     docs_context (docs-gate 01). docs-gate 04: the drift-class
+                     fields (docs_kind/stale_passage/doc_path) pass through verbatim
+                     when scripted; a scripted confidence overrides the tier default.
 docs-gate 05 knobs (generation mode, `--docs-summary` in argv):
   STUB_DOCS_SUMMARY         the summary markdown the generation call returns
   STUB_DOCS_SUMMARY_VERDICT "fail" -- exit 1, exercising the gate's fail-closed path
@@ -442,14 +445,20 @@ if docs_finding and manifest and manifest.get("docs_context"):
     try:
         spec = json.loads(docs_finding)
         anchor = spec.get("path") or (manifest.get("paths") or ["?"])[0]
-        findings.append({
-            "path": anchor, "start_line": 1, "end_line": 2, "confidence": 0.95,
+        sev = spec.get("severity", "high")
+        f = {
+            "path": anchor, "start_line": 1, "end_line": 2,
+            "confidence": _confidence(sev, spec),
             "category": spec.get("category", "documentation"),
             "evidence": "docs_context",
-            "severity": spec.get("severity", "high"),
+            "severity": sev,
             "content": spec.get("content", "stub docs finding"),
             "existing_code": spec.get("existing_code", "stub code"),
-        })
+        }
+        for k in ("docs_kind", "stale_passage", "doc_path"):
+            if k in spec:
+                f[k] = spec[k]
+        findings.append(f)
     except Exception:
         pass
 emit(json.dumps(out))

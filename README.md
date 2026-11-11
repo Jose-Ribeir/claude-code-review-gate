@@ -172,6 +172,14 @@ A gate that cannot be bypassed by its owner is a denial-of-service tool, not a
 control. `--no-verify` skips the git pre-push hook entirely and is the documented
 emergency path; use it deliberately.
 
+Every honored `OCR_FAIL_OPEN=1` bypass is audited: the gate appends a
+`gate_skipped` line to its telemetry log (`review-gate-debug.log` under the
+external state store) naming the repository, the time, and the revision range
+that went unreviewed, so exceptions can be accounted for after the fact.
+`git push --no-verify` is different: it never invokes the hook, so no gate code
+runs at all and **no telemetry entry can be written** — that escape is
+undetectable by design, stated here rather than faked as detection.
+
 ## Modes and environment
 
 - default: block confident high-severity findings (any high-severity finding

@@ -704,7 +704,12 @@ containing:
 - `repo_root`: the absolute repository root (the checker reads full documents
   itself with its read-only tools; `docs_context` names its sources).
 
-It returns a JSON array of findings in the exact §3 shape. Merge them into the
+It returns a JSON array of findings in the exact §3 shape. A stale-documentation
+(drift) finding additionally carries `docs_kind: "stale_docs"`, `stale_passage`
+(the verbatim stale doc quote) and `doc_path` (the file holding the passage);
+copy those verbatim like every other field. The gate enforces the contract: a
+drift finding missing either quote is downgraded to a warning and can never
+block — the blocking rule itself (§4, D15) is unchanged. Merge them into the
 findings array verbatim: §3a, §3b, §4 and §6 then apply to them unchanged — a
 documentation finding that would block is falsified in §3b like any other.
 When the manifest has no `docs_context`, skip this step entirely: no spawn, no
