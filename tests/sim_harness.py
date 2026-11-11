@@ -48,6 +48,11 @@ STILL_RUNNING_RE = re.compile(r"is still running", re.IGNORECASE)
 BLOCK_BANNER = "review-gate blocked this commit"
 # Git's own trailer when the pre-push hook fails.
 GIT_PUSH_FAILED = "failed to push some refs"
+# Every answer the gate prints -- async denial, block banner, error-state
+# deny -- mentions itself. A failed push whose output has NO such marker was
+# never seen by the gate (a git-level/transport failure): classifying that as
+# a "block" is how a harness accident poisons every scenario verdict after it.
+GATE_MARKER_RE = re.compile(r"review-gate", re.IGNORECASE)
 
 _SCRIPTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts")
 
@@ -255,12 +260,61 @@ def push_env(scratch, gate_scripts, inline_budget=120, review_timeout=2700):
 # Driving pushes
 # --------------------------------------------------------------------------
 
-def drive_push(scratch, env, timeout_s=3000, poll_s=10):
+def _origin_intact(scratch):
+    """The fake remote must survive the whole run: it is the fence-post of
+    remote isolation, and nothing the harness or the gate legitimately runs
+    writes outside it -- least of all deletes it."""
+    return (scratch.origin / "HEAD").is_file()
+
+
+def _origin_vanished_message(scratch):
+    """Diagnose the mid-scenario disappearance of the fake origin.
+
+    Observed 2026-11-11: while a real review ran detached, origin.git was
+    deleted under the scratch root and every later push died with git's
+    'does not appear to be a git repository' -- misclassified as gate
+    'block's across the remaining scenarios. This is a HARNESS-level failure,
+    so it raises and names the vanished remote instead of faking a verdict."""
+    try:
+        children = sorted(p.name for p in scratch.root.iterdir())
+    except OSError:
+        children = []
+    return (f"the fake origin {scratch.origin} VANISHED mid-scenario "
+            "(something outside the harness deleted the bare remote); "
+            f"scratch root now contains: {children or '(unreadable)'}. "
+            "This is a harness error, not a gate verdict.")
+
+
+def _assert_origin_intact(scratch):
+    if not _origin_intact(scratch):
+        raise SimError(_origin_vanished_message(scratch))
+
+
+def _transport_failure_message(scratch, out):
+    """A failed push the gate never answered: diagnose it as the harness
+    error it is, never as a scenario 'block'."""
+    origin = ("still exists" if _origin_intact(scratch)
+              else "VANISHED mid-scenario")
+    return ("git-level push failure with no gate output -- a transport error "
+            "is not a gate verdict and is never classified as a 'block':\n"
+            f"  the fake origin {scratch.origin} {origin}\n"
+            f"  push said:\n{out.strip()[-1500:]}")
+
+
+def drive_push(scratch, env, timeout_s=5400, poll_s=10):
     """Push HEAD to the fake origin, driving the gate's async two-step.
 
     Returns (outcome, transcript, attempts): "pass" when the push landed,
     "block" when the gate denied with anything that is not the still-running
-    async answer. Raises SimError when the gate never settles."""
+    async answer. Raises SimError when the gate never settles, when a failed
+    push has no gate answer at all (a git-level transport failure is a
+    harness error, not a gate verdict), or when the fake origin itself
+    vanishes mid-scenario.
+
+    The default settle deadline must span a REAL review end to end: the
+    detached supervisor first regenerates the docs summary inline when it is
+    stale (measured ~470 s on kimchi-studio, docs-gate 07) and only then
+    reviews (measured ~630 s for a one-file push); minutes, not seconds."""
     deadline = time.monotonic() + timeout_s
     attempts = []
     while True:
@@ -274,7 +328,10 @@ def drive_push(scratch, env, timeout_s=3000, poll_s=10):
             if time.monotonic() > deadline:
                 raise SimError(f"gate still running after {timeout_s}s -- never reached a verdict")
             time.sleep(poll_s)
+            _assert_origin_intact(scratch)
             continue
+        if not GATE_MARKER_RE.search(out):
+            raise SimError(_transport_failure_message(scratch, out))
         return "block", "\n".join(a["output"] for a in attempts), attempts
 
 
@@ -305,7 +362,7 @@ def reset_to_origin(scratch):
     _git(["clean", "-fdq"], scratch.work)
 
 
-def run_scenario(scratch, env, scenario, timeout_s=3000):
+def run_scenario(scratch, env, scenario, timeout_s=5400):
     t0 = time.monotonic()
     failures, outcome, transcript, attempts = [], "error", "", []
     reset_to_origin(scratch)
@@ -362,7 +419,10 @@ def main(argv=None):
     ap.add_argument("--workdir", default="", help="scratch root (default: fresh sim-scratch-<ts>)")
     ap.add_argument("--gate-scripts", default=_SCRIPTS, help="plugin scripts/ under test")
     ap.add_argument("--branch", default="", help="branch to exercise (default: clone's HEAD)")
-    ap.add_argument("--timeout", type=int, default=3000, help="per-push settle deadline (s)")
+    ap.add_argument("--timeout", type=int, default=5400,
+                    help="per-push settle deadline (s); must span a real review "
+                         "including an inline docs-summary regeneration (measured "
+                         "~1100s combined on kimchi-studio, docs-gate 07)")
     ap.add_argument("--inline-budget", type=int, default=120, help="OCR_INLINE_BUDGET_GIT (s)")
     args = ap.parse_args(argv)
     t_start = time.monotonic()

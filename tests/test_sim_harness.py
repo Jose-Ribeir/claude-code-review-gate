@@ -7,6 +7,7 @@ FAKE pre-push hook script that plays the gate's "is still running" answer and
 then its block/allow verdicts, so no `kimchi` worker ever runs.
 """
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -210,6 +211,94 @@ def test_drive_push_block_is_terminal_not_retried(tmp_path):
     assert sim.BLOCK_BANNER in transcript
     assert _git(["rev-parse", "HEAD"], scratch.work) != \
         _git(["rev-parse", "origin/main"], scratch.work)
+
+
+def test_drive_push_transport_failure_is_a_harness_error_not_a_block(tmp_path):
+    """The 2026-11-11 defect, in miniature: something outside the harness
+    deletes the fake origin mid-scenario; the next push dies with git's
+    'does not appear to be a git repository' and NOT A WORD from the gate.
+    That must surface as a SimError (harness error), never as a gate
+    'block' the scenario assertions then chew on."""
+    target = _toy_repo(tmp_path)
+    scratch = sim.make_scratch(target, tmp_path / "scratch")
+    env, _ = _fake_gate_env(scratch, _FAKE_GATE_BLOCK, tmp_path)
+    sim.apply_commit(scratch.work, sim.CommitSpec(message="c", write={"f.py": "z = 1\n"}))
+    shutil.rmtree(scratch.origin)  # the deleter: outside the harness
+    with pytest.raises(sim.SimError, match="not a gate verdict"):
+        sim.drive_push(scratch, env, poll_s=0.05)
+    try:
+        sim.drive_push(scratch, env, poll_s=0.05)
+    except sim.SimError as exc:
+        assert "VANISHED" in str(exc)
+        assert str(scratch.origin) in str(exc)
+        assert "does not appear to be a git repository" in str(exc)
+    else:
+        raise AssertionError("expected SimError")
+
+
+_FAKE_GATE_DELETE_ORIGIN_ON_SECOND_PUSH = """#!/usr/bin/env bash
+# Plays the async denial, but on the second invocation something OUTSIDE the
+# gate deletes the bare remote -- the observed real-run failure mode.
+cat >/dev/null   # consume the ref updates git feeds a pre-push hook
+N_FILE="$FAKE_GATE_STATE/n"
+N=$(cat "$N_FILE" 2>/dev/null || echo 0)
+N=$((N + 1)); echo "$N" > "$N_FILE"
+if [ "$N" -eq 2 ]; then
+  rm -rf "$FAKE_ORIGIN"
+fi
+echo "review-gate: the review of main (abc) is still running." >&2
+echo "To get the verdict, run the push again." >&2
+exit 1
+"""
+
+
+def test_drive_push_detects_the_origin_vanishing_between_retries(tmp_path):
+    target = _toy_repo(tmp_path)
+    scratch = sim.make_scratch(target, tmp_path / "scratch")
+    env, state = _fake_gate_env(
+        scratch, _FAKE_GATE_DELETE_ORIGIN_ON_SECOND_PUSH, tmp_path)
+    env["FAKE_ORIGIN"] = str(scratch.origin)
+    sim.apply_commit(scratch.work, sim.CommitSpec(message="c", write={"f.py": "z = 1\n"}))
+    t0 = time.monotonic()
+    with pytest.raises(sim.SimError, match="VANISHED mid-scenario"):
+        sim.drive_push(scratch, env, timeout_s=30, poll_s=0.05)
+    assert time.monotonic() - t0 < 20, "detected at the next poll, not at the deadline"
+    assert state.joinpath("n").read_text().strip() == "2", "failed fast on the third attempt"
+
+
+def test_drive_push_block_without_any_git_fatal_stays_a_verdict(tmp_path):
+    """The guard only bites on pushes the gate never answered: gate denials
+    (which always name review-gate) still classify as 'block'."""
+    target = _toy_repo(tmp_path)
+    scratch = sim.make_scratch(target, tmp_path / "scratch")
+    env, _ = _fake_gate_env(scratch, _FAKE_GATE_BLOCK, tmp_path)
+    sim.apply_commit(scratch.work, sim.CommitSpec(message="c", write={"f.py": "z = 1\n"}))
+    outcome, _, attempts = sim.drive_push(scratch, env, poll_s=0.05)
+    assert outcome == "block" and len(attempts) == 1
+    assert sim.GATE_MARKER_RE.search(attempts[0]["output"])
+
+
+def test_run_scenario_propagates_transport_failures_as_harness_errors(tmp_path):
+    """run_scenario must not swallow a transport failure into an outcome:
+    the SimError propagates to main(), which records outcome='error'."""
+    target = _toy_repo(tmp_path)
+    scratch = sim.make_scratch(target, tmp_path / "scratch")
+    env, _ = _fake_gate_env(scratch, _FAKE_GATE_BLOCK, tmp_path)
+    shutil.rmtree(scratch.origin)
+    scenario = sim.Scenario(name="s", description="d", expect="block",
+                            commits=[sim.CommitSpec(message="c", write={"f.py": "z = 1\n"})])
+    with pytest.raises(sim.SimError, match="not a gate verdict"):
+        sim.run_scenario(scratch, env, scenario)
+
+
+def test_settle_deadline_default_spans_a_real_multi_phase_review():
+    """A real review = inline docs-summary regeneration + the review itself
+    (measured ~1100 s combined on kimchi-studio, docs-gate 07). The default
+    deadline must comfortably span that, or drive_push declares a healthy
+    long review dead."""
+    import inspect
+    assert inspect.signature(sim.drive_push).parameters["timeout_s"].default >= 3600
+    assert inspect.signature(sim.run_scenario).parameters["timeout_s"].default >= 3600
 
 
 def test_drive_push_times_out_when_the_verdict_never_settles(tmp_path):
