@@ -3,6 +3,45 @@
 ## [Unreleased]
 
 ### Added
+- **Intent context: commit messages and linked tickets (2026-11-11).** The
+  pushed commits' messages (subjects + bodies + touched files, verbatim) ride
+  the manifest-extras seam as `commit_intent`, fenced for the reviewer as
+  untrusted author-controlled *claims* — verbatim for the newest 10 commits
+  inside a ~4k-token budget, subject-only past it with a visible
+  `trim_notice`, and scoped per chunk by touched-file intersection
+  (zero-intersection chunks get subjects-only background). Opt-in ticket
+  enrichment (`intent.tickets`, default off) discovers keys in the order
+  override file > branch name > commit messages, fetches title + description
+  only (never comments), caches hits for 24 hours, and records every miss as
+  a note — a fetch can never delay, fail, or block a review.
+- **`scripts/rg_ticket_fetch.py` + `scripts/rg_tickets.py`** — deterministic
+  ticket key discovery (cap of 3 fetched, the rest listed by ID only) and the
+  read-only, fail-open fetch backends: GitHub via `gh issue view` (PR
+  fallback), GitLab via `glab api`, both riding the maintainer's existing CLI
+  sign-in.
+- **`scripts/rg_jira_fetch.py`** — the Kimchi-only Jira side-fetch worker: one
+  tiny separate headless `kimchi -p` run whose `--mcp-config` enables ONLY
+  the persisted desktop Atlassian connector (read verbatim from
+  `~/.config/kimchi/harness/mcp.json`, overridable with
+  `OCR_JIRA_MCP_CONFIG`), reusing the app's existing Jira login; the review
+  worker's strict no-MCP posture is unchanged, and no token is stored in gate
+  config. All failure modes are silent miss notes; hits land in the shared
+  24 h cache.
+- **`intent_gap`: a contracted finding family for intent-vs-diff mismatches.**
+  A finding is kept only if its self-check holds (verbatim claim quoted,
+  contradicting code quoted, fix-safety rationale); severity `blocking`
+  solely when the claimed work is entirely absent from the changes — every
+  other mismatch warns and can never block. `compute_verdict` remains the
+  sole verdict authority (ADR 0001), and the asymmetry invariant holds:
+  intent adds findings, it never removes a defect finding. Reports render
+  intent findings distinctly (`[intent-blocking]` / `[intent-warning]`).
+- **`scripts/rg_config.py` + intent provenance.** A single settings read
+  resolves built-in defaults <- the global config (`<store root>/config.json`)
+  <- per-repo `.ocr/config.json`, key by key: `intent.messages` on,
+  `intent.tickets` off, `intent.tracker_order`, per-repo `intent.ticket`
+  override, and a `jira` coordinates block. Verdict records carry the intent
+  context actually used (sources, text capped at 2,000 chars, per-chunk
+  counts, fetch notes) as tolerated extra fields — no protocol version bump.
 - `scripts/ocr_report.py` — every recorded gate review in one analyzable
   summary: aggregates the verdict store (all repos), and with `--repo` joins
   that repo's finding-level records and raw-stream history. `--json` emits
