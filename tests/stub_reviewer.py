@@ -43,6 +43,9 @@ unit_diff is `unit:<path>:<unit>:<part>` and a context item `context:<role>:<pat
   STUB_DOCS_FINDING  JSON {content, severity?, path?, category?, existing_code?} -- a
                      documentation-checker finding, only when the manifest carries
                      docs_context (docs-gate 01).
+docs-gate 05 knobs (generation mode, `--docs-summary` in argv):
+  STUB_DOCS_SUMMARY         the summary markdown the generation call returns
+  STUB_DOCS_SUMMARY_VERDICT "fail" -- exit 1, exercising the gate's fail-closed path
   STUB_UNIT_FINDINGS  JSON {unit qualname: {severity, content, offset}} -- a finding anchored
                       `offset` lines into every unit_diff item of that unit (first part only),
                       at the unit's tip line numbers, with `existing_code` read from the tree.
@@ -51,17 +54,20 @@ unit_diff is `unit:<path>:<unit>:<part>` and a context item `context:<role>:<pat
                       first time a task id is seen, ok afterwards). broken also emits a finding
                       at the caller, with dep_task set.
 
-The last non-flag argument is the range the gate asked to review; it is echoed
-into the trace so a test can assert what was reviewed.
+The last non-flag argument is the range the gate asked to review (in
+docs-summary mode: the tip the summary is generated for); it is echoed into
+the trace so a test can assert what was reviewed.
 """
 import json
 import os
 import sys
 import time
 
-# Parse arguments: range is the last non-flag arg; --paths-file and --resolve are optional.
+# Parse arguments: range is the last non-flag arg; --paths-file, --resolve and
+# --docs-summary (docs-gate 05) are optional.
 paths_file = None
 resolve_file = None
+docs_summary = False
 args = sys.argv[1:]
 i = 0
 while i < len(args):
@@ -71,6 +77,9 @@ while i < len(args):
     elif args[i] == "--resolve" and i + 1 < len(args):
         resolve_file = args[i + 1]
         i += 2
+    elif args[i] == "--docs-summary":
+        docs_summary = True
+        i += 1
     else:
         i += 1
 rng = args[-1] if args and not args[-1].startswith("--") else ""
@@ -138,6 +147,7 @@ if trace:
             "pid": os.getpid(), "cwd": os.getcwd(), "range": rng,
             "ts": time.time(), "paths_file": paths_file,
             "resolve_file": resolve_file,
+            "docs_summary": docs_summary,
             "resolve_manifest": resolve_input,
             "manifest": manifest,
             "item_files": _read_item_files(manifest or resolve_input),
@@ -253,6 +263,25 @@ if resolve_file is not None:
         else:
             resolutions[fid] = {"status": "still_present", "evidence_path": "", "evidence_quote": ""}
     emit(json.dumps({"resolutions": resolutions}))
+    sys.exit(0)
+
+# --- docs-summary generation mode (docs-gate 05) ---------------------------
+# The gate's freshness tracker regenerates .ocr/docs-summary.md through one
+# headless worker call with `--docs-summary` in argv. Behaviour knobs:
+#   STUB_DOCS_SUMMARY         the summary markdown the generation writes
+#                             (default: a canned stub summary)
+#   STUB_DOCS_SUMMARY_VERDICT "fail" -- exit 1 with no usable output, so the
+#                             gate's fail-closed path can be exercised
+if docs_summary:
+    time.sleep(float(os.environ.get("STUB_SLEEP", "0") or 0))
+    if os.environ.get("STUB_DOCS_SUMMARY_VERDICT", "").strip().lower() == "fail":
+        sys.stdout.write("stub: docs summary generation failed\n")
+        sys.exit(1)
+    emitted = os.environ.get("STUB_DOCS_SUMMARY") or (
+        "# Documentation summary\n"
+        "\n"
+        "Stub-generated summary of the repository documentation.\n")
+    sys.stdout.write(emitted)
     sys.exit(0)
 
 # --- review mode --------------------------------------------------------
