@@ -3749,6 +3749,14 @@ def _supervise_run(state_path, run_id):
         ]
         _mark_phase("plan", files=len(plan or []))
 
+        # docs-gate 05: the documentation summary must be current BEFORE the
+        # review builds its manifest. A checked push (plan non-empty)
+        # regenerates a stale/missing summary inline -- the doc-changer's push
+        # pays the one model call, and generation failure blocks fail-closed.
+        # A docs-only push only records the staleness.
+        planner_warnings = (list(planner_warnings or []) + _docs_summary_freshen(
+            state_path, run_id, repo_root, review_root, tip, checked=bool(plan)))
+
         if plan is None or plan == []:
             # git diff failed OR no allowed files: fall back to single-context (0.7.0 path).
             result, ran, raw_name = _run_review_with_retry(
@@ -6338,20 +6346,316 @@ def _context_only(item):
 
 _DOCS_SUMMARY_PATH = ".ocr/docs-summary.md"
 
+# docs-gate 05: the artifact's freshness marker. One leading comment line
+# holding a JSON object {"version", "tip", "docs": {path: blob oid}}; the
+# `docs` hashes are the git blob hashes of the source documents AT GENERATION
+# TIME. Freshness == marker hashes == the hashes at the tip being pushed, so
+# no file timestamp (of the docs or of the artifact) can fake freshness.
+_DOCS_SUMMARY_MARKER_PREFIX = "<!-- docs-gate:freshness "
+_DOCS_SUMMARY_MARKER_SUFFIX = " -->"
+
+# The documentation corpus the summary compresses: every tracked *.md except
+# changelogs, which the spec puts out of scope for all checks.
+_DOC_BASENAME_EXCLUDED = ("changelog", "changes", "history")
+
+# Model pin for the generation worker (SKILL.md persona-pin pattern, the docs
+# persona tier; overridable like the reviewer's OCR_MODEL). Only the flag
+# value is swapped -- the rest of DEFAULT_KIMI_ARGS (sandbox wiring) is kept.
+_DOCS_SUMMARY_MODEL = (
+    os.environ.get("OCR_DOCS_SUMMARY_MODEL", "kimchi-dev/glm-5.3").strip()
+    or "kimchi-dev/glm-5.3")
+
+_PROMPT_DOCS_SUMMARY = (
+    "Summarize this repository's documentation for a code-review gate. The "
+    "documentation files (read every one with your read-only tools) are:\n"
+    "{docs}\n\n"
+    "Output the summary as markdown ONLY (no preamble, no fences): one bullet "
+    "per KEY POINT a code change must respect -- every recorded decision, "
+    "formal decision records and informal D-numbered notes alike (binding), "
+    "glossaries and architecture constraints (binding), and the behavior "
+    "claims each README or runbook makes (informational). Each bullet names "
+    "its source: `- <point> (source: <path>)`."
+)
+
+
+def _doc_blob_hashes(review_root, tip):
+    """{path: blob oid} of the documentation corpus at `tip`, from git --
+    never from file timestamps."""
+    out, rc = _git(["ls-tree", "-r", "-z", tip], cwd=review_root)
+    if rc != 0:
+        raise ReviewGateError(f"git ls-tree {str(tip)[:12]} failed in the review tree")
+    docs = {}
+    for entry in out.split("\0"):
+        if "\t" not in entry:
+            continue
+        meta, path = entry.split("\t", 1)
+        parts = meta.split()
+        base = path.rsplit("/", 1)[-1].lower()
+        if len(parts) < 3 or not base.endswith(".md"):
+            continue
+        # The artifact itself can never be part of its own freshness corpus:
+        # if it somehow became tracked, its marker hashes would refer to the
+        # previous artifact blob and every push would regenerate forever.
+        if path == _DOCS_SUMMARY_PATH:
+            continue
+        if base.startswith(_DOC_BASENAME_EXCLUDED):
+            continue
+        docs[path] = parts[2]
+    return docs
+
+
+def _read_docs_summary_artifact(root):
+    """(marker dict | None, body) for the cached artifact, or (None, "")."""
+    try:
+        text = (Path(root) / _DOCS_SUMMARY_PATH).read_text(encoding="utf-8")
+    except OSError:
+        return None, ""
+    lines = text.split("\n", 1)
+    first = lines[0]
+    if first.startswith(_DOCS_SUMMARY_MARKER_PREFIX) \
+            and first.endswith(_DOCS_SUMMARY_MARKER_SUFFIX):
+        try:
+            marker = json.loads(
+                first[len(_DOCS_SUMMARY_MARKER_PREFIX):-len(_DOCS_SUMMARY_MARKER_SUFFIX)])
+            if not isinstance(marker, dict):
+                marker = None
+        except Exception:
+            marker = None
+        body = lines[1] if len(lines) > 1 else ""
+        if body.startswith("\n"):
+            body = body[1:]
+        return marker, body
+    return None, text
+
+
+def _appsummary_model_args():
+    """DEFAULT_KIMI_ARGS with the docs-summary persona's model pin (docs-gate 05)."""
+    args = list(DEFAULT_KIMI_ARGS)
+    args += shlex.split(os.environ.get("OCR_KIMI_EXTRA_ARGS", ""))
+    if "--model" in args and args.index("--model") + 1 < len(args):
+        args[args.index("--model") + 1] = _DOCS_SUMMARY_MODEL
+    return args
+
+
+def _docs_summary_failed_message(why):
+    """The fail-closed denial for a generation failure -- the chosen behavior
+    (blocked, never silently unchecked) documented in the message itself."""
+    return (
+        "review-gate: the documentation summary at .ocr/docs-summary.md is stale "
+        "or missing and this push could not regenerate it (fail-closed): " + why + "\n"
+        "  The documentation check needs a fresh summary, so rather than letting an "
+        "unchecked push through, the push is blocked.\n"
+        "  Fix the generation error above and push again (regeneration is retried), "
+        "or bypass once with `git push --no-verify` (recorded in the gate's log)."
+    )
+
+
+def _extract_worker_text(out):
+    """The worker's final text: `--mode json` wraps it in {"result": ...};
+    the test stub emits the raw summary."""
+    out = (out or "").strip()
+    if not out:
+        return ""
+    for candidate in [out] + [ln for ln in out.splitlines() if ln.lstrip().startswith("{")]:
+        if not candidate.lstrip().startswith("{"):
+            continue
+        try:
+            parsed = json.loads(candidate)
+        except Exception:
+            continue
+        if isinstance(parsed, dict) and isinstance(parsed.get("result"), str):
+            return parsed["result"].strip()
+    return out
+
+
+def _run_docs_summary_once(review_root, tip, doc_paths):
+    """One headless worker call that produces the docs summary body.
+
+    Invoked in the same style as the review worker (_run_review_once):
+    `kimchi -p` with the DEFAULT_KIMI_ARGS sandbox wiring (the deny extension
+    keeps the generator read-only too), C3 canary on the first call, and the
+    OCR_REVIEWER_CMD / OCR_STUB_WORKER stubs in tests (argv `--docs-summary`,
+    driven by the STUB_DOCS_SUMMARY* knobs).
+
+    Returns the summary markdown. Raises ReviewGateError on every failure
+    mode -- the caller fails the push closed (see _docs_summary_freshen).
+    """
+    kimi = _find_kimi()
+    stub = _test_reviewer_cmd() or _stub_worker_cmd()
+    if not kimi and not stub:
+        # D9: a gate without a worker must not wave a push through.
+        raise ReviewGateError(
+            _docs_summary_failed_message(
+                "`kimchi` CLI not found on PATH or KIMCHI_BIN.")
+            + f"\n  Run {_DOCTOR_CMD} (review-gate doctor) to diagnose.")
+    override = os.environ.get("OCR_KIMI_ARGS")
+    args = shlex.split(override) if override else _appsummary_model_args()
+    listing = "\n".join("- " + p for p in doc_paths)
+    prompt = _PROMPT_DOCS_SUMMARY.format(docs=listing)
+    child_env = dict(os.environ)
+    child_env["OCR_IN_REVIEW"] = "1"
+    _scrub_worker_env(child_env)
+    if (not stub and not override and not _canary_state["probed"]
+            and not os.environ.get("OCR_SKIP_CANARY", "").strip()):
+        _canary_state["probed"] = True
+        _canary_probe(kimi, args, child_env)
+    cmd = stub + ["--docs-summary", tip] if stub else [kimi, "-p", prompt] + args
+    popen_extra = {} if sys.platform == "win32" else {"start_new_session": True}
+    creationflags = _WIN_FLAGS if sys.platform == "win32" else 0
+    try:
+        proc = subprocess.run(
+            cmd, cwd=review_root, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace",
+            env=child_env, timeout=TIMEOUT, creationflags=creationflags,
+            **popen_extra)
+    except subprocess.TimeoutExpired as exc:
+        raise ReviewGateError(_docs_summary_failed_message(
+            f"the generator worker timed out after {TIMEOUT}s"),
+            is_timeout=True) from exc
+    except Exception as exc:
+        raise ReviewGateError(_docs_summary_failed_message(
+            f"the generator worker could not run: {type(exc).__name__}: {exc}")) from exc
+    if proc.returncode != 0:
+        why = _sanitize((proc.stderr or proc.stdout or "").strip()[:400], 400) \
+            or f"exit {proc.returncode}"
+        raise ReviewGateError(_docs_summary_failed_message(why))
+    body = _extract_worker_text(proc.stdout)
+    if not body:
+        raise ReviewGateError(_docs_summary_failed_message(
+            "the generator worker returned an empty summary"))
+    return body
+
+
+def _write_docs_summary_artifact(root, body, docs, tip):
+    """Atomically write the artifact (freshness marker + body) under `root`."""
+    target = Path(root) / _DOCS_SUMMARY_PATH
+    marker = json.dumps({"version": 1, "tip": tip, "docs": docs}, sort_keys=True)
+    text = (_DOCS_SUMMARY_MARKER_PREFIX + marker + _DOCS_SUMMARY_MARKER_SUFFIX
+            + "\n\n" + body.strip() + "\n")
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = str(target) + ".tmp"
+        Path(tmp).write_text(text, encoding="utf-8")
+        os.replace(tmp, target)
+    except OSError as exc:
+        raise ReviewGateError(_docs_summary_failed_message(
+            f"could not write {target}: {exc}"))
+
+
+def _ensure_docs_summary_ignored(repo_root):
+    """The gitignore guarantee (docs-gate 05): the generated artifact can never
+    become a tracked file. .git/info/exclude is repo-local and itself
+    untracked, so adding the entry cannot dirty the repository either."""
+    try:
+        common = _git_common_dir(repo_root)
+        if not common:
+            return
+        excl = Path(common) / "info" / "exclude"
+        existing = ""
+        if excl.exists():
+            existing = excl.read_text(encoding="utf-8", errors="replace")
+        if _DOCS_SUMMARY_PATH in existing.splitlines():
+            return
+        excl.parent.mkdir(parents=True, exist_ok=True)
+        with open(excl, "a", encoding="utf-8") as fh:
+            fh.write("\n# review-gate docs-gate 05: generated docs summary cache\n"
+                     + _DOCS_SUMMARY_PATH + "\n")
+    except Exception:
+        pass
+
+
+def _docs_summary_freshen(state_path, run_id, repo_root, review_root, tip,
+                          checked):
+    """docs-gate 05: freshness tracker + inline regeneration of the summary.
+
+    Runs before the review builds its manifest (which embeds the summary as
+    `docs_context`). Freshness is decided by the git blob hashes of the
+    tracked docs at the pushed tip compared to the hashes the artifact embeds
+    -- never file timestamps.
+
+    checked=True (the push runs a review): a stale or missing summary is
+    regenerated INLINE during this push -- the doc-changer's push pays the one
+    model call -- and a generation failure is fail-closed (ReviewGateError,
+    the message documents the behavior and the recorded escape hatch).
+
+    checked=False (docs-only push, or the 0.7.0 fallback): staleness is only
+    RECORDED (run state + telemetry); the regeneration waits for the next
+    push that runs checks.
+
+    Returns extra planner warnings (normally empty).
+    """
+    try:
+        hashes = _doc_blob_hashes(review_root, tip)
+    except ReviewGateError as exc:
+        # git trouble enumerating the docs: the cache cannot be trusted, but
+        # that is bookkeeping, not a generation failure -- note it and review
+        # without a summary rather than fail a push on enumeration errors.
+        _TELE["docs_summary"] = {"status": "unknown", "error": str(exc)[:200]}
+        return []
+    if not hashes:
+        _TELE["docs_summary"] = {"status": "no-docs"}
+        return []
+    marker, _body = _read_docs_summary_artifact(repo_root)
+    if marker and isinstance(marker.get("docs"), dict) and marker["docs"] == hashes:
+        _TELE["docs_summary"] = {"status": "fresh", "docs": len(hashes)}
+    else:
+        status = "stale" if (Path(repo_root) / _DOCS_SUMMARY_PATH).exists() else "missing"
+        rec = {"status": status, "docs": len(hashes), "checked": checked}
+        _TELE["docs_summary"] = rec
+        try:
+            _update_state_owned(state_path, run_id, docs_summary=rec)
+        except Exception:
+            pass
+        if not checked:
+            return [
+                "docs-gate: tracked documentation changed since .ocr/docs-summary.md "
+                "was generated (or no summary exists). This push runs no review, so the "
+                "stale summary is only recorded; the next push that reviews code "
+                "regenerates it first (one model call)."]
+        # The doc-changer's push pays the call: regenerate inline, before the
+        # docs check runs. Failures raise (fail-closed).
+        _run_start = time.monotonic()
+        body = _run_docs_summary_once(review_root, tip, sorted(hashes))
+        roots = {os.path.realpath(repo_root), os.path.realpath(review_root)}
+        for root in sorted(roots):
+            _write_docs_summary_artifact(root, body, hashes, tip)
+        _ensure_docs_summary_ignored(repo_root)
+        _mark_phase("docs-summary", docs=len(hashes),
+                    secs=round(time.monotonic() - _run_start, 1))
+        rec = {"status": "fresh", "docs": len(hashes), "regenerated": True}
+        _TELE["docs_summary"] = rec
+        try:
+            _update_state_owned(state_path, run_id, docs_summary=rec)
+        except Exception:
+            pass
+    # The review may run in a gate worktree (review_root != repo_root): the
+    # fresh cache must be visible to _docs_context there too.
+    if os.path.realpath(review_root) != os.path.realpath(repo_root):
+        try:
+            src = Path(repo_root) / _DOCS_SUMMARY_PATH
+            dst = Path(review_root) / _DOCS_SUMMARY_PATH
+            if src.exists() and (not dst.exists()
+                                 or src.read_bytes() != dst.read_bytes()):
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(str(src), str(dst))
+        except Exception:
+            pass
+    return []
+
 
 def _docs_context(review_root):
     """The documentation context for the checker pass (docs-gate), or None.
 
     The artifact at .ocr/docs-summary.md is repo-local and gitignored (the
-    docs-gate generator owns its production; a hand-written file works too).
-    Absent or empty: nothing is injected and behavior is identical to before.
-    The content travels as untrusted reference material -- a document file is
+    docs-gate 05 generator owns its production and keeps it fresh from git
+    hashes; a hand-written file works too). Absent or empty: nothing is
+    injected and behavior is identical to before. The freshness marker line
+    is bookkeeping, not documentation: it is stripped before injection. The
+    content travels as untrusted reference material -- a document file is
     NEVER a review target, so the allowlist of reviewable paths is untouched.
     """
-    try:
-        text = (Path(review_root) / _DOCS_SUMMARY_PATH).read_text(encoding="utf-8")
-    except OSError:
-        return None
+    _marker, text = _read_docs_summary_artifact(review_root)
     if not text.strip():
         return None
     return {
