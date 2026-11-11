@@ -437,6 +437,11 @@ if _OCR_TIMEOUT_MAX < TIMEOUT:
 _INTENT_VERBATIM_COMMITS = 10
 _INTENT_TOKEN_BUDGET = 4000
 _INTENT_SUBJECT_TAIL = 100    # subject lines kept past the budget; older count in trim_notice
+# Verdict-record provenance (t25): the record stays small -- the intent text
+# is capped, chunked runs contribute per-chunk counts+digests only, notes list.
+_INTENT_RECORD_TEXT_CAP = 2000   # chars of intent text kept in the record
+_INTENT_RECORD_MAX_CHUNKS = 64   # per-chunk intent digests kept in the record
+_INTENT_RECORD_MAX_NOTES = 20    # fetch/trim notes kept in the record
 try:
     _MAX_FILES = int(os.environ.get("OCR_MAX_FILES", "40"))
     _MAX_FILES = max(1, _MAX_FILES)
@@ -4042,6 +4047,8 @@ def _supervise_run(state_path, run_id):
     progress = {"new": 0}
     plan_summary = ""
     diffs = None     # precomputed diffs (_build_diffs); None on the 0.9.x path
+    verdict_intent_base = None  # t25: day-0 intent view for the verdict record
+    intent_chunk_stats = None   # [] on the chunked path: per-chunk digests
     try:
         # Provider guard, belt and braces for the worker path: the push hook
         # already vetted, but a supervisor can also be started out of band
@@ -4168,6 +4175,18 @@ def _supervise_run(state_path, run_id):
             ticket_context = _collect_ticket_context(repo_root, branch,
                                                      intent_commits)
 
+            # Intent provenance for the verdict record (t25): the day-0
+            # single-context view, computed ONCE here from the data already
+            # collected above -- at verdict time nothing is recomputed and
+            # nothing is re-fetched. Per-chunk digests are appended by
+            # _review_extras on the chunked path. Fail-open: a bug here is
+            # a missing record extra, never a failed review.
+            try:
+                verdict_intent_base = _verdict_intent_base(
+                    intent_commits, ticket_context, push_range)
+            except Exception:
+                verdict_intent_base = None
+
             def _review_extras(k, chunk_paths, chunk_items=None):
                 extras = {}
                 bundle = _impact_bundle(review_root, tip, impact, chunk_paths,
@@ -4181,6 +4200,11 @@ def _supervise_run(state_path, run_id):
                 intent = _intent_extra(intent_commits, chunk_paths, push_range)
                 if intent:
                     extras["commit_intent"] = intent
+                    if intent_chunk_stats is not None:
+                        try:
+                            intent_chunk_stats.append(_intent_chunk_stat(k, intent))
+                        except Exception:
+                            pass  # provenance must never break a review
                 return extras
 
             # Files that timed out in an earlier run: retried in smaller chunks (even
@@ -4337,7 +4361,9 @@ def _supervise_run(state_path, run_id):
                 plan_summary = f"carried {len(carry_items)} file(s), 0 reviewed"
             elif (len(active_items) > _CHUNK_THRESHOLD or timeout_marks
                   or (seg is not None and seg.files)):
-                # Multi-chunk path.
+                # Multi-chunk path. _review_extras now also records one
+                # counts/digest stat per chunk for the verdict record (t25).
+                intent_chunk_stats = []
                 result, ran, raw_name, chunks_new = _run_chunked(
                     state_path, run_id, common_dir, review_root, mode, git_dir,
                     tip, push_range, active_items, planner_warnings, fenced, progress,
@@ -4616,11 +4642,20 @@ def _supervise_run(state_path, run_id):
     # D12: record the verdict in the EXTERNAL store before the done state, so
     # a done state always has a store record behind it (the store is what the
     # join validates; a torn write here fails closed, never open).
+    # Intent provenance (t25): built from the day-0 stash + chunk stats only
+    # (no recompute, no fetch at verdict time); a builder bug must not cost
+    # the verdict record itself, so it degrades to "no intent extra" FIRST.
+    try:
+        intent_extra = _verdict_intent_extras(verdict_intent_base,
+                                              intent_chunk_stats)
+    except Exception:
+        intent_extra = None
     try:
         remote_id = st.get("remote_url") or st.get("remote") or ""
         rg_store.record_verdict(
             remote_id, tip, base, verdict, blocked, reasons,
-            rg_store.record_commits(repo_root, base, tip))
+            rg_store.record_commits(repo_root, base, tip),
+            intent=intent_extra)
     except Exception:
         pass
     record = _record_review(git_dir, tip, branch, mode, verdict, advisory, blocked, result, raw_name)
@@ -7049,6 +7084,95 @@ def _intent_extra(commits, chunk_paths, push_range=""):
         "trimmed": bool(trimmed or omitted),
         "trim_notice": "; ".join(notices),
     }
+
+
+def _intent_record_text(tickets, commit_intent):
+    """The intent text the reviewer saw, flattened for the verdict record
+    and capped at _INTENT_RECORD_TEXT_CAP chars: ticket title+body blocks
+    first (manual/ticket outranks messages in precedence), then the commit
+    messages verbatim-newest-first, subject-only lines last. Pure text
+    formatting over ALREADY-COLLECTED data -- no fetch happens here.
+    """
+    parts = []
+    for t in tickets:
+        head = ": ".join(str(x) for x in (t.get("key"), t.get("title")) if x)
+        body = str(t.get("body") or "").strip()
+        parts.append(head + ("\n" + body if body else ""))
+    for c in (commit_intent or {}).get("commits") or ():
+        body = str(c.get("body") or "").strip()
+        parts.append(str(c.get("subject") or "") + ("\n" + body if body else ""))
+    for c in (commit_intent or {}).get("subject_only") or ():
+        parts.append(str(c.get("subject") or ""))
+    text = "\n\n".join(p for p in parts if p)
+    if len(text) > _INTENT_RECORD_TEXT_CAP:
+        text = (text[:_INTENT_RECORD_TEXT_CAP]
+                + f"\n[... intent text capped at {_INTENT_RECORD_TEXT_CAP} chars ...]")
+    return text
+
+
+def _verdict_intent_base(intent_commits, ticket_context, push_range):
+    """The day-0 single-context intent view for the verdict record (t25).
+
+    Built ONCE, right after collection, from the already-collected commit
+    messages and ticket context -- no recompute and NO fetch at verdict
+    time (the 24h ticket cache is never re-consulted). Shape matches the
+    store's `intent` extra: sources present, the intent text (the
+    single-context unscoped view; chunk scoping is summarised per chunk),
+    counts and fetch notes. None when the review had no intent context.
+    """
+    tickets = list((ticket_context or {}).get("tickets") or [])
+    if not tickets and not intent_commits:
+        return None
+    commit_intent = _intent_extra(intent_commits, None, push_range)
+    sources = (["ticket"] if tickets else []) + (["commit_messages"] if intent_commits else [])
+    notes = [str(n) for n in (ticket_context or {}).get("notes") or []]
+    if commit_intent and commit_intent.get("trim_notice"):
+        notes.append(str(commit_intent["trim_notice"]))
+    return {
+        "sources": sources,
+        # The range the intent was collected over: provenance for matching
+        # the intent text against rg_store's commits list.
+        "range": str(push_range or ""),
+        "text": _intent_record_text(tickets, commit_intent),
+        "counts": {
+            "tickets": len(tickets),
+            "listed_only": len((ticket_context or {}).get("listed_only") or []),
+            "messages": (commit_intent or {}).get("commit_count", 0),
+            "subject_only": len((commit_intent or {}).get("subject_only") or []),
+        },
+        "notes": notes[:_INTENT_RECORD_MAX_NOTES],
+    }
+
+
+def _intent_chunk_stat(k, commit_intent):
+    """One line of per-chunk intent provenance for a chunked run's record:
+    counts and a short digest of the exact text chunk k received. The text
+    itself stays only in the day-0 single-context view, so the record
+    stays small no matter how many chunks a run had.
+    """
+    text = _intent_record_text([], commit_intent)
+    return {
+        "chunk": k,
+        "messages": len((commit_intent or {}).get("commits") or ()),
+        "subject_only": len((commit_intent or {}).get("subject_only") or ()),
+        "trimmed": bool((commit_intent or {}).get("trimmed")),
+        "digest": hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:12],
+    }
+
+
+def _verdict_intent_extras(base, chunk_stats):
+    """The `intent` extra for record_verdict: the day-0 single-context view
+    plus, on chunked runs, per-chunk counts/digests (capped). None when
+    the review used no intent context -- an old-shape record. The finalize
+    site wraps this in try/except anyway: intent recording NEVER fails a
+    verdict write.
+    """
+    if base is None and not chunk_stats:
+        return None
+    extra = dict(base) if isinstance(base, dict) else {}
+    if chunk_stats:
+        extra["chunks"] = list(chunk_stats)[:_INTENT_RECORD_MAX_CHUNKS]
+    return extra or None
 
 
 def _build_deep_manifest(paths, reasons, threshold):
