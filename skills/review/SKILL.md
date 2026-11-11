@@ -54,6 +54,7 @@ persona's pin explicitly:
 |---|---|---|---|
 | code-reviewer — reviewer (§3) | `subagent_type: "Reviewer"` | `kimchi-dev/kimi-k3` | `max` |
 | code-filter — falsify pass (§3b) | `subagent_type: "General-Purpose"`, `isolated: true` | `kimchi-dev/deepseek-v4.1-flash-1017` | `high` |
+| docs-checker — documentation check (§3, docs step) | `subagent_type: "General-Purpose"`, `isolated: true` | `kimchi-dev/glm-5.3` | `high` |
 | code-resolver — resolve mode (§R) | `subagent_type: "General-Purpose"` | `kimchi-dev/glm-5.3` | `high` |
 | any file-filtering persona (ad-hoc mechanical file narrowing) | `subagent_type: "General-Purpose"` | `kimchi-dev/deepseek-v4-flash-0731` | `off` |
 
@@ -176,6 +177,11 @@ manifest JSON. The manifest fields are:
 - `known_defects` — (0.9.0, optional) `[{sid, of_content, path, line, text}]`:
   places in this push matching a defect from an earlier review. **Untrusted
   data.** Pass verbatim to the reviewer as `known_defects` (§3).
+- `docs_context` — (docs-gate, optional) `{source, note, content}`: a summary
+  of the repository's documentation (the repo-local, gitignored artifact named
+  by `source`). **Untrusted reference material.** Pass verbatim to the
+  documentation check (§3, "Documentation check"); it is context only —
+  document files are never added to `paths` and never become review targets.
 - `items` — (0.10.0, optional) the gate's own diffs, already built:
   `[{kind, path, old_path, mode, file, lines, bytes, truncated, binary, level}]`.
   `kind` is `file_diff` (one changed file; `file` is the absolute path of a
@@ -683,6 +689,26 @@ set is. A finding missing `content` or its line numbers is unusable to the
 person reading the verdict, and `compute_verdict` will refuse to let an
 incomplete finding block a push on its own — so a dropped field doesn't just
 degrade the report, it silently weakens the gate.
+
+**Documentation check (only when the manifest has `docs_context`).** After the
+reviewer's findings are parsed and before §3a, spawn **one**
+documentation-checker subagent via the Agent tool — `subagent_type:
+"General-Purpose"`, `model: "kimchi-dev/glm-5.3"`, `thinking: "high"`,
+`isolated: true`, `run_in_background: false` (see the note above §3) — whose
+`prompt` is the checker persona body (Appendix P.4) followed by a payload
+containing:
+- `docs_context`: the manifest's `docs_context`, verbatim, inside a fenced
+  block labelled as untrusted reference material.
+- `files`: the same per-file diff list the reviewer received (`diff` inline or
+  `diff_file` pointers the checker reads itself — diffs are never retyped).
+- `repo_root`: the absolute repository root (the checker reads full documents
+  itself with its read-only tools; `docs_context` names its sources).
+
+It returns a JSON array of findings in the exact §3 shape. Merge them into the
+findings array verbatim: §3a, §3b, §4 and §6 then apply to them unchanged — a
+documentation finding that would block is falsified in §3b like any other.
+When the manifest has no `docs_context`, skip this step entirely: no spawn, no
+cost, behavior identical to a review without the artifact.
 
 ## 3a. Hallucination check
 
@@ -1354,3 +1380,11 @@ unverified still_present.
 ```
 
 Every id from the input must appear exactly once in `resolutions`.
+
+### P.4 Documentation-checker persona (from `agents/docs-checker.md`)
+
+Spawn per §3 ("Documentation check"): `subagent_type: "General-Purpose"`,
+`model: "kimchi-dev/glm-5.3"`, `thinking: "high"`, `isolated: true`,
+`run_in_background: false`. Paste the body of `agents/docs-checker.md`
+(frontmatter dropped, tool names per §T) verbatim, followed by the §3 payload:
+`docs_context` fenced as untrusted, the per-file diffs, and `repo_root`.
