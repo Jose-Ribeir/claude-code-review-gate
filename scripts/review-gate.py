@@ -6472,7 +6472,7 @@ def _read_docs_summary_artifact(root):
     return None, text
 
 
-def _appsummary_model_args():
+def _docs_summary_model_args():
     """DEFAULT_KIMI_ARGS with the docs-summary persona's model pin (docs-gate 05)."""
     args = list(DEFAULT_KIMI_ARGS)
     args += shlex.split(os.environ.get("OCR_KIMI_EXTRA_ARGS", ""))
@@ -6568,7 +6568,7 @@ def _run_docs_summary_once(review_root, tip, doc_paths):
                 "`kimchi` CLI not found on PATH or KIMCHI_BIN.")
             + f"\n  Run {_DOCTOR_CMD} (review-gate doctor) to diagnose.")
     override = os.environ.get("OCR_KIMI_ARGS")
-    args = shlex.split(override) if override else _appsummary_model_args()
+    args = shlex.split(override) if override else _docs_summary_model_args()
     listing = "\n".join("- " + p for p in doc_paths)
     prompt = _PROMPT_DOCS_SUMMARY.format(docs=listing)
     child_env = dict(os.environ)
@@ -6644,6 +6644,16 @@ def _ensure_docs_summary_ignored(repo_root):
         pass
 
 
+def _record_docs_summary(state_path, run_id, rec):
+    """Mirror a docs-summary status record into telemetry AND the run state
+    (the join path reads the state). Both are best-effort bookkeeping."""
+    _TELE["docs_summary"] = rec
+    try:
+        _update_state_owned(state_path, run_id, docs_summary=rec)
+    except Exception:
+        pass
+
+
 def _docs_summary_freshen(state_path, run_id, repo_root, review_root, tip,
                           checked):
     """docs-gate 05: freshness tracker + inline regeneration of the summary.
@@ -6681,11 +6691,7 @@ def _docs_summary_freshen(state_path, run_id, repo_root, review_root, tip,
     else:
         status = "stale" if (Path(repo_root) / _DOCS_SUMMARY_PATH).exists() else "missing"
         rec = {"status": status, "docs": len(hashes), "checked": checked}
-        _TELE["docs_summary"] = rec
-        try:
-            _update_state_owned(state_path, run_id, docs_summary=rec)
-        except Exception:
-            pass
+        _record_docs_summary(state_path, run_id, rec)
         if not checked:
             return [
                 "docs-gate: tracked documentation changed since .ocr/docs-summary.md "
@@ -6703,11 +6709,7 @@ def _docs_summary_freshen(state_path, run_id, repo_root, review_root, tip,
         _mark_phase("docs-summary", docs=len(hashes),
                     secs=round(time.monotonic() - _run_start, 1))
         rec = {"status": "fresh", "docs": len(hashes), "regenerated": True}
-        _TELE["docs_summary"] = rec
-        try:
-            _update_state_owned(state_path, run_id, docs_summary=rec)
-        except Exception:
-            pass
+        _record_docs_summary(state_path, run_id, rec)
     # The review may run in a gate worktree (review_root != repo_root): the
     # fresh cache must be visible to _docs_context there too.
     if os.path.realpath(review_root) != os.path.realpath(repo_root):

@@ -14,7 +14,6 @@ import os
 import subprocess
 import sys
 import time
-from pathlib import Path
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SCRIPTS = os.path.join(os.path.dirname(_HERE), "scripts")
