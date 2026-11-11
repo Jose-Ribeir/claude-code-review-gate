@@ -67,11 +67,31 @@ def _write(work, files):
         p.write_text(content, encoding="utf-8")
 
 
+def _freshness_marker(work):
+    """The docs-gate 05 freshness marker matching the current tip's doc blobs,
+    so the hand-placed artifact reads as freshly generated (never regenerated
+    under this test's own push)."""
+    out = _git(["ls-tree", "-r", "-z", "HEAD"], cwd=work)
+    docs = {}
+    for entry in out.split("\0"):
+        if "\t" not in entry:
+            continue
+        meta, path = entry.split("\t", 1)
+        parts = meta.split()
+        base = path.rsplit("/", 1)[-1].lower()
+        if len(parts) >= 3 and base.endswith(".md") and not base.startswith(
+                ("changelog", "changes", "history")):
+            docs[path] = parts[2]
+    marker = json.dumps({"version": 1, "tip": _git(["rev-parse", "HEAD"], cwd=work),
+                         "docs": docs}, sort_keys=True)
+    return "<!-- docs-gate:freshness " + marker + " -->\n\n"
+
+
 def _write_docs_summary(work):
     """The repo-local cache artifact: present in the tree, never committed."""
     p = work / _DOCS_REL
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(DOCS_SUMMARY, encoding="utf-8")
+    p.write_text(_freshness_marker(work) + DOCS_SUMMARY, encoding="utf-8")
 
 
 def _commit(work, files, amend=False):
@@ -122,7 +142,7 @@ def _calls(tmp_path, trace):
 
 def _review_manifest(tmp_path, trace):
     return next((c.get("manifest") or {}) for c in _calls(tmp_path, trace)
-                if not c.get("resolve_file"))
+                if not c.get("resolve_file") and not c.get("docs_summary"))
 
 
 _APP_V1 = "def verdict():\n    return 'model-says-pass'\n"
@@ -155,7 +175,10 @@ def test_artifact_arrives_as_untrusted_context_never_as_a_review_target(tmp_path
     work = _repo(tmp_path, {"app.py": _APP_V1, "README.md": "# project\n"})
     _write_docs_summary(work)
     _commit(work, {"app.py": _APP_V2, "README.md": "# project\n\nmore docs\n"})
-    decision, reason = _push(work, _env(tmp_path, "t.trace"))
+    # The push also changes the docs, so the summary is stale and regenerates
+    # inline (docs-gate 05): the stub generator reproduces the same body.
+    decision, reason = _push(work, _env(tmp_path, "t.trace",
+                                        STUB_DOCS_SUMMARY=DOCS_SUMMARY))
     assert decision == "pass", reason
     manifest = _review_manifest(tmp_path, "t.trace")
     ctx = manifest.get("docs_context")
