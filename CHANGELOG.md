@@ -12,6 +12,40 @@ Built from `.kimchi/plans/review-gate-v2-spec.md`; all flows degrade with a warn
 never a silent loss of protection.
 
 ### Added
+- **Intent context: commit messages and linked tickets (2026-11-11).** The pushed commits'
+  messages (subjects + bodies + touched files) ride the manifest-extras seam
+  as `commit_intent`, fenced as untrusted author-controlled *claims* — verbatim
+  for the newest commits inside a token budget, subject-only beyond it with a
+  visible trim notice, and scoped per chunk by touched-file intersection
+  (zero-intersection chunks get subjects-only background). Opt-in ticket
+  enrichment (`intent.tickets`, default off) discovers keys from a per-repo
+  override, the branch name, then commit messages (`scripts/ocr_tickets.py`,
+  cap of 3 fetched, the rest ID-only), fetches title + description only
+  through the maintainer's own `gh`/`glab` sign-in
+  (`scripts/ocr_ticket_fetch.py`, GitHub/GitLab),
+  caches 24h, and silently notes — never fails on — any miss. **Jira is not
+  supported in this variant** (the review worker hard-blocks MCP, so the
+  Kimchi variant's Jira side-fetch worker does not port): a `jira` entry in
+  `tracker_order` or a Jira-style discovered key yields a clean
+  unsupported-tracker note.
+- **`intent_gap`: a contracted finding family for intent-vs-diff mismatches.**
+  A finding is kept only if its self-check holds (verbatim claim, quoted
+  contradicting code, fix-safety rationale); `blocking` solely when the
+  claimed work is entirely absent from the changes — everything else warns
+  and can never block. The verdict recomputes from findings, and the
+  asymmetry invariant holds: intent adds findings, it never removes a
+  defect finding. Reports render intent findings distinctly
+  (`[intent-blocking]` / `[intent-warning]`).
+- **Settings surface + intent provenance.** A single settings read
+  (`scripts/ocr_intent_config.py`) resolves defaults <- global config
+  (gate data dir `config.json`) <- per-repo `.ocr/config.json`, key by key:
+  `intent.messages` on, `intent.tickets` off, `intent.tracker_order`,
+  per-repo `intent.ticket` override. Verdict records (the append-only
+  findings log and the done state) carry the intent context actually used
+  (sources, text, counts, fetch notes) as a tolerated extra — no protocol
+  change.
+
+### Added (v2)
 - **Context vs review allowlists.** A caller search may now look at files that are
   excluded from review (specs/tests), so a changed helper no longer strands test
   callers invisibly. Review admission is unchanged.

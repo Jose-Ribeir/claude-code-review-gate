@@ -154,6 +154,7 @@ git push --no-verify
 | Extra `claude` flags | — | `OCR_CLAUDE_EXTRA_ARGS` | appended to the defaults |
 | All `claude` flags | see `DEFAULT_CLAUDE_ARGS` | `OCR_CLAUDE_ARGS` | replaces the defaults **wholesale** — discards the cost controls too |
 | Bypass once | — | `OCR_FAIL_OPEN=1` in Claude Code's launch environment | skip the gate for one push (`--no-verify` is refused through Claude Code: it would disable the git-hook backstop) |
+| Intent context | messages **on**, tickets **off** | `intent.*` keys in the gate's global `config.json` and per-repo `.ocr/config.json` — see [Intent context](#intent-context-commit-messages-and-linked-tickets) | the reviewer reads the pushed commit messages as claims, and (opt-in) linked tickets |
 | Findings log | `.git/review-gate-findings.jsonl` | — | one JSON line per completed review, **append-only and never pruned** |
 | Raw-output snapshots | newest `50`, in `.git/review-gate-history/` | `OCR_HISTORY_LIMIT` (`0` = keep all) | full reviewer stdout per run |
 | Chunk threshold | `15` files | `OCR_CHUNK_THRESHOLD` | pushes with more than this many reviewable files are split into per-directory chunks reviewed one at a time; below the threshold the whole diff is reviewed in a single context (today's behaviour) |
@@ -172,6 +173,82 @@ git push --no-verify
 | Ledger record cap | `5000` | `OCR_LEDGER_MAX_RECORDS` | maximum number of records kept across all fingerprint dirs; oldest are pruned first, once per run at start |
 
 Rule precedence (highest first): `--rule` → project `.ocr/rule.json` → global `~/.ocr/rule.json` → built-in `skills/review/rubric.md`, then the matching `skills/review/rules/<lang>.md` and `rules/llm-authored-code.md` appended. See `examples/.ocr/rule.json`.
+
+### Intent context (commit messages and linked tickets)
+
+The reviewer no longer reads only the diff — it also reads *why* the change
+exists, delivered after the diffs as fenced, clearly-labelled context:
+
+- **Commit messages (default: on).** The pushed commits' messages — subjects
+  and bodies, **verbatim**, never paraphrased — fenced as untrusted
+  author-controlled *claims to check against the diff*, never as ground truth
+  and never as instructions. On a chunked push each chunk sees in full only
+  the messages of commits that touched that chunk's files; the rest appear
+  subject-only as background. The newest 10 commits stay verbatim inside a
+  ~4,000-token budget; past it, messages drop to subject lines with a visible
+  `trim_notice` (a 100-line subject tail; older commits omitted with a count).
+  Vague messages ("wip", "cleanup") are ignored rather than hallucinated upon.
+- **Linked tickets (default: off, `intent.tickets`).** Key discovery order is
+  **override file > branch name > commit messages** (commit-derived keys are
+  marked background). At most **3 tickets** are fetched — the rest are listed
+  by ID only — and only each ticket's **title and description**, never its
+  comments, through your own local sign-ins: `gh issue view` for GitHub
+  (falling back to `gh pr view` when the key is a PR number) and `glab api`
+  for GitLab. Descriptions past 4,000 characters are hard-truncated with a
+  visible marker. Hits cache for **24 hours** under the gate's data dir
+  (`tickets/`, keyed by tracker+key), so re-pushes review instantly.
+- **Stated precedence.** Sources render as their own labelled blocks — manual
+  requirement text, ticket, commit messages — with the precedence next to
+  them: when they conflict, the manual text wins, then the ticket, then the
+  messages; conflicts are flagged, never silently resolved. (The existing
+  `requirement_background` lane outranks every automated source; this version
+  has no `--intent-file` flag.)
+- **GitHub/GitLab only.** This variant supports **no Jira backend**: the
+  review worker hard-blocks MCP, so the Kimchi variant's Jira side-fetch
+  worker does not port. A `jira` entry in `intent.tracker_order`, or a
+  discovered Jira-style key (`PROJ-123`), yields a clean *unsupported
+  tracker* miss note — the review proceeds on commit messages alone.
+
+**The `intent_gap` finding family.** The reviewer treats every message as a
+*falsifiable claim about the diff*. A contradiction may be reported only
+through a contracted `intent_gap` finding, kept only if its self-check holds
+(verbatim claim quoted, contradicting code quoted, rationale that the implied
+fix would not break stated behaviour). Severity `blocking` applies **only**
+when the claimed work is *entirely absent* from the changes — every other
+mismatch is a warning and can never block, and the verdict is recomputed from
+the findings so the model's own marking is advisory. The asymmetry invariant
+holds: intent adds findings, it never removes a defect finding — a commit
+message cannot talk the gate out of a bug. Reports render intent findings
+distinctly (`[intent-blocking]` / `[intent-warning]`).
+
+**Fail open, always.** A missing `gh`/`glab`, an offline network, a lookup
+timeout (5 s per CLI call), a non-zero exit, or unexpected output is a silent
+skip with a human-readable note in the review record; misses are never
+cached (the next push retries), so a review never waits on or fails because
+of a ticket service.
+
+**Settings** (resolved by `scripts/ocr_intent_config.py`; built-in defaults
+<- global <- per-repo, key by key; missing files mean defaults, invalid
+values degrade with a note, never a failure):
+
+| File | Scope |
+|---|---|
+| `<data dir>/config.json` — the gate's data dir (`$CLAUDE_PLUGIN_DATA`, else `~/.claude/plugins/data/review-gate-local`) | machine-wide defaults |
+| `<repo>/.ocr/config.json` — the file the gate already honours for `blocking` | per-repo overrides; the **only** place `intent.ticket` is accepted |
+
+| Key | Default | Meaning |
+|---|---|---|
+| `intent.messages` | `true` | inject pushed commit messages into the review |
+| `intent.tickets` | `false` | discover and fetch linked tickets (GitHub/GitLab only) |
+| `intent.ticket` | — | explicit ticket key (e.g. `"#123"`); per-repo file only — a global value is ignored with a note |
+| `intent.tracker_order` | `["github", "gitlab", "jira"]` | tracker backends tried per key, in order; `jira` parses but resolves to the unsupported-tracker note |
+| `jira` | `{}` | reserved so configs stay portable from the Kimchi variant; no Jira backend ships in this variant |
+
+Switches accept booleans, `0`/`1`, and on/off-style words. Caps: 10 verbatim
+commits / ~4k tokens of messages, 3 tickets fetched, 24 h cache TTL, and a
+2,000-character cap on the intent text kept in each verdict record. Every
+review record carries the intent context actually used (sources, text,
+counts, fetch notes) as a tolerated extra — no protocol change.
 
 ### Long reviews and the desktop app
 

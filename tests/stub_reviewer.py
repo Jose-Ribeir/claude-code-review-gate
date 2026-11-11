@@ -14,6 +14,8 @@ environment variables so one command line serves every scenario:
   STUB_VERDICT_FOR   path — the chunk containing this path returns block
   STUB_FINDINGS_FOR  JSON mapping path → {severity, content, confidence?} for
                      path-scripted verdicts (confidence defaults to 0.95)
+  STUB_INTENT_FINDINGS JSON list of verbatim intent_gap findings appended to the
+                     verdict (the E2E intent fixture seeds the reviewer's verdict).
   STUB_RESOLVE       JSON mapping finding_id → {status, evidence_path, evidence_quote}
                      Used when --resolve <file> is in argv; return resolver output.
                      Values are passed through verbatim, so a malformed answer
@@ -304,6 +306,17 @@ if findings_for_raw:
                     "content": spec.get("content", "stub scripted finding"),
                     "existing_code": spec.get("existing_code", "stub code"),
                 })
+    except Exception:
+        pass
+
+# STUB_INTENT_FINDINGS: a JSON list of verbatim intent_gap findings appended to
+# the verdict (the E2E intent fixture seeds the reviewer's whole verdict this way).
+intent_findings_raw = os.environ.get("STUB_INTENT_FINDINGS", "")
+if intent_findings_raw:
+    try:
+        for f in json.loads(intent_findings_raw):
+            if isinstance(f, dict):
+                findings.append(f)
     except Exception:
         pass
 
