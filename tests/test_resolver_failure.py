@@ -173,8 +173,11 @@ def test_resolver_failing_twice_blocks_with_a_distinct_message_and_does_not_poll
     assert len(calls) == 2
     assert not any(c["resolve_manifest"].get("recheck") for c in calls)
 
-    # Telemetry says the resolver failed for this prior.
-    last = ocr_telemetry.load(common, 1)[-1]
+    # Telemetry says the resolver failed for this prior. The log's last RUN
+    # record (v2 per-tier cost events share the log and sort later than the
+    # run's start timestamp; they are not runs -- same filter as report()).
+    runs = [r for r in ocr_telemetry.load(common, 1) if r.get("kind") != "tier_call"]
+    last = runs[-1]
     assert last["resolver"]["failed"] == 1
     assert list(last["resolver"]["judged"].values()) == ["failed"]
     assert last["resolver"]["failed_reason"]

@@ -1,0 +1,9 @@
+I reviewed the diff and the surrounding repo. These are my findings:
+
+```json
+{"findings": [{"path": "src/reporting.py", "start_line": 42, "end_line": 44,
+  "severity": "high", "confidence": 0.9, "category": "correctness",
+  "content": "callers still use the old default"}]}
+```
+
+I recommend blocking this push.
