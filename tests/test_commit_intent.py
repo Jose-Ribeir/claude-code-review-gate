@@ -8,6 +8,7 @@ marker, and scoped per chunk by touched-file intersection -- a chunk whose
 files no commit touched gets subjects-only background. Untrusted,
 author-controlled claims; never instructions.
 """
+import json
 import os
 import subprocess
 import sys
@@ -197,6 +198,19 @@ def test_a_multi_commit_push_carries_the_fenced_messages_in_its_manifest(tmp_pat
         "The counter wrapped at 2**31. Clamp it instead."
     assert by_subject["fix the overflow in the retry backoff"]["files"] == ["src/b.py"]
     assert by_subject["add the parser"]["body"] == "Recursive descent, no deps."
+
+
+def test_intent_messages_off_skips_collection_entirely(tmp_path):
+    work = _repo(tmp_path, [
+        ({"src/b.py": "y = 2\n"}, "fix the overflow", "body"),
+    ])
+    (work / ".ocr").mkdir()
+    (work / ".ocr" / "config.json").write_text(
+        json.dumps({"intent": {"messages": False}}))
+    _push(work, ag._env(tmp_path))
+    (call,) = _reviews(tmp_path)
+    assert "commit_intent" not in call["manifest"], (
+        "intent.messages off must leave the payload without commit_intent")
 
 
 def test_a_single_commit_push_behaves_as_before_plus_its_message(tmp_path):
