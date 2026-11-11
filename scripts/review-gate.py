@@ -4490,12 +4490,22 @@ def _blob_oids_at(root, tip, paths):
 
 
 def _ocr_tree_oid(root, tip):
-    """SHA1 of the .ocr/ tree at tip, or "" if not present."""
-    out, rc = _git(["ls-tree", "--full-tree", tip, "--", ".ocr"], cwd=root)
+    """Hash of the .ocr/ tree at tip (review criteria), or "" if not present.
+
+    The generated docs summary is excluded: it is review INPUT regenerated
+    whenever the docs change (docs-gate 05), never criteria, and a repo may
+    have it tracked (committed before the ignore guarantee could apply).
+    Counting it would roll the fingerprint on every regeneration and orphan
+    every review record.
+    """
+    out, rc = _git(["ls-tree", "-r", "--full-tree", tip, "--", ".ocr"], cwd=root)
     if rc != 0 or not out:
         return ""
-    parts = out.split()
-    return parts[2] if len(parts) >= 3 else ""
+    entries = sorted(ln for ln in out.splitlines()
+                     if not ln.endswith("\t" + _DOCS_SUMMARY_PATH))
+    if not entries:
+        return ""
+    return hashlib.sha256("\n".join(entries).encode("utf-8")).hexdigest()
 
 
 def _plugin_version():
