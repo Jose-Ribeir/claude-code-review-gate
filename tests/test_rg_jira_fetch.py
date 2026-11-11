@@ -177,7 +177,6 @@ def test_success_writes_t17s_cache_shape(tmp_path, monkeypatch):
 
 def test_cache_hit_skips_the_side_fetch_entirely(tmp_path, monkeypatch):
     monkeypatch.setenv("OCR_JIRA_MCP_CONFIG", str(_harness_config(tmp_path)))
-    cache = tmp_path / "cache"
     assert len(_fetch(tmp_path, _runner_stub())["tickets"]) == 1
     second_runner = _runner_stub()
     second = _fetch(tmp_path, second_runner)

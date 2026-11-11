@@ -106,6 +106,18 @@ def test_token_budget_trims_before_the_commit_cap():
     assert len(extra["subject_only"]) == 6 - len(extra["commits"])
 
 
+def test_newest_commit_over_the_budget_still_sets_a_trim_notice():
+    # The newest message is verbatim even when it alone overflows the budget
+    # (~4000 tokens at 4 chars/token): keeping it must still be VISIBLE --
+    # spec story 3: truncation is never silent.
+    extra = review_gate._intent_extra(_mk(1, body_chars=20000), None, "A..B")
+    assert len(extra["commits"]) == 1 and "b" * 100 in extra["commits"][0]["body"]
+    assert extra["subject_only"] == []
+    assert extra["trim_notice"], "an over-budget newest commit must be marked"
+    assert "exceed" in extra["trim_notice"]
+    assert "kept anyway" in extra["trim_notice"] and "1" in extra["trim_notice"]
+
+
 def test_no_intent_when_there_are_no_commits():
     assert review_gate._intent_extra([], None, "A..B") is None
     assert review_gate._intent_extra(None, None, "A..B") is None
@@ -138,6 +150,19 @@ def test_a_zero_intersection_chunk_gets_subjects_only_background():
     extra = review_gate._intent_extra(_scoped_commits(), {"unrelated/z.py"}, "A..B")
     assert extra["commits"] == []
     assert sorted(_subjects(extra)) == ["core change", "docs change", "oldest"]
+
+
+def test_a_file_less_commit_counts_as_touching_every_chunk():
+    # Merge commits under plain `git log --name-only` carry an empty files
+    # list: without special-casing they would zero-intersect every chunk and
+    # land subjects-only everywhere, even when inside the verbatim budget.
+    commits = _mk_scoped([([], "merge branch 'feature'"), (["src/c.py"], "oldest")])
+    extra = review_gate._intent_extra(commits, {"unrelated/z.py"}, "A..B")
+    # The file-less commit is a verbatim candidate in EVERY chunk; the real
+    # zero-intersection commit still degrades to subjects-only background.
+    assert [c["subject"] for c in extra["commits"]] == ["merge branch 'feature'"]
+    assert extra["commits"][0]["body"] == "body of merge branch 'feature'"
+    assert _subjects(extra) == ["oldest"]
 
 
 def test_single_context_scoping_is_a_no_op_over_the_full_set():

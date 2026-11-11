@@ -136,6 +136,18 @@ def test_self_check_failing_intent_finding_is_dropped_for_the_report():
     assert remaining == [good]
 
 
+def test_self_check_failures_drop_across_every_chunk_of_a_merge():
+    """Chunked-path behaviour unchanged: the filter runs on the merged
+    accumulator, so failures from ANY chunk vanish, keepers survive."""
+    merged = rg._merge_chunk_results([
+        _verdict([_self_check_failures()[0], _intent(severity="warning")]),
+        _verdict([_self_check_failures()[2], _intent(severity="blocking")]),
+    ])
+    kept = [f for f in merged["findings"]
+            if str(f.get("type")) == "intent_gap"]
+    assert [f["severity"] for f in kept] == ["warning", "blocking"]
+
+
 def test_defect_findings_are_not_dropped_by_the_intent_filter():
     merged = rg._merge_chunk_results(
         [_verdict([_defect()] + _self_check_failures())])

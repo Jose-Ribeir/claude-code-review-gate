@@ -69,7 +69,7 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ocr_verdict import (compute_verdict, drop_failed_intent_findings,  # noqa: E402
-                         norm_severity)
+                         norm_severity, _INTENT_SEVERITIES, _is_intent_finding)
 import ocr_impact  # noqa: E402
 import ocr_index  # noqa: E402
 import ocr_memory  # noqa: E402
@@ -2391,7 +2391,7 @@ def _normalize_verdict(obj):
     for f in obj.get("findings") or []:
         if not isinstance(f, dict):
             continue
-        if str(f.get("type") or "").strip().lower() == "intent_gap":
+        if _is_intent_finding(f):
             # Contracted family, not a near miss to normalize: the
             # claim/against/severity/self_check schema passes through
             # untouched. compute_verdict enforces the family's own rules.
@@ -4178,7 +4178,8 @@ def _supervise_run(state_path, run_id):
             # fetched on the real repo (gh/glab resolve its remotes), never
             # in the sandbox clone. None leaves every payload untouched.
             ticket_context = _collect_ticket_context(repo_root, branch,
-                                                     intent_commits)
+                                                     intent_commits,
+                                                     settings=_intent_settings)
 
             # Intent provenance for the verdict record (t25): the day-0
             # single-context view, computed ONCE here from the data already
@@ -4425,6 +4426,13 @@ def _supervise_run(state_path, run_id):
                         if diffs is not None:
                             _remove_run_dir(common_dir, run_id, sub=0)
                     chunks_new = 1 if ran else 0
+                # Self-check contract (intent findings), ONCE on this path:
+                # the chunked path filters in _merge_chunk_results; without
+                # this a self-check-failing intent_gap would reach the
+                # records, the verdict record, and the report text here.
+                if isinstance(result, dict) and result.get("findings"):
+                    result = dict(result, findings=drop_failed_intent_findings(
+                        result["findings"]))
                 if ran and _ledger_enabled():
                     _write_run_records(result, active_items, common_dir, fp, run_id,
                                        review_root, tip,
@@ -7002,7 +7010,7 @@ def _intent_tokens(text):
     return max(1, (len(text) + 3) // 4)
 
 
-def _collect_ticket_context(repo_root, branch, intent_commits):
+def _collect_ticket_context(repo_root, branch, intent_commits, settings=None):
     """The manifest `ticket_context` value: the fetched titles+descriptions
     of the push's discovered ticket keys, plus the keys discovery listed by
     ID only and every miss note (t17).
@@ -7013,9 +7021,14 @@ def _collect_ticket_context(repo_root, branch, intent_commits):
     same extras seam as commit_intent and sits between manual
     requirement_background and commit messages in precedence. Everything is
     best-effort: even an internal bug becomes a note, never an exception.
+
+    `settings`: the already-resolved settings of this push (_supervise_run
+    loaded them for intent.messages); None reads them through rg_config --
+    one settings read per push, never two.
     """
     try:
-        settings = rg_config.load_settings(repo_root)
+        if settings is None:
+            settings = rg_config.load_settings(repo_root)
         if not (settings and settings.get("intent", {}).get("tickets")):
             return None
         messages = [f"{c['subject']}\n{c['body']}".strip()
@@ -7052,12 +7065,15 @@ def _intent_extra(commits, chunk_paths, push_range=""):
     if not commits:
         return None
     verbatim, trimmed = [], []
+    overflow = 0   # newest kept verbatim despite overflowing the budget alone
     used = 0
     for c in commits:
         cost = _intent_tokens(c["subject"] + "\n" + c["body"])
         if (not verbatim or
                 (len(verbatim) < _INTENT_VERBATIM_COMMITS
                  and used + cost <= _INTENT_TOKEN_BUDGET)):
+            if not verbatim and cost > _INTENT_TOKEN_BUDGET:
+                overflow += 1
             verbatim.append(c)
             used += cost
         else:
@@ -7065,7 +7081,12 @@ def _intent_extra(commits, chunk_paths, push_range=""):
     chunk_set = set(chunk_paths) if chunk_paths is not None else None
 
     def _in_chunk(c):
-        return chunk_set is None or not chunk_set.isdisjoint(c["files"])
+        # A commit with no touched files (a merge commit under plain
+        # `git log --name-only`) cannot be scoped by intersection: it counts
+        # as touching EVERY chunk, so it stays a verbatim candidate instead
+        # of landing subjects-only everywhere via zero-intersection.
+        return (chunk_set is None or not c["files"]
+                or not chunk_set.isdisjoint(c["files"]))
 
     full = [{"sha": c["sha"][:12], "subject": c["subject"], "body": c["body"],
              "files": c["files"]} for c in verbatim if _in_chunk(c)]
@@ -7074,6 +7095,12 @@ def _intent_extra(commits, chunk_paths, push_range=""):
                     for c in background[:_INTENT_SUBJECT_TAIL]]
     omitted = len(background) - len(subject_only)
     notices = []
+    if overflow:
+        # Kept verbatim but over budget: truncation visibility (spec story 3)
+        # must apply here too, or a giant newest message hides every trim.
+        notices.append(
+            f"newest commit(s) exceed the verbatim budget "
+            f"(~{_INTENT_TOKEN_BUDGET} tokens) - kept anyway: {overflow}")
     if trimmed:
         notices.append(
             f"{len(trimmed)} older commit(s) trimmed to subject lines only "
@@ -7694,7 +7721,6 @@ def _merge_chunk_results(chunk_results, planner_warnings=None):
         if not isinstance(r, dict):
             continue
         all_findings.extend(r.get("findings") or [])
-        all_findings = drop_failed_intent_findings(all_findings)
         all_warnings.extend(r.get("warnings") or [])
         cfs = r.get("cross_file_context_summary")
         if isinstance(cfs, dict) and isinstance(cfs.get("symbols"), list):
@@ -7707,7 +7733,10 @@ def _merge_chunk_results(chunk_results, planner_warnings=None):
         rank = _STATUS_RANK.get(s, 0)
         if rank > worst_status_rank:
             worst_status_rank = rank
-    merged = _merge_near_dup_findings(all_findings)
+    # Self-check contract (intent findings), enforced ONCE here on the whole
+    # accumulator -- never per chunk (O(chunks x findings) re-filter), and
+    # mirrored on the single-context path in _supervise_run.
+    merged = _merge_near_dup_findings(drop_failed_intent_findings(all_findings))
     worst_status = ["success", "completed_with_warnings", "completed_with_errors"][
         worst_status_rank
     ]
@@ -9550,14 +9579,14 @@ def _format_reasons(result, limit=20):
     for f in result.get("findings", []) if isinstance(result, dict) else []:
         # Every field here came out of the diff under review, so all of it is
         # sanitized before it reaches the caller's context (see _sanitize).
-        if str(f.get("type") or "").strip().lower() == "intent_gap":
+        if _is_intent_finding(f):
             # Intent findings are NOT code defects: the report must never
             # blur "your message misdescribes your code" with "your code is
             # broken". Render the family, its severity tier, the verbatim
             # claim, and the code it is checked against.
             tier = (_sanitize(f.get("severity", "warning"), 20).lower()
                     if str(f.get("severity") or "").strip().lower()
-                    in ("blocking", "warning") else "warning")
+                    in _INTENT_SEVERITIES else "warning")
             claim = _sanitize(f.get("claim") or "", 400).strip()
             against = f.get("against") if isinstance(f.get("against"), dict) else {}
             apath = _sanitize(against.get("path", "?"), 200)

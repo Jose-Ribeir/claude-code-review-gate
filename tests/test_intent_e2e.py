@@ -232,3 +232,48 @@ def test_intent_e2e_lying_commit_message_blocks_and_marks_intent(tmp_path):
     # Intent rides the manifest on the warning path too.
     intent2 = _review_manifest(tmp_path, "stub2.trace").get("commit_intent")
     assert intent2 and intent2["commits"][0]["subject"] == _SUBJECT
+
+
+_LYING_CLAIM = "adds exponential backoff with jitter to every request"
+
+
+def _failed_self_check_gap():
+    """A blocking intent_gap the reviewer self-marked as failing its check."""
+    gap = _blocking_gap()
+    gap["claim"] = _LYING_CLAIM
+    gap["self_check"] = {"fix_safe": False,
+                         "rationale": "the implied fix would break the request path"}
+    return gap
+
+
+def test_intent_e2e_failed_self_check_never_reaches_verdict_or_report(tmp_path):
+    """Self-check contract on the SINGLE-CONTEXT path: a self-check-failing
+    intent_gap is dropped before it can reach the report text or the verdict
+    record (the chunked path drops it in _merge_chunk_results; a drop that
+    only lived there would leak on this path)."""
+    work = _two_commit_repo(tmp_path)
+    tip = _git(["rev-parse", "HEAD"], cwd=work)
+
+    gaps = json.dumps([_blocking_gap(), _failed_self_check_gap()])
+    env = _env(tmp_path, "stub-fail.trace", STUB_INTENT_FINDINGS=gaps,
+               OCR_LEDGER="0")
+    decision, reason = _push(work, env)
+    assert decision == "deny", reason  # the well-formed blocking gap survives
+    st = _state(work, tip)
+    assert st["state"] == "done" and st.get("verdict") == "block", st
+
+    # The failed gap is absent from the report text: neither its family
+    # label nor its claim appears, while the good gap still does.
+    reasons = st.get("reasons", "")
+    assert "[intent-blocking]" in reasons, reasons
+    assert _LYING_CLAIM not in reasons, reasons
+
+    # And absent from the verdict record: exactly one intent_gap is kept.
+    record_path = st.get("record")
+    assert record_path and Path(record_path).exists()
+    entries = [json.loads(ln) for ln in Path(record_path).read_text().splitlines()
+               if ln.strip()]
+    entry = next(e for e in reversed(entries) if e.get("head") == tip)
+    found = [f for f in entry["findings"] if f.get("type") == "intent_gap"]
+    assert len(found) == 1, entry["findings"]
+    assert found[0]["claim"] == _SUBJECT

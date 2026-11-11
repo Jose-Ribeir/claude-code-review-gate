@@ -361,6 +361,26 @@ def test_collect_ticket_context_keeps_discovery_extras_and_notes(tmp_path, monke
     assert "#45: gh not found on PATH" in block["notes"]
 
 
+def test_collect_ticket_context_reuses_the_caller_loaded_settings(tmp_path, monkeypatch):
+    """_supervise_run already loaded the settings for intent.messages: the
+    collector must thread them through, not read the config a second time
+    per push (rg_config stays the single read API when none are passed)."""
+    repo = _repo_with_tickets_on(tmp_path)
+    settings = rg_config.load_settings(str(repo))
+    ticket = {"key": "#45", "tracker": "github", "title": "T", "body": "B",
+              "source": "override", "role": "direct", "truncated": False}
+    monkeypatch.setattr(review_gate.rg_ticket_fetch, "fetch_tickets",
+                        lambda *a, **k: {"tickets": [ticket], "notes": []})
+
+    def _no_reload(*a, **k):
+        raise AssertionError("settings read twice in one push")
+
+    monkeypatch.setattr(review_gate.rg_config, "load_settings", _no_reload)
+    block = review_gate._collect_ticket_context(
+        str(repo), "main", None, settings=settings)
+    assert block is not None and block["tickets"] == [ticket]
+
+
 def test_collect_ticket_context_never_raises(tmp_path, monkeypatch):
     repo = _repo_with_tickets_on(tmp_path)
     monkeypatch.setattr(review_gate.rg_ticket_fetch, "fetch_tickets",
