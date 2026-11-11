@@ -253,3 +253,27 @@ def test_a_chunked_run_scopes_the_messages_to_each_chunks_files(tmp_path):
     assert _subjects(docs) == ["core: add mod0 and mod1"]
     # Both halves of the push are visible in full somewhere; bodies verbatim.
     assert core["commits"][0]["body"] == "core work"
+
+
+def test_newest_commit_alone_over_budget_is_marked_in_trim_notice():
+    # One commit whose message alone exceeds the ~4000-token budget: still
+    # verbatim (that is the contract), but the overflow is no longer silent.
+    extra = review_gate._intent_extra(_mk(1, body_chars=40000), None, "A..B")
+    assert len(extra["commits"]) == 1 and extra["commit_count"] == 1
+    assert extra["trimmed"] is True
+    assert "newest" in extra["trim_notice"].lower()
+    assert "kept verbatim" in extra["trim_notice"]
+    # No older commits were trimmed: the marker must not overclaim.
+    assert "older commit(s) trimmed" not in extra["trim_notice"]
+
+
+def test_a_file_less_commit_scopes_to_every_chunk():
+    # A merge commit touches no file: with no touched-file set to intersect,
+    # it is intent for EVERY chunk, never dropped to subject-only background.
+    commits = _mk_scoped([([], "merge branch 'x'"), (["src/a.py"], "core change")])
+    extra = review_gate._intent_extra(commits, {"unrelated/z.py"}, "A..B")
+    assert [c["subject"] for c in extra["commits"]] == ["merge branch 'x'"]
+    assert [c["subject"] for c in extra["subject_only"]] == ["core change"]
+    extra = review_gate._intent_extra(commits, {"src/a.py"}, "A..B")
+    assert sorted(c["subject"] for c in extra["commits"]) == [
+        "core change", "merge branch 'x'"]

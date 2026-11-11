@@ -127,3 +127,92 @@ def test_intent_extra_survives_within_the_line_cap(tmp_path):
     assert len(line) <= rg._MAX_LOG_LINE
     entry = json.loads(line)
     assert entry["intent"] == _INTENT
+
+
+# --- verdict-record intent shape (t25): base view, cap, chunk digests -----
+
+_COMMITS = [
+    {"sha": "b" * 40, "subject": "fix the retry backoff overflow",
+     "body": "Body one.", "files": ["a.py"]},
+    {"sha": "a" * 40, "subject": "base", "body": "", "files": ["b.py"]},
+]
+_TICKET_CTX = {"tickets": [{"key": "PROJ-123", "title": "Retry fix",
+                            "body": "Describe it."}],
+               "listed_only": ["PROJ-9"],
+               "notes": ["fetched via gh"]}
+
+
+def test_verdict_intent_base_none_when_no_intent_context():
+    assert rg._verdict_intent_base(None, None, "b..t") is None
+    assert rg._verdict_intent_base([], {"tickets": []}, "b..t") is None
+
+
+def test_verdict_intent_base_commit_messages_only():
+    base = rg._verdict_intent_base(_COMMITS, None, "b..t")
+    assert base["sources"] == ["commit_messages"]
+    assert base["range"] == "b..t"
+    assert base["counts"] == {"tickets": 0, "listed_only": 0,
+                              "messages": 2, "subject_only": 0}
+    assert "fix the retry backoff overflow" in base["text"]
+    assert "Body one." in base["text"] and base["text"].endswith("base")
+    assert base["notes"] == []
+
+
+def test_verdict_intent_base_ticket_and_messages_from_collected_data():
+    base = rg._verdict_intent_base(_COMMITS, _TICKET_CTX, "origin/main..tip")
+    assert base["sources"] == ["ticket", "commit_messages"]
+    assert base["range"] == "origin/main..tip"
+    assert base["counts"]["tickets"] == 1 and base["counts"]["listed_only"] == 1
+    # KEY + TITLE + DESCRIPTION all land in the flattened text, tickets first.
+    assert base["text"].startswith("PROJ-123: Retry fix\nDescribe it.")
+    assert "fix the retry backoff overflow" in base["text"]
+    assert base["notes"] == ["fetched via gh"]
+
+
+def test_verdict_intent_base_ticket_only_still_records():
+    base = rg._verdict_intent_base(None, _TICKET_CTX, "b..t")
+    assert base["sources"] == ["ticket"]
+
+
+def test_verdict_intent_base_trim_notice_lands_in_notes():
+    many = [{"sha": f"{i:040x}", "subject": f"c{i}", "body": "",
+             "files": [f"f{i}.py"]} for i in range(rg._INTENT_VERBATIM_COMMITS + 2)]
+    base = rg._verdict_intent_base(many, None, "b..t")
+    assert any("trimmed to subject lines only" in n for n in base["notes"])
+    assert base["counts"]["messages"] == rg._INTENT_VERBATIM_COMMITS + 2
+    assert base["counts"]["subject_only"] == 2
+
+
+def test_verdict_intent_base_text_is_capped_at_the_named_constant():
+    fat = [{"sha": "b" * 40, "subject": "s", "body": "x" * 10000, "files": []}]
+    base = rg._verdict_intent_base(fat, None, "b..t")
+    assert rg._INTENT_RECORD_TEXT_CAP == 2000
+    assert base["text"].startswith("s\n" + "x" * 100)
+    assert len(base["text"]) > rg._INTENT_RECORD_TEXT_CAP
+    assert f"capped at {rg._INTENT_RECORD_TEXT_CAP} chars" in base["text"]
+
+
+def test_intent_chunk_stat_counts_and_stable_digest():
+    intent = rg._intent_extra(_COMMITS, None, "b..t")
+    stat = rg._intent_chunk_stat(0, intent)
+    assert stat == rg._intent_chunk_stat(0, intent)  # deterministic
+    assert stat["chunk"] == 0 and stat["messages"] == 2
+    assert stat["subject_only"] == 0 and stat["trimmed"] is False
+    assert len(stat["digest"]) == 12
+    other = dict(intent)
+    other["subject_only"] = [{"sha": "c" * 12, "subject": "z"}]
+    assert rg._intent_chunk_stat(1, other)["digest"] != stat["digest"]
+
+
+def test_verdict_intent_extras_combines_and_caps():
+    assert rg._verdict_intent_extras(None, None) is None
+    assert rg._verdict_intent_extras(None, []) is None
+    base = rg._verdict_intent_base(_COMMITS, None, "b..t")
+    stats = [{"chunk": k, "messages": 1, "subject_only": 0,
+              "trimmed": False, "digest": f"{k:012d}"}
+             for k in range(rg._INTENT_RECORD_MAX_CHUNKS + 5)]
+    extra = rg._verdict_intent_extras(base, stats)
+    assert extra["sources"] == ["commit_messages"]
+    assert len(extra["chunks"]) == rg._INTENT_RECORD_MAX_CHUNKS
+    only = rg._verdict_intent_extras(None, stats[:1])
+    assert only == {"chunks": stats[:1]}

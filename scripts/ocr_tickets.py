@@ -30,8 +30,6 @@ import re
 
 CAP = 3  # settled: fetch at most 3 tickets; the rest are listed by ID only
 
-SOURCES = ("override", "branch", "commit")
-ROLES = ("direct", "background")
 
 # Realistic key shapes:
 #   Jira-style   PROJ-123 -- an UPPERCASE project tag, so "utf-8"/"json-2"

@@ -328,7 +328,8 @@ def _repo_with_tickets_on(tmp_path, key="#45"):
 
 
 def test_collect_ticket_context_off_by_default_returns_none(tmp_path):
-    assert review_gate._collect_ticket_context(str(tmp_path), "main", None) is None
+    settings = review_gate.ocr_intent_config.load_settings(str(tmp_path))
+    assert review_gate._collect_ticket_context(settings, "main", None) is None
 
 
 def test_collect_ticket_context_assembles_the_extras_block(tmp_path, monkeypatch):
@@ -340,7 +341,7 @@ def test_collect_ticket_context_assembles_the_extras_block(tmp_path, monkeypatch
     monkeypatch.setattr(review_gate.ocr_ticket_fetch, "fetch_tickets",
                         lambda *a, **k: payload)
     block = review_gate._collect_ticket_context(
-        str(repo), "main",
+        review_gate.ocr_intent_config.load_settings(str(repo)), "main",
         [{"sha": "a" * 40, "subject": "fix", "body": "", "files": ["a.py"]}])
     assert block["tickets"] == payload["tickets"]
     assert block["listed_only"] == []
@@ -357,7 +358,8 @@ def test_collect_ticket_context_keeps_discovery_extras_and_notes(tmp_path, monke
         lambda *a, **k: {"selected": [{"key": "#45", "source": "override",
                                        "role": "direct"}],
                          "extras": ["PROJ-9"], "notes": ["override oddity"]})
-    block = review_gate._collect_ticket_context(str(repo), "main", None)
+    block = review_gate._collect_ticket_context(
+        review_gate.ocr_intent_config.load_settings(str(repo)), "main", None)
     assert block["listed_only"] == ["PROJ-9"]
     assert "override oddity" in block["notes"]
     assert "#45: gh not found on PATH" in block["notes"]
@@ -367,6 +369,7 @@ def test_collect_ticket_context_never_raises(tmp_path, monkeypatch):
     repo = _repo_with_tickets_on(tmp_path)
     monkeypatch.setattr(review_gate.ocr_ticket_fetch, "fetch_tickets",
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
-    block = review_gate._collect_ticket_context(str(repo), "main", None)
+    block = review_gate._collect_ticket_context(
+        review_gate.ocr_intent_config.load_settings(str(repo)), "main", None)
     assert block["tickets"] == []
     assert any("boom" in note for note in block["notes"])

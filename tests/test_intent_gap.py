@@ -237,3 +237,12 @@ def test_skill_states_the_source_precedence():
     section = text[text.find("intent context"):]
     assert section.find("requirement_background") < section.find("ticket")
     assert section.find("ticket") < section.find("commit messages")
+
+
+def test_self_check_drop_is_hoisted_once_over_completed_chunk_results():
+    """Regression: the drop used to run after every per-chunk extend; hoisted,
+    it runs once over the completed results with an identical outcome."""
+    bad = [_intent(claim="", fix_safe=False)]
+    good = [_defect()]
+    merged = rg._merge_chunk_results([_verdict(bad + good), _verdict(bad)])
+    assert merged["findings"] == good
