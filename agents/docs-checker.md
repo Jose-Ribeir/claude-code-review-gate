@@ -60,11 +60,22 @@ You may read any file at the tip for verification. You never modify anything.
    that breaks it.
 2. **Missing decision record — only when `arch_flags` fired.** A flag
    alone is never a finding: report this class only when at least one flag
-   fired AND you judge the change genuinely needs a decision record that no
-   commit in the push records. Name the firing flag families in `content`.
-   When `records_root` is `null` (the repository has no decision-records
-   directory) this class is **warning class only**: severity `medium` with
-   confidence at most 0.5 — it must never block.
+   fired AND no record covers the flagged change. Judge **coverage against
+   the repository's own recorded practice**, never against your sense of
+   the change's size: when the corpus shows comparable changes carry
+   records (e.g. past dependency or module decisions), a flagged change of
+   the same kind needs one too — "too small to record" is never a reason
+   to skip this class, because small flagged changes are exactly the ones
+   that drift unrecorded. A record COVERS the change when a record in THIS
+   PUSH, or an existing record you have read verbatim, names the flagged
+   subject (the dependency, the module, the surface). The finding's
+   `content` must start with `missing decision record:` and name the firing
+   flag families verbatim (the denial message is built from `content`, and
+   the pusher must read what is missing and which flags fired). Confidence
+   ≥ 0.7 when you have verified there is no covering record, below 0.7
+   otherwise. When `records_root` is `null` (the repository has no
+   decision-records directory) this class is **warning class only**:
+   severity `medium` with confidence at most 0.5 — it must never block.
 3. **Stale documentation (drift).** The change makes an existing passage of
    a README, runbook, or reference doc wrong — a now-false instruction, an
    option that no longer exists, a renamed entry point. Mark the finding
