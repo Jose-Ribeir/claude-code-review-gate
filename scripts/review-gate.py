@@ -3654,7 +3654,12 @@ def _supervise_run(state_path, run_id):
             # Commit intent: one git log over the push range, then scoped per
             # chunk by touched-file intersection. Collected once here (manifest
             # build time), best-effort: None leaves every payload untouched.
-            intent_commits = _collect_commit_intent(review_root, push_range)
+            # The settings switch intent.messages (default on) gates collection.
+            _intent_settings = ocr_intent_config.load_settings(repo_root)
+            if _intent_settings["intent"].get("messages", True):
+                intent_commits = _collect_commit_intent(review_root, push_range)
+            else:
+                intent_commits = None
             # Linked tickets: only when settings intent.tickets is on; fetched
             # on the real repo (gh/glab resolve its remotes), never in the
             # review worktree. None leaves every payload untouched.
