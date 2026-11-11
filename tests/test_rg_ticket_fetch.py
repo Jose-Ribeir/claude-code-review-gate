@@ -6,8 +6,8 @@ maintainer's existing gh/glab sign-in (GitHub: issue, PR fallback; GitLab:
 glab api against the current repo's project). Results are cached 24h in the
 gate's state directory. Any failure (CLI missing, offline, timeout, non-zero
 exit, unexpected JSON) is a silent skip with a human-readable note; a review
-never fails on ticket fetching. The jira backend slot exists but is a clean
-miss note until t18's side-fetch worker lands.
+never fails on ticket fetching. The jira backend is t18's side-fetch worker
+(rg_jira_fetch; full coverage in test_rg_jira_fetch.py).
 
 The CLI boundary is mocked everywhere: no network, no gh/glab needed.
 """
@@ -165,17 +165,21 @@ def test_tracker_order_decides_which_backend_answers_first(tmp_path):
     assert runner.calls[0][0] == "glab"  # gitlab tried before github
 
 
-# --- jira seam (t18) --------------------------------------------------------------
+# --- jira backend (t18 delegation) ----------------------------------------------
 
-def test_jira_key_is_a_clean_miss_note_until_t18(tmp_path):
+def test_jira_key_without_a_connector_config_is_a_clean_miss_note(tmp_path, monkeypatch):
+    # t18's real jira backend runs via a separate headless worker; here the
+    # harness config is absent, so the fetch never leaves the gate checks.
+    # Full jira coverage lives in test_rg_jira_fetch.py.
+    monkeypatch.setenv("OCR_JIRA_MCP_CONFIG", str(tmp_path / "absent.json"))
     runner = _stub([])
     result = rg_ticket_fetch.fetch_tickets(
         _settings(), _discovered([("PROJ-123", "branch", "direct")]),
         repo_root=str(tmp_path), runner=runner, cache_dir=tmp_path / "cache")
     assert result["tickets"] == []
-    assert runner.calls == []  # gh/glab only handle #N keys
+    assert runner.calls == []  # gh/glab only handle #N keys; jira was gated off
     (note,) = result["notes"]
-    assert "PROJ-123" in note and "jira" in note.lower() and "t18" in note
+    assert "PROJ-123" in note and "jira" in note.lower()
 
 
 def test_key_without_a_matching_backend_is_a_note_not_a_crash(tmp_path):
