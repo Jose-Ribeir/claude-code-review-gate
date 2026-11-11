@@ -795,22 +795,26 @@ def _read_push_updates_from(lines, with_ref=False):
     commits past the gate. _range_for_refs reviews an `others` entry only when
     it carries commits the pushed branches do not.
 
-    Deletions (local sha all-zero) are skipped: there is no content to review.
+    Deletions (local sha all-zero) are skipped from both lists -- there is no
+    content to review -- and counted in the third return so a push that is
+    ENTIRELY deletions can be told apart from empty stdin: the former must
+    allow, the latter falls back to the HEAD heuristic.
     """
-    branches, others = [], []
+    branches, others, deleted = [], [], 0
     for line in lines:
         parts = line.split()
         if len(parts) != 4:
             continue
         local_ref, local_sha, remote_ref, remote_sha = parts
         if local_sha == _ZERO_SHA:
-            continue  # branch deletion: no content to review
+            deleted += 1  # branch deletion: no content to review
+            continue
         if remote_ref and not remote_ref.startswith("refs/heads/"):
             others.append((local_sha, remote_sha))
         else:
             branches.append((local_sha, remote_sha, remote_ref) if with_ref
                             else (local_sha, remote_sha))
-    return branches, others
+    return branches, others, deleted
 
 
 def _read_push_updates(with_ref=False):
@@ -825,14 +829,24 @@ def _read_push_updates(with_ref=False):
     reviewed none of them. Observed in a real repo, not hypothesised.
 
     Returns ([], []) when stdin is empty or unreadable, which puts callers back
-    on the old heuristic rather than failing.
+    on the old heuristic rather than failing. See _read_push_updates_ex for
+    the variant that also reports how many ref updates were deletions.
     """
+    return _read_push_updates_ex(with_ref)[:2]
+
+
+def _read_push_updates_ex(with_ref=False):
+    """`_read_push_updates` plus the deletion count: a push whose every ref
+    update is a deletion (local sha all zeros) carries no commits, and its
+    caller must allow it instead of falling back to the HEAD heuristic the
+    way an empty stdin does (that fallback once blocked a plain branch
+    deletion behind a review of commits the push did not send)."""
     try:
         if sys.stdin is None or sys.stdin.isatty():
-            return [], []
+            return [], [], 0
         raw = sys.stdin.read()
     except Exception:
-        return [], []
+        return [], [], 0
     return _read_push_updates_from((raw or "").splitlines(), with_ref)
 
 
@@ -2046,6 +2060,17 @@ def _parse_push(cmd):
     if out["tags"] and not specs:
         out["kind"] = "tags"
     return out
+
+
+def _delete_push_note():
+    """The informational line for a push that only deletes remote refs: no
+    commits are sent, so there is nothing to review -- same invariant as
+    _noop_push_note, for the deletion shape."""
+    try:
+        sys.stderr.write("review-gate: nothing to review — this push only deletes "
+                         "remote refs.\n")
+    except Exception:
+        pass
 
 
 def _noop_push_note():
@@ -10256,7 +10281,7 @@ def _main_inner(argv, mode):
     # is all there is -- and since 0.6.0 it is read rather than ignored.
     push_range, tip, branch, base, push_ref = "", "", "", "", ""
     if mode == "git":
-        refs3, other_refs = _read_push_updates(with_ref=True)
+        refs3, other_refs, n_deleted = _read_push_updates_ex(with_ref=True)
         refs = [r[:2] for r in refs3]
         push_range = _range_for_refs(refs, repo_root, _pushed_remote_arg(argv, repo_root),
                                      extra=other_refs)
@@ -10270,6 +10295,12 @@ def _main_inner(argv, mode):
                 "unreviewed, so it is refused instead.\n\nPush the branches separately, or "
                 "set OCR_FAIL_OPEN=1 for a one-shot bypass.",
             )
+        if not refs and not other_refs and n_deleted:
+            # Every ref update is a deletion: the push carries no commits at
+            # all, so reviewing anything (let alone the HEAD fallback) reviews
+            # commits this push does not even send.
+            _delete_push_note()
+            allow()
         if not refs and not other_refs and not _base_v1():
             # Git told us nothing readable. Ask the same helper what HEAD would
             # send, so the review still gets an ancestor-based range instead of
