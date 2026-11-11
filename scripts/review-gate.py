@@ -9759,12 +9759,18 @@ def _main_inner(argv, mode):
                 tip = _head_sha(repo_root)
         else:
             tip = _head_sha(repo_root)
-        branch = _branch(repo_root)
-        remote_name = _pushed_remote_arg(argv, repo_root)
         # The remote ref this tip is being pushed to; the one ref when only one
         # is in play, "" when it cannot be told apart.
         _hit = [r[2] for r in refs3 if r[0] == tip] or ([refs3[0][2]] if len(refs3) == 1 else [])
         push_ref = _norm_push_ref(_hit[0]) if _hit else ""
+        # The state's branch label names the PUSHED branch, not the checkout:
+        # `git push origin feat` from a main checkout is "the review of feat".
+        # Mislabeling it as the checked-out branch made a push of one branch
+        # read as a review of another.
+        branch = (_hit[0][len("refs/heads/"):]
+                 if _hit and _hit[0].startswith("refs/heads/")
+                 else _branch(repo_root))
+        remote_name = _pushed_remote_arg(argv, repo_root)
     else:
         decision, info = _hook_target(repo_root, cmd)
         if decision == "allow":
