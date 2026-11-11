@@ -40,6 +40,9 @@ name (0.10.0), read at call time. (A file_diff is keyed `review:<path>`; since 0
 unit_diff is `unit:<path>:<unit>:<part>` and a context item `context:<role>:<path>:<n>`.)
 
 0.11.0 (Part S) knobs:
+  STUB_DOCS_FINDING  JSON {content, severity?, path?, category?, existing_code?} -- a
+                     documentation-checker finding, only when the manifest carries
+                     docs_context (docs-gate 01).
   STUB_UNIT_FINDINGS  JSON {unit qualname: {severity, content, offset}} -- a finding anchored
                       `offset` lines into every unit_diff item of that unit (first part only),
                       at the unit's tip line numbers, with `existing_code` read from the tree.
@@ -389,4 +392,22 @@ if os.environ.get("STUB_CONFIRM_SIBLINGS") == "1":
         })
 if os.environ.get("STUB_CROSS_FILE"):
     out["cross_file_context_summary"] = json.loads(os.environ["STUB_CROSS_FILE"])
+# docs-gate 01: a documentation-checker finding. Only emitted when the manifest
+# carries `docs_context` (the gate injected the repo's .ocr/docs-summary.md) --
+# with no artifact the checker pass never runs and no finding can appear.
+docs_finding = os.environ.get("STUB_DOCS_FINDING", "")
+if docs_finding and manifest and manifest.get("docs_context"):
+    try:
+        spec = json.loads(docs_finding)
+        anchor = spec.get("path") or (manifest.get("paths") or ["?"])[0]
+        findings.append({
+            "path": anchor, "start_line": 1, "end_line": 2, "confidence": 0.95,
+            "category": spec.get("category", "documentation"),
+            "evidence": "docs_context",
+            "severity": spec.get("severity", "high"),
+            "content": spec.get("content", "stub docs finding"),
+            "existing_code": spec.get("existing_code", "stub code"),
+        })
+    except Exception:
+        pass
 emit(json.dumps(out))
