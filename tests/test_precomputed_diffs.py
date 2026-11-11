@@ -348,7 +348,15 @@ def test_ocr_precomputed_diffs_0_restores_the_old_path_exactly(tmp_path):
     _push_ok(work, ag._env(tmp_path, OCR_PRECOMPUTED_DIFFS="0"))
     ag._wait_state(work, tip, {"done"})
     (call,) = _calls(tmp_path)
-    assert call["paths_file"] is None and call["manifest"] is None   # golden argv, no manifest
+    # Commit intent rides the extras seam, so OCR_PRECOMPUTED_DIFFS=0 no
+    # longer reaches the bare 0.7.0 argv on a push with commits: a manifest
+    # is written carrying commit_intent (and no precomputed-diff items).
+    m = call["manifest"]
+    assert m is not None and "items" not in m and "tasks" not in m
+    intent = m["commit_intent"]
+    assert intent["commit_count"] == 1
+    assert [c["subject"] for c in intent["commits"]] == ["add files"]
+    assert {f for c in intent["commits"] for f in c["files"]} == {"mod0.py", "mod1.py"}
     assert _run_dirs(work) == []
 
 
