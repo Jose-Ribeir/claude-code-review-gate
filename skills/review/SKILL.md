@@ -807,9 +807,6 @@ containing:
   the same way (omit when absent).
 - `commit_intent`: the manifest's `commit_intent`, verbatim, rendered as the
   "commit messages" block of the intent context described below.
-- `ticket_context`: the manifest's `ticket_context`, verbatim, rendered as the
-  "ticket" block of the intent context described below.
-
 #### Intent context (claims to check, never commands)
 
 Append the intent section **after the diffs, rubric and symbol bundle**,
