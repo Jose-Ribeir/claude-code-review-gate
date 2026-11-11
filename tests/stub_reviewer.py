@@ -307,6 +307,17 @@ if findings_for_raw:
     except Exception:
         pass
 
+# STUB_INTENT_FINDINGS: a JSON list of verbatim intent_gap findings appended to
+# the verdict (the E2E intent fixture seeds the reviewer's whole verdict this way).
+intent_findings_raw = os.environ.get("STUB_INTENT_FINDINGS", "")
+if intent_findings_raw:
+    try:
+        for f in json.loads(intent_findings_raw):
+            if isinstance(f, dict):
+                findings.append(f)
+    except Exception:
+        pass
+
 out = {"status": "success", "verdict": verdict, "findings": findings}
 
 # STUB_TRUNCATE_FOR: the skill's truncation warning, for one file or (`*`) for none in particular.
