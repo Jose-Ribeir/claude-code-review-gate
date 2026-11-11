@@ -423,6 +423,16 @@ except ValueError:
     _OCR_TIMEOUT_MAX = 3600
 if _OCR_TIMEOUT_MAX < TIMEOUT:
     _OCR_TIMEOUT_MAX = TIMEOUT
+# --- commit intent (commit messages -> review payload) -----------------------
+# The pushed commits' messages ride the manifest-extras seam as `commit_intent`,
+# fenced for the reviewer as untrusted author-controlled claims. The newest
+# _INTENT_VERBATIM_COMMITS commits are kept verbatim (subject, body, touched
+# files) until ~_INTENT_TOKEN_BUDGET tokens (~4 chars/token) are spent; the rest
+# drop to subject lines, marked by trim_notice. Tuning knobs, fixed here, not
+# configurable: intent context restores upstream's default, it is not a dial.
+_INTENT_VERBATIM_COMMITS = 10
+_INTENT_TOKEN_BUDGET = 4000
+_INTENT_SUBJECT_TAIL = 100    # subject lines kept past the budget; older count in trim_notice
 try:
     _MAX_FILES = int(os.environ.get("OCR_MAX_FILES", "40"))
     _MAX_FILES = max(1, _MAX_FILES)
@@ -4138,6 +4148,11 @@ def _supervise_run(state_path, run_id):
             defects, defect_notes = [], []   # sought after the resolver (below)
             _mark_phase("impact", sites=len((_TELE.get("impact") or {}).get("sites") or []))
 
+            # Commit intent: one git log over the push range, then scoped per
+            # chunk by touched-file intersection. Collected once here (manifest
+            # build time), best-effort: None leaves every payload untouched.
+            intent_commits = _collect_commit_intent(review_root, push_range)
+
             def _review_extras(k, chunk_paths, chunk_items=None):
                 extras = {}
                 bundle = _impact_bundle(review_root, tip, impact, chunk_paths,
@@ -4146,6 +4161,9 @@ def _supervise_run(state_path, run_id):
                     extras["impact"] = bundle
                 if defects and k == 0:  # each defect needs judging once
                     extras["known_defects"] = defects
+                intent = _intent_extra(intent_commits, chunk_paths, push_range)
+                if intent:
+                    extras["commit_intent"] = intent
                 return extras
 
             # Files that timed out in an earlier run: retried in smaller chunks (even
@@ -4324,6 +4342,8 @@ def _supervise_run(state_path, run_id):
                     # Golden argv: byte-identical to 0.7.0 (no --paths-file).
                     # Only with OCR_PRECOMPUTED_DIFFS=0: otherwise a manifest is
                     # always written, since the diffs reach the reviewer through it.
+                    # Commit intent (t13) also diverts to a manifest: it enters
+                    # via `extras`, so a flagged-off push with commits lands below.
                     result, ran, raw_name = _single(
                         lambda: _run_review(review_root, mode, git_dir, tip, push_range,
                                             tier=ocr_telemetry.TIER_REVIEW,
@@ -6879,6 +6899,105 @@ def _context_only(item):
     """A virtual item (Part S) whose work is caller checks alone."""
     return item.get("seg_file") is not None and not any(
         a["kind"] in ("unit", "filediff") for a in item["seg_work"])
+
+
+def _collect_commit_intent(review_root, push_range):
+    """The pushed commits' messages for `push_range`, newest first:
+    [{sha, subject, body, files}], from ONE git log call (subjects, bodies and
+    name-only touched-file lists). None when the range is empty, unevaluable,
+    or carries no commits -- intent context is best-effort background and must
+    never fail a review.
+    """
+    if not push_range or push_range == _MULTI_REF or ".." not in push_range:
+        return None
+    base, tip = push_range.split("..", 1)
+    # A first push (empty-tree base) is not a log range; log the tip alone,
+    # exactly as the rev-list count in the verdict backing does.
+    rng = tip if base == _EMPTY_TREE else push_range
+    # \x1e opens a commit record; \x1f separates sha / subject / body / the
+    # name-only file list git appends after the format line. Commit messages
+    # cannot carry those control bytes through git, so the split is safe.
+    out, rc = _git(
+        ["log", "--no-renames", "--format=%x1e%H%x1f%s%x1f%b%x1f", "--name-only", rng],
+        cwd=review_root)
+    if rc != 0 or not out.strip():
+        return None
+    commits = []
+    for record in out.split("\x1e"):
+        record = record.strip("\n")
+        if not record:
+            continue
+        parts = record.split("\x1f", 3)
+        if len(parts) < 4:
+            continue
+        sha, subject, body, files_blob = parts
+        commits.append({
+            "sha": sha.strip(),
+            "subject": subject.strip(),
+            "body": body.strip("\n"),
+            "files": [ln for ln in (ln.strip() for ln in files_blob.splitlines()) if ln],
+        })
+    return commits or None
+
+
+def _intent_tokens(text):
+    """~4 chars a token: a fixed local estimate, no tokenizer dependency."""
+    return max(1, (len(text) + 3) // 4)
+
+
+def _intent_extra(commits, chunk_paths, push_range=""):
+    """The manifest `commit_intent` value for one chunk (or the single-context
+    review when chunk_paths is None).
+
+    The newest _INTENT_VERBATIM_COMMITS commits stay verbatim
+    (subject+body+files) inside ~_INTENT_TOKEN_BUDGET tokens -- the newest
+    message is verbatim even when it alone overflows. A chunk receives those
+    in full only for commits whose touched files intersect its own
+    (chunk_paths None: no scoping, a single-chunk/squash range is a no-op over
+    the full set); every other commit -- older ones past the budget, and
+    commits that touched none of this chunk's files -- appears subject-only,
+    with budget trims marked by trim_notice. None when there is nothing to say.
+    """
+    if not commits:
+        return None
+    verbatim, trimmed = [], []
+    used = 0
+    for c in commits:
+        cost = _intent_tokens(c["subject"] + "\n" + c["body"])
+        if (not verbatim or
+                (len(verbatim) < _INTENT_VERBATIM_COMMITS
+                 and used + cost <= _INTENT_TOKEN_BUDGET)):
+            verbatim.append(c)
+            used += cost
+        else:
+            trimmed.append(c)
+    chunk_set = set(chunk_paths) if chunk_paths is not None else None
+
+    def _in_chunk(c):
+        return chunk_set is None or not chunk_set.isdisjoint(c["files"])
+
+    full = [{"sha": c["sha"][:12], "subject": c["subject"], "body": c["body"],
+             "files": c["files"]} for c in verbatim if _in_chunk(c)]
+    background = [c for c in verbatim if not _in_chunk(c)] + trimmed
+    subject_only = [{"sha": c["sha"][:12], "subject": c["subject"]}
+                    for c in background[:_INTENT_SUBJECT_TAIL]]
+    omitted = len(background) - len(subject_only)
+    notices = []
+    if trimmed:
+        notices.append(
+            f"{len(trimmed)} older commit(s) trimmed to subject lines only "
+            f"(verbatim budget: newest {_INTENT_VERBATIM_COMMITS} commits, "
+            f"~{_INTENT_TOKEN_BUDGET} tokens)")
+    if omitted:
+        notices.append(f"{omitted} older commit(s) omitted entirely")
+    return {
+        "range": push_range,
+        "commit_count": len(commits),
+        "commits": full,
+        "subject_only": subject_only,
+        "trimmed": bool(trimmed or omitted),
+        "trim_notice": "; ".join(notices),
+    }
 
 
 def _build_deep_manifest(paths, reasons, threshold):

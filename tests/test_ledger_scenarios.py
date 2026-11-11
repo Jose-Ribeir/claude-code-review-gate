@@ -820,20 +820,25 @@ def test_scenario_6_no_change_repush_replays_with_zero_calls(tmp_path):
     assert calls2 == [], f"expected 0 reviewer calls on re-push, got {calls2}"
 
 
-def test_scenario_13_ocr_ledger_0_uses_golden_argv_no_ledger_dir(tmp_path):
-    """OCR_LEDGER=0: every file is full, argv byte-identical to 0.7.0, no ledger dir."""
+def test_scenario_13_ocr_ledger_0_uses_manifest_no_ledger_dir(tmp_path):
+    """OCR_LEDGER=0: every file is full and no ledger dir is created.
+    OCR_PRECOMPUTED_DIFFS=0: since 0.10.0 every review gets a manifest (the
+    diffs reach the reviewer through it); the bare 0.7.0 argv is the rollback
+    path -- reached only when nothing rides the extras seam. Commit intent
+    (t13) does, so this push still gets a manifest carrying commit_intent."""
     work = _tiny_repo(tmp_path, {"x.py": "x = 1\n"})
     tip = _commit(work, "x.py", "x = 2\n")
-    # OCR_PRECOMPUTED_DIFFS=0: since 0.10.0 every review gets a manifest (the diffs
-    # reach the reviewer through it); the bare 0.7.0 argv is the rollback path.
     env = _env(tmp_path, OCR_LEDGER="0", OCR_PRECOMPUTED_DIFFS="0")
     decision, reason, _ = _hook(work, "git push origin main", env)
     assert decision == "pass", reason
     _wait_state(work, tip, {"done"})
     calls = _trace(tmp_path)
     assert len(calls) == 1
-    # No --paths-file in the call (golden argv path).
-    assert calls[0]["paths_file"] is None, "OCR_LEDGER=0 must not use --paths-file"
+    # A manifest is used (--paths-file), carrying commit intent (t13).
+    assert calls[0]["paths_file"] is not None, "commit intent diverts the golden argv path"
+    intent = calls[0]["manifest"]["commit_intent"]
+    assert intent["commit_count"] == 1
+    assert [c["subject"] for c in intent["commits"]] == ["add x.py"]
     # Ledger directory must not be created.
     common = review_gate._git_common_dir(str(work))
     led_dir = review_gate._ledger_dir(common)
