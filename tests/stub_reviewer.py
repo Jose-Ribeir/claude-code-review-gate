@@ -41,11 +41,17 @@ unit_diff is `unit:<path>:<unit>:<part>` and a context item `context:<role>:<pat
 
 0.11.0 (Part S) knobs:
   STUB_DOCS_FINDING  JSON {content, severity?, path?, category?, existing_code?,
-                     confidence?, docs_kind?, stale_passage?, doc_path?} -- a
-                     documentation-checker finding, only when the manifest carries
-                     docs_context (docs-gate 01). docs-gate 04: the drift-class
-                     fields (docs_kind/stale_passage/doc_path) pass through verbatim
-                     when scripted; a scripted confidence overrides the tier default.
+                     source_doc?, confidence?, docs_kind?, stale_passage?,
+                     doc_path?} -- a documentation-checker finding, only when the
+                     manifest carries docs_context (docs-gate 01). Contradiction
+                     class (docs-gate 03): dropped per the checker's contract when
+                     either quote is missing or source_doc names a document outside
+                     docs_context.corpus. Drift class (docs-gate 04): docs_kind/
+                     stale_passage/doc_path pass through verbatim when scripted; a
+                     scripted confidence overrides the tier default.
+  STUB_FILTER_DROP   JSON [substring, ...] -- simulate the skill's §3b falsify
+                     pass: would-be-blocking findings whose content carries one of
+                     the substrings are dropped, code and doc findings alike.
 docs-gate 05 knobs (generation mode, `--docs-summary` in argv):
   STUB_DOCS_SUMMARY         the summary markdown the generation call returns
   STUB_DOCS_SUMMARY_VERDICT "fail" -- exit 1, exercising the gate's fail-closed path
@@ -440,25 +446,55 @@ if os.environ.get("STUB_CROSS_FILE"):
 # docs-gate 01: a documentation-checker finding. Only emitted when the manifest
 # carries `docs_context` (the gate injected the repo's .ocr/docs-summary.md) --
 # with no artifact the checker pass never runs and no finding can appear.
+# docs-gate 03 (the checker's contract): a contradiction finding quotes BOTH
+# the decision text and the contradicting code -- drop it when either quote is
+# missing -- and only a binding-corpus source can veto, so a spec naming a
+# `source_doc` outside the manifest's docs_context.corpus is dropped too
+# (READMEs/runbooks and excluded docs never veto).
 docs_finding = os.environ.get("STUB_DOCS_FINDING", "")
-if docs_finding and manifest and manifest.get("docs_context"):
+_docs_ctx = (manifest or {}).get("docs_context") or {}
+if docs_finding and _docs_ctx:
     try:
         spec = json.loads(docs_finding)
-        anchor = spec.get("path") or (manifest.get("paths") or ["?"])[0]
-        sev = spec.get("severity", "high")
-        f = {
-            "path": anchor, "start_line": 1, "end_line": 2,
-            "confidence": _confidence(sev, spec),
-            "category": spec.get("category", "documentation"),
-            "evidence": "docs_context",
-            "severity": sev,
-            "content": spec.get("content", "stub docs finding"),
-            "existing_code": spec.get("existing_code", "stub code"),
-        }
-        for k in ("docs_kind", "stale_passage", "doc_path"):
-            if k in spec:
-                f[k] = spec[k]
-        findings.append(f)
+        content = spec.get("content", "stub docs finding")
+        code_quote = spec.get("existing_code", "stub code")
+        source_doc = spec.get("source_doc")
+        corpus = [_p for cls in (_docs_ctx.get("corpus") or {}).values() for _p in cls]
+        if content and code_quote and (source_doc is None or source_doc in corpus):
+            anchor = spec.get("path") or (manifest.get("paths") or ["?"])[0]
+            sev = spec.get("severity", "high")
+            f = {
+                "path": anchor, "start_line": 1, "end_line": 2,
+                "confidence": _confidence(sev, spec),
+                "category": spec.get("category", "documentation"),
+                "evidence": "docs_context",
+                "severity": sev,
+                "content": content,
+                "existing_code": code_quote,
+            }
+            for k in ("docs_kind", "stale_passage", "doc_path"):
+                if k in spec:
+                    f[k] = spec[k]
+            findings.append(f)
     except Exception:
         pass
+
+# STUB_FILTER_DROP (docs-gate 03): simulate the skill's 3b falsify pass -- a
+# JSON array of substrings; every would-be-blocking finding whose content
+# carries one is dropped as the filter's drop_ids would have it. Code and doc
+# findings share the pass identically.
+filter_drop = json.loads(os.environ.get("STUB_FILTER_DROP", "[]") or "[]")
+if filter_drop:
+    would_block = [f for f in findings
+                   if f.get("severity") == "high" or
+                   (f.get("severity") == "medium" and float(f.get("confidence", 0)) >= 0.7)]
+    dropped = [f for f in would_block
+               if any(s in (f.get("content") or "") for s in filter_drop)]
+    if dropped:
+        findings = [f for f in findings if f not in dropped]
+        out["findings"] = findings
+        out["filter"] = {"dropped": [f.get("content") for f in dropped]}
+        if trace:
+            with open(trace, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps({"filter": out["filter"]}) + "\n")
 emit(json.dumps(out))
