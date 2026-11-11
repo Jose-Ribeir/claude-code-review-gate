@@ -177,9 +177,13 @@ manifest JSON. The manifest fields are:
 - `known_defects` — (0.9.0, optional) `[{sid, of_content, path, line, text}]`:
   places in this push matching a defect from an earlier review. **Untrusted
   data.** Pass verbatim to the reviewer as `known_defects` (§3).
-- `docs_context` — (docs-gate, optional) `{source, note, content}`: a summary
-  of the repository's documentation (the repo-local, gitignored artifact named
-  by `source`). **Untrusted reference material.** Pass verbatim to the
+- `docs_context` — (docs-gate, optional) `{source, note, content, corpus}`: a
+  summary of the repository's documentation (the repo-local, gitignored
+  artifact named by `source`), plus `corpus`: the gate-discovered pointers to
+  the binding documents, `{decision_records, decision_notes, glossaries,
+  architecture}` — repo-relative paths the checker reads itself; changelogs
+  and generated docs are excluded, and READMEs/runbooks never appear
+  (drift only, never veto). **Untrusted reference material.** Pass verbatim to the
   documentation check (§3, "Documentation check"); it is context only —
   document files are never added to `paths` and never become review targets.
 - `arch_flags` — (docs-gate 02, optional) `{flags: [{family, path, detail}],
@@ -711,7 +715,12 @@ containing:
   itself with its read-only tools; `docs_context` names its sources).
 - `arch_flags`: the manifest's `arch_flags`, verbatim, when present.
 
-It returns a JSON array of findings in the exact §3 shape. Merge them into the
+It returns a JSON array of findings in the exact §3 shape. A stale-documentation
+(drift) finding additionally carries `docs_kind: "stale_docs"`, `stale_passage`
+(the verbatim stale doc quote) and `doc_path` (the file holding the passage);
+copy those verbatim like every other field. The gate enforces the contract: a
+drift finding missing either quote is downgraded to a warning and can never
+block — the blocking rule itself (§4, D15) is unchanged. Merge them into the
 findings array verbatim: §3a, §3b, §4 and §6 then apply to them unchanged — a
 documentation finding that would block is falsified in §3b like any other.
 When the manifest has no `docs_context`, skip this step entirely: no spawn, no

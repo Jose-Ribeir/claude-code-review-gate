@@ -420,3 +420,303 @@ def test_documentation_only_fix_reblocks_with_the_options_message(tmp_path):
     assert decision == "deny", reason
     assert ("documentation-only fix re-blocks once and proceeds via a logged "
             "git push --no-verify") in reason, reason
+
+
+# ---------------------------------------------------------------------------
+# docs-gate 03: contradiction check against the binding corpus.
+#
+# The gate discovers the repo's binding documents Python-side and delivers the
+# pointers in docs_context.corpus; the checker reads the files itself and only
+# binding sources veto. Contracts under test: contradiction findings quote both
+# sides (decision text AND contradicting code), informal decision notes in
+# prose documents are binding, READMEs/runbooks never veto, and a would-block
+# contradiction dropped by the falsify pass does not block.
+
+_ADR = (
+    "# ADR 0001: verdict computation lives in Python\n"
+    "\n"
+    "Decision D1: the model's verdict word is never trusted; the verdict is\n"
+    "computed in Python from the findings.\n")
+_PROSE_NOTES = (
+    "# Design notes\n"
+    "\n"
+    "Decision D3: the falsify pass always runs in its own fresh context,\n"
+    "independent of the reviewer's reasoning.\n")
+_GLOSSARY = "# Glossary\n\n**gate**: the pre-push review hook.\n"
+_ARCHITECTURE = "# Architecture\n\nOne hook process, detached supervisor.\n"
+_README = "# project\n\nThe verdict is whatever the model says.\n"
+_DEC_D1 = "the model's verdict word is never trusted"
+_CODE_QUOTE = "return trust_model()"
+
+
+def _corpus(tmp_path, trace):
+    ctx = (_review_manifest(tmp_path, trace).get("docs_context") or {})
+    return ctx.get("corpus")
+
+
+def _contradiction_spec(source_doc, decision, code):
+    """A checker finding built by the persona contract: the decision text and
+    the contradicting code are BOTH quoted (docs-gate 03)."""
+    return {"source_doc": source_doc,
+            "content": "contradicts recorded decision \"%s\" (%s): "
+                       "the added code `%s` breaks it" % (decision, source_doc, code),
+            "existing_code": code}
+
+
+def test_corpus_pointers_classify_the_binding_docs_and_exclude_the_rest(tmp_path):
+    """Formal records, informal notes in prose, glossaries, architecture docs
+    are enumerated as binding pointers; READMEs/runbooks are absent (drift
+    only, ticket 04); changelogs and generated docs are excluded entirely."""
+    work = _repo(tmp_path, {"app.py": _APP_V1,
+                            "docs/adr/0001-python-verdict.md": _ADR,
+                            "docs/plans/design.md": _PROSE_NOTES,
+                            "GLOSSARY.md": _GLOSSARY,
+                            "docs/architecture/overview.md": _ARCHITECTURE,
+                            "README.md": _README,
+                            "CHANGELOG.md": "# Changelog\n",
+                            "docs/generated/api.md": "# Generated API\n",
+                            "runbooks/deploy.md": "# Deploy runbook\n"})
+    _write_docs_summary(work)
+    _commit(work, {"app.py": _APP_V2})
+    decision, reason = _push(work, _env(tmp_path, "t.trace"))
+    assert decision == "pass", reason
+    corpus = _corpus(tmp_path, "t.trace")
+    assert corpus, "the manifest must carry binding-corpus pointers"
+    assert corpus["decision_records"] == ["docs/adr/0001-python-verdict.md"]
+    assert corpus["decision_notes"] == ["docs/plans/design.md"]
+    assert corpus["glossaries"] == ["GLOSSARY.md"]
+    assert corpus["architecture"] == ["docs/architecture/overview.md"]
+    flat = [p for v in corpus.values() for p in v]
+    for excluded in ("README.md", "CHANGELOG.md", "docs/generated/api.md",
+                     "runbooks/deploy.md"):
+        assert excluded not in flat
+
+
+def test_contradiction_blocks_quoting_both_the_decision_and_the_code(tmp_path):
+    """A checker finding against a binding record blocks, and the push's
+    denial quotes BOTH the decision text and the contradicting code."""
+    work = _repo(tmp_path, {"app.py": _APP_V1,
+                            "docs/adr/0001-python-verdict.md": _ADR})
+    _write_docs_summary(work)
+    _commit(work, {"app.py": _APP_V2})
+    spec = _contradiction_spec("docs/adr/0001-python-verdict.md", _DEC_D1, _CODE_QUOTE)
+    env = _env(tmp_path, "t.trace", STUB_DOCS_FINDING=json.dumps(spec))
+    decision, reason = _push(work, env)
+    assert decision == "deny", reason
+    assert _DEC_D1 in reason, reason
+    assert _CODE_QUOTE in reason, reason
+
+
+def test_informal_decision_note_inside_a_prose_document_is_binding(tmp_path):
+    """A D-numbered note recorded in prose (not a formal ADR) carries veto
+    power: the corpus points at the file and a contradiction blocks."""
+    work = _repo(tmp_path, {"app.py": _APP_V1,
+                            "docs/plans/design.md": _PROSE_NOTES})
+    _write_docs_summary(work)
+    _commit(work, {"app.py": _APP_V2})
+    spec = _contradiction_spec("docs/plans/design.md",
+                               "falsify pass always runs in its own fresh context",
+                               _CODE_QUOTE)
+    env = _env(tmp_path, "t.trace", STUB_DOCS_FINDING=json.dumps(spec))
+    decision, reason = _push(work, env)
+    assert decision == "deny", reason
+    assert _corpus(tmp_path, "t.trace")["decision_notes"] == ["docs/plans/design.md"]
+    assert "Decision D3" not in reason  # the quote appears as the prose text
+    assert "fresh context" in reason, reason
+
+
+def test_readme_contradiction_never_blocks(tmp_path):
+    """READMEs carry no veto: a finding sourced from a README is dropped by
+    the checker (not in the binding corpus) and the push lands."""
+    work = _repo(tmp_path, {"app.py": _APP_V1, "README.md": _README})
+    _write_docs_summary(work)
+    tip = _commit(work, {"app.py": _APP_V2})
+    spec = _contradiction_spec("README.md", "the verdict is whatever the model says",
+                               _CODE_QUOTE)
+    env = _env(tmp_path, "t.trace", STUB_DOCS_FINDING=json.dumps(spec))
+    decision, reason = _push(work, env)
+    assert decision == "pass", reason
+    corpus = _corpus(tmp_path, "t.trace")
+    assert all("README.md" not in v for v in (corpus or {}).values())
+    st = _state(work, tip)
+    assert st.get("verdict") == "pass"
+
+
+def test_docs_finding_without_both_quotes_does_not_block(tmp_path):
+    """The persona contract: a contradiction finding missing either quote is
+    not blocking -- the checker drops it rather than emit it."""
+    work = _repo(tmp_path, {"app.py": _APP_V1,
+                            "docs/adr/0001-python-verdict.md": _ADR})
+    _write_docs_summary(work)
+    _commit(work, {"app.py": _APP_V2})
+    env = _env(tmp_path, "t.trace",
+               STUB_DOCS_FINDING=json.dumps({
+                   "source_doc": "docs/adr/0001-python-verdict.md",
+                   "content": "maybe contradicts the ADR, no code quoted",
+                   "existing_code": "",
+               }))
+    decision, reason = _push(work, env)
+    assert decision == "pass", reason
+
+
+def test_falsify_rejected_contradiction_does_not_block(tmp_path):
+    """A would-block contradiction passes through the existing falsify pass
+    (SKILL.md 3b); when the filter drops it, the push lands."""
+    work = _repo(tmp_path, {"app.py": _APP_V1,
+                            "docs/adr/0001-python-verdict.md": _ADR})
+    _write_docs_summary(work)
+    tip = _commit(work, {"app.py": _APP_V2})
+    spec = _contradiction_spec("docs/adr/0001-python-verdict.md", _DEC_D1, _CODE_QUOTE)
+    env = _env(tmp_path, "t.trace",
+               STUB_DOCS_FINDING=json.dumps(spec),
+               STUB_FILTER_DROP=json.dumps([_DEC_D1]))
+    decision, reason = _push(work, env)
+    assert decision == "pass", reason
+    drops = [c["filter"]["dropped"] for c in _calls(tmp_path, "t.trace")
+             if c.get("filter")]
+    assert drops and any(_DEC_D1 in d for d in drops[0]), drops
+    st = _state(work, tip)
+    assert st.get("verdict") == "pass"
+    assert _DEC_D1 not in st.get("reasons", "")
+
+
+# ---------------------------------------------------------------------------
+# docs-gate 04: documentation DRIFT -- code that stales an existing README,
+# runbook, or reference doc. Drift findings carry docs_kind "stale_docs" and
+# block only when they quote BOTH the exact stale passage (stale_passage) and
+# the contradicting code (existing_code); missing either quote they are
+# downgraded to warning and can never block. The blocking rule they ride is
+# D15 itself (compute_verdict, ocr_verdict.py) -- byte-identical to the rule
+# code findings use.
+# ---------------------------------------------------------------------------
+
+_README_DOC = ("# project\n\nBefore pushing, run `python app.py --self-check` "
+               "and make sure it prints OK.\n")
+_APP_WITH_CHECK = "def self_check():\n    return 'OK'\n"
+_APP_WITHOUT_CHECK = "def main():\n    return 1\n"
+_STALE_PASSAGE = "run `python app.py --self-check`"
+_DRIFT_CODE = "def main():"
+_DRIFT_CONTENT = (
+    "README.md instructs to run `python app.py --self-check` before pushing, "
+    "but the change removes the self-check entry point (app.py now has only "
+    "def main():), so that documented instruction is now stale. Unblock by "
+    "touching a code file that references the record (a pure docs fix "
+    "re-blocks once, then proceed with a logged git push --no-verify).")
+
+
+def _drift_finding(**over):
+    """A contract-shaped drift finding; overrides pin one aspect per test."""
+    f = {
+        "path": "app.py", "start_line": 1, "end_line": 2,
+        "severity": "medium", "confidence": 0.8,
+        "category": "documentation", "evidence": "docs_context",
+        "docs_kind": "stale_docs",
+        "stale_passage": _STALE_PASSAGE, "doc_path": "README.md",
+        "existing_code": _DRIFT_CODE, "content": _DRIFT_CONTENT,
+    }
+    f.update(over)
+    return f
+
+
+def test_fully_quoted_drift_finding_blocks():
+    # Criterion: a solid drift finding blocks -- with both quotes present the
+    # documentation class is as binding as any code finding.
+    assert review_gate.compute_verdict({"findings": [_drift_finding()]}) == "block"
+
+
+def test_drift_blocking_uses_the_same_d15_medium_branch_as_code_findings():
+    # The drift class rides D15 byte-for-byte: medium severity blocks exactly
+    # at OCR_BLOCK_CONFIDENCE (0.7) and warns below it -- no drift-specific
+    # severity math.
+    assert review_gate.compute_verdict(
+        {"findings": [_drift_finding(confidence=0.7)]}) == "block"
+    assert review_gate.compute_verdict(
+        {"findings": [_drift_finding(confidence=0.69)]}) == "warn"
+
+
+def test_drift_finding_without_the_stale_passage_quote_never_blocks():
+    # Missing the verbatim stale passage entirely, or carrying an empty one:
+    # even at high severity and 0.95 confidence (which WOULD block a code
+    # finding) the finding is below the credibility bar -- warn, never block.
+    missing = _drift_finding(severity="high", confidence=0.95)
+    del missing["stale_passage"]
+    assert review_gate.compute_verdict({"findings": [missing]}) == "warn"
+    empty = _drift_finding(severity="high", confidence=0.95, stale_passage="  ")
+    assert review_gate.compute_verdict({"findings": [empty]}) == "warn"
+
+
+def test_drift_finding_without_the_code_quote_never_blocks():
+    # Symmetric other half: the contradicting code quote is required too.
+    f = _drift_finding(severity="high", confidence=0.95, existing_code="")
+    assert review_gate.compute_verdict({"findings": [f]}) == "warn"
+
+
+def test_non_drift_documentation_findings_are_not_quote_clamped():
+    # The quoting rule scopes to docs_kind "stale_docs" only. Other
+    # documentation-check classes (ticket 03's contradiction class, emitted
+    # without docs_kind) keep their own strictness: a high finding blocks.
+    f = _drift_finding(severity="high", confidence=0.95)
+    del f["docs_kind"]
+    del f["stale_passage"]
+    assert review_gate.compute_verdict({"findings": [f]}) == "block"
+
+
+def test_drift_finding_blocks_and_the_denial_quotes_passage_and_code(tmp_path):
+    """Seam: stub checker reports a staling change with BOTH quotes -> the push
+    is denied and the denial quotes the stale passage and the contradicting
+    code, verbatim."""
+    work = _repo(tmp_path, {"app.py": _APP_WITH_CHECK, "README.md": _README_DOC})
+    _write_docs_summary(work)
+    tip = _commit(work, {"app.py": _APP_WITHOUT_CHECK})
+    env = _env(tmp_path, "t.trace", STUB_DOCS_FINDING=json.dumps({
+        "docs_kind": "stale_docs", "severity": "medium", "confidence": 0.8,
+        "stale_passage": _STALE_PASSAGE, "doc_path": "README.md",
+        "existing_code": _DRIFT_CODE, "content": _DRIFT_CONTENT}))
+    decision, reason = _push(work, env)
+    assert decision == "deny", reason
+    assert _STALE_PASSAGE in reason and _DRIFT_CODE in reason, reason
+    st = _state(work, tip)
+    assert st.get("verdict") == "block" and _STALE_PASSAGE in st.get("reasons", "")
+
+
+def test_drift_finding_without_both_quotes_warns_only_end_to_end(tmp_path):
+    """Same staling change, but the finding carries no stale_passage: even at
+    high severity / 0.95 confidence the push lands (decision pass) and the
+    verdict is warn -- downgraded, never blocking, still surfaced."""
+    work = _repo(tmp_path, {"app.py": _APP_WITH_CHECK, "README.md": _README_DOC})
+    _write_docs_summary(work)
+    tip = _commit(work, {"app.py": _APP_WITHOUT_CHECK})
+    env = _env(tmp_path, "t.trace", STUB_DOCS_FINDING=json.dumps({
+        "docs_kind": "stale_docs", "severity": "high", "confidence": 0.95,
+        "doc_path": "README.md",
+        "existing_code": _DRIFT_CODE, "content": _DRIFT_CONTENT}))
+    decision, reason = _push(work, env)
+    assert decision == "pass", reason
+    st = _state(work, tip)
+    assert st.get("verdict") == "warn", st
+    assert _DRIFT_CONTENT in st.get("reasons", ""), st.get("reasons")
+
+
+def test_drift_medium_at_confidence_threshold_blocks_end_to_end(tmp_path):
+    """D15 equivalence through the gate: a quoted drift finding at exactly the
+    medium blocking threshold (0.7) denies the push, same as a code finding."""
+    work = _repo(tmp_path, {"app.py": _APP_WITH_CHECK, "README.md": _README_DOC})
+    _write_docs_summary(work)
+    _commit(work, {"app.py": _APP_WITHOUT_CHECK})
+    env = _env(tmp_path, "t.trace", STUB_DOCS_FINDING=json.dumps({
+        "docs_kind": "stale_docs", "severity": "medium", "confidence": 0.7,
+        "stale_passage": _STALE_PASSAGE, "doc_path": "README.md",
+        "existing_code": _DRIFT_CODE, "content": _DRIFT_CONTENT}))
+    decision, reason = _push(work, env)
+    assert decision == "deny", reason
+
+
+def test_persona_carries_the_drift_finding_contract():
+    """The finding contract (not prompt wording): the persona must name the
+    drift class marker, the two quote fields, and assert this class rides the
+    same blocking rule -- what compute_verdict actually enforces."""
+    body = (Path(_SCRIPTS).parent / "agents" / "docs-checker.md").read_text()
+    assert "docs_kind" in body and "stale_docs" in body
+    assert "stale_passage" in body
+    for field in ("doc_path", "existing_code"):
+        assert field in body, field
