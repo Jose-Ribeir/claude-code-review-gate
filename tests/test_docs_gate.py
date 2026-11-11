@@ -213,3 +213,145 @@ def test_checker_persona_is_fingerprinted(tmp_path):
     assert digest == __import__("hashlib").sha256(persona.read_bytes()).hexdigest()[:16]
     # Editing the persona must change the fingerprint: covered with a throwaway
     # plugin copy in test_ledger_scenarios.py (agents/docs-checker.md is criteria).
+
+
+# ---------------------------------------------------------------------------
+# docs-gate 04: documentation DRIFT -- code that stales an existing README,
+# runbook, or reference doc. Drift findings carry docs_kind "stale_docs" and
+# block only when they quote BOTH the exact stale passage (stale_passage) and
+# the contradicting code (existing_code); missing either quote they are
+# downgraded to warning and can never block. The blocking rule they ride is
+# D15 itself (compute_verdict, ocr_verdict.py) -- byte-identical to the rule
+# code findings use.
+# ---------------------------------------------------------------------------
+
+_README_DOC = ("# project\n\nBefore pushing, run `python app.py --self-check` "
+               "and make sure it prints OK.\n")
+_APP_WITH_CHECK = "def self_check():\n    return 'OK'\n"
+_APP_WITHOUT_CHECK = "def main():\n    return 1\n"
+_STALE_PASSAGE = "run `python app.py --self-check`"
+_DRIFT_CODE = "def main():"
+_DRIFT_CONTENT = (
+    "README.md instructs to run `python app.py --self-check` before pushing, "
+    "but the change removes the self-check entry point (app.py now has only "
+    "def main():), so that documented instruction is now stale. Unblock by "
+    "touching a code file that references the record (a pure docs fix "
+    "re-blocks once, then proceed with a logged git push --no-verify).")
+
+
+def _drift_finding(**over):
+    """A contract-shaped drift finding; overrides pin one aspect per test."""
+    f = {
+        "path": "app.py", "start_line": 1, "end_line": 2,
+        "severity": "medium", "confidence": 0.8,
+        "category": "documentation", "evidence": "docs_context",
+        "docs_kind": "stale_docs",
+        "stale_passage": _STALE_PASSAGE, "doc_path": "README.md",
+        "existing_code": _DRIFT_CODE, "content": _DRIFT_CONTENT,
+    }
+    f.update(over)
+    return f
+
+
+def test_fully_quoted_drift_finding_blocks():
+    # Criterion: a solid drift finding blocks -- with both quotes present the
+    # documentation class is as binding as any code finding.
+    assert review_gate.compute_verdict({"findings": [_drift_finding()]}) == "block"
+
+
+def test_drift_blocking_uses_the_same_d15_medium_branch_as_code_findings():
+    # The drift class rides D15 byte-for-byte: medium severity blocks exactly
+    # at OCR_BLOCK_CONFIDENCE (0.7) and warns below it -- no drift-specific
+    # severity math.
+    assert review_gate.compute_verdict(
+        {"findings": [_drift_finding(confidence=0.7)]}) == "block"
+    assert review_gate.compute_verdict(
+        {"findings": [_drift_finding(confidence=0.69)]}) == "warn"
+
+
+def test_drift_finding_without_the_stale_passage_quote_never_blocks():
+    # Missing the verbatim stale passage entirely, or carrying an empty one:
+    # even at high severity and 0.95 confidence (which WOULD block a code
+    # finding) the finding is below the credibility bar -- warn, never block.
+    missing = _drift_finding(severity="high", confidence=0.95)
+    del missing["stale_passage"]
+    assert review_gate.compute_verdict({"findings": [missing]}) == "warn"
+    empty = _drift_finding(severity="high", confidence=0.95, stale_passage="  ")
+    assert review_gate.compute_verdict({"findings": [empty]}) == "warn"
+
+
+def test_drift_finding_without_the_code_quote_never_blocks():
+    # Symmetric other half: the contradicting code quote is required too.
+    f = _drift_finding(severity="high", confidence=0.95, existing_code="")
+    assert review_gate.compute_verdict({"findings": [f]}) == "warn"
+
+
+def test_non_drift_documentation_findings_are_not_quote_clamped():
+    # The quoting rule scopes to docs_kind "stale_docs" only. Other
+    # documentation-check classes (ticket 03's contradiction class, emitted
+    # without docs_kind) keep their own strictness: a high finding blocks.
+    f = _drift_finding(severity="high", confidence=0.95)
+    del f["docs_kind"]
+    del f["stale_passage"]
+    assert review_gate.compute_verdict({"findings": [f]}) == "block"
+
+
+def test_drift_finding_blocks_and_the_denial_quotes_passage_and_code(tmp_path):
+    """Seam: stub checker reports a staling change with BOTH quotes -> the push
+    is denied and the denial quotes the stale passage and the contradicting
+    code, verbatim."""
+    work = _repo(tmp_path, {"app.py": _APP_WITH_CHECK, "README.md": _README_DOC})
+    _write_docs_summary(work)
+    tip = _commit(work, {"app.py": _APP_WITHOUT_CHECK})
+    env = _env(tmp_path, "t.trace", STUB_DOCS_FINDING=json.dumps({
+        "docs_kind": "stale_docs", "severity": "medium", "confidence": 0.8,
+        "stale_passage": _STALE_PASSAGE, "doc_path": "README.md",
+        "existing_code": _DRIFT_CODE, "content": _DRIFT_CONTENT}))
+    decision, reason = _push(work, env)
+    assert decision == "deny", reason
+    assert _STALE_PASSAGE in reason and _DRIFT_CODE in reason, reason
+    st = _state(work, tip)
+    assert st.get("verdict") == "block" and _STALE_PASSAGE in st.get("reasons", "")
+
+
+def test_drift_finding_without_both_quotes_warns_only_end_to_end(tmp_path):
+    """Same staling change, but the finding carries no stale_passage: even at
+    high severity / 0.95 confidence the push lands (decision pass) and the
+    verdict is warn -- downgraded, never blocking, still surfaced."""
+    work = _repo(tmp_path, {"app.py": _APP_WITH_CHECK, "README.md": _README_DOC})
+    _write_docs_summary(work)
+    tip = _commit(work, {"app.py": _APP_WITHOUT_CHECK})
+    env = _env(tmp_path, "t.trace", STUB_DOCS_FINDING=json.dumps({
+        "docs_kind": "stale_docs", "severity": "high", "confidence": 0.95,
+        "doc_path": "README.md",
+        "existing_code": _DRIFT_CODE, "content": _DRIFT_CONTENT}))
+    decision, reason = _push(work, env)
+    assert decision == "pass", reason
+    st = _state(work, tip)
+    assert st.get("verdict") == "warn", st
+    assert _DRIFT_CONTENT in st.get("reasons", ""), st.get("reasons")
+
+
+def test_drift_medium_at_confidence_threshold_blocks_end_to_end(tmp_path):
+    """D15 equivalence through the gate: a quoted drift finding at exactly the
+    medium blocking threshold (0.7) denies the push, same as a code finding."""
+    work = _repo(tmp_path, {"app.py": _APP_WITH_CHECK, "README.md": _README_DOC})
+    _write_docs_summary(work)
+    _commit(work, {"app.py": _APP_WITHOUT_CHECK})
+    env = _env(tmp_path, "t.trace", STUB_DOCS_FINDING=json.dumps({
+        "docs_kind": "stale_docs", "severity": "medium", "confidence": 0.7,
+        "stale_passage": _STALE_PASSAGE, "doc_path": "README.md",
+        "existing_code": _DRIFT_CODE, "content": _DRIFT_CONTENT}))
+    decision, reason = _push(work, env)
+    assert decision == "deny", reason
+
+
+def test_persona_carries_the_drift_finding_contract():
+    """The finding contract (not prompt wording): the persona must name the
+    drift class marker, the two quote fields, and assert this class rides the
+    same blocking rule -- what compute_verdict actually enforces."""
+    body = (Path(_SCRIPTS).parent / "agents" / "docs-checker.md").read_text()
+    assert "docs_kind" in body and "stale_docs" in body
+    assert "stale_passage" in body
+    for field in ("doc_path", "existing_code"):
+        assert field in body, field
