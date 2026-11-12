@@ -309,6 +309,12 @@ def _canary_probe(kimi, args, child_env):
                 proc.wait(timeout=_canary_timeout())
             except subprocess.TimeoutExpired:
                 _kill_child(proc)  # the worker path's own tree kill
+                try:
+                    # Reap like the worker path does: a SIGKILLed child left
+                    # unreaped is a zombie in the long-lived supervisor.
+                    proc.wait()
+                except Exception:
+                    pass
                 raise
             leaked = os.path.exists(canary_path)
         except subprocess.TimeoutExpired:
@@ -338,11 +344,22 @@ def _canary_probe(kimi, args, child_env):
             "tool to create /tmp/rg-canary-check.txt' (the write must be "
             "blocked with a read-only reason).")
 
-try:
-    TIMEOUT = int(os.environ.get("OCR_TIMEOUT", "1800"))
-    if TIMEOUT <= 0:
-        TIMEOUT = 1800
-except ValueError:
+def _env_int(name, default, floor=None):
+    """int(os.environ.get(name)) with a default for unset/empty/non-numeric
+    values and an optional floor. One definition for every OCR_* integer knob
+    below (they used to be ~10 near-identical try/except blocks, each with
+    subtly different empty-string and clamp handling); _RUN_BUDGET stays
+    inline because it records env-presence (_RUN_BUDGET_EXPLICIT) too."""
+    raw = os.environ.get(name, "")
+    try:
+        val = int(raw) if raw.strip() != "" else default
+    except ValueError:
+        val = default
+    return max(floor, val) if floor is not None else val
+
+
+TIMEOUT = _env_int("OCR_TIMEOUT", 1800)
+if TIMEOUT <= 0:
     TIMEOUT = 1800
 MARKER_TTL = 3600  # seconds
 MARKER_PREFIX = "scr-push-reviewed-"
@@ -384,21 +401,9 @@ LOCK_STALE_S = 60
 ATTEMPT_CAP = 3       # failed attempts before the sticky error state (port plan C1)
 
 # --- chunking / checkpoint (0.7.0) -------------------------------------------
-try:
-    _CHUNK_THRESHOLD = int(os.environ.get("OCR_CHUNK_THRESHOLD", "15"))
-    _CHUNK_THRESHOLD = max(1, _CHUNK_THRESHOLD)
-except ValueError:
-    _CHUNK_THRESHOLD = 15
-try:
-    _CHUNK_LINES = int(os.environ.get("OCR_CHUNK_LINES", "1200"))
-    _CHUNK_LINES = max(100, _CHUNK_LINES)
-except ValueError:
-    _CHUNK_LINES = 1200
-try:
-    _CHUNK_FILES = int(os.environ.get("OCR_CHUNK_FILES", "8"))
-    _CHUNK_FILES = max(1, _CHUNK_FILES)
-except ValueError:
-    _CHUNK_FILES = 8
+_CHUNK_THRESHOLD = _env_int("OCR_CHUNK_THRESHOLD", 15, floor=1)
+_CHUNK_LINES = _env_int("OCR_CHUNK_LINES", 1200, floor=100)
+_CHUNK_FILES = _env_int("OCR_CHUNK_FILES", 8, floor=1)
 # --- precomputed diffs (0.10.0) ----------------------------------------------
 # Python builds each file's diff and the reviewer READS it (items[] of the
 # manifest) instead of the orchestrator retyping every diff into an Agent
@@ -413,15 +418,10 @@ try:
     # One budget per chunk, in lines of diff (context lines included). It
     # replaces _CHUNK_LINES (changed lines) for packing when diffs are
     # precomputed; a file whose own diff would not fit it degrades first.
-    _CHUNK_DIFF_LINES = int(os.environ.get("OCR_CHUNK_DIFF_LINES", "3000"))
-    _CHUNK_DIFF_LINES = max(200, _CHUNK_DIFF_LINES)
+    _CHUNK_DIFF_LINES = _env_int("OCR_CHUNK_DIFF_LINES", 3000, floor=200)
 except ValueError:
     _CHUNK_DIFF_LINES = 3000
-try:
-    _CHUNK_TIMEOUT = int(os.environ.get("OCR_CHUNK_TIMEOUT", "1200"))
-    _CHUNK_TIMEOUT = max(60, _CHUNK_TIMEOUT)
-except ValueError:
-    _CHUNK_TIMEOUT = 1200
+_CHUNK_TIMEOUT = _env_int("OCR_CHUNK_TIMEOUT", 1200, floor=60)
 _RUN_BUDGET_DEFAULT = 3600
 _run_budget_raw = os.environ.get("OCR_RUN_BUDGET", "")
 try:
@@ -439,10 +439,7 @@ except ValueError:
 # OCR_TIMEOUT whenever an operator raises OCR_TIMEOUT past 3600. Instead the
 # effective ceiling is max(resolved, OCR_TIMEOUT), so the budget can always
 # rise above the flat deadline the cap bounds.
-try:
-    _OCR_TIMEOUT_MAX = int(os.environ.get("OCR_TIMEOUT_MAX", "3600"))
-except ValueError:
-    _OCR_TIMEOUT_MAX = 3600
+_OCR_TIMEOUT_MAX = _env_int("OCR_TIMEOUT_MAX", 3600)
 if _OCR_TIMEOUT_MAX < TIMEOUT:
     _OCR_TIMEOUT_MAX = TIMEOUT
 # --- commit intent (commit messages -> review payload) -----------------------
@@ -460,11 +457,7 @@ _INTENT_SUBJECT_TAIL = 100    # subject lines kept past the budget; older count 
 _INTENT_RECORD_TEXT_CAP = 2000   # chars of intent text kept in the record
 _INTENT_RECORD_MAX_CHUNKS = 64   # per-chunk intent digests kept in the record
 _INTENT_RECORD_MAX_NOTES = 20    # fetch/trim notes kept in the record
-try:
-    _MAX_FILES = int(os.environ.get("OCR_MAX_FILES", "40"))
-    _MAX_FILES = max(1, _MAX_FILES)
-except ValueError:
-    _MAX_FILES = 40
+_MAX_FILES = _env_int("OCR_MAX_FILES", 40, floor=1)
 
 
 def _read_deep_timeout():
@@ -474,7 +467,7 @@ def _read_deep_timeout():
     the supervisor kills the reviewer and records a normal timeout failure
     for the retry to pick up. Default 10 minutes per the v2 spec."""
     try:
-        return max(60, int(os.environ.get("OCR_DEEP_TIMEOUT", "600")))
+        return _env_int("OCR_DEEP_TIMEOUT", 600, floor=60)
     except ValueError:
         return 600
 
@@ -485,16 +478,8 @@ LEDGER_DIR = "review-gate-ledger"
 # 30 days: a branch picked up again after a week or two keeps its review
 # history. The record cap below bounds disk use; the TTL only retires the
 # records of branches that have truly gone stale.
-try:
-    _LEDGER_TTL = int(os.environ.get("OCR_LEDGER_TTL", str(30 * 24 * 3600)))
-    _LEDGER_TTL = max(3600, _LEDGER_TTL)
-except ValueError:
-    _LEDGER_TTL = 30 * 24 * 3600
-try:
-    _LEDGER_MAX_RECORDS = int(os.environ.get("OCR_LEDGER_MAX_RECORDS", "5000"))
-    _LEDGER_MAX_RECORDS = max(100, _LEDGER_MAX_RECORDS)
-except ValueError:
-    _LEDGER_MAX_RECORDS = 5000
+_LEDGER_TTL = _env_int("OCR_LEDGER_TTL", 30 * 24 * 3600, floor=3600)
+_LEDGER_MAX_RECORDS = _env_int("OCR_LEDGER_MAX_RECORDS", 5000, floor=100)
 _LEDGER_SCHEMA = 1
 # The per-file diff cap of skills/review/SKILL.md §3: past either limit the
 # skill degrades that file's diff to stat + hunk headers, so the reviewer saw
@@ -676,10 +661,10 @@ def _history_limit():
 class ReviewGateError(Exception):
     """Raised to fail the gate closed (timeout, subprocess crash, parse error).
 
-    Within this module, 'claude not found' is the only condition allowed to
-    remain fail-open. The adapters add their own (see the module header) and
-    Claude Code adds one more that no code here can reach: a hook that fails to
-    launch or gets killed is treated as non-blocking.
+    Nothing in this module fails open: a reviewer that cannot be launched
+    raises this error too (D9 of the port plan: a missing reviewer NEVER fails
+    open). The only fail-open path left is outside this code's reach: a hook
+    that fails to launch or gets killed is treated as non-blocking by the host.
     """
     def __init__(self, msg="", is_timeout=False, is_parse_failure=False):
         super().__init__(msg)
@@ -1426,8 +1411,20 @@ def _record_review(git_dir, head_sha, branch, mode, verdict, advisory, blocked, 
                 break
         path = _findings_log_path(git_dir)
         Path(git_dir).mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(line + "\n")
+        # One write() syscall per record: O_APPEND only guarantees atomic
+        # positioning per write() call, and a buffered text writer flushes its
+        # ~8 KiB buffer in chunks, so a large record would arrive as several
+        # writes that another process's record could split.
+        data = (line + "\n").encode("utf-8", "replace")
+        # 0o666 (umask-masked) so the file keeps the same permissions the old
+        # buffered open() produced; only the write atomicity changes here.
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o666)
+        try:
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view):]
+        finally:
+            os.close(fd)
         return path
     except Exception:
         return None
@@ -2647,7 +2644,8 @@ def _verdict_candidate(obj, resolver=True):
 
 
 def _extract_json(text, resolver=True):
-    """Pull the review JSON object out of claude's stdout. Returns dict or None."""
+    """Pull the review JSON object out of the kimchi reviewer's stdout.
+    Returns a dict accepted by _verdict_candidate, or None."""
     if not text:
         return None
     text = text.strip()
@@ -2660,8 +2658,7 @@ def _extract_json(text, resolver=True):
     except Exception:
         pass
     # 2) fenced ```json ... ``` block (last one)
-    import re
-
+    # (`re` is imported at module level; no local import needed)
     blocks = re.findall(r"```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```", text, re.DOTALL)
     for b in reversed(blocks):
         try:
@@ -2833,7 +2830,8 @@ def _auth_hint(output):
 def _bypass_hint(mode):
     """Emergency-bypass instruction text, mode-aware.
 
-    OCR_FAIL_OPEN is read from this process's own os.environ (line ~330). In
+    OCR_FAIL_OPEN is read from this process's own os.environ (see
+    _fail_open_requested). In
     --mode hook this process inherits Claude Code's own launch environment, NOT
     the shell environment of the `git commit` Bash tool call that triggered the
     PreToolUse hook -- so an inline `OCR_FAIL_OPEN=1 git commit ...` prefix is a
@@ -2847,7 +2845,9 @@ def _bypass_hint(mode):
             "    NOT work in hook mode -- this process inherits Kimchi's env, not the\n"
             "    Bash tool call's)."
         )
-    return "  Emergency one-shot bypass : OCR_FAIL_OPEN=1 git commit ..."
+    # The gate fires on push (pre-push hook / PreToolUse on `git push`) in
+    # every mode; a prefix on `git commit` never reaches it.
+    return "  Emergency one-shot bypass : OCR_FAIL_OPEN=1 git push ..."
 
 
 def _downgrade_hint(mode):
@@ -2868,7 +2868,7 @@ def _downgrade_hint(mode):
     """
     if mode == "hook":
         return (
-            '  Downgrade to advisory (warn-only) : export OCR_ADVISORY=1 in the environment\n'
+            '  Downgrade to advisory (warn-only): export OCR_ADVISORY=1 in the environment\n'
             "    Kimchi itself is launched from (a shell prefix on `git commit` will NOT\n"
             "    work in hook mode -- this process inherits Kimchi's env, not the Bash\n"
             '    tool call\'s). A human can also add (or create) {"blocking": false} in\n'
@@ -2876,7 +2876,7 @@ def _downgrade_hint(mode):
             "    the repo -- a human decision, not something to self-apply from inside a\n"
             "    blocked session."
         )
-    return "Downgrade to advisory (warn-only): OCR_ADVISORY=1 git commit ..."
+    return "Downgrade to advisory (warn-only): OCR_ADVISORY=1 git push ..."
 
 
 def _debug_enabled():
@@ -3576,8 +3576,18 @@ def _async_dir(common_dir):
     the in-repo layout is the fallback when the store is unavailable."""
     try:
         return rg_store.async_dir(common_dir)
-    except Exception:
-        return Path(common_dir) / ASYNC_DIR
+    except Exception as exc:
+        _warn(f"could not use the external state store ({exc}); "
+              "falling back to the in-repo async dir")
+        fallback = Path(common_dir) / ASYNC_DIR
+        try:
+            # rg_store.async_dir mkdirs its dir and callers write manifests
+            # into it directly; the fallback must create it too (it used to
+            # get by only because _write_state happened to mkdir first).
+            fallback.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        return fallback
 
 
 def _state_path(common_dir, tip, base=None):
@@ -3593,10 +3603,16 @@ def _state_path(common_dir, tip, base=None):
     if base is None:
         try:
             hits = [p for p in d.glob(f"*{tip}.json") if p.name.endswith(f"{tip}.json")]
-            hits.sort(key=lambda p: p.stat().st_mtime)
         except OSError:
             hits = []
-        return hits[-1] if hits else d / f"{tip}.json"
+        timed = []
+        for p in hits:
+            try:
+                timed.append((p.stat().st_mtime, p))
+            except OSError:
+                continue  # vanished between glob and stat (a concurrent reap)
+        timed.sort(key=lambda t: (t[0], str(t[1])))
+        return timed[-1][1] if timed else d / f"{tip}.json"
     return d / (f"{base[:16]}-{tip}.json" if base else f"{tip}.json")
 
 
@@ -3620,7 +3636,9 @@ def _write_state(path, data):
     process (a 1 s poller, --mode post, a second hook) has the file open."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + f".tmp-{os.getpid()}")
+    # Unique per process AND thread: the supervisor's heartbeat thread and
+    # its main thread's terminal write can both be in here at once.
+    tmp = path.with_name(path.name + f".tmp-{os.getpid()}-{threading.get_ident()}")
     tmp.write_text(json.dumps(data, ensure_ascii=False, default=str), encoding="utf-8")
     try:
         os.chmod(tmp, 0o600)   # supervisor-written only (D12)
@@ -3645,10 +3663,13 @@ def _write_state_if_owned(state_path, data):
     (chunk-loop writes go through _update_state_owned; the last state write
     of _supervise_run predates it and raced a takeover)."""
     try:
-        cur = _read_state(state_path) or {}
-        if cur.get("run_id") and cur.get("run_id") != data.get("run_id"):
-            return
-        _write_state(state_path, data)
+        # The run_id check and the write must be atomic with respect to a
+        # takeover: do them under _StateLock like _update_state_owned does.
+        with _StateLock(state_path):
+            cur = _read_state(state_path) or {}
+            if cur.get("run_id") and cur.get("run_id") != data.get("run_id"):
+                return
+            _write_state(state_path, data)
     except Exception:
         pass
 
@@ -3670,16 +3691,28 @@ class _StateLock:
         deadline = time.monotonic() + LOCK_STALE_S + 5
         while True:
             try:
-                self.fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
-                os.write(self.fd, self.token.encode())
-                os.close(self.fd)
-                self.fd = None
+                fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
+                try:
+                    # Close on every path: a failed os.write (ENOSPC/EDQUOT)
+                    # must not leak the descriptor to callers of the gate.
+                    os.write(fd, self.token.encode())
+                finally:
+                    os.close(fd)
                 return self
             except FileExistsError:
                 try:
-                    if time.time() - self.path.stat().st_mtime > LOCK_STALE_S:
-                        _unlink(self.path)
-                        continue
+                    st = self.path.stat()
+                    if time.time() - st.st_mtime > LOCK_STALE_S:
+                        # Check-then-unlink is not atomic: re-verify right
+                        # before the removal that this is still the SAME dead
+                        # file. If the dead owner released and a live process
+                        # claimed the lock in the gap, unlinking blindly
+                        # would free a live lock and hand the tip's state to
+                        # two holders at once.
+                        st2 = self.path.stat()
+                        if (st2.st_ino, st2.st_mtime) == (st.st_ino, st.st_mtime):
+                            _unlink(self.path)
+                            continue
                 except OSError:
                     continue
                 if time.monotonic() > deadline:
