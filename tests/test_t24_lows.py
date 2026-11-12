@@ -256,3 +256,40 @@ def test_build_item_diff_notes_counted_in_fit(monkeypatch):
         assert res["text"].startswith(header)
     finally:
         monkeypatch.setattr(rg, "_PRECOMPUTED_MAX_BYTES", old)
+
+
+# --- user-chosen judgement fixes ---------------------------------------------
+
+def test_reanchor_prefers_the_occurrence_nearest_the_stale_line(monkeypatch):
+    """Duplicated block: anchor to nearest, not blindly first (finding 6463)."""
+    body = "x = 1\ny = 2\nz = 3\nx = 1\nw = 9\nx = 1\n"
+    monkeypatch.setattr(rg, "_git",
+                        lambda a, cwd=None: (body, 0) if a[:2] == ["show", "t:p"] else ("", 1))
+    f, ok = rg._reanchor_finding(
+        {"path": "p", "existing_code": "x = 1", "start_line": 4, "end_line": 4}, ".", "t")
+    assert ok and (f["start_line"], f["end_line"]) == (4, 4)   # nearest is #3... line 4
+    f2, ok2 = rg._reanchor_finding(
+        {"path": "p", "existing_code": "x = 1", "start_line": 6, "end_line": 6}, ".", "t")
+    assert ok2 and (f2["start_line"], f2["end_line"]) == (6, 6)
+    f3, ok3 = rg._reanchor_finding(
+        {"path": "p", "existing_code": "x = 1", "start_line": 1, "end_line": 1}, ".", "t")
+    assert ok3 and (f3["start_line"], f3["end_line"]) == (1, 1)
+
+
+def test_diff_exceeds_caps_measures_blob_sizes_not_the_painted_diff(monkeypatch):
+    """7524: bounded-memory measurement via cat-file -s; conservative over count."""
+    calls = []
+    def fake_git(a, cwd=None):
+        calls.append(a)
+        if a[:2] == ["cat-file", "-s"]:
+            return "\n".join("9000" for _ in a[2:]), 0
+        return "", 0
+    monkeypatch.setattr(rg, "_git", fake_git)
+    item = {"entry": {"lines": 10, "old_oid": "a" * 40, "new_oid": "b" * 40,
+                      "path": "big.py"}, "mode": "full"}
+    assert rg._diff_exceeds_caps(item, ".") is True   # 9000+9000 > 16k
+    assert calls and calls[-1][0] == "cat-file"                # no in-memory diff
+    item2 = {"entry": {"lines": 10, "old_oid": "0" * 40, "new_oid": "b" * 40,
+                       "path": "small.py"}, "mode": "full"}
+    monkeypatch.setattr(rg, "_git", lambda a, cwd=None: ("100", 0))
+    assert rg._diff_exceeds_caps(item2, ".") is False  # 100 < 16k

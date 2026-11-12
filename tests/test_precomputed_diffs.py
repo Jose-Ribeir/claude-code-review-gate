@@ -112,7 +112,7 @@ def test_a_binary_file_is_flagged_and_gets_no_diff_file(tmp_path):
     diffs = _build(work, base, tip, items)
     assert diffs["blob.py"]["binary"] and not diffs["blob.py"]["failed"]
     manifest = review_gate._build_review_manifest(
-        str(work / ".git"), "r1", 0, 1, items, [], [], None, diffs)
+        review_gate._ManifestScope(str(work / ".git"), "r1", 0, 1), items, [], [], None, diffs)
     (item,) = [i for i in manifest["items"] if i["kind"] == "file_diff"]
     assert item["binary"] is True and item["file"] == ""
     assert review_gate._diff_warnings(diffs) and "binary" in review_gate._diff_warnings(diffs)[0]
@@ -131,7 +131,7 @@ def test_a_git_failure_means_no_diff_file_and_the_orchestrator_collects_it(tmp_p
     diffs = {"a.py": review_gate._failed_diff()}
     common = work / ".git"
     manifest = review_gate._build_review_manifest(
-        str(common), "r1", 0, 1, items, [], [], None, diffs)
+        review_gate._ManifestScope(str(common), "r1", 0, 1), items, [], [], None, diffs)
     (item,) = [i for i in manifest["items"] if i["kind"] == "file_diff"]
     assert item["file"] == "" and item["binary"] is False and item["path"] == "a.py"
     assert not diffs["a.py"].get("owned")
@@ -145,7 +145,7 @@ def test_diff_files_are_lf_even_for_a_crlf_file(tmp_path):
     items = _items_between(work, base, tip)
     diffs = _build(work, base, tip, items)
     manifest = review_gate._build_review_manifest(
-        str(work / ".git"), "r1", 0, 1, items, [], [], None, diffs)
+        review_gate._ManifestScope(str(work / ".git"), "r1", 0, 1), items, [], [], None, diffs)
     data = Path(manifest["items"][0]["file"]).read_bytes()
     assert b"\r" not in data and b"+a = 1\n+b = 2\n+c = 3\n" in data
 
@@ -170,7 +170,7 @@ def test_diff_files_are_written_in_the_run_dir_with_generated_names(tmp_path):
     diffs = _build(work, base, tip, items)
     common = work / ".git"
     manifest = review_gate._build_review_manifest(
-        str(common), "run9", 3, 5, items, ["other.py"], ["carried.py"], {"impact": {"x": 1}}, diffs)
+        review_gate._ManifestScope(str(common), "run9", 3, 5), items, ["other.py"], ["carried.py"], {"impact": {"x": 1}}, diffs)
     assert (manifest["chunk_index"], manifest["chunks_total"]) == (3, 5)
     files = [i["file"] for i in manifest["items"] if i["kind"] == "file_diff"]
     # Kimchi port (D12): the run dir is under the external store's async/<key>.

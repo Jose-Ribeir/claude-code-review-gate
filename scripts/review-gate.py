@@ -4665,8 +4665,9 @@ def _supervise_run(state_path, run_id):
                     manifest_path = str(
                         _async_dir(common_dir) / f"manifest-{run_id}-sc.json"
                     )
+                    scope = _ManifestScope(common_dir, run_id)
                     manifest = _build_review_manifest(
-                        common_dir, run_id, None, None, active_items, [], carry_paths,
+                        scope, active_items, [], carry_paths,
                         extras, diffs, docs_context=docs_context, arch_flags=arch_flags)
                     _write_manifest_file(manifest_path, manifest,
                                          "single-context manifest")
@@ -6751,11 +6752,24 @@ def _reanchor_finding(f, review_root, tip):
     norm_code = " ".join(existing_code.split())
     lines = out.splitlines()
     span = existing_code.count("\n") + 1
+    # A duplicated block (constant, repeated guard clause) matches more than
+    # once: anchor to the occurrence NEAREST the finding's stale line rather
+    # than blindly the first -- the reviewer reported what it saw around that
+    # line, so proximity is the best guess at intent (finding 6463).
+    matches = []
     for i in range(len(lines) - span + 1):
         block = " ".join(" ".join(lines[i:i + span]).split())
         if norm_code == block:
-            return dict(f, start_line=i + 1, end_line=i + span), True
-    return dict(f, unanchored=True), False
+            matches.append(i)
+    if not matches:
+        return dict(f, unanchored=True), False
+    try:
+        want = int(str(f.get("start_line") or "").strip()) - 1
+    except ValueError:
+        want = -1
+    best = (min(matches, key=lambda m: abs(m - want))
+            if want >= 0 else matches[0])
+    return dict(f, start_line=best + 1, end_line=best + span), True
 
 
 def _prune_ledger(common_dir):
@@ -8198,11 +8212,26 @@ def _arch_flags(root, base, tip):
         return None
 
 
-def _build_review_manifest(common_dir, run_id, k, total, chunk_items, other_changed,
-                           carry_paths, extras=None, diffs=None, docs_context=None,
+class _ManifestScope:
+    """The identity every manifest shares: the run's storage dir and name,
+    plus the chunk coordinates (k, total). k is None for the single-context
+    review. common_dir+run_id and k+total always traveled as pairs (finding
+    7268); the scope object makes that explicit.
+    """
+    __slots__ = ("common_dir", "run_id", "k", "total")
+
+    def __init__(self, common_dir, run_id, k=None, total=None):
+        self.common_dir = common_dir
+        self.run_id = run_id
+        self.k = k
+        self.total = total
+
+
+def _build_review_manifest(scope, chunk_items, other_changed, carry_paths,
+                           extras=None, diffs=None, docs_context=None,
                            arch_flags=None):
-    """The reviewer's manifest for one chunk (k, total) or the single-context
-    review (k None). The one builder for both.
+    """The reviewer's manifest for one chunk (scope.k, scope.total) or the
+    single-context review (scope.k None). The one builder for both.
 
     Keys kept from 0.8/0.9: paths, renames, other_changed, files[] (path, mode,
     from_oid, to_oid), carried, plus the impact / known_defects extras. With
@@ -8214,6 +8243,8 @@ def _build_review_manifest(common_dir, run_id, k, total, chunk_items, other_chan
     `unit_diff` items for the changed units of a big file, a `file_context` item per
     such file, and a `caller` (+ `callee_diff`) context item per task.
     """
+    common_dir, run_id, k, total = (scope.common_dir, scope.run_id,
+                                    scope.k, scope.total)
     manifest = {}
     if k is not None:
         manifest.update(chunk_index=k, chunks_total=total)
@@ -8463,8 +8494,16 @@ def _diff_exceeds_caps(item, review_root=""):
         out, rc = _git(["cat-file", "-s", new_oid], cwd=review_root)
         size = int(out) if rc == 0 and out.isdigit() else 0
     else:
-        out, rc = _git(["diff", "--no-ext-diff", old_oid, new_oid], cwd=review_root)
-        size = len(out.encode("utf-8", "replace")) if rc == 0 else 0
+        # Blob sizes bound memory: this branch fires precisely on large
+        # over-cap files, so materializing the whole diff just to measure
+        # it is the wrong budget (finding 7524). Deliberate approximation:
+        # the sum of the two blobs is NOT the diff's byte size -- it
+        # over-counts similar files and under-counts contextual churn --
+        # so the cap trips a little more conservatively, which for a
+        # truncation signal is the acceptable direction.
+        out, rc = _git(["cat-file", "-s", old_oid, new_oid], cwd=review_root)
+        nums = [int(x) for x in out.split() if x.isdigit()] if rc == 0 else []
+        size = sum(nums) if len(nums) == 2 else 0
     return size > _TRUNC_MAX_BYTES
 
 
@@ -10074,8 +10113,9 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
             extras = chunk_extras(k, chunk_paths, chunk_items)
         else:
             extras = chunk_extras(k, chunk_paths)
+        scope = _ManifestScope(common_dir, run_id, k, len(chunks))
         manifest = _build_review_manifest(
-            common_dir, run_id, k, len(chunks), chunk_items, other_changed, carry_paths,
+            scope, chunk_items, other_changed, carry_paths,
             extras, diffs, docs_context=docs_context, arch_flags=arch_flags)
         _write_manifest_file(manifest_path, manifest, f"chunk manifest for chunk {k}")
         return manifest, manifest_path
