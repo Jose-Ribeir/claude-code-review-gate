@@ -183,6 +183,25 @@ class TestModelProvider:
     def test_blank_and_none_classify_as_unknown(self):
         assert review_gate._model_provider("") not in ("anthropic", "openai")
 
+    @pytest.mark.parametrize("model", [
+        "anthropic/claude-sonnet-4-5", "anthropic/CLAUDE-OPUS-4-5", "anthropic/sonnet",
+    ])
+    def test_vendor_prefixed_anthropic_models_classify(self, model):
+        # openrouter-style vendor/model ids: the family is in the model part
+        # AFTER the prefix, not in the first '-'-token of the whole id.
+        assert review_gate._model_provider(model) == "anthropic"
+
+    @pytest.mark.parametrize("model", ["openai/gpt-5", "openai/o3-mini"])
+    def test_vendor_prefixed_openai_models_classify(self, model):
+        assert review_gate._model_provider(model) == "openai"
+
+    @pytest.mark.parametrize("model", [
+        "kimchi-dev/kimi-k3", "some-vendor/glm-5.3",
+    ])
+    def test_vendor_prefixed_open_models_are_not_blocked(self, model):
+        # The harness's own _MODEL default convention must keep passing.
+        assert review_gate._model_provider(model) not in ("anthropic", "openai")
+
 
 # ---------------------------------------------------------------------------
 # Provider guard: the startup validator

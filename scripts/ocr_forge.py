@@ -52,6 +52,7 @@ import shutil
 import subprocess
 import time
 
+import ocr_impact
 import ocr_index
 
 FORGE_TIMEOUT = 3.0          # hard per-call subprocess bound (spec)
@@ -66,8 +67,13 @@ _NEGCACHE_REL = os.path.join(".ocr", "index", "forge_negcache.json")
 
 
 def _git_runner(repo_root):
-    """run(args) -> (stdout, rc); never raises (mirrors ocr_impact.git_runner)."""
-    env = dict(os.environ, GIT_LITERAL_PATHSPECS="1")
+    """run(args) -> (stdout, rc); never raises (mirrors ocr_impact.git_runner).
+
+    Kimchi's per-session GIT_TRACE* vars are scrubbed (see conftest.py):
+    they point at temp dirs that vanish, and any git inheriting them dies
+    with exit 128."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_TRACE")}
+    env["GIT_LITERAL_PATHSPECS"] = "1"
 
     def run(args):
         try:
@@ -86,18 +92,9 @@ def _git_runner(repo_root):
 # ---------------------------------------------------------------------------
 
 def _name_matches(query, candidate):
-    """Basename/stem match either way, so 'weekly-2026-11',
-    'weekly-2026-11.md' and 'out/weekly-2026-11.md' name the same artifact."""
-    norm = str(query or "").replace("\\", "/").strip().lower()
-    if not norm:
-        return False
-    q = norm.rsplit("/", 1)[-1]
-    qstem = os.path.splitext(q)[0]
-    c = str(candidate or "").replace("\\", "/").rsplit("/", 1)[-1].lower()
-    cstem = os.path.splitext(c)[0]
-    if not qstem or not cstem:
-        return False
-    return q in c or qstem in cstem or cstem in qstem
+    """Basename/stem match either way (shared with the collectors' loose
+    pointer match; single implementation lives in ocr_impact.name_matches)."""
+    return ocr_impact.name_matches(query, candidate)
 
 
 def _basename(target):
@@ -262,12 +259,18 @@ def _save_negcache(repo_root, cache):
 
 def _forge_cli(run):
     """Autodetect the forge CLI from the origin remote: github.com -> gh;
-    gitlab.com and self-hosted GitLab (any non-GitHub remote) -> glab."""
+    gitlab.com and self-hosted GitLab (host contains 'gitlab') -> glab. Any
+    other host (Bitbucket, Codeberg, ...) has no supported CLI: return
+    (None, url) so the caller skips the forge tier with a warning."""
     url, rc = run(["remote", "get-url", "origin"])
     url = url.strip()
     if rc != 0 or not url:
         return None, None
-    return ("gh" if "github.com" in url else "glab"), url
+    if "github.com" in url:
+        return "gh", url
+    if "gitlab" in url:
+        return "glab", url
+    return None, url
 
 
 def _forge_cmd(cli, name):
@@ -300,11 +303,22 @@ def _forge_hits(stdout):
 
 
 def _forge_lookup(repo_root, run, target, timeout, negcache, warnings):
-    """Return a resolved dict, the string 'unavailable' (degraded), or None
-    (searched, nothing found). Appends degradation reasons to warnings."""
+    """Return a resolved dict, the string 'skipped' (unsupported host: the
+    tier never ran), the string 'unavailable' (degraded), or None (searched,
+    nothing found). Appends degradation reasons to warnings."""
     name = _basename(target)
     cli, url = _forge_cli(run)
     if cli is None:
+        if url:
+            # Unsupported host: no tier engaged at all, so the walk simply
+            # ends without an answer -- 'unresolved' (an absence), not
+            # 'unavailable' (a tier tool down). Callers treat both as
+            # local-only coverage; the warning says why. The tier did not
+            # run, so it must not be reported as searched.
+            warnings.append("forge: origin remote %s is neither GitHub nor "
+                            "GitLab; forge tier skipped, local tiers only"
+                            % url)
+            return "skipped"
         warnings.append("forge: no origin remote configured; forge tier "
                         "skipped, local tiers only")
         return "unavailable"
@@ -397,7 +411,12 @@ def make_pointer_resolver(repo_root, *, timeout=FORGE_TIMEOUT):
                     forge["warning"] = "; ".join(warnings[-3:])
                 return forge
             searched = ["registry", "grep", "branch"]
-            if forge is None:
+            if forge == "skipped":
+                # Unsupported host: the tier never ran, so it is not counted
+                # as searched -- only the local tiers were.
+                result = {"status": "unresolved", "via": "none",
+                          "searched": searched}
+            elif forge is None:
                 searched.append("forge")  # searched (or a known cached miss)
                 result = {"status": "unresolved", "via": "none",
                           "searched": searched}

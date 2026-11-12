@@ -477,6 +477,15 @@ def ensure_built(repo_root: str, is_allowed: Callable[[str], bool] = None) -> Di
                 "tool": "unknown", "warnings": warnings}
 
 
+def _norm_rel(path) -> str:
+    """Repo-relative normalize: forward slashes, one leading './' removed.
+
+    NOT str.lstrip('./'): that strips every leading '.' and '/', mangling
+    root-level dotfiles ('.eslintrc.js' -> 'eslintrc.js')."""
+    rel = str(path).replace("\\", "/")
+    return rel[2:] if rel.startswith("./") else rel
+
+
 def refresh(repo_root: str, changed_files, is_allowed: Callable[[str], bool] = None) -> Dict:
     """Incrementally re-extract the given repo-relative changed files.
 
@@ -499,8 +508,7 @@ def refresh(repo_root: str, changed_files, is_allowed: Callable[[str], bool] = N
         is_allowed = is_allowed or _default_is_allowed
         files = index.setdefault("files", {})
         refreshed, removed = [], []
-        for rel in sorted({str(p).replace("\\", "/").lstrip("./")
-                           for p in (changed_files or [])}):
+        for rel in sorted({_norm_rel(p) for p in (changed_files or [])}):
             if not rel:
                 continue
             full = os.path.join(repo_root, rel.replace("/", os.sep))
@@ -611,8 +619,12 @@ def query_event_couples(repo_root: str, names) -> Dict:
                 events_out[name] = {"producers": producers,
                                     "consumers": consumers}
                 for p in producers:
+                    if len(couples) >= _MAX_QUERY_RESULTS:
+                        break
                     for c in consumers:
                         if len(couples) >= _MAX_QUERY_RESULTS:
+                            warnings.append(
+                                f"ocr_index: couple cap {_MAX_QUERY_RESULTS} hit")
                             break
                         couples.append({
                             "event": name,

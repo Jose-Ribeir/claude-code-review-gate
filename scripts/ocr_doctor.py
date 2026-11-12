@@ -457,6 +457,9 @@ def check_store(add, env, root=None):
     # (review-gate _StateLock). A live owner is just slow; a dead one is stale.
     # The .flock singleflight files are kernel-managed and auto-released when
     # their owner dies, so they cannot go stale and are not checked.
+    # Note: the lock's age is computed once in this guarded loop and carried
+    # alongside; a lock can vanish between listing and reporting, and the
+    # report loop must not re-stat it (FileNotFoundError -> crashed doctor).
     stale, live = [], []
     try:
         lock_paths = sorted((root / "async").glob("*/*.lock"))
@@ -474,21 +477,21 @@ def check_store(add, env, root=None):
             token = p.read_text(encoding="utf-8")
             pid = token.split(":", 1)[0]
         except (OSError, ValueError):
-            stale.append((p, None))
+            stale.append((p, None, age))
             continue
         if _pid_alive(pid):
-            live.append((p, pid))
+            live.append((p, pid, age))
         else:
-            stale.append((p, pid))
+            stale.append((p, pid, age))
     if stale:
-        for p, pid in stale[:5]:
+        for p, pid, age in stale[:5]:
             add("store-locks", "warn",
                 f"stale state lock (owner pid {pid if pid else '?'} dead, "
-                f"{int(now - p.stat().st_mtime)}s old): {p}")
+                f"{int(age)}s old): {p}")
         if len(stale) > 5:
             add("store-locks", "warn", f"... and {len(stale) - 5} more stale lock(s)")
     elif live:
-        for p, pid in live[:5]:
+        for p, pid, age in live[:5]:
             add("store-locks", "ok",
                 f"aged lock still owned by live pid {pid} (not stale): {p}")
     else:

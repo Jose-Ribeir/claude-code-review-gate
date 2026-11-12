@@ -1,5 +1,9 @@
 # Changelog
 
+All notable changes to this project are documented here. The format is based on
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
+to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
 ## [Unreleased]
 
 ### Added
@@ -48,6 +52,19 @@
   machine-readable records for downstream analysis; unparseable store
   records are counted and reported (stderr in json mode) rather than
   silently dropped.
+- **`scripts/ocr_electron.py`** (shipped in [W5], 2026-11-06) — the
+  deterministic Electron checker (v1, regex-only): given the push range it
+  builds an IPC-channel index over the whole repo at the tip and emits
+  no-model findings the gate injects as `impact`/`known_defects` hints —
+  orphan renderer channels, `ipcMain` handlers without sender validation,
+  `webPreferences` anti-patterns newly added in the diff, and stale export
+  references a rename left behind.
+- **`scripts/ocr_janitor.py`** (shipped in [W8], 2026-11-08) — the gate
+  janitor: garbage-collects the gate's state on demand (`--dry-run` previews
+  every action) — clones of done/failed states, stale pending/pushed markers
+  whose repository is gone, findings-log rotation to whole lines, and
+  pruning of old verdict records (never one whose tip is still reachable);
+  sticky error states are reported, never auto-cleared.
 
 ### Changed
 - **The installer cleans up its own stale copies, and `/review-gate:doctor`
@@ -73,7 +90,7 @@
   `OCR_TIMEOUT` no longer resets to 3600 — the effective ceiling is
   `max(resolved, OCR_TIMEOUT)` — so an operator who raises `OCR_TIMEOUT` past
   3600 is no longer silently pinned to the flat deadline.
-- **Unseeded huge ranges are refused, not attempted (SPEC-11).** A push whose
+- **Unseeded huge ranges are refused, not attempted (SPEC-09).** A push whose
   range exceeds `OCR_FULL_HISTORY_LIMIT` commits (default 500) without prior
   chunk telemetry is refused with remedy text (`--depth`, the limit variable,
   or an explicit override) instead of starting a review that would run for
@@ -100,13 +117,6 @@
 - **Reporting text fixes.** Failure and still-running messages no longer read
   as almost-done: wording was corrected so a failed or refused review is not
   mistaken for a nearly finished one.
-
-
-All notable changes to this project are documented here. The format is based on
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
-to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
-## [Unreleased]
 
 Context expansion beyond the diff ("v2"): the gate now spots what a change touches,
 collects the evidence deterministically, and reviews with that evidence in hand.

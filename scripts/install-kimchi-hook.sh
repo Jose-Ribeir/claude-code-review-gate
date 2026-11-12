@@ -29,6 +29,19 @@ GITDIR="$(git -C "$REPO" rev-parse --absolute-git-dir 2>/dev/null)" || {
   echo "not a git repository: $REPO" >&2
   exit 2
 }
+# Linked worktrees (git worktree add): --absolute-git-dir answers the
+# PER-WORKTREE private dir (<common>/.git/worktrees/<name>), but git reads
+# hooks from the COMMON dir -- installing into $GITDIR/hooks there would be
+# the same silent mis-install core.hooksPath causes (the gate appears
+# installed while pushes run ungated). The default hooks dir is therefore
+# the common one wherever the two differ. --git-common-dir may print a path
+# relative to the cwd git ran in ($REPO); resolve it to absolute.
+GIT_COMMON_DIR="$(git -C "$REPO" rev-parse --git-common-dir 2>/dev/null || true)"
+if [ -n "$GIT_COMMON_DIR" ] && [ "${GIT_COMMON_DIR#/}" = "$GIT_COMMON_DIR" ]; then
+  GIT_COMMON_DIR="$(cd "$REPO" && cd -P "$GIT_COMMON_DIR" >/dev/null 2>&1 && pwd -P)" \
+    || GIT_COMMON_DIR=""
+fi
+DEFAULT_HOOKS_DIR="${GIT_COMMON_DIR:-$GITDIR}/hooks"
 KIMCHI_HOOKS_DIR="${KIMCHI_HOOKS_DIR:-$HOME/.config/kimchi/harness/hooks/bash}"
 EXT_DIR="${OCR_EXT_DIR:-$HOME/.config/kimchi/harness/extensions}"
 EXT_FILE="$EXT_DIR/review-gate-deny.ts"
@@ -41,9 +54,11 @@ SCR_VERSION="${SCR_VERSION:-unknown}"
 
 # (a) repo-level pre-push. Git runs hooks from core.hooksPath when the repo
 # sets one (husky, lefthook, a hand-rolled scripts/git-hooks); installing
-# into $GITDIR/hooks there would be a SILENT MIS-INSTALL -- git would never
-# run our hook. Honor the configured path, resolved the way git resolves it
-# (relative to the repo's work-tree top).
+# into the default hooks dir there would be a SILENT MIS-INSTALL -- git would
+# never run our hook. Honor the configured path, resolved the way git
+# resolves it (relative to the repo's work-tree top). With no configured
+# path the default is $DEFAULT_HOOKS_DIR: the COMMON dir's hooks/ -- inside a
+# linked worktree, git never looks at the per-worktree $GITDIR/hooks.
 HOOKS_CFG="$(git -C "$REPO" config --get core.hooksPath 2>/dev/null || true)"
 if [ -n "$HOOKS_CFG" ]; then
   REPO_TOP="$(git -C "$REPO" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$REPO")"
@@ -53,14 +68,14 @@ if [ -n "$HOOKS_CFG" ]; then
   esac
   echo "core.hooksPath is set to $HOOKS_CFG; installing the pre-push into $HOOKS_DIR"
 else
-  HOOKS_DIR="$GITDIR/hooks"
+  HOOKS_DIR="$DEFAULT_HOOKS_DIR"
 fi
 if ! mkdir -p "$HOOKS_DIR" 2>/dev/null; then
   cat >&2 <<EOF
 ERROR: cannot create the hook directory $HOOKS_DIR (from core.hooksPath =
 $HOOKS_CFG). The pre-push gate was NOT installed: git would not run a hook
-from $GITDIR/hooks while core.hooksPath points elsewhere, so refusing to
-mis-install it there. Fix the permissions on $HOOKS_DIR (or clear
+from $DEFAULT_HOOKS_DIR while core.hooksPath points elsewhere, so refusing
+to mis-install it there. Fix the permissions on $HOOKS_DIR (or clear
   git -C "$REPO" config --unset core.hooksPath
 if that setting is stale), then re-run this installer.
 EOF
@@ -70,9 +85,9 @@ if ! [ -w "$HOOKS_DIR" ] || ! [ -x "$HOOKS_DIR" ]; then
   cat >&2 <<EOF
 ERROR: the hook directory $HOOKS_DIR (from core.hooksPath = $HOOKS_CFG) is
 not writable, so the pre-push gate cannot be installed there. It was NOT
-installed into $GITDIR/hooks either: git would never run it from there while
-core.hooksPath points elsewhere. Grant write access to $HOOKS_DIR (or unset
-core.hooksPath), then re-run this installer.
+installed into $DEFAULT_HOOKS_DIR either: git would never run it from there
+while core.hooksPath points elsewhere. Grant write access to $HOOKS_DIR (or
+unset core.hooksPath), then re-run this installer.
 EOF
   exit 1
 fi
@@ -99,19 +114,23 @@ if ! sed -e "s|__SCR_DIR__|$SCR_DIR|g" -e "s|__SCR_VERSION__|$SCR_VERSION|g" \
 fi
 chmod +x "$PRE_PUSH" || { echo "ERROR: could not chmod +x $PRE_PUSH." >&2; exit 1; }
 
-# Stale-copy cleanup: when core.hooksPath points elsewhere, git never runs a
-# hook left in the default $GITDIR/hooks -- a gate copy there is a shadowed
-# lie (the gate appears installed while pushes run ungated). Remove it, but
-# only after the new install succeeded (the gate must never go absent) and
-# only when it is recognizably ours; a foreign hook is never touched.
-  hooks_dir_real=$(cd "$HOOKS_DIR" 2>/dev/null && pwd -P) || hooks_dir_real="$HOOKS_DIR"
-  default_hooks_real=$(cd "$GITDIR/hooks" 2>/dev/null && pwd -P) || default_hooks_real="$GITDIR/hooks"
-  if [ "$hooks_dir_real" != "$default_hooks_real" ] && [ -f "$GITDIR/hooks/pre-push" ] \
-     && grep -q "review-gate.py" "$GITDIR/hooks/pre-push" 2>/dev/null; then
-  rm -f "$GITDIR/hooks/pre-push"
-  echo "Removed a stale review-gate pre-push from $GITDIR/hooks:"
-  echo "  core.hooksPath points at $HOOKS_DIR, so git never ran that copy."
-fi
+# Stale-copy cleanup: git only reads hooks from core.hooksPath / the common
+# dir, so a gate copy left in any other hook dir (the per-worktree
+# $GITDIR/hooks of a linked worktree, or the default dir while core.hooksPath
+# points elsewhere) is a shadowed lie: the gate appears installed while
+# pushes run ungated. Remove it, but only after the new install succeeded
+# (the gate must never go absent) and only when it is recognizably ours; a
+# foreign hook is never touched.
+hooks_dir_real=$(cd "$HOOKS_DIR" 2>/dev/null && pwd -P) || hooks_dir_real="$HOOKS_DIR"
+for stale_dir in "$GITDIR/hooks" "$DEFAULT_HOOKS_DIR"; do
+  stale_real=$(cd "$stale_dir" 2>/dev/null && pwd -P) || stale_real="$stale_dir"
+  if [ "$stale_real" != "$hooks_dir_real" ] && [ -f "$stale_dir/pre-push" ] \
+     && grep -q "review-gate.py" "$stale_dir/pre-push" 2>/dev/null; then
+    rm -f "$stale_dir/pre-push"
+    echo "Removed a stale review-gate pre-push from $stale_dir:"
+    echo "  git runs hooks from $HOOKS_DIR, so it never ran that copy."
+  fi
+done
 
 # (b) the Kimchi bash hook (UX layer).
 mkdir -p "$KIMCHI_HOOKS_DIR"

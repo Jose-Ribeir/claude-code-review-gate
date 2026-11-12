@@ -324,7 +324,14 @@ classify_command() {
       '#')
         # comment: only when it starts a word (shell rule)
         if [ "$word_started" = 0 ]; then
-          break   # rest of the command is a comment
+          # Shell semantics: a comment ENDS AT THE NEWLINE. Skip to it instead
+          # of ending the scan -- breaking here truncates a multi-line call at
+          # the '#', so `git status # note\ngit push origin main' would never
+          # classify (and gate) the push on the following line.
+          while [ "$i" -lt "$n" ] && [ "${code:i:1}" != $'\n' ]; do
+            i=$((i + 1))
+          done
+          continue   # the newline itself is handled as a separator next turn
         fi
         word+='#'; i=$((i + 1)); continue ;;
       *)
@@ -342,16 +349,35 @@ classify_command() {
     while [ "$j" -lt "$m" ]; do
       w2="${words[j]}"
       local recurse=""
-      case " $_INTERPRETERS " in
-        *" $w2 "*)
-          if [ "$((j + 2))" -lt "$m" ] && [ "${words[j+1]}" = "-c" ]; then
-            recurse="${words[j+2]}"
-          fi ;;
-        eval)
-          if [ "$((j + 1))" -lt "$m" ]; then
-            recurse="${words[j+1]}"
-          fi ;;
-      esac
+      # NOTE: membership tests here must use $w2 as the case SUBJECT -- the
+      # old `case " $_INTERPRETERS " in ... eval)' had eval as a PATTERN
+      # against the interpreter LIST, so the eval arm was unreachable and
+      # every eval form (even the quoted one) slipped past the recursion.
+      if [ "$w2" = "eval" ]; then
+        if [ "$((j + 1))" -lt "$m" ]; then
+          # eval joins ALL of its arguments with spaces and runs the result,
+          # so re-classify the whole rest of the command (up to the next
+          # separator), not just the next word: `eval git push origin main'
+          # tokenizes as four words and only re-reading `git' would miss the
+          # push. The quoted single-argument form lands here as one word and
+          # is unchanged. j then resumes at the separator, so the same words
+          # are not re-scanned as a second interpreter invocation.
+          local jj=$((j + 1)) joined=""
+          while [ "$jj" -lt "$m" ] && [ "${words[jj]}" != ";" ]; do
+            joined+="${words[jj]} "
+            jj=$((jj + 1))
+          done
+          recurse="${joined% }"
+          j=$((jj - 1))   # the loop's own j+1 lands back on the separator
+        fi
+      else
+        case " $_INTERPRETERS " in
+          *" $w2 "*)
+            if [ "$((j + 2))" -lt "$m" ] && [ "${words[j+1]}" = "-c" ]; then
+              recurse="${words[j+2]}"
+            fi ;;
+        esac
+      fi
       if [ -n "$recurse" ]; then
         local sf=$PUSH_FOUND sc=$PUSH_COUNT sw="$PUSH_WORDS" sp=$PUSH_PLUMBING
         classify_command "$recurse" $((depth + 1))

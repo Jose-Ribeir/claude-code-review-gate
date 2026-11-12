@@ -20,11 +20,23 @@ GITDIR="$(git -C "$REPO" rev-parse --absolute-git-dir 2>/dev/null)" || {
   echo "not a git repository: $REPO" >&2
   exit 2
 }
+# Linked worktrees (git worktree add): $GITDIR is the PER-WORKTREE private
+# dir; git reads hooks from the COMMON dir, so the installed pre-push lives
+# there even when the install ran from inside a worktree. Sweep both.
+# --git-common-dir may print a path relative to the cwd git ran in ($REPO);
+# resolve it to absolute.
+GIT_COMMON_DIR="$(git -C "$REPO" rev-parse --git-common-dir 2>/dev/null || true)"
+if [ -n "$GIT_COMMON_DIR" ] && [ "${GIT_COMMON_DIR#/}" = "$GIT_COMMON_DIR" ]; then
+  GIT_COMMON_DIR="$(cd "$REPO" && cd -P "$GIT_COMMON_DIR" >/dev/null 2>&1 && pwd -P)" \
+    || GIT_COMMON_DIR=""
+fi
+COMMON_HOOKS_DIR="${GIT_COMMON_DIR:-$GITDIR}/hooks"
 HOOKS_DIR="$GITDIR/hooks"
 # A3: the pre-push was installed into core.hooksPath when the repo sets one
 # (install-kimchi-hook.sh honors it); uninstall from wherever git would
-# actually run it. The default $GITDIR/hooks is still swept below for
-# recognizably-ours leftovers from older, mis-placed installs.
+# actually run it. The per-worktree $GITDIR/hooks and the common dir are both
+# still swept below for recognizably-ours leftovers from older or
+# mis-placed installs (a worktree's private hooks dir is never read by git).
 HOOKS_CFG="$(git -C "$REPO" config --get core.hooksPath 2>/dev/null || true)"
 if [ -n "$HOOKS_CFG" ]; then
   REPO_TOP="$(git -C "$REPO" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$REPO")"
@@ -37,11 +49,19 @@ else
 fi
 
 # (a) repo-level pre-push: restore the preserved user hook if there is one.
-# Runs for the configured hooks dir (when set) and the default one, in that
-# order; only files recognizably ours are ever touched.
+# Runs for the configured hooks dir (when set), the per-worktree hooks dir,
+# and the common dir, in that order, deduped by real path; only files
+# recognizably ours are ever touched.
 _DIRS=()
-if [ -n "$CFG_HOOKS_DIR" ]; then _DIRS+=("$CFG_HOOKS_DIR"); fi
-if [ "$CFG_HOOKS_DIR" != "$HOOKS_DIR" ]; then _DIRS+=("$HOOKS_DIR"); fi
+_seen="|"
+for cand in ${CFG_HOOKS_DIR:+"$CFG_HOOKS_DIR"} "$HOOKS_DIR" "$COMMON_HOOKS_DIR"; do
+  cand_real="$(cd "$cand" 2>/dev/null && pwd -P)" || cand_real="$cand"
+  case "$_seen" in
+    *"|$cand_real|"*) continue ;;
+  esac
+  _seen="$_seen$cand_real|"
+  _DIRS+=("$cand")
+done
 for dir in "${_DIRS[@]}"; do
   if [ -f "$dir/pre-push" ] && grep -q "review-gate.py" "$dir/pre-push" 2>/dev/null; then
     rm -f "$dir/pre-push"

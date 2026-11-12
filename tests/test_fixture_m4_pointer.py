@@ -38,13 +38,20 @@ import builders  # noqa: E402
 
 
 def _m4(tmp_path):
-    return builders.build_m4(tmp_path / "work")
+    info = builders.build_m4(tmp_path / "work")
+    # Repoint the local-path origin at a GitLab host: a local-path origin is
+    # an unsupported host, so the forge tier would be skipped (and must not
+    # count as searched); this fixture wants the tier to genuinely engage.
+    builders.git(["remote", "set-url", "origin",
+                  "https://gitlab.example.invalid/dept/weekly.git"],
+                 info["root"])
+    return info
 
 
 def _stub_glab_env(tmp_path, monkeypatch):
     """A forge that runs and finds nothing: PATH = real git dir + a fake
-    `glab` printing `[]` with rc 0 (the fixture's origin is a local path,
-    not github.com, so autodetection picks glab)."""
+    `glab` printing `[]` with rc 0 (the fixture's origin is repointed at a
+    gitlab host in _m4, so autodetection picks glab)."""
     bin_dir = builders.make_forge_cli(tmp_path / "bin", "glab", "[]", rc=0)
     git_dir = os.path.dirname(shutil.which("git"))
     monkeypatch.setenv("PATH", os.pathsep.join([bin_dir, git_dir]))
@@ -72,7 +79,8 @@ class TestFixtureSelfCheck:
         assert hits.strip() == "HEAD:" + info["src"]
 
     def test_origin_is_not_github_so_glab_is_the_forge(self, tmp_path):
-        """Deterministic CLI choice for the stub."""
+        """Deterministic CLI choice for the stub: _m4 repoints origin at a
+        gitlab host so autodetection selects glab and the tier runs."""
         info = _m4(tmp_path)
         url = builders.git(["remote", "get-url", "origin"], info["root"]).strip()
         assert url and "github.com" not in url

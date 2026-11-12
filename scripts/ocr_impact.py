@@ -44,6 +44,25 @@ def _valid_ident(name: str) -> bool:
     return bool(_IDENT_RE.match(name))
 
 
+def name_matches(query: str, candidate: str) -> bool:
+    """Loose basename/stem match either way, so 'weekly-2026-11',
+    'weekly-2026-11.md' and 'out/weekly-2026-11.md' name the same artifact.
+
+    Single implementation of the loose pointer-name match shared by
+    ocr_collectors (_pointer_matches) and ocr_forge (_name_matches).
+    """
+    norm = str(query or "").replace("\\", "/").strip().lower()
+    if not norm:
+        return False
+    q = norm.rsplit("/", 1)[-1]
+    qstem = os.path.splitext(q)[0]
+    c = str(candidate or "").replace("\\", "/").rsplit("/", 1)[-1].lower()
+    cstem = os.path.splitext(c)[0]
+    if not qstem or not cstem:
+        return False
+    return q in c or qstem in cstem or cstem in qstem
+
+
 # ---------------------------------------------------------------------------
 # 1. git_runner
 # ---------------------------------------------------------------------------
@@ -153,15 +172,19 @@ def _ast_defs(text: str, path: str) -> List[Dict]:
         # before the first body statement, so a wrapped multi-line
         # signature compares in full (an added optional parameter often
         # lands on a continuation line while line 1 stays identical).
+        # Blank lines and full-line comments inside that span are dropped:
+        # they are not part of the signature, so adding one must not
+        # misclassify as a 'signature' change.
         lineno = node.lineno - 1  # 0-based
         if not (0 <= lineno < len(lines)):
             return ""
+        end = lineno + 1
         body = getattr(node, "body", None)
-        if body and isinstance(body[0], ast.stmt):
+        if body and isinstance(body[0], ast.stmt) and body[0].lineno - 1 > lineno:
             end = body[0].lineno - 1  # exclusive, 0-based
-            if end > lineno:
-                return "\n".join(lines[lineno:end])
-        return lines[lineno]
+        header = [ln for ln in lines[lineno:end]
+                  if ln.strip() and not ln.strip().startswith("#")]
+        return "\n".join(header)
 
     defs = []
 

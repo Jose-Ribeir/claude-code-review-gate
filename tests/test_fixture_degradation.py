@@ -77,9 +77,21 @@ def _isolated_path(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", git_dir)
 
 
+def _gitlab_origin(info):
+    """Repoint m4's local-path origin at a gitlab-hosting URL. The forge
+    tier autodetects ``glab`` from a host containing 'gitlab'; any other
+    host now skips the tier outright (findings-#10 fix), so the CLI-missing
+    and CLI-fails degradation paths this class exists to check need an
+    origin that still claws the tier back to ``glab``."""
+    builders.git(["remote", "set-url", "origin",
+                  "https://gitlab.example.invalid/dept/weekly.git"],
+                 info["root"])
+
+
 class TestOfflineForge:
     def test_missing_forge_cli_degrades_to_local_tiers(self, tmp_path, monkeypatch):
         info = builders.build_m4(tmp_path / "work")
+        _gitlab_origin(info)
         ocr_index.ensure_built(info["root"])
         _isolated_path(tmp_path, monkeypatch)
         resolution = ocr_forge.make_pointer_resolver(info["root"])(info["target"])
@@ -92,6 +104,7 @@ class TestOfflineForge:
     def test_degraded_forge_still_reaches_the_bundle_as_unavailable(
             self, tmp_path, monkeypatch):
         info = builders.build_m4(tmp_path / "work")
+        _gitlab_origin(info)
         ocr_index.ensure_built(info["root"])
         _isolated_path(tmp_path, monkeypatch)
         resolver = ocr_forge.make_pointer_resolver(info["root"])
@@ -125,6 +138,7 @@ class TestOfflineForge:
         """An unauthneticated-forge answer (rc=1) degrades AND is cached:
         the second call pays nothing (spec: cached negative results)."""
         info = builders.build_m4(tmp_path / "work")
+        _gitlab_origin(info)
         ocr_index.ensure_built(info["root"])
         bin_dir = builders.make_forge_cli(tmp_path / "bin", "glab", "error", rc=1)
         git_dir = os.path.dirname(shutil.which("git"))

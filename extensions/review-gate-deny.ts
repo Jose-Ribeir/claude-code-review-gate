@@ -19,6 +19,21 @@
 // Deny is fail-closed by construction: a bash command we cannot parse, or a
 // bash payload we cannot even find in the event, is DENIED -- the reviewer
 // loses a tool call, the push never loses its sandbox.
+//
+// Hardening policies (gate self-review findings):
+//  - Leading VAR=value assignments are DENIED, never skipped. Exported env
+//    reaches the child process, and git alone honors GIT_CONFIG_COUNT /
+//    GIT_CONFIG_KEY_* / GIT_CONFIG_VALUE_* (arbitrary config, including `!`
+//    aliases that execute an arbitrary command), GIT_DIR / GIT_WORK_TREE
+//    (retargeting reads at any repo on disk, defeating GIT_ESCAPES),
+//    GIT_CONFIG_PARAMETERS and GIT_PAGER -- each a full escape from the
+//    read-only sandbox. The reviewer needs no environment overrides.
+//  - sed is NOT on the allowlist, even with -n: its script language writes
+//    arbitrary files (the w/W commands) and on GNU sed executes the shell
+//    (the e command, the s///e substitution flag). head/cat/grep/tail cover
+//    line-range reads.
+//  - For every git verb the allowlist admits, --output, --output=<path> and
+//    -o are DENIED: they write a file from inside the sandbox.
 
 // --- what the reviewer may run -------------------------------------------------
 
@@ -73,14 +88,14 @@ const FIND_ESCAPES = ["-exec", "-execdir", "-ok", "-okdir", "-delete",
 const TOOL_DENIES = new Set(["write", "edit", "multiedit", "web_fetch",
   "web_search", "notebook_edit"])
 
-const REDIRECT_OPS = [">", ">>", "&>", ">&", "<>"]
+const REDIRECT_OPS = [">", ">>", "&>", ">&", "<>", "<"]
 
 // Every deny reason ends with what to do instead: a deny the model cannot
 // act on is just a retry loop.
 const _ADVICE = "The review sandbox is read-only: inspect with the " +
   "read/grep/find/ls tools or git read verbs (diff log show rev-parse " +
   "cat-file blame ls-files grep status describe merge-base, plus " +
-  "grep/rg/find/ls/wc/cat/head/tail/sed -n), and ask the supervisor " +
+  "grep/rg/find/ls/wc/cat/head/tail), and ask the supervisor " +
   "(outside the review) for anything else."
 
 function deny(reason) {
@@ -210,20 +225,23 @@ function checkBashCommand(cmd) {
 }
 
 function checkSegment(words) {
-  // Leading VAR=value assignments are environment for the command, not the
-  // command itself.
-  let i = 0
-  while (i < words.length && !words[i].quoted &&
-         /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i].text)) {
-    i++
+  // Leading VAR=value assignments are DENIED, not skipped: exported
+  // environment reaches the child and git alone honors GIT_CONFIG_COUNT /
+  // GIT_CONFIG_KEY_* / GIT_CONFIG_VALUE_* (arbitrary config incl. `!` alias
+  // shell execution), GIT_DIR / GIT_WORK_TREE (repo retarget),
+  // GIT_CONFIG_PARAMETERS, GIT_PAGER ... (see header policy).
+  if (!words[0].quoted && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[0].text)) {
+    return deny("leading environment assignment " +
+      JSON.stringify(words[0].text) + " can steer the command it prefixes " +
+      "(git reads GIT_CONFIG_*, GIT_DIR, GIT_WORK_TREE, GIT_PAGER, ...) and " +
+      "is not allowed in the read-only sandbox.")
   }
-  if (i >= words.length) return undefined
-  const name = words[i].text
+  const name = words[0].text
   if (name.includes("/")) {
     return deny(JSON.stringify(name) + " is a path, not an allowlisted " +
       "command name (a path could be any executable).")
   }
-  if (name === "git") return checkGit(words.slice(i + 1))
+  if (name === "git") return checkGit(words.slice(1))
   if (NETWORK.has(name)) {
     return deny(name + " opens a network connection from inside the review.")
   }
@@ -232,18 +250,16 @@ function checkSegment(words) {
       "could spawn an unsandboxed nested agent session).")
   }
   if (name === "sed") {
-    const flags = words.slice(i + 1).map((w) => w.text)
-    if (flags.some((f) => f === "-i" || f.startsWith("-i"))) {
-      return deny("sed -i edits files in place.")
-    }
-    if (!flags.includes("-n")) {
-      return deny("sed without -n is not on the read-only allowlist (only " +
-        "`sed -n <script> <file>` is).")
-    }
-    return undefined
+    // Not on the allowlist at all: the sed script language writes files
+    // (`sed -n 'w /tmp/out' f`; W on GNU sed) and GNU sed executes the
+    // shell (the e command and the s///e substitution flag). -n does not
+    // restrict the script, so no flag check can make sed read-only.
+    return deny("sed is not on the read-only allowlist: its script " +
+      "language writes files (w command) and GNU sed executes the shell " +
+      "(e command, s///e flag). Use head/cat/grep/tail for line reads.")
   }
   if (name === "find") {
-    const flags = words.slice(i + 1).map((w) => w.text)
+    const flags = words.slice(1).map((w) => w.text)
     const bad = flags.find((f) => FIND_ESCAPES.includes(f) || f.startsWith("-fprint"))
     if (bad) {
       return deny("find " + bad + " executes or writes; it is not the " +
@@ -296,6 +312,13 @@ function checkGit(rest) {
     if (w.text.startsWith("-") && GIT_ESCAPES.includes(flag)) {
       return deny("git " + flag + " retargets git at a different repo or " +
         "config: a sandbox escape.")
+    }
+    // --output (and --output=<path>) writes a file from inside the sandbox;
+    // -o is the short form where a verb supports it. None of the admitted
+    // read verbs need a file sink: the extension captures the output stream.
+    if (flag === "--output" || w.text === "-o") {
+      return deny("git " + flag + " writes output to a file inside the " +
+        "sandbox; read the command's own stdout instead.")
     }
   }
   return undefined

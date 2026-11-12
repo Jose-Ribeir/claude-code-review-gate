@@ -407,6 +407,18 @@ def test_a_parse_failed_chunk_is_split_and_retried_not_run_fatal(tmp_path):
     assert _gate_worktree_dirs() == []
 
 
+def test_the_progress_total_grows_with_the_splits(tmp_path):
+    """SPEC-07 splits extend the plan AFTER the first count: the user-facing
+    progress total must follow them, or chunk/progress messages miscount."""
+    work = ag._big_repo(tmp_path, n_files=4)
+    tip = ag._git(["rev-parse", "HEAD"], cwd=work)
+    env = _files_env(tmp_path, STUB_CHUNK_VERDICT=json.dumps({"0": "garbage"}))
+    _push(work, env)
+    st = ag._wait_state(work, tip, {"done", "failed"}, timeout=90)
+    assert st["state"] == "done", st
+    assert st["chunks_total"] == 4, st     # 2 planned + chunk 0's 2 split pieces
+
+
 def test_an_exhausted_parse_failure_names_the_unreviewed_remainder(tmp_path):
     """mod0.py is unparseable alone twice (the splitter's bound): it stays
     unreviewed, but the run still delivers a warn verdict over the reviewed

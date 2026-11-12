@@ -609,6 +609,53 @@ class TestBundleCap:
         assert "S" * 900 in small_entry["evidence"]["files"]["src/app.py"]
         _assert_valid_bundle(bundle)
 
+    def _note_bundle(self, note):
+        entry = {"id": "prose_pointers[0]", "kind": "prose_pointers",
+                 "demands": ["weekly-2099-W48.md"], "status": "unresolved",
+                 "evidence": None, "note": note}
+        return {"version": 1, "entries": [entry], "truncated": False,
+                "total_chars": 0}
+
+    def test_note_shrinking_when_no_evidence_remains_to_cut(self):
+        """Notes fallback: with no evidence left to cut, a >160-char note is
+        truncated to the keep bound (max(160, len//4)) with the trunc
+        suffix, the entry is flagged truncated, and the warning fires."""
+        bundle = self._note_bundle("A" * 300)
+        warnings = []
+        # After one cut the entry carries the keep-bound note and a truncated
+        # flag; size the cap so the loop ends right there.
+        after_cut = dict(bundle["entries"][0],
+                         note="A" * 160 + (oc._TRUNC_SUFFIX % 140),
+                         truncated=True)
+        budget = oc._json_chars([after_cut])
+        oc._enforce_cap(bundle, budget, warnings)
+        entry = bundle["entries"][0]
+        assert entry["note"] == "A" * 160 + (oc._TRUNC_SUFFIX % 140)
+        assert entry["truncated"] is True
+        assert bundle["truncated"] is True
+        assert any("prose_pointers[0]" in w and "largest-entry-first" in w
+                   for w in warnings)
+        assert bundle["total_chars"] <= budget
+        _assert_valid_bundle(bundle)
+
+    def test_note_shrinking_terminates_when_nothing_left_yields(self):
+        """Over-cap with an unreachable budget: the notes fallback re-cuts to
+        the same length, detects no progress, and the loop still terminates
+        (no unbounded spin)."""
+        bundle = self._note_bundle("B" * 300)
+        warnings = []
+        oc._enforce_cap(bundle, 1, warnings)  # terminator check: returns
+        entry = bundle["entries"][0]
+        # Settled at the keep bound plus the shortest re-truncation suffix
+        # (a 313-char cut, then a 30-char re-cut that yields no progress).
+        assert entry["note"] == "B" * 160 + (oc._TRUNC_SUFFIX % 30)
+        assert entry["truncated"] is True
+        assert bundle["truncated"] is True
+        # Warned once per entry, not once per spin.
+        assert len(warnings) == 1
+        assert bundle["total_chars"] > 1
+        _assert_valid_bundle(bundle)
+
 
 # ===========================================================================
 # End-to-end: one fixture with evidence + unresolved + truncation warning

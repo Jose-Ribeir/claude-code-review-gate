@@ -93,3 +93,72 @@ def test_stub_push_records_one_resumable_row(tmp_path):
 @pytest.mark.skipif(not _SCRATCH_ROOT, reason="needs OCR_CAL_TEST_ROOT (stub e2e)")
 def test_stub_push_against_prebuilt_scratch(tmp_path):
     cal.main(["--stub", "--root", _SCRATCH_ROOT, "--md", str(tmp_path / "cal.md")])
+
+
+def _mk_git_repo(path, commits):
+    """A scratch git checkout standing in for the upstream review source."""
+    path.mkdir(parents=True, exist_ok=True)
+
+    def g(*args):
+        subprocess.run(["git"] + list(args), cwd=str(path), check=True,
+                       capture_output=True,
+                       env={k: v for k, v in os.environ.items()
+                            if not k.startswith("GIT_TRACE")})
+    g("init", "-q", "-b", "main")
+    g("config", "user.email", "t@example.com")
+    g("config", "user.name", "t")
+    g("config", "commit.gpgsign", "false")
+    for i in range(commits):
+        (path / f"f{i}.txt").write_text(f"{i}\n")
+        g("add", ".")
+        g("commit", "-q", "-m", f"commit {i}")
+    return path
+
+
+@pytest.fixture
+def _restore_upstream(monkeypatch):
+    """_retarget_upstream retargets module globals; snapshot + restore them
+    around each test."""
+    monkeypatch.setattr(cal, "UPSTREAM", cal.UPSTREAM)
+    monkeypatch.setitem(cal.REMOTES, "upstream", cal.REMOTES["upstream"])
+
+
+def test_missing_upstream_fails_with_a_clean_ap_error(tmp_path, monkeypatch,
+                                                      capsys, _restore_upstream):
+    """No OCR_CALIB_UPSTREAM and the fallback path does not exist: the run
+    must die BEFORE rows are built with argparse's error (SystemExit 2) and a
+    message naming the env var -- never a raw RuntimeError from git."""
+    monkeypatch.delenv("OCR_CALIB_UPSTREAM", raising=False)
+    monkeypatch.setattr(cal, "UPSTREAM_FALLBACK", tmp_path / "no-such-checkout")
+    with pytest.raises(SystemExit) as exc:
+        cal.main(["--fp-upstream", "3", "--plan", "--md", str(tmp_path / "m.md")])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "OCR_CALIB_UPSTREAM" in err
+    assert "no-such-checkout" in err
+
+
+def test_upstream_that_is_not_a_git_repo_fails_cleanly(tmp_path, monkeypatch,
+                                                       capsys, _restore_upstream):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    monkeypatch.setenv("OCR_CALIB_UPSTREAM", str(plain))
+    with pytest.raises(SystemExit) as exc:
+        cal.main(["--fp-upstream", "2", "--plan", "--md", str(tmp_path / "m.md")])
+    assert exc.value.code == 2
+    assert "not a git repository" in capsys.readouterr().err
+
+
+def test_upstream_env_var_points_at_a_temp_repo(tmp_path, monkeypatch,
+                                                capsys, _restore_upstream):
+    """Happy path: OCR_CALIB_UPSTREAM names a real checkout; its ranges plan
+    out and REMOTES is retargeted at the resolved path."""
+    repo = _mk_git_repo(tmp_path / "upstream-checkout", commits=4)
+    monkeypatch.setenv("OCR_CALIB_UPSTREAM", str(repo))
+    rc = cal.main(["--fp-upstream", "2", "--plan", "--md", str(tmp_path / "m.md")])
+    assert rc == 0
+    todo = [ln for ln in capsys.readouterr().out.splitlines()
+            if ln.split()[0] == "TODO" and ln.split()[1].startswith("upstream-")]
+    assert len(todo) == 2
+    assert cal.REMOTES["upstream"] == repo
+    assert cal.UPSTREAM == repo

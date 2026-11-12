@@ -84,8 +84,8 @@ def _glob_to_regex(glob):
     return re.compile("^" + "".join(out) + "$")
 
 
-def _read_lines(path, warnings):
-    """Read a file's lines; on failure append a warning and return None."""
+def _read_lines(path):
+    """Read a file's lines; on failure return None (the caller warns)."""
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
             return fh.read().splitlines()
@@ -213,7 +213,7 @@ def _render_file(entries, max_doc_lines, max_total_lines, warnings):
     used = 0
     for entry in entries:
         label = entry["doc_label"]
-        lines = _read_lines(entry["doc_abs"], warnings)
+        lines = _read_lines(entry["doc_abs"])
         if lines is None:
             warnings.append("conventions: doc %s not found or unreadable; skipped" % label)
             continue

@@ -648,6 +648,19 @@ def test_a_clean_pass_is_still_recorded(tmp_path):
     assert entry["finding_count"] == 0 and entry["truncated"] is False
 
 
+def test_record_persists_the_unreviewed_file_list(tmp_path):
+    """The 'not reviewed' block (see _mark_unreviewed) is rendered from the
+    live verdict's `unreviewed` path list; a count alone would leave --history
+    and --mode post unable to rebuild it from the recorded entry."""
+    result = {"findings": [_FINDING], "unreviewed": ["a.py", "b/c.py"]}
+    _record_review(str(tmp_path), "abc1234", "feat/x", "git",
+                   "warn", False, False, result, "")
+    entry = _read_history(str(tmp_path))[0]
+    assert entry["unreviewed"] == ["a.py", "b/c.py"]
+    out = review_gate._format_reasons(entry)
+    assert "not reviewed" in out and "a.py" in out and "b/c.py" in out, out
+
+
 def test_blocked_reviews_are_recorded_too(tmp_path):
     _rec(tmp_path, verdict="block", blocked=True)
     assert _read_history(str(tmp_path))[0]["blocked"] is True
@@ -1799,6 +1812,15 @@ def test_post_still_delivers_a_record_written_moments_ago(tmp_path, monkeypatch,
     _seed_record(tmp_path)
     _run_post(monkeypatch, tmp_path)
     assert "unchecked index" in _post_context(capsys)
+
+
+def test_post_replays_the_not_reviewed_block_from_the_record(tmp_path, monkeypatch, capsys):
+    result = {"findings": list(_WARN_RESULT["findings"]), "unreviewed": ["a.py"]}
+    review_gate._record_review(
+        str(tmp_path), "a" * 40, "feat/x", "hook", "warn", False, False, result, "")
+    _run_post(monkeypatch, tmp_path)
+    ctx = _post_context(capsys)
+    assert "not reviewed" in ctx and "a.py" in ctx, ctx
 
 
 def test_post_ignores_a_record_with_an_unusable_timestamp(tmp_path, monkeypatch, capsys):

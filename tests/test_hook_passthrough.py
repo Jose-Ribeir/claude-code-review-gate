@@ -520,6 +520,81 @@ def test_sh_adapter_blocks_send_pack_as_plumbing(tmp_path):
     assert "send-pack" in reason
 
 
+# --- review-gate findings: comment and eval handling in the tokenizer ---------
+
+@needs_bash
+def test_sh_adapter_classifies_a_push_on_the_line_after_a_comment(tmp_path):
+    # '#'-comment handling used to BREAK OUT of the tokenizer instead of
+    # skipping to the newline, truncating a multi-line call at the '#', so
+    # `git status # note\ngit push origin main' never classified (or gated)
+    # the push on the following line. Shell comments end at the newline.
+    repo = _gated_repo(tmp_path)
+    proc = subprocess.run(
+        [_BASH, _SH], input=_payload("git status # note\ngit push origin main", cwd=str(repo)),
+        capture_output=True, text=True, env=_env(), timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    decision, reason = parse_pretooluse(proc.stdout)
+    assert decision == "deny", (proc.stdout, proc.stderr)
+    assert "review-gate" in reason
+    # Same for the push-shaped short path (blocks before any repo lookup).
+    proc = _run([_BASH, _SH], "git status # note\ngit push --all")
+    decision, reason = parse_pretooluse(proc.stdout)
+    assert decision == "deny"
+    assert "could not parse push command" in reason
+
+
+@needs_bash
+def test_sh_adapter_never_classifies_the_comment_text_itself():
+    # The mirror guarantee: text after '#' (to the end of the line) is data.
+    _assert_passes(_run([_BASH, _SH], "git status # git push origin main"))
+    _assert_passes(_run([_BASH, _SH], "git status # note\ngit status # git push origin main"))
+
+
+@needs_bash
+def test_sh_adapter_routes_a_quoted_eval_push_to_the_gate(tmp_path):
+    # The old `case " $_INTERPRETERS " in ... eval)' arm was UNREACHABLE (the
+    # case subject is the interpreter LIST, never the word `eval'), so even
+    # the quoted single-argument form slipped past the recursion. Now a gated
+    # repo must deny it -- review-gate.py's own strict parser positively
+    # parses this quoted hand-off.
+    repo = _gated_repo(tmp_path)
+    proc = subprocess.run(
+        [_BASH, _SH], input=_payload("eval 'git push origin main'", cwd=str(repo)),
+        capture_output=True, text=True, env=_env(), timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    decision, reason = parse_pretooluse(proc.stdout)
+    assert decision == "deny", (proc.stdout, proc.stderr)
+    assert "review-gate" in reason
+
+
+@needs_bash
+def test_sh_adapter_sees_the_push_shape_through_an_unquoted_eval():
+    # The unquoted multi-word eval form: eval joins ALL its arguments with
+    # spaces, so the recursion must re-classify `git push --all' as a whole.
+    # (Routing end-to-end here can't be asserted -- review-gate.py's strict
+    # parser owns the quoted comparison -- so the shape and count tests below
+    # carry the unquoted-form regression.)
+    proc = _run([_BASH, _SH], "eval git push --all")
+    decision, reason = parse_pretooluse(proc.stdout)
+    assert decision == "deny"
+    assert "could not parse push command" in reason
+
+
+@needs_bash
+def test_sh_adapter_counts_each_eval_push_exactly_once(tmp_path):
+    # Two eval pushes => the multi-push block. A single eval push must count
+    # EXACTLY once: in an un-gated repo it passes through, whereas a double
+    # count (re-scanning the joined words a second time) would block there.
+    proc = _run([_BASH, _SH], "eval git push origin main; eval 'git push origin main'")
+    decision, reason = parse_pretooluse(proc.stdout)
+    assert decision == "deny"
+    assert "more than one `git push`" in reason
+    repo = _mkcommitted_repo(tmp_path)   # never installed the gate: the hook is inert
+    _assert_passes(_run([_BASH, _SH], "eval git push origin main", _cwd=str(repo)))
+
+
 def test_core_does_not_self_disable_on_a_spoofed_in_review_env(tmp_path):
     # OCR_IN_REVIEW in the PROCESS environment (what a spoofing shell gives
     # the pre-push hook) must not disable the push gate in hook mode: the

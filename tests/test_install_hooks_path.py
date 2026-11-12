@@ -271,6 +271,86 @@ def test_install_into_an_unwritable_hooks_path_fails_loudly(tmp_path):
         "must not silently fall back to .git/hooks"
 
 
+def _mkworktree(tmp_path):
+    """A repo with a linked worktree (git worktree add). Hooks for every
+    checkout of the repo are read from the COMMON dir (<work>/.git/hooks);
+    each worktree's private dir (<work>/.git/worktrees/<name>/hooks) is never
+    consulted by git -- installing or removing only there is a silent miss."""
+    work = _mkrepo(tmp_path, hooks_cfg=None)
+    wt = tmp_path / "linked"
+    _git(["worktree", "add", str(wt)], cwd=work)
+    return work, wt
+
+
+def test_install_from_a_linked_worktree_targets_the_common_hooks_dir(tmp_path):
+    work, wt = _mkworktree(tmp_path)
+    proc = subprocess.run(["bash", _INSTALL], cwd=str(wt), env=_overridden_env(tmp_path),
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stderr
+    hook = work / ".git" / "hooks" / "pre-push"
+    assert hook.is_file(), "git reads a worktree's hooks from the common dir"
+    assert "review-gate.py" in hook.read_text()
+    assert os.access(str(hook), os.X_OK)
+    private_hooks = work / ".git" / "worktrees" / "linked" / "hooks"
+    assert not (private_hooks / "pre-push").exists(), \
+        "the per-worktree private hooks dir is never read by git; installing " \
+        "there would be the silent mis-install this fix prevents"
+
+
+def test_uninstall_from_a_linked_worktree_removes_the_common_hook(tmp_path):
+    """Install from the primary checkout, uninstall from the worktree: the
+    sweep must reach the real hook in the common dir."""
+    work, wt = _mkworktree(tmp_path)
+    env = _overridden_env(tmp_path)
+    proc = subprocess.run(["bash", _INSTALL], cwd=str(work), env=env,
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stderr
+    hook = work / ".git" / "hooks" / "pre-push"
+    assert hook.is_file()
+    proc = subprocess.run(["bash", _UNINSTALL], cwd=str(wt), env=env,
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stderr
+    assert not hook.exists(), \
+        "uninstall run inside a worktree must find the real hook in the common dir"
+
+
+def test_uninstall_from_a_worktree_never_touches_a_foreign_common_hook(tmp_path):
+    """The common-dir sweep keeps the marker guarantee: a hook that is not
+    recognizably ours is never removed, whatever checkout the uninstaller
+    runs from."""
+    work, wt = _mkworktree(tmp_path)
+    foreign = work / ".git" / "hooks" / "pre-push"
+    foreign.write_text("#!/bin/sh\nexit 0\n")
+    os.chmod(str(foreign), 0o755)
+    proc = subprocess.run(["bash", _UNINSTALL], cwd=str(wt), env=_overridden_env(tmp_path),
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stderr
+    assert foreign.is_file()
+    assert foreign.read_text().strip() == "#!/bin/sh\nexit 0"
+
+
+def test_install_from_a_worktree_removes_a_stale_copy_from_the_private_hooks_dir(tmp_path):
+    """A gate copy stranded in a worktree's private hooks dir (e.g. installed
+    before this fix) is shadowed: git never runs it. Install must remove it
+    (with a notice) while landing the real hook in the common dir."""
+    work, wt = _mkworktree(tmp_path)
+    private_hooks = work / ".git" / "worktrees" / "linked" / "hooks"
+    private_hooks.mkdir(parents=True, exist_ok=True)
+    (private_hooks / "pre-push").write_text(
+        "#!/bin/sh\n# installed by install-kimchi-hook.sh\nexec python review-gate.py\n"
+    )
+    os.chmod(str(private_hooks / "pre-push"), 0o755)
+    proc = subprocess.run(["bash", _INSTALL], cwd=str(wt), env=_overridden_env(tmp_path),
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stderr
+    assert not (private_hooks / "pre-push").exists(), \
+        "the shadowed gate copy in the per-worktree hooks dir must be removed"
+    assert "stale" in proc.stdout.lower(), "the removal must be announced"
+    common = work / ".git" / "hooks" / "pre-push"
+    assert common.is_file()
+    assert "review-gate.py" in common.read_text()
+
+
 def test_sha40_shape_of_ref_lines_still_drives_the_hook(tmp_path):
     """Sanity for the synthetic payload shape used above: git's pre-push stdin
     is `<local ref> <local sha> <remote ref> <remote sha>`."""

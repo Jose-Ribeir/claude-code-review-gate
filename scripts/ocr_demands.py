@@ -63,7 +63,7 @@ def is_finding_like(obj):
             and isinstance(obj.get("content"), str))
 
 
-def _valid_demand_list(value, label, warnings):
+def _valid_demand_list(value, label):
     """Validate one demand-list field; returns (ok, errors-as-warning-text)."""
     if not isinstance(value, list):
         return False, "%s must be an array" % label
@@ -174,7 +174,7 @@ def validate_demands(text):
         kept = [e for e in data[key] if not is_finding_like(e)]
         dropped += len(data[key]) - len(kept)
         data[key] = kept
-        ok, why = _valid_demand_list(data[key], key, warnings)
+        ok, why = _valid_demand_list(data[key], key)
         if not ok:
             warnings.append("spotter: %s; proceeding without demands "
                             "(T0 fallback)" % why)
@@ -199,7 +199,7 @@ def _schema():
         "type": "array",
         "items": {
             "anyOf": [
-                {"type": "string", "minLength": 1},
+                {"type": "string", "minLength": 1, "pattern": "\\S"},
                 {"type": "object", "additionalProperties": scalar_or_list},
             ],
         },

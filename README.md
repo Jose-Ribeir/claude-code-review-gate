@@ -66,7 +66,9 @@ Run once per repository you want gated. It installs three things:
 
 1. **the git `pre-push` hook** (the PRIMARY gate) into that repository's
    `.git/hooks/pre-push` — this is the layer that sees every push reaching git:
-   your terminal, scripts, heredocs, `python -c`, `gh`, GUIs;
+   your terminal, scripts, heredocs, `python -c`, `gh`, GUIs (run from inside
+   a linked `git worktree`, it lands in the shared common-dir `hooks/`, since
+   git reads a worktree's hooks from the common dir);
 2. **the Kimchi bash hook** (the UX layer) at
    `~/.config/kimchi/harness/hooks/bash/review-gate.sh` — installed once, and
    inert in any repository that did not install the pre-push layer; it surfaces

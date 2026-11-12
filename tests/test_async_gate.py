@@ -583,6 +583,26 @@ def test_the_history_limit_refusal_honors_fail_open(tmp_path):
     assert _trace(tmp_path) == []
 
 
+def test_an_unevaluable_history_count_refuses_instead_of_proceeding(tmp_path):
+    """SPEC-09 fails closed: when git rev-list --count cannot count the
+    commits of an unseeded (_EMPTY_TREE-base) push, the guard must refuse
+    (unknown counts as over-limit), not start a full-history review."""
+    work = _fresh_repo(tmp_path, commits=0)
+    for i in range(3):
+        (work / "f.txt").write_text(f"c{i}\n")
+        _git(["add", "."], cwd=work)
+        _git(["commit", "-q", "-m", f"c{i}"], cwd=work)
+    # The tip itself still resolves, but its root-ancestor object is gone,
+    # so `git rev-list --count <tip>` fails while the push flow proceeds.
+    first = _git(["rev-list", "--max-parents=0", "HEAD"], cwd=work)
+    (Path(work) / ".git" / "objects" / first[:2] / first[2:]).unlink()
+    decision, reason, _, _ = _hook(work, "git push origin main", _env(tmp_path))
+    assert decision == "deny", reason
+    assert "OCR_FULL_HISTORY_LIMIT" in reason
+    assert "rev-list" in reason
+    assert _trace(tmp_path) == []
+
+
 # --- SPEC-08: chunk-aware run budget ------------------------------------------
 
 def _budget_env(tmp_path, threshold="3", files="1", **extra):
@@ -711,3 +731,16 @@ def test_run_budget_env_stays_a_flat_override(tmp_path):
     delta = _budget_of(work, tip, _budget_env(tmp_path, OCR_RUN_BUDGET=6000),
                        chunks_total=4)
     assert 6000 <= delta < 6090, delta
+
+
+def test_run_budget_equal_to_the_default_still_overrides(tmp_path):
+    """OCR_RUN_BUDGET=3600, explicitly: even when it equals the default, the
+    flat override must win -- otherwise the seeded telemetry's much larger
+    chunk-aware budget would silently take over."""
+    _seed_chunk_telemetry([_chunk_line(f"r{i}", 600) for i in range(3)])
+    work = _big_repo(tmp_path, n_files=21)
+    tip = _git(["rev-parse", "HEAD"], cwd=work)
+    delta = _budget_of(work, tip,
+                       _budget_env(tmp_path, OCR_RUN_BUDGET=3600, OCR_TIMEOUT_MAX=9000),
+                       chunks_total=21)
+    assert 3600 <= delta < 3690, delta

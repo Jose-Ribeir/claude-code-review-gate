@@ -67,7 +67,25 @@ fi
 # <dir> push` is a push too, and review-gate.py applies the strict
 # command-position test once it is running. Over-routing costs a Python
 # spawn; under-routing costs an unreviewed push.
-case "$payload" in
+#
+# The substring test runs on a DE-SPLICED copy of the payload: a real push
+# can hide its subcommand behind quote splicing -- `git pu""sh origin main`,
+# `git pu\sh origin main` -- so its JSON carries no literal `push` and the
+# raw `*git*push*` test under-matched it (the miss is documented as proven
+# live in hooks/sh/gate-hook.sh, whose own prefilter answers it by matching
+# bare `*git*`). Matching bare `*git*` here instead would route EVERY
+# git-mentioning Bash call into Python -- or into the fail-closed deny when
+# Python is missing -- a materially worse cost profile than the sibling's,
+# where the classifier runs in-shell. Stripping `"`, `'`, backticks and `\`
+# from the test copy sees through the splice while keeping the test's
+# precision; it can only ever match MORE, and over-match only costs a spawn
+# (review-gate.py re-parses strictly). review-gate.py still gets the raw
+# payload below.
+spliced="${payload//\\/}"
+spliced="${spliced//\"/}"
+spliced="${spliced//\'/}"
+spliced="${spliced//\`/}"
+case "$spliced" in
   *git*push*) ;;
   *)
     exit 0  # pass through: not a push
@@ -99,4 +117,27 @@ if [ -z "$PY" ] || [ ! -f "$DIR/review-gate.py" ]; then
   exit 0
 fi
 
-printf '%s' "$payload" | "$PY" "$DIR/review-gate.py" --mode hook
+# Run the gate. Capture the exit code without `set -e` dying on us: a
+# nonzero exit WITHOUT a verdict on stdout must not read as an approval --
+# Claude Code treats a non-2 nonzero PreToolUse exit as a non-blocking error
+# and lets the call through UNREVIEWED. gate-hook.ps1 handles this exact
+# case ('No output and a NON-zero exit ... Block rather than let the silence
+# read as approval'); mirror it: deny instead of exiting silently.
+rc=0
+out="$(printf '%s' "$payload" | "$PY" "$DIR/review-gate.py" --mode hook)" || rc=$?
+
+if [ -n "$out" ]; then
+  # The gate answered: relay its decision verbatim (same as gate-hook.ps1).
+  printf '%s\n' "$out"
+  exit "$rc"
+fi
+if [ "$rc" = 0 ]; then
+  exit 0  # pass-through: the gate had nothing to say about this call
+fi
+case "${OCR_FAIL_OPEN:-}" in
+  1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss])
+    exit 0
+    ;;
+esac
+printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"review-gate: the reviewer exited %s without returning a verdict, so the push was not reviewed. Set OCR_FAIL_OPEN=1 in the environment Claude Code was launched from to bypass."}}' "$rc"
+exit 0

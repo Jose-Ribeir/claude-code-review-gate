@@ -185,8 +185,16 @@ _PROVIDER_FIRST_TOKENS = (
 def _model_provider(model):
     """Provider family for a model id, or "" when it is unrecognized. The
     guard is a deny-list for subscription-violating providers, so unknown
-    providers pass."""
-    first = (model or "").strip().lower().split("-", 1)[0]
+    providers pass.
+
+    A vendor-prefixed id (openrouter-style `vendor/model`, the convention
+    this harness's own _MODEL default `kimchi-dev/kimi-k3` follows) is
+    classified on the model part AFTER the prefix: `anthropic/claude-sonnet-4-5`
+    is an anthropic model, regardless of the prefix it was routed under."""
+    ident = (model or "").strip().lower()
+    if "/" in ident:
+        ident = ident.split("/", 1)[-1]
+    first = ident.split("-", 1)[0]
     for provider, tokens in _PROVIDER_FIRST_TOKENS:
         if first in tokens:
             return provider
@@ -410,11 +418,16 @@ try:
 except ValueError:
     _CHUNK_TIMEOUT = 1200
 _RUN_BUDGET_DEFAULT = 3600
+_run_budget_raw = os.environ.get("OCR_RUN_BUDGET", "")
 try:
-    _RUN_BUDGET = int(os.environ.get("OCR_RUN_BUDGET", str(_RUN_BUDGET_DEFAULT)))
+    _RUN_BUDGET = int(_run_budget_raw) if _run_budget_raw else _RUN_BUDGET_DEFAULT
     _RUN_BUDGET = max(1, _RUN_BUDGET)
+    # Env-presence is recorded apart from the value: an explicit OCR_RUN_BUDGET
+    # overrides the chunk-aware computation even when it equals the default.
+    _RUN_BUDGET_EXPLICIT = bool(_run_budget_raw)
 except ValueError:
     _RUN_BUDGET = _RUN_BUDGET_DEFAULT
+    _RUN_BUDGET_EXPLICIT = False
 # Hard ceiling for the chunk-aware run budget (SPEC-08). A value that is not a
 # positive integer falls back to the 3600 s default. A resolved cap at or below
 # OCR_TIMEOUT no longer resets to 3600: it would silently pin the budget to
@@ -1387,6 +1400,12 @@ def _record_review(git_dir, head_sha, branch, mode, verdict, advisory, blocked, 
         unreviewed = result.get("unreviewed_truncated") if isinstance(result, dict) else None
         if isinstance(unreviewed, list) and unreviewed:
             entry["unreviewed_truncated"] = len(unreviewed)
+        not_reviewed = result.get("unreviewed") if isinstance(result, dict) else None
+        if isinstance(not_reviewed, list) and not_reviewed:
+            # The path list itself, not just a count: --history and --mode
+            # post rebuild only from this entry, and _format_reasons needs the
+            # names to re-render the "not reviewed" block (see _mark_unreviewed).
+            entry["unreviewed"] = not_reviewed
         # Shed findings until the line fits, rather than truncating the string
         # and leaving unparseable JSON behind. The dropped detail is still in
         # the raw snapshot this entry points at.
@@ -6743,14 +6762,16 @@ def _chunk_avg_secs():
 def _run_budget_secs(chunks_total, slots, flat=None):
     """The run budget in seconds (SPEC-08): ceil(chunk count / slots) waves x
     trailing per-chunk average -- the realistic wall clock, since chunks run
-    concurrently across the slots, clamped to [OCR_TIMEOUT, OCR_TIMEOUT_MAX]. With
-    no prior chunk telemetry the per-chunk estimate is OCR_TIMEOUT-derived
-    (one slot-wave's worth), so a first or small push budgets OCR_TIMEOUT --
-    the flat behaviour this replaces. Budget exhaustion stays resumable, never
-    an attempt. The caller's flat budget (the module-level _RUN_BUDGET, which
-    already honours an explicit OCR_RUN_BUDGET) overrides the computation
-    whenever it differs from the default."""
-    if flat is not None and flat != _RUN_BUDGET_DEFAULT:
+    concurrently across the slots. The result is clamped to [OCR_TIMEOUT,
+    OCR_TIMEOUT_MAX]. With no prior chunk telemetry the per-chunk estimate is
+    OCR_TIMEOUT-derived (one slot-wave's worth), so a first or small push
+    budgets OCR_TIMEOUT -- the flat behaviour this replaces. Budget exhaustion
+    stays resumable, never an attempt. The caller's flat budget (the
+    module-level _RUN_BUDGET) overrides the computation whenever
+    OCR_RUN_BUDGET was set explicitly (even when it equals the default) or
+    the flat value differs from the default -- e.g. a patched-in non-default
+    value. Only an unset default falls back to the chunk-aware computation."""
+    if flat is not None and (_RUN_BUDGET_EXPLICIT or flat != _RUN_BUDGET_DEFAULT):
         return flat
     total = max(1, int(chunks_total or 1))
     n_slots = max(1, int(slots or 1))
@@ -9025,9 +9046,10 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
                 raise
         slots += extra_worktrees
         conc = len(slots)
-    # SPEC-08: the run budget is chunk-aware -- chunks x trailing per-chunk
-    # average x slots, clamped to [OCR_TIMEOUT, OCR_TIMEOUT_MAX]. Exhaustion
-    # stays resumable (see ReviewBudgetError below), never an attempt.
+    # SPEC-08: the run budget is chunk-aware -- ceil(chunks / slots) waves x
+    # trailing per-chunk average, clamped to [OCR_TIMEOUT, OCR_TIMEOUT_MAX].
+    # Exhaustion stays resumable (see ReviewBudgetError below), never an
+    # attempt.
     run_budget = _run_budget_secs(len(chunks), conc, _RUN_BUDGET)
     budget_end = time.monotonic() + run_budget
     try:      # informational: align the state's deadline with the real budget
@@ -9244,6 +9266,9 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
                     more = seg.retry_chunks()
                     if more:
                         chunks.extend(more)
+                        # The plan grew after the first count: keep the
+                        # progress total honest.
+                        total = len(chunks)
                         continue
                 break
 
@@ -9286,8 +9311,12 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
                                 _timeout_marks(common_dir, fp, chunk_items))
                             if pieces:
                                 chunks.extend(pieces)
+                                # Splits grow the plan after the first count:
+                                # keep the progress total honest.
+                                total = len(chunks)
                             elif _chunk_members(chunk_items) == 1:
                                 chunks.append(chunk_items)  # one more try alone, then stuck
+                                total = len(chunks)
                             else:
                                 _give_up(chunk_items, exc)  # cannot be split further
                     else:
@@ -9559,16 +9588,24 @@ def _failed_reason(st, mode):
             + "\n".join("  " + line for line in detail.splitlines()[:12]) + "\n"
             + _bypass_hint(mode)
         )
-    head = (
-        f"review-gate: the review could not complete ({why}) - blocking to preserve gate "
-        "integrity. Nothing was approved; re-running the same `git push` retries the review.\n"
-    )
     if attempts >= ATTEMPT_CAP:
-        head += (
+        # Re-running replays the sticky failed state while the marker is
+        # inside its TTL (see _drive_review), so the retry guidance must name
+        # the two real ways through: OCR_FORCE_REVIEW=1, or waiting out the
+        # TTL.
+        head = (
+            f"review-gate: the review could not complete ({why}) - blocking to preserve gate "
+            "integrity. Nothing was approved.\n"
             f"  This tip failed {attempts} times; it will not be retried automatically for "
-            f"{MARKER_TTL // 60} min. OCR_FORCE_REVIEW=1 (in the environment Kimchi was "
-            "launched from) retries now.\n"
+            f"{MARKER_TTL // 60} min, and re-running `git push` inside that window replays "
+            "this state rather than retrying. OCR_FORCE_REVIEW=1 (in the environment Kimchi "
+            "was launched from) retries now.\n"
             f"  Run {_DOCTOR_CMD} (review-gate doctor) to diagnose the failure.\n"
+        )
+    else:
+        head = (
+            f"review-gate: the review could not complete ({why}) - blocking to preserve gate "
+            "integrity. Nothing was approved; re-running the same `git push` retries the review.\n"
         )
     body = "\n".join("  " + line for line in detail.splitlines()[:12]) if detail else ""
     return head + body + ("\n" if body else "") + _bypass_hint(mode)
@@ -10355,11 +10392,19 @@ def _full_history_limit():
         return 500
 
 
-def _huge_range_reason(count, limit):
+def _huge_range_reason(count, limit, mode):
+    if str(count).isdigit():
+        scale = (f"it carries {count} commits, more than the "
+                 f"OCR_FULL_HISTORY_LIMIT of {limit}")
+    else:
+        # git rev-list --count failed, so nothing proves this unbounded push
+        # fits the limit: the guard fails closed on what it cannot measure.
+        scale = ("its commit count could not be established (git rev-list --count "
+                 f"failed), so it cannot be shown to fit the OCR_FULL_HISTORY_LIMIT "
+                 f"of {limit}")
     return (
         "review-gate: this push has no base commit to review against - the remote "
-        f"holds no ref that bounds the range - and it carries {count} commits, more "
-        f"than the OCR_FULL_HISTORY_LIMIT of {limit}. Reviewing that much history in "
+        f"holds no ref that bounds the range - and {scale}. Reviewing that much history in "
         "one gate run is not practical, so the push is refused.\n\n"
         "Proceed in one of these ways:\n"
         "  - Push the base branch first (e.g. git push origin main) so the remote ref "
@@ -10372,7 +10417,7 @@ def _huge_range_reason(count, limit):
         "first, then push the feature branch.\n"
         "  - To review the full history on purpose, set OCR_FULL_HISTORY_LIMIT=0 for "
         "this push.\n"
-        "  - Emergency bypass: set OCR_FAIL_OPEN=1."
+        + _bypass_hint(mode)
     )
 
 
@@ -10383,9 +10428,9 @@ def _refuse_huge_range(mode, allow, count, limit):
     and allows; otherwise the push fails closed with the remedy text.
     """
     if _fail_open_requested():
-        _warn(_huge_range_reason(count, limit))
+        _warn(_huge_range_reason(count, limit, mode))
         allow()
-    _fail_closed(mode, _huge_range_reason(count, limit))
+    _fail_closed(mode, _huge_range_reason(count, limit, mode))
 
 
 def _fail_closed(mode, msg):
@@ -10753,8 +10798,11 @@ def _main_inner(argv, mode):
     # the remote ref already scoped the diff. OCR_FULL_HISTORY_LIMIT=0
     # disables the guard for intentional full-history reviews.
     limit = _full_history_limit()
-    if (base == _EMPTY_TREE and limit > 0 and count.isdigit()
-            and int(count) > limit):
+    if (base == _EMPTY_TREE and limit > 0
+            and (not count.isdigit() or int(count) > limit)):
+        # An unevaluable count (git rev-list --count failed) fails closed too:
+        # the guard exists to refuse the unbounded push, and a push it cannot
+        # count is a push it cannot show to be bounded.
         _refuse_huge_range(mode, allow, count, limit)
     meta = {
         "tip": tip, "branch": branch, "base": base, "range": push_range,
