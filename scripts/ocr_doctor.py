@@ -37,9 +37,14 @@ import time
 from pathlib import Path
 
 # Kimchi versions this gate has been verified against (port plan C9: drift
-# detection). A version not on the list is a WARN, never a FAIL -- the gate
+# detection). 1.27.0 is the port-era pin; 1.32.0 (the current release) and
+# 1.34.3 (the dogfooding machine's `kimchi --version`) were verified against
+# the doctor, the deny-extension canary, and real gated pushes. Extend the
+# list per release after the same check -- a pin list stale behind the
+# current release makes EVERY install WARN "UNTESTED", training warning
+# blindness. A version not on the list is a WARN, never a FAIL -- the gate
 # still runs, on an unverified release.
-TESTED_PIN = ["1.27.0"]
+TESTED_PIN = ["1.27.0", "1.32.0", "1.34.3"]
 
 MIN_PY = (3, 7)
 # Mirrors review-gate.py: a state lock older than this belongs to a process

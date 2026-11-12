@@ -100,6 +100,19 @@ def test_kimchi_bin_override_found(tmp_path):
     checks = _by_name(ocr_doctor.run_checks(env=env))
     assert checks["kimchi"]["status"] == "ok"
 
+def test_extended_tested_pin_reports_ok(tmp_path):
+    """Every release the gate was verified against is an OK, not the
+    UNTESTED WARN (regression: only 1.27.0 was pinned while 1.32.0 was the
+    current release, so every user saw the WARN -- training warning
+    blindness)."""
+    for version in ("kimchi 1.27.0", "kimchi 1.32.0", "kimchi 1.34.3"):
+        env = _base_env(tmp_path, kimchi_version=version)
+        checks = _by_name(ocr_doctor.run_checks(env=env))
+        assert checks["kimchi"]["status"] == "ok", version
+        assert "UNTESTED" not in checks["kimchi"]["detail"]
+    assert ocr_doctor.TESTED_PIN == ["1.27.0", "1.32.0", "1.34.3"]
+
+
 def test_untested_kimchi_version_warns_not_fails(tmp_path):
     env = _base_env(tmp_path, kimchi_version="kimchi 1.99.0")
     checks = _by_name(ocr_doctor.run_checks(env=env))
