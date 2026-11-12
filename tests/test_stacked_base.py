@@ -337,6 +337,43 @@ def _git_mode(work, lines, env, *extra):
     return proc
 
 
+def test_git_mode_names_the_pushed_branch_not_the_checkout(repo, tmp_path):
+    """The state's branch label must name the branch BEING PUSHED, not the one
+    checked out where the hook runs: `git push origin feat` from a main
+    checkout is "the review of feat". Mislabeling it as the checkout made a
+    push of one branch look like a review of another (observed: a kimchi push
+    reported as "the review of integration/intent-context")."""
+    _git(["switch", "-q", "-c", "feat"], cwd=repo)
+    tip = _commit(repo, "feat.txt")
+    _git(["switch", "-q", "main"], cwd=repo)   # the checkout is main; the push sends feat
+    env = _env(tmp_path)
+    env["STUB_SLEEP"] = "5"   # outrun the 3 s inline budget: a still-running deny
+    proc = _git_mode(repo, [f"refs/heads/feat {tip} refs/heads/feat {ZERO}"], env)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode != 0, out
+    assert "review of feat" in out, out
+    assert "review of main" not in out, out
+
+
+def test_an_all_deletion_push_never_falls_back_to_reviewing_HEAD(repo, tmp_path):
+    """A push whose only ref update is a DELETION (local sha all zeros) carries
+    no commits, so there is nothing to review: allow, with a note saying so.
+    The gate used to skip the deletion line, see an empty ref list, and fall
+    back to reviewing the checked-out branch -- blocking the deletion behind
+    a review of commits the push does not even send."""
+    # Unpushed commits on HEAD, so the buggy HEAD fallback would find work.
+    (repo / "new.txt").write_text("unpushed\n")
+    _git(["add", "new.txt"], cwd=repo)
+    _git(["commit", "-q", "-m", "unpushed work"], cwd=repo)
+    remote_sha = _sha(repo, "HEAD~1")
+    line = f"refs/heads/gone {'0' * 40} refs/heads/gone {remote_sha}"
+    env = _env(tmp_path)
+    env["STUB_VERDICT"] = "block"   # any spawned review must DENY, loudly
+    proc = _git_mode(repo, [line], env)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert "only deletes" in (proc.stderr + proc.stdout)
+
+
 def test_failed_git_log_of_the_pushed_range_means_carries_commits(repo):
     # B-W1-01: HEAD is level with its upstream, so the HEAD-based check says
     # "nothing to review" -- but the pushed range is unevaluable (git log
@@ -392,9 +429,10 @@ def test_follow_tags_does_not_make_a_branch_push_multi_ref(repo):
     tip = _commit(repo, "feat.txt")
     _git(["tag", "-a", "v1", "-m", "v1", tip], cwd=repo)  # annotated: sha is the tag object
     tag_obj = _sha(repo, "refs/tags/v1")
-    branches, others = rg._read_push_updates_from(
+    branches, others, deleted = rg._read_push_updates_from(
         [f"refs/heads/feat {tip} refs/heads/feat {ZERO}",
          f"refs/tags/v1 {tag_obj} refs/tags/v1 {ZERO}"])
+    assert deleted == 0
     rng = rg._range_for_refs(branches, str(repo), "origin", extra=others)
     assert rng not in ("", rg._MULTI_REF)
     assert rng.endswith(f"..{tip}")
@@ -406,9 +444,10 @@ def test_tag_on_other_unpushed_commits_beside_a_branch_is_refused(repo):
     _git(["switch", "-q", "main"], cwd=repo)
     other = _commit(repo, "other.txt")
     _git(["tag", "v1", other], cwd=repo)
-    branches, others = rg._read_push_updates_from(
+    branches, others, deleted = rg._read_push_updates_from(
         [f"refs/heads/feat {tip} refs/heads/feat {ZERO}",
          f"refs/tags/v1 {other} refs/tags/v1 {ZERO}"])
+    assert deleted == 0
     assert rg._range_for_refs(branches, str(repo), "origin", extra=others) == rg._MULTI_REF
 
 
