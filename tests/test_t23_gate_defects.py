@@ -72,6 +72,21 @@ def test_hook_main_denies_unparseable_stdin(monkeypatch, capsys):
 
 # --- item 2: the guard denies the short -o form of --output -----------------
 
+
+def test_mode_guard_denies_unparseable_stdin(monkeypatch, capsys):
+    """--mode guard direct calls (from the shell hooks) bypass the _in_review
+    peek: their own stdin parse must fail closed too."""
+    monkeypatch.chdir(os.environ.get("HOME", "/"))
+    monkeypatch.setattr(sys, "stdin", io.StringIO("{not json"))
+    monkeypatch.setattr(review_gate, "_log_gate_skipped", lambda *a, **k: None)
+    monkeypatch.delenv("OCR_FAIL_OPEN", raising=False)
+    with pytest.raises(SystemExit):
+        review_gate._mode_guard(["--mode", "guard"])
+    out = capsys.readouterr().out
+    payload = json.loads(out or "{}")
+    assert payload.get("decision") == "block"
+    assert "OCR_FAIL_OPEN" in payload.get("reason", "")
+
 def test_guard_denies_short_output_option():
     g = review_gate._guard_reviewer_command
     assert g("git log -o /tmp/x")

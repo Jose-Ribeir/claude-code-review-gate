@@ -11374,7 +11374,11 @@ def _mode_guard(argv):
     try:
         payload = json.load(sys.stdin) or {}
     except Exception:
-        payload = {}
+        # Same rule as every other stdin parse in the hook family: a payload
+        # this process cannot read is a payload it cannot vet -- fail closed
+        # (the direct --mode guard calls from the shell hooks bypass the
+        # _in_review peek that proves parseability upstream).
+        _refuse_unparseable_stdin("hook")
     cmd = ""
     if isinstance(payload, dict) and (payload.get("tool_name") in (None, "", "Bash", "bash")):
         cmd = _payload_command(payload)
