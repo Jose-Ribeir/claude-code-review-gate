@@ -4226,6 +4226,15 @@ def _supervise_run(state_path, run_id):
                 _globs, deep_threshold = _risk_config(review_root)
                 manifest = _build_deep_manifest(deep_paths, st.get("deep_reasons") or [],
                                                 deep_threshold)
+                # docs-gate 02/01: the deep lane likewise feeds the docs context
+                # and the push-wide arch flags into its manifest -- escalation
+                # changes WHO reviews, never what the checker sees.
+                deep_docs = _docs_context(review_root)
+                if deep_docs:
+                    manifest["docs_context"] = deep_docs
+                    deep_flags = _arch_flags(review_root, base, tip)
+                    if deep_flags:
+                        manifest["arch_flags"] = deep_flags
                 manifest_path = str(_async_dir(common_dir) / f"manifest-{run_id}-deep.json")
                 _write_manifest_file(manifest_path, manifest, "deep-review manifest")
                 try:
