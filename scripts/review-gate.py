@@ -6520,7 +6520,11 @@ def _read_docs_summary_artifact(root):
 
 
 def _docs_summary_model_args():
-    """DEFAULT_KIMI_ARGS with the docs-summary persona's model pin (docs-gate 05)."""
+    """DEFAULT_KIMI_ARGS with the docs-summary persona's model pin (docs-gate 05).
+    This caller's default-args builder decides its own extras: it applies
+    OCR_KIMI_EXTRA_ARGS like the review path, then pins --model. Under an
+    OCR_KIMI_ARGS override it is never consulted at all (the override replaces
+    the default argv wholesale) -- the uniform rule, see _worker_invocation."""
     args = list(DEFAULT_KIMI_ARGS)
     args += shlex.split(os.environ.get("OCR_KIMI_EXTRA_ARGS", ""))
     if "--model" in args and args.index("--model") + 1 < len(args):
@@ -6597,11 +6601,15 @@ def _extract_worker_text(out):
 def _run_docs_summary_once(review_root, tip, doc_paths):
     """One headless worker call that produces the docs summary body.
 
-    Invoked in the same style as the review worker (_run_review_once):
-    `kimchi -p` with the DEFAULT_KIMI_ARGS sandbox wiring (the deny extension
-    keeps the generator read-only too), C3 canary on the first call, and the
-    OCR_REVIEWER_CMD / OCR_STUB_WORKER stubs in tests (argv `--docs-summary`,
-    driven by the STUB_DOCS_SUMMARY* knobs).
+    Invoked under the same plumbing as the review worker (docs-gate 09):
+    the shared invocation resolution (_worker_invocation) and the same spawn
+    discipline -- registered in _ACTIVE_CHILDREN so the supervisor's kill
+    path can stop it, and a timeout tree-kills the whole process group, so a
+    stuck generator can neither leak grandchildren nor dodge a fence-break
+    kill. `kimchi -p` with the DEFAULT_KIMI_ARGS sandbox wiring (the deny
+    extension keeps the generator read-only too), C3 canary on the first
+    call, and the OCR_REVIEWER_CMD / OCR_STUB_WORKER stubs in tests (argv
+    `--docs-summary`, driven by the STUB_DOCS_SUMMARY* knobs).
 
     Returns the summary markdown. Raises ReviewGateError on every failure
     mode -- the caller fails the push closed (see _docs_summary_freshen).
@@ -6614,15 +6622,42 @@ def _run_docs_summary_once(review_root, tip, doc_paths):
     listing = "\n".join("- " + p for p in doc_paths)
     prompt = _PROMPT_DOCS_SUMMARY.format(docs=listing)
     cmd = stub + ["--docs-summary", tip] if stub else [kimi, "-p", prompt] + args
+    # The generator worker runs under the review worker's spawn discipline
+    # (docs-gate 09): registered so the supervisor's kill path
+    # (_kill_active_children) can stop it in flight, and a timeout -- or any
+    # cancel/error -- takes down the WHOLE process tree via _kill_child (a
+    # launcher-only kill would leak the real model child). Parsing of the
+    # worker's output stays this caller's concern (_extract_worker_text).
     popen_extra = {} if sys.platform == "win32" else {"start_new_session": True}
     creationflags = _WIN_FLAGS if sys.platform == "win32" else 0
     try:
-        proc = subprocess.run(
-            cmd, cwd=review_root, stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, encoding="utf-8", errors="replace",
-            env=child_env, timeout=TIMEOUT, creationflags=creationflags,
-            **popen_extra)
+        with subprocess.Popen(
+            cmd,
+            cwd=review_root,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=child_env,
+            creationflags=creationflags,
+            **popen_extra,
+        ) as proc:
+            _register_child(proc)
+            try:
+                out_text, err_text = proc.communicate(timeout=TIMEOUT)
+            except subprocess.TimeoutExpired:
+                _kill_child(proc)
+                # Drain so the killed worker's pipe buffers wedge nothing
+                # (mirrors the review worker's own timeout path).
+                proc.communicate()
+                raise
+            except BaseException:
+                _kill_child(proc)
+                raise
+            finally:
+                _unregister_child(proc)
     except subprocess.TimeoutExpired as exc:
         raise ReviewGateError(_docs_summary_failed_message(
             f"the generator worker timed out after {TIMEOUT}s"),
@@ -6631,10 +6666,12 @@ def _run_docs_summary_once(review_root, tip, doc_paths):
         raise ReviewGateError(_docs_summary_failed_message(
             f"the generator worker could not run: {type(exc).__name__}: {exc}")) from exc
     if proc.returncode != 0:
-        why = _sanitize((proc.stderr or proc.stdout or "").strip()[:400], 400) \
+        # stderr FIRST, deliberately (the review worker prefers stdout):
+        # message goldens depend on the generator's order.
+        why = _sanitize((err_text or out_text or "").strip()[:400], 400) \
             or f"exit {proc.returncode}"
         raise ReviewGateError(_docs_summary_failed_message(why))
-    body = _extract_worker_text(proc.stdout)
+    body = _extract_worker_text(out_text)
     if not body:
         raise ReviewGateError(_docs_summary_failed_message(
             "the generator worker returned an empty summary"))

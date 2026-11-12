@@ -12,11 +12,14 @@ covered by the argv goldens, the deny-canary suite and the generator suites.
 """
 import os
 import sys
+import threading
+import time
 
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from test_async_gate import review_gate  # noqa: E402
+from test_process_groups import _wait_gone  # noqa: E402
 
 _FAKE_KIMI = "/fake/bin/kimchi"
 
@@ -155,3 +158,78 @@ def test_the_worker_environment_is_marked_and_scrubbed_identically(
             assert gone not in child_env
     assert envs[0] == envs[1]
     assert scrubbed_lists[0] == scrubbed_lists[1]
+# --- step 2: the docs-summary worker adopts the review worker's spawn -------
+# discipline (docs-gate 09): registered in _ACTIVE_CHILDREN so the
+# supervisor's kill path (_kill_active_children) can stop it in flight, and a
+# timeout takes down the WHOLE process tree (_kill_child / _tree_kill), not
+# just the direct launcher child. Before, the generator worker ran via
+# subprocess.run: invisible to the supervisor, and a timed-out launcher left
+# its real model child behind.
+
+_STUB_REVIEWER = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "stub_reviewer.py")
+
+
+def _docs_summary_stub_env(monkeypatch, sleep):
+    monkeypatch.setenv("OCR_REVIEWER_CMD", f'"{sys.executable}" "{_STUB_REVIEWER}"')
+    monkeypatch.delenv("OCR_STUB_WORKER", raising=False)
+    monkeypatch.delenv("OCR_KIMI_ARGS", raising=False)
+    monkeypatch.setenv("STUB_SLEEP", str(sleep))
+
+
+def test_a_timed_out_generator_worker_leaves_no_process_tree(
+        tmp_path, monkeypatch):
+    _docs_summary_stub_env(monkeypatch, sleep=120)
+    monkeypatch.setenv("STUB_SPAWN_CHILD", str(tmp_path / "grandchild.pid"))
+    monkeypatch.setattr(review_gate, "TIMEOUT", 3)
+    started = time.monotonic()
+    with pytest.raises(review_gate.ReviewGateError) as exc:
+        review_gate._run_docs_summary_once(str(tmp_path), "t" * 40, ["docs/a.md"])
+    assert exc.value.is_timeout
+    assert "timed out after 3s" in str(exc.value)
+    assert time.monotonic() - started < 60
+    grandchild = int((tmp_path / "grandchild.pid").read_text())
+    assert _wait_gone(grandchild), \
+        "the generator worker's child outlived the timeout kill"
+    # The registration is unwound on the way out, like the review worker's.
+    assert review_gate._active_children() == []
+
+
+def test_an_in_flight_generator_worker_is_supervisor_killable(
+        tmp_path, monkeypatch):
+    _docs_summary_stub_env(monkeypatch, sleep=120)
+    monkeypatch.setattr(review_gate, "TIMEOUT", 300)
+    outcome = {}
+
+    def _worker():
+        try:
+            review_gate._run_docs_summary_once(str(tmp_path), "t" * 40,
+                                               ["docs/a.md"])
+            outcome["no-error"] = True
+        except review_gate.ReviewGateError as exc:
+            outcome["error"] = exc
+        except BaseException as exc:  # the assertion below must see it
+            outcome["unexpected"] = exc
+
+    # daemon: if the worker ever became un-killable again the
+    # assertions below fail fast instead of hanging the suite
+    # for the stub's full sleep.
+    thread = threading.Thread(target=_worker, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline and not review_gate._active_children():
+        time.sleep(0.05)
+    children = review_gate._active_children()
+    assert children, "the in-flight generator worker was never registered"
+    worker_pid = children[0].pid
+    review_gate._kill_active_children()
+    thread.join(timeout=15)
+    assert not thread.is_alive(), "killing the worker did not end the call"
+    # A supervisor kill is a generation FAILURE, not a timeout: the same
+    # fail-closed message the other non-zero exits produce.
+    err = outcome.get("error")
+    assert "unexpected" not in outcome and err is not None
+    assert not err.is_timeout
+    assert "could not regenerate" in str(err)
+    assert _wait_gone(worker_pid)
+    assert review_gate._active_children() == []
