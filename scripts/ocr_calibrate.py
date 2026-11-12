@@ -24,10 +24,11 @@ verdict store itself short-circuits pushes already reviewed.
 Environment:
   OCR_CALIB_UPSTREAM   path to a local checkout of claude-code-review-gate,
                        the review source behind --fp-upstream and
-                       --source upstream. Default: the developer-machine
-                       fallback hard-coded below (UPSTREAM_FALLBACK); the
-                       run fails with a clear error before building any rows
-                       when the resolved path is missing or not a git repo.
+                       --source upstream. REQUIRED for those commands:
+                       there is no built-in default (a developer-machine
+                       path must not be committed). The run fails with a
+                       clear error before building any rows when it is
+                       unset, missing, or not a git repo.
 
 Usage:
   python3 scripts/ocr_calibrate.py --stub            # plumbing proof (no model)
@@ -52,11 +53,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 GATE = REPO_ROOT / "scripts" / "review-gate.py"
 INSTALLER = REPO_ROOT / "scripts" / "install-kimchi-hook.sh"
 FIXTURES = REPO_ROOT / "tests" / "fixtures" / "repos"
-# Developer-machine fallback for the upstream review source; any other user
-# (or CI) overrides it with OCR_CALIB_UPSTREAM. Retargeted in main() after
-# validation -- see _retarget_upstream.
-UPSTREAM_FALLBACK = Path("/Users/jose_ribeir/work/code-review/claude-code-review-gate")
-UPSTREAM = UPSTREAM_FALLBACK
+# Upstream review source: retargeted from OCR_CALIB_UPSTREAM in main()
+# after validation (--fp-upstream / --source upstream only) -- see
+# _retarget_upstream. None until then; there is deliberately NO built-in
+# fallback path, so nothing developer-machine specific is committed.
+UPSTREAM = None
 
 # remote per source: the bare fixture (or upstream checkout) the scratch clone
 # is made from. Its path IS the verdict-store identity of the push remote.
@@ -165,17 +166,19 @@ def _resolve(source, short):
 def _retarget_upstream(ap):
     """Resolve the upstream review source and fail cleanly when unusable.
 
-    The path comes from OCR_CALIB_UPSTREAM when set, else UPSTREAM_FALLBACK
-    (a developer-machine absolute path). Any other user, or CI, must get a
-    clear ap.error here -- BEFORE rows are built -- instead of a raw
-    RuntimeError from _git surfacing mid-run ('fatal: not a git repository').
+    The path comes from OCR_CALIB_UPSTREAM, REQUIRED -- the repo ships no
+    built-in fallback, so every user (developer or CI) sets one. Failures
+    surface here, BEFORE rows are built, as a clear ap.error -- never a raw
+    RuntimeError from _git mid-run ('fatal: not a git repository').
     Retargets the module-level UPSTREAM / REMOTES["upstream"] on success so
     upstream_rows() and _resolve() see the resolved path.
     """
     global UPSTREAM
     raw = os.environ.get("OCR_CALIB_UPSTREAM", "").strip()
-    path = Path(raw) if raw else UPSTREAM_FALLBACK
     hint = "set OCR_CALIB_UPSTREAM to a local checkout of claude-code-review-gate"
+    if not raw:
+        ap.error(f"no upstream source configured -- {hint}")
+    path = Path(raw)
     if not path.is_dir():
         ap.error(f"upstream source not found: {path} -- {hint}")
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_TRACE")}
@@ -492,9 +495,9 @@ def main(argv=None):
     ap = argparse.ArgumentParser(
         description=__doc__.splitlines()[0],
         epilog="upstream source (--fp-upstream N, --source upstream): taken "
-               "from OCR_CALIB_UPSTREAM when set, else the built-in fallback "
-               "path; it must exist and be a git repository, or the run fails "
-               "before any rows are built.",
+               "from OCR_CALIB_UPSTREAM (required; the repo ships no "
+               "built-in default); it must exist and be a git repository, "
+               "or the run fails before any rows are built.",
     )
     ap.add_argument("--stub", action="store_true", help="one stub-worker push")
     ap.add_argument("--fn", action="store_true", help="the 6 seeded-bug pushes")

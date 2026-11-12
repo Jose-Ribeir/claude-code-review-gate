@@ -52,7 +52,20 @@ def _head(cwd):
                            capture_output=True, text=True).stdout.strip()
 
 
-def test_upstream_rows_are_single_commit_ranges_newest_first():
+def test_no_builtin_upstream_default_is_committed():
+    """Cycle-3 finding: the repo carries NO developer-machine path as the
+    upstream default; the source stays unconfigured until OCR_CALIB_UPSTREAM
+    retargets it."""
+    assert not hasattr(cal, "UPSTREAM_FALLBACK")
+
+
+def test_upstream_rows_are_single_commit_ranges_newest_first(monkeypatch):
+    raw = os.environ.get("OCR_CALIB_UPSTREAM", "").strip()
+    if not raw or not Path(raw).is_dir():
+        pytest.skip("no upstream checkout -- set OCR_CALIB_UPSTREAM to run this")
+    path = Path(raw)
+    monkeypatch.setattr(cal, "UPSTREAM", path)
+    monkeypatch.setitem(cal.REMOTES, "upstream", path)
     rows = cal.upstream_rows(4)
     assert len(rows) == 4
     # newest first: each row's tip is a descendant of the next row's tip
@@ -123,15 +136,26 @@ def _restore_upstream(monkeypatch):
     monkeypatch.setitem(cal.REMOTES, "upstream", cal.REMOTES["upstream"])
 
 
-def test_missing_upstream_fails_with_a_clean_ap_error(tmp_path, monkeypatch,
-                                                      capsys, _restore_upstream):
-    """No OCR_CALIB_UPSTREAM and the fallback path does not exist: the run
-    must die BEFORE rows are built with argparse's error (SystemExit 2) and a
-    message naming the env var -- never a raw RuntimeError from git."""
+def test_missing_upstream_env_var_fails_with_a_clean_ap_error(tmp_path, monkeypatch,
+                                                                capsys, _restore_upstream):
+    """OCR_CALIB_UPSTREAM unset -- and the repo ships no built-in fallback
+    (cycle-3 finding): the run must die BEFORE rows are built with argparse's
+    error (SystemExit 2) naming the env var, never a raw RuntimeError from git."""
     monkeypatch.delenv("OCR_CALIB_UPSTREAM", raising=False)
-    monkeypatch.setattr(cal, "UPSTREAM_FALLBACK", tmp_path / "no-such-checkout")
     with pytest.raises(SystemExit) as exc:
         cal.main(["--fp-upstream", "3", "--plan", "--md", str(tmp_path / "m.md")])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "OCR_CALIB_UPSTREAM" in err
+    assert "no upstream source configured" in err
+
+
+def test_upstream_env_var_path_not_found_fails_cleanly(tmp_path, monkeypatch,
+                                                       capsys, _restore_upstream):
+    """The env var names a path that does not exist: same clean early death."""
+    monkeypatch.setenv("OCR_CALIB_UPSTREAM", str(tmp_path / "no-such-checkout"))
+    with pytest.raises(SystemExit) as exc:
+        cal.main(["--fp-upstream", "2", "--plan", "--md", str(tmp_path / "m.md")])
     assert exc.value.code == 2
     err = capsys.readouterr().err
     assert "OCR_CALIB_UPSTREAM" in err
