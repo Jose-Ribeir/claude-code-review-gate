@@ -274,16 +274,18 @@ def fetch_tickets(settings, discovered, repo_root=None, runner=None,
             if not isinstance(sel, dict) or not sel.get("key"):
                 continue
             key = sel["key"]
-            tracker, note_or_none = _fetch_one_safe(
+            # result is branch-honest: (tracker, payload) on success,
+            # (None, note) on a clean miss.
+            tracker, result = _fetch_one_safe(
                 key, order, repo_root, runner, cache_dir, now,
                 jira_settings=settings.get("jira"))
             if tracker is None:
-                notes.append(f"{key}: {note_or_none}")
+                notes.append(f"{key}: {result}")
                 continue
-            body, truncated = _trim(note_or_none["body"])
+            body, truncated = _trim(result["body"])
             tickets.append({"key": key, "tracker": tracker,
                             "source": sel.get("source"), "role": sel.get("role"),
-                            "title": note_or_none["title"], "body": body,
+                            "title": result["title"], "body": body,
                             "truncated": truncated})
         return {"tickets": tickets, "notes": notes}
     except Exception as exc:  # fail-open invariant: a note, never an exception
