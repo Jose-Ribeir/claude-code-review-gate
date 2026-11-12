@@ -22,7 +22,16 @@ if [ -n "$PREV" ] && [ "$(_canon "$PREV")" = "$(_canon "$HOOKS_DIR")" ]; then
   git config --global --unset reviewGate.prevHooksPath || true
 fi
 
-if [ -n "$PREV" ]; then
+# Touch the global core.hooksPath ONLY if it still points at our managed
+# hooks dir. If the user re-pointed it after installing (adopted another
+# global hook setup, or hand-disabled the gate by pointing it elsewhere),
+# restoring PREV -- or unsetting -- would silently destroy THEIR setting.
+CUR="$(git config --global --get core.hooksPath || true)"
+if [ -n "$CUR" ] && [ "$(_canon "$CUR")" != "$(_canon "$HOOKS_DIR")" ]; then
+  git config --global --unset reviewGate.prevHooksPath || true
+  echo "Global core.hooksPath now points at $CUR, not our hooks dir; leaving"
+  echo "it alone (only cleared the stale reviewGate.prevHooksPath backup)."
+elif [ -n "$PREV" ]; then
   git config --global core.hooksPath "$PREV"
   git config --global --unset reviewGate.prevHooksPath || true
   echo "Restored previous global core.hooksPath: $PREV"

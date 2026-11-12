@@ -25,6 +25,7 @@
 # wirings now agree on the version in force, and syncing matters for both.
 import argparse
 import filecmp
+import fnmatch
 import json
 import os
 import shutil
@@ -64,11 +65,18 @@ PAYLOAD = [
     "SUPPORT.md",
 ]
 
-# Never copy generated/local junk even when it sits inside a payload directory.
-EXCLUDE = shutil.ignore_patterns(
+# Never copy generated/local junk even when it sits inside a payload
+# directory. EXCLUDE_PATTERNS is the single source of truth: the copy step
+# (via EXCLUDE) and the drift check (via _ignored) BOTH consume it, so
+# --check can never flag as drift a file the copy deliberately skips (a
+# .DS_Store written by Finder into scripts/ used to report OUT OF DATE
+# forever). Cache dirs are included even though no payload root currently
+# contains one -- the patterns, not the tree, are the contract.
+EXCLUDE_PATTERNS = (
     "__pycache__", "*.py[cod]", ".pytest_cache", ".ruff_cache", ".serena",
     ".DS_Store", "Thumbs.db", "settings.local.json",
 )
+EXCLUDE = shutil.ignore_patterns(*EXCLUDE_PATTERNS)
 
 
 def _repo_root():
@@ -116,23 +124,32 @@ def _dirty(repo):
         return False
 
 
+def _ignored(name):
+    """True when the copy step skips this entry (shared EXCLUDE_PATTERNS --
+    drift and copy MUST ignore exactly the same set)."""
+    return any(fnmatch.fnmatch(name, pat) for pat in EXCLUDE_PATTERNS)
+
+
 def _differs(src, dst):
-    """Recursive content comparison. filecmp.dircmp with shallow=False is not
-    used directly because it only compares the files common to both sides at
-    each level; we need added/removed entries to count as drift too."""
+    """Recursive content comparison, ignoring EXCLUDE_PATTERNS on BOTH sides
+    (an excluded-but-present entry in either tree is not drift). Entries
+    present on only one side count as drift, which filecmp.dircmp on its own
+    (common-files-only comparison) would miss -- hence the explicit walk."""
     if not dst.exists():
         return True
-    cmp = filecmp.dircmp(str(src), str(dst), ignore=[
-        "__pycache__", ".pytest_cache", ".ruff_cache", ".serena",
-    ])
-    if cmp.left_only or cmp.right_only or cmp.funny_files:
+    src_names = {n for n in os.listdir(src) if not _ignored(n)}
+    dst_names = {n for n in os.listdir(dst) if not _ignored(n)} if dst.is_dir() else set()
+    if src_names != dst_names:
         return True
-    _, mismatch, errors = filecmp.cmpfiles(
-        str(src), str(dst), cmp.common_files, shallow=False
-    )
-    if mismatch or errors:
-        return True
-    return any(_differs(src / d, dst / d) for d in cmp.common_dirs)
+    for name in src_names:
+        s = src / name
+        d = dst / name
+        if s.is_dir():
+            if not d.is_dir() or _differs(s, d):
+                return True
+        elif d.is_dir() or not filecmp.cmp(s, d, shallow=False):
+            return True
+    return False
 
 
 def _copy_payload(repo, dest):
@@ -185,7 +202,12 @@ def _update_record(plugins_dir, install_path, version, sha):
         entry["lastUpdated"] = stamp
         if sha:
             entry["gitCommitSha"] = sha
-    reg.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    # Atomic rewrite (tmp + os.replace, same discipline as _copy_payload):
+    # a crash/interrupt mid-write must not leave a truncated registry that
+    # uninstalls every OTHER installed plugin on the next launch.
+    tmp = reg.parent / f".{reg.name}.tmp-{os.getpid()}"
+    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, reg)
     return None
 
 

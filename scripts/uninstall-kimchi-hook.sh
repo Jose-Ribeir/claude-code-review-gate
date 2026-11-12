@@ -67,10 +67,19 @@ for dir in "${_DIRS[@]}"; do
     rm -f "$dir/pre-push"
     echo "Removed $dir/pre-push"
   fi
+  # Restore the preserved user hook ONLY when the current pre-push is ours
+  # or absent: a $dir/pre-push we do not recognize is someone's own hook
+  # (the natural way to disable the gate without uninstalling), and the mv
+  # must not clobber it.
   if [ -f "$dir/pre-push.user" ]; then
-    mv "$dir/pre-push.user" "$dir/pre-push"
-    chmod +x "$dir/pre-push" 2>/dev/null || true
-    echo "Restored your previous pre-push hook at $dir/pre-push."
+    if [ -f "$dir/pre-push" ] && ! grep -q "review-gate.py" "$dir/pre-push" 2>/dev/null; then
+      echo "WARNING: $dir/pre-push exists and is not ours; leaving it in"
+      echo "  place and keeping $dir/pre-push.user untouched."
+    else
+      mv "$dir/pre-push.user" "$dir/pre-push"
+      chmod +x "$dir/pre-push" 2>/dev/null || true
+      echo "Restored your previous pre-push hook at $dir/pre-push."
+    fi
   fi
 done
 KIMCHI_HOOKS_DIR="${KIMCHI_HOOKS_DIR:-$HOME/.config/kimchi/harness/hooks/bash}"

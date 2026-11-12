@@ -153,11 +153,19 @@ def _merge_jira(resolved, notes, path, label, jira):
                      "coordinates; ignored")
         return
     for key, value in jira.items():
-        if isinstance(value, str):
+        if isinstance(value, bool):
+            notes.append(f"{label} config {path}: jira.{key} must be a string "
+                         "or a number; ignored")
+        elif isinstance(value, str):
             resolved[str(key)] = value
+        elif isinstance(value, (int, float)):
+            # README documents a JSON-number form ("timeout": 30);
+            # rg_jira_fetch._timeout parses numbers charitably, so accept
+            # them here instead of dropping the documented shape.
+            resolved[str(key)] = str(value)
         else:
-            notes.append(f"{label} config {path}: jira.{key} must be a string; "
-                         "ignored")
+            notes.append(f"{label} config {path}: jira.{key} must be a string "
+                         "or a number; ignored")
 
 
 def _as_switch(value):
