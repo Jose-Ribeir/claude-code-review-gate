@@ -40,13 +40,24 @@ $stdinBytes = New-Object System.IO.MemoryStream
 $bytes = $stdinBytes.ToArray()
 
 # Short-circuit non-pushes before ever touching Python. hooks.json's
-# `if: "Bash(*git push*)"` is best-effort -- Claude Code's own docs say an
-# if-pattern it can't parse "fails open" (the hook runs anyway), and
-# `*text*` isn't documented syntax -- so in practice this hook fires on every
-# Bash call, not just git push. Without this check, that means ANY Bash call
-# with no working Python gets denied, not just a real push. Same substring
-# rule review-gate.py itself applies once it's running.
+# `if: "Bash(git *)"` is best-effort -- Claude Code's own docs say an
+# if-pattern it can't parse "fails open" (the hook runs anyway) -- so in
+# practice this hook fires on every Bash call, not just git push. Without
+# this check, that means ANY Bash call with no working Python gets denied,
+# not just a real push. Same substring rule review-gate.py itself applies
+# once it's running.
 $payloadText = [System.Text.Encoding]::UTF8.GetString($bytes)
+
+# The substring test runs on a DE-SPLICED copy of the payload: a real push
+# can hide its subcommand behind quote splicing -- `git pu""sh origin main`,
+# `git pu\sh origin main` -- so its JSON carries no literal `push` and the
+# raw `*git*push*` test under-matches it (the miss is documented as proven
+# live in hooks/sh/gate-hook.sh, and gate-hook.sh answers it the same way).
+# Stripping `"`, `'`, backticks and `\` from the test copy sees through the
+# splice while keeping the test's precision; it can only ever match MORE,
+# and over-match only costs a Python spawn (review-gate.py still gets the
+# raw payload below and re-parses strictly).
+$desplicedText = $payloadText -replace '[\\"`'']', ''
 
 # --- Inside the review session -------------------------------------------------
 # review-gate.py runs the headless review with --plugin-dir, so this plugin --
@@ -63,7 +74,7 @@ if ($env:OCR_IN_REVIEW -eq '1') {
 
 # Loose on purpose: `git -C <dir> push` is a push too. review-gate.py applies
 # the strict command-position test once it is running.
-if (-not $script:GuardMode -and $payloadText -notlike '*git*push*') { exit 0 }
+if (-not $script:GuardMode -and $desplicedText -notlike '*git*push*') { exit 0 }
 
 # --- Should this adapter run at all? ------------------------------------------
 # Deliberately biased toward RUNNING. Deferring when gate-hook.sh cannot

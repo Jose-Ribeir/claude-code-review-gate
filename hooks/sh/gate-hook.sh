@@ -28,11 +28,18 @@
 # own hook-mode budget is 3 s (see OCR_INLINE_BUDGET in scripts/review-gate.py).
 #
 # Ported from scripts/gate-hook.sh (claude-code-review-gate); the strict push
-# parsing ports _looks_like_real_push/_parse_push (review-gate.py:1584/:1710)
+# parsing ports _looks_like_real_push/_parse_push in scripts/review-gate.py
+# (the AUTHORITATIVE master classifier -- this bash copy must track its
+# behaviour, not cite its line numbers, which go stale on every edit)
 # adapted for Kimchi's recursive command parsing: quoted strings are DATA of
 # the enclosing command, because Kimchi fires this hook again on the inner
 # segment when the quotes actually delimit a command.
-set -uo pipefail
+# set -e is SAFE here only because every deliberate nonzero return is
+# captured below: a bare `fn; rc=$?` would abort this hook mid-payload and,
+# because hook failure = ALLOW in Kimchi, silently wave a push through.
+# Keep it that way: any new function call that can return nonzero must be
+# guarded (`|| rc=$?`, `if`, `&&`, `|| _pass`, ...).
+set -euo pipefail
 
 # Where this script lives: the repo checkout (hooks/sh/). The installed copy
 # is stamped with __GATE_DIR__ by install-kimchi-hook.sh; the runtime override
@@ -168,7 +175,9 @@ _hook_gated() {
     case " $seen " in *" $f "*) continue ;; esac
     seen="$seen $f"
     grep -q "review-gate" "$f" 2>/dev/null && return 0
-    d="$(dirname -- "$f")"
+    # BSD-safe: dirname takes no `--` on macOS (scripts/ convention: quote the
+    # operand instead of end-of-options).
+    d="$(dirname "$f")"
     text="$(<"$f")"
     # Resolve the $0-relative dirname/basename idioms to literal paths so the
     # scripts a shim sources/execs become findable tokens (husky 9 writes
@@ -561,8 +570,11 @@ fi
 
 # Parse inversion (D14): positively-parsed shapes go on; push-shaped but
 # unparseable shapes block with the retry message.
-push_shape "$PUSH_WORDS"
-shape_rc=$?
+# push_shape returns 1/2 as DECISIONS, not failures -- capture the status
+# explicitly so `set -e` cannot read a deliberate unparseable/dry-run result
+# as an abort (which would exit with no output = ALLOW = unreviewed push).
+shape_rc=0
+push_shape "$PUSH_WORDS" || shape_rc=$?
 [ "$shape_rc" = 1 ] && { _fail_open_requested && _pass; _emit_block "$BLOCK_UNPARSEABLE"; }
 [ "$shape_rc" = 2 ] && _pass                       # dry-run / delete: nothing to review
 
