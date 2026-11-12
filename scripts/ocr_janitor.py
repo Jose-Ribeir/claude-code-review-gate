@@ -129,9 +129,16 @@ def gc_clones(root, states, days, now, dry, emit):
         run_id = clone.name.split("-", 1)[1] if "-" in clone.name else ""
         owner = by_run.get(run_id)
         if owner is None:
-            emit("clone", clone,
-                 "no owning state entry (orphan)", "removed orphan clone")
-            _remove(clone, dry)
+            # Report the REMOVAL's outcome, not the intent: emit only after
+            # _remove answers, honouring its False return -- otherwise the
+            # report says "removed" for a clone still on disk.
+            if _remove(clone, dry):
+                emit("clone", clone,
+                     "no owning state entry (orphan)", "removed orphan clone")
+            else:
+                emit("clone", clone,
+                     "no owning state entry (orphan)",
+                     "removal FAILED (orphan clone left in place)")
             continue
         _, data = owner
         state = data.get("state")
@@ -144,10 +151,14 @@ def gc_clones(root, states, days, now, dry, emit):
             except OSError:
                 ts = now
             if now - ts > days * DAY:
-                emit("clone", clone,
-                     f"state {state}, {_fmt_age(now - ts)} old",
-                     "removed clone")
-                _remove(clone, dry)
+                if _remove(clone, dry):
+                    emit("clone", clone,
+                         f"state {state}, {_fmt_age(now - ts)} old",
+                         "removed clone")
+                else:
+                    emit("clone", clone,
+                         f"state {state}, {_fmt_age(now - ts)} old",
+                         "removal FAILED (clone left in place)")
         # any other state value: keep, we do not know what it means
 
 
@@ -165,17 +176,21 @@ def gc_markers(root, dry, emit):
         repo = str((body or {}).get("repo") or "")
         if body is None or not repo or not os.path.isdir(repo):
             why = "unreadable" if body is None else f"repo gone: {repo or '(none recorded)'}"
-            emit("marker", p, why, "removed stale pending marker")
-            _remove(p, dry)
+            if _remove(p, dry):
+                emit("marker", p, why, "removed stale pending marker")
+            else:
+                emit("marker", p, why, "removal FAILED (marker left in place)")
     for p in pushed:
         try:
             repo = p.read_text(encoding="utf-8").strip()
         except OSError:
             continue
         if not repo or not os.path.isdir(repo):
-            emit("marker", p, f"repo gone: {repo or '(none recorded)'}",
-                 "removed stale pushed-repo marker")
-            _remove(p, dry)
+            why = f"repo gone: {repo or '(none recorded)'}"
+            if _remove(p, dry):
+                emit("marker", p, why, "removed stale pushed-repo marker")
+            else:
+                emit("marker", p, why, "removal FAILED (marker left in place)")
 
 
 # --- (c) findings-log rotation --------------------------------------------------

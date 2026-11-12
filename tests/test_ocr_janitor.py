@@ -122,6 +122,29 @@ def test_orphan_clone_removed_when_state_entry_gone(tmp_path):
     assert not (store.clones / f"{'a' * 12}-runZZ").exists()
 
 
+def test_failed_removals_report_failure_not_removal(tmp_path, monkeypatch):
+    """_remove answers False: the report must say FAILED, never "removed",
+    and the paths stay on disk (regression: emit-once-before-removal lied)."""
+    store = Store(tmp_path)
+    clone = store.clone("a" * 40, "runZZ")  # orphan clone
+    old_state = store.state("runF", tip="b" * 40, state="done",
+                            done_ts=NOW - 20 * DAY, repo_root=str(tmp_path))
+    old_clone = store.clone("b" * 40, "runF")  # aged done clone
+    marker = store.pending(tmp_path / "vanished", head="fail1")
+    pushed = store.pushed_repo(tmp_path / "vanished2")
+    monkeypatch.setattr(ocr_janitor, "_remove", lambda path, dry: False)
+    lines, _ = _janitor(store)
+    text = "\n".join(lines)
+    assert "removed orphan clone" not in text
+    assert "removed clone" not in text
+    assert "removed stale pending marker" not in text
+    assert "removed stale pushed-repo marker" not in text
+    assert text.count("removal FAILED") == 4
+    for path in (clone, old_clone, marker, pushed):
+        assert path.exists()
+    assert old_state.exists()
+
+
 def test_running_and_recent_clones_kept(tmp_path):
     store = Store(tmp_path)
     store.state("runR", tip="b" * 40, state="running", repo_root=str(tmp_path))
