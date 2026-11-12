@@ -54,19 +54,41 @@ SEED_FILES = {"docs/adr/0085-cli-spawn-only-via-acp-service.md": _SEED_ADR}
 
 # --- shared payloads ----------------------------------------------------------
 
-_SLUG_TS = """import { kebabCase } from 'lodash-es';
-
-export function slugifySessionTitle(title) {
-  return kebabCase(title.trim()).slice(0, 80);
+# The slug helper is deliberately BORING TypeScript: the scenario only tests
+# the documentation gate, so the fabricated code must give the code reviewer
+# nothing to block on (typed signature, no truncation sloppiness, a unit
+# test). The first calibration run had S2/S3 blocked by an implicit-any
+# MEDIUM finding on this file instead, and the carried "(still present)"
+# copy re-blocked S3.
+_SLUG_BODY = """export function slugifySessionTitle(title: string): string {
+  return kebabCase(title.trim()).slice(0, 80).replace(/-+$/, '');
 }
 """
 
-_SLUG_TS_REFERENCING = """// decision: docs/adr/0086-lodash-es-for-slug-helpers.md
-import { kebabCase } from 'lodash-es';
+_SLUG_TS = "import { kebabCase } from 'lodash-es';\n\n" + _SLUG_BODY
 
-export function slugifySessionTitle(title) {
-  return kebabCase(title.trim()).slice(0, 80);
-}
+_SLUG_TS_REFERENCING = ("// decision: docs/adr/0086-lodash-es-for-slug-helpers.md\n"
+                        "import { kebabCase } from 'lodash-es';\n\n" + _SLUG_BODY)
+
+_SLUG_TEST_TS = """import { describe, expect, it } from 'vitest';
+
+import { slugifySessionTitle } from './slug';
+
+describe('slugifySessionTitle', () => {
+  it('kebab-cases a mixed-case title', () => {
+    expect(slugifySessionTitle('Nightly Build 42')).toBe('nightly-build-42');
+  });
+
+  it('trims surrounding whitespace', () => {
+    expect(slugifySessionTitle('  Padded Title  ')).toBe('padded-title');
+  });
+
+  it('caps the slug at 80 characters without a trailing dash', () => {
+    const slug = slugifySessionTitle('alpha '.repeat(40));
+    expect(slug.length).toBeLessThanOrEqual(80);
+    expect(slug.endsWith('-')).toBe(false);
+  });
+});
 """
 
 _PKGJSON_OLD = '    "@cast/analytics": "^0.1.0",'
@@ -144,7 +166,8 @@ SCENARIOS = [
         description="new runtime dependency (dependency_manifest flag), no record",
         commits=[CommitSpec(
             message="sim S2: slugify session titles with lodash-es",
-            write={"packages/app/src/main/sim/slug.ts": _SLUG_TS},
+            write={"packages/app/src/main/sim/slug.ts": _SLUG_TS,
+                   "packages/app/src/main/sim/slug.test.ts": _SLUG_TEST_TS},
             replace=[("packages/app/package.json", _PKGJSON_OLD, _PKGJSON_NEW)],
         )],
         expect="block",
@@ -156,6 +179,7 @@ SCENARIOS = [
         commits=[CommitSpec(
             message="sim S3: slugify session titles with lodash-es (recorded)",
             write={"packages/app/src/main/sim/slug.ts": _SLUG_TS_REFERENCING,
+                   "packages/app/src/main/sim/slug.test.ts": _SLUG_TEST_TS,
                    "docs/adr/0086-lodash-es-for-slug-helpers.md": _RECORD_ADR_0086},
             replace=[("packages/app/package.json", _PKGJSON_OLD, _PKGJSON_NEW)],
         )],
