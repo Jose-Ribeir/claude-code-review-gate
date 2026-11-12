@@ -2958,6 +2958,69 @@ _RETRY_CONTRACT_REMINDER = (
 _RETRY_REMINDER_ACTIVE = False
 
 
+def _review_model_args():
+    """The review worker's default argv: DEFAULT_KIMI_ARGS with the caller's
+    extras appended. Only consulted when OCR_KIMI_ARGS is NOT set (an override
+    replaces the default argv wholesale in every worker caller -- see
+    _worker_invocation)."""
+    args = list(DEFAULT_KIMI_ARGS)
+    args += shlex.split(os.environ.get("OCR_KIMI_EXTRA_ARGS", ""))
+    return args
+
+
+# --- shared worker-invocation plumbing (docs-gate 09) -------------------------
+# Every headless `kimchi -p` worker (review, docs summary) resolves WHAT to
+# spawn through this one builder. Previously each caller owned a copy of this
+# half; the copies could drift, and a sandbox hardening applied to one would
+# leave the others unprotected. What stays per-caller: the fail-closed
+# missing-worker message, the default-args builder (model pins, extras), the
+# prompt and stub argv mode, the spawn loop, output parsing, error wrapping.
+
+def _worker_invocation(default_args_builder, missing_message):
+    """Resolve the invocation shared by every headless `kimchi -p` worker call.
+
+    default_args_builder: zero-arg callable returning the caller's DEFAULT
+      argv (e.g. _review_model_args, _docs_summary_model_args); only consulted
+      with no OCR_KIMI_ARGS override, and decides its own extras
+      (OCR_KIMI_EXTRA_ARGS). Uniform rule, identical in every caller: an
+      OCR_KIMI_ARGS override replaces the default argv WHOLESALE -- the
+      default-args builder (and therefore the extras it would have added) is
+      never consulted under an override.
+    missing_message: the caller's own fail-closed message for a missing
+      worker (D9: a gate without a worker must not wave a push through; the
+      stubs run INSTEAD of kimchi, so they must not need it installed).
+
+    Returns (kimi, stub, args, child_env, scrubbed). The worker's -e wiring
+    (the deny extension) travels in the default argv, which also puts THIS
+    plugin's review skill on the worker's skill-resolution path (DOCS-GATE-08;
+    without it "/skill:review" resolved to a foreign global skill and the
+    verdict contract + docs-checker pass never ran). The env marker guards
+    re-entry: without it, every Bash call the reviewer makes pays a Python
+    spawn, and a push from inside a review would nest a whole second review.
+    Both adapters short-circuit on this (see _in_review).
+
+    C3 canary: prove the deny extension actually loaded before the first real
+    worker call in this process -- whichever caller gets there first pays the
+    one probe. Skipped for stub workers (no kimchi involved) and when
+    OCR_KIMI_ARGS replaced the argv wholesale (the caller owns that sandbox);
+    OCR_SKIP_CANARY=1 is the emergency escape hatch.
+    """
+    kimi = _find_kimi()
+    stub = _test_reviewer_cmd() or _stub_worker_cmd()
+    if not kimi and not stub:
+        raise ReviewGateError(missing_message)
+    override = os.environ.get("OCR_KIMI_ARGS")
+    args = shlex.split(override) if override else default_args_builder()
+    child_env = dict(os.environ)
+    child_env["OCR_IN_REVIEW"] = "1"
+    scrubbed = _scrub_worker_env(child_env)
+    if (not stub and not override and not _canary_state["probed"]
+            and not os.environ.get("OCR_SKIP_CANARY", "").strip()):
+        _canary_state["probed"] = True
+        _canary_probe(kimi, args, child_env)
+    return kimi, stub, args, child_env, scrubbed
+
+
 def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
                      paths_file=None, timeout=None, raw_tag="", resolve_file=None):
     """Return (result_dict, True, raw_archive_name) on success.
@@ -2972,47 +3035,15 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
     ReviewLimitError when the reviewer reports a usage/session limit, or
     returns (None, False, "") when claude is not installed (fail-open).
     """
-    kimi = _find_kimi()
     bypass = _bypass_hint(mode)
-    stub = _test_reviewer_cmd() or _stub_worker_cmd()
-    # D9 of the port plan: a missing reviewer NEVER fails open. The stubs run
-    # INSTEAD of kimchi, so they must not need it to be installed.
-    if not kimi and not stub:
-        raise ReviewGateError(
-            "`kimchi` CLI not found on PATH or KIMCHI_BIN - blocking to preserve gate "
-            "integrity (a gate without a reviewer must not wave a push through).\n"
-            "  Install Kimchi Studio, or point KIMCHI_BIN at the CLI, then push again.\n"
-            f"  Run {_DOCTOR_CMD} (review-gate doctor) to diagnose.\n"
-            f"{bypass}"
-        )
-    # OCR_KIMI_ARGS replaces the defaults wholesale (full escape hatch);
-    # OCR_KIMI_EXTRA_ARGS appends to them, which is what callers usually want.
-    override = os.environ.get("OCR_KIMI_ARGS")
-    if override:
-        args = shlex.split(override)
-    else:
-        args = list(DEFAULT_KIMI_ARGS)
-        args += shlex.split(os.environ.get("OCR_KIMI_EXTRA_ARGS", ""))
-    # The child is given -e wiring (the deny extension), which also puts
-    # THIS plugin's review skill on the worker's skill-resolution path
-    # (DOCS-GATE-08; without it "/skill:review" resolved to a foreign global
-    # skill and the verdict contract + docs-checker pass never ran). The env
-    # marker guards re-entry: without it, every Bash call the reviewer makes
-    # pays a Python spawn, and a push from inside a review would nest a whole
-    # second review. Both adapters short-circuit on this (see _in_review).
-    child_env = dict(os.environ)
-    child_env["OCR_IN_REVIEW"] = "1"
-    scrubbed = _scrub_worker_env(child_env)
-
-    # C3 canary: prove the deny extension actually loaded before the first real
-    # worker call in this process. Skipped for stub workers (no kimchi involved)
-    # and when OCR_KIMI_ARGS replaced the argv wholesale (the caller owns that
-    # sandbox); OCR_SKIP_CANARY=1 is the emergency escape hatch.
-    if (not stub and not override and not _canary_state["probed"]
-            and not os.environ.get("OCR_SKIP_CANARY", "").strip()):
-        _canary_state["probed"] = True
-        _canary_probe(kimi, args, child_env)
-
+    kimi, stub, args, child_env, scrubbed = _worker_invocation(
+        _review_model_args,
+        "`kimchi` CLI not found on PATH or KIMCHI_BIN - blocking to preserve gate "
+        "integrity (a gate without a reviewer must not wave a push through).\n"
+        "  Install Kimchi Studio, or point KIMCHI_BIN at the CLI, then push again.\n"
+        f"  Run {_DOCTOR_CMD} (review-gate doctor) to diagnose.\n"
+        f"{bypass}"
+    )
     debug = _debug_enabled()
     creationflags = _WIN_FLAGS if sys.platform == "win32" else 0
     _SUFFIX = " --json"
@@ -6575,25 +6606,13 @@ def _run_docs_summary_once(review_root, tip, doc_paths):
     Returns the summary markdown. Raises ReviewGateError on every failure
     mode -- the caller fails the push closed (see _docs_summary_freshen).
     """
-    kimi = _find_kimi()
-    stub = _test_reviewer_cmd() or _stub_worker_cmd()
-    if not kimi and not stub:
-        # D9: a gate without a worker must not wave a push through.
-        raise ReviewGateError(
-            _docs_summary_failed_message(
-                "`kimchi` CLI not found on PATH or KIMCHI_BIN.")
-            + f"\n  Run {_DOCTOR_CMD} (review-gate doctor) to diagnose.")
-    override = os.environ.get("OCR_KIMI_ARGS")
-    args = shlex.split(override) if override else _docs_summary_model_args()
+    kimi, stub, args, child_env, _scrubbed = _worker_invocation(
+        _docs_summary_model_args,
+        _docs_summary_failed_message(
+            "`kimchi` CLI not found on PATH or KIMCHI_BIN.")
+        + f"\n  Run {_DOCTOR_CMD} (review-gate doctor) to diagnose.")
     listing = "\n".join("- " + p for p in doc_paths)
     prompt = _PROMPT_DOCS_SUMMARY.format(docs=listing)
-    child_env = dict(os.environ)
-    child_env["OCR_IN_REVIEW"] = "1"
-    _scrub_worker_env(child_env)
-    if (not stub and not override and not _canary_state["probed"]
-            and not os.environ.get("OCR_SKIP_CANARY", "").strip()):
-        _canary_state["probed"] = True
-        _canary_probe(kimi, args, child_env)
     cmd = stub + ["--docs-summary", tip] if stub else [kimi, "-p", prompt] + args
     popen_extra = {} if sys.platform == "win32" else {"start_new_session": True}
     creationflags = _WIN_FLAGS if sys.platform == "win32" else 0
