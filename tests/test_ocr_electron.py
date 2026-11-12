@@ -290,3 +290,94 @@ def test_handler_body_and_line_helpers():
     body = 'ipcMain.on("ch", (e) => { const f = e.senderFrame; });'
     assert mod._handler_body(body, body.index('"ch"') + 3) is not None
     assert mod._line_of("ab\ncd", 3) == 2
+
+
+# ---------------------------------------------------------------------------
+# t25: deleted/renamed files visible to checks 3b and 4 (cycle3 finding);
+# bare-reference handler detection in ASI (no-semicolon) style.
+# ---------------------------------------------------------------------------
+
+def test_diff_map_whole_file_deletion_lands_in_deleted(tmp_path):
+    repo = _make_repo(tmp_path)
+    (repo / "src").mkdir()
+    main = repo / "src" / "main.js"
+    main.write_text('const { ipcMain } = require("electron");\n'
+                    'ipcMain.on("diag:get", (e) => { e.senderFrame; });\n')
+    _commit(repo)
+    a = _git(repo, "rev-parse", "HEAD").strip()
+    main.unlink()
+    _commit(repo)
+    b = _git(repo, "rev-parse", "HEAD").strip()
+    added, deleted, renames = _module()._diff_map(str(repo), a, b)
+    assert "src/main.js" in deleted   # was dropped via '+++ /dev/null'
+    assert 2 in deleted["src/main.js"]
+    assert renames == {}
+
+
+def test_deleted_file_with_handler_orphans_renderer(tmp_path):
+    repo = _make_repo(tmp_path)
+    src = repo / "src"
+    src.mkdir()
+    (src / "main.js").write_text(
+        'const { ipcMain } = require("electron");\n'
+        'ipcMain.on("app:ping", (e) => { return e.senderFrame; });\n')
+    (src / "renderer.js").write_text(
+        'const { ipcRenderer } = require("electron");\n'
+        'ipcRenderer.send("app:ping");\n')
+    _commit(repo)
+    (src / "main.js").unlink()  # whole-file deletion of the handler file
+    _commit(repo)
+    out = _check(repo, "HEAD~1", "HEAD")
+    lost = [f for f in out["findings"] if f["kind"] == "orphan-channel"
+            and "lost its ipcMain handler" in f["detail"]]
+    assert len(lost) == 1
+    assert lost[0]["file"] == "src/renderer.js"
+    assert "src/main.js" in lost[0]["detail"]
+
+
+def test_renamed_file_removed_handler_still_flagged(tmp_path):
+    repo = _make_repo(tmp_path)
+    src = repo / "src"
+    src.mkdir()
+    old = src / "entry.js"
+    old.write_text('const { ipcMain } = require("electron");\n'
+                   'ipcMain.on("app:cfg", (e) => { return e.senderFrame; });\n'
+                   'console.log("loaded");\n')
+    (src / "renderer.js").write_text(
+        'const { ipcRenderer } = require("electron");\n'
+        'ipcRenderer.send("app:cfg");\n')
+    _commit(repo)
+    old.unlink()
+    (src / "bootstrap.js").write_text('const { ipcMain } = require("electron");\n'
+                                      'console.log("loaded");\n'
+                                      'console.log("loaded");\n')
+    _commit(repo)
+    a = _git(repo, "rev-parse", "HEAD~1").strip()
+    b = _git(repo, "rev-parse", "HEAD").strip()
+    mod = _module()
+    added, deleted, renames = mod._diff_map(str(repo), a, b)
+    assert renames.get("src/bootstrap.js") == "src/entry.js"
+    assert 2 in deleted.get("src/entry.js", set())
+    out = mod.analyze(str(repo), "%s..%s" % (a, b))
+    lost = [f for f in out["findings"] if f["kind"] == "orphan-channel"
+            and "lost its ipcMain handler" in f["detail"]]
+    assert len(lost) == 1
+    assert lost[0]["file"] == "src/renderer.js"
+    assert "src/entry.js" in lost[0]["detail"]
+
+
+def test_handler_body_bare_reference_without_semicolon():
+    mod = _module()
+    # ASI style: no ';' terminator; the unrelated block the next statement
+    # opens must NOT be judged the handler body.
+    text = ('ipcMain.on("ch", handler)\n'
+            'const unrelated = { run() { return 1; } };\n')
+    assert mod._handler_body(text, text.index('"ch"') + 3) is None
+    # inline callbacks still have their body found, brace on the same line
+    # or the next (Allman).
+    same_line = 'ipcMain.on("ch", (e) => { return e.senderFrame; });\n'
+    body = mod._handler_body(same_line, same_line.index('"ch"') + 3)
+    assert body and "senderFrame" in body
+    next_line = 'ipcMain.on("ch", (e, a) =>\n{ return e.senderFrame; });\n'
+    body2 = mod._handler_body(next_line, next_line.index('"ch"') + 3)
+    assert body2 and "senderFrame" in body2
