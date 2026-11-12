@@ -1665,16 +1665,24 @@ def _strip_heredocs(cmd):
         line = lines[i]
         out.append(line)
         i += 1
-        m = _HEREDOC.search(line)
-        if not m:
+        openers = list(_HEREDOC.finditer(line))
+        if not openers:
             continue
-        marker = m.group(2)
+        # `cat <<A <<B` opens several bodies on one line; their bodies arrive
+        # in order, each closed by its own terminator. Drop ALL of them --
+        # stopping after the first leaves the later bodies in `out`, still
+        # scanned for cds/pushes by callers. As conservative as before: a
+        # missing terminator strips nothing.
         j = i
-        while j < len(lines) and lines[j].strip() != marker:
-            j += 1
-        if j >= len(lines):
-            continue  # no terminator: not a heredoc we can trust; strip nothing
-        i = j + 1  # past the body AND the terminator line
+        for m in openers:
+            marker = m.group(2)
+            while j < len(lines) and lines[j].strip() != marker:
+                j += 1
+            if j >= len(lines):
+                break  # no terminator: not a heredoc we can trust; strip nothing
+            j += 1  # past this body AND its terminator line
+        else:
+            i = j  # every body and terminator consumed
     return "\n".join(out)
 
 
@@ -1891,8 +1899,10 @@ _PRE_PUSH_ALLOWED = frozenset({
     "for-each-ref", "show-ref", "shortlog", "blame", "name-rev", "var",
     "version", "help",
 })
-# `git branch` is allowed only in its listing forms.
-_BRANCH_LIST_FLAGS = ("--show-current", "--list", "-a", "-r", "-v", "-vv", "--all", "--remotes")
+# `git branch` is allowed only in its listing forms (which include the bare
+# command and `-l`, the short spelling of --list).
+_BRANCH_LIST_FLAGS = ("--show-current", "--list", "-l", "-a", "-r", "-v", "-vv",
+                      "--all", "--remotes")
 
 # push options that take a separate value (or `=value`), and bare flags.
 _PUSH_VALUE_OPTS = frozenset({
@@ -1976,7 +1986,9 @@ def _pre_push_git_commands(cmd):
         tail = head[m.end():m.end() + 80]
         if sub == "branch":
             first = tail.split()[0] if tail.split() else ""
-            if first in _BRANCH_LIST_FLAGS:
+            if not first or first[0] in ";&|" or first in _BRANCH_LIST_FLAGS:
+                # No argument (possibly a separator follows): the listing
+                # form. Only an argumented `git branch` can mutate.
                 continue
         if sub in _PRE_PUSH_ALLOWED:
             continue
@@ -3262,9 +3274,10 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
     raw_tag: suffix appended to head_sha in the history filename so each
       chunk's raw output gets a distinct file.
 
-    Raises ReviewGateError (with .is_timeout=True for timeouts),
-    ReviewLimitError when the reviewer reports a usage/session limit, or
-    returns (None, False, "") when claude is not installed (fail-open).
+    Raises ReviewGateError (with .is_timeout=True for timeouts) or
+    ReviewLimitError when the reviewer reports a usage/session limit.
+    A reviewer that cannot be launched raises ReviewGateError too: since
+    0.3.0 there is no missing-reviewer fail-open path (D9 of the port plan).
     """
     bypass = _bypass_hint(mode)
     kimi, stub, args, child_env, scrubbed = _worker_invocation(
@@ -4307,7 +4320,7 @@ def _supervise_run(state_path, run_id):
             # Priors are classified before the review: their known defects go
             # to the reviewer, and the resolver judges them afterwards.
             to_resolve, auto_resolved, carried_findings = _classify_priors(
-                plan, tip, review_root, common_dir, fp, run_id
+                plan, tip, review_root, common_dir, fp
             )
             _mark_phase("priors", priors=len(to_resolve) + len(carried_findings))
             # Event-graph index (t06): built lazily on the first push, then
@@ -4425,10 +4438,17 @@ def _supervise_run(state_path, run_id):
                 tip_cache = {}
 
                 def _judge_all(items):
+                    # One ls-tree for the whole batch, not one spawn per
+                    # judged resolution (the guard's fallback branch reads the
+                    # tip blob of each evidence path).
+                    oids = _blob_oids_at(review_root, tip, sorted({
+                        r.get("evidence_path")
+                        for r in (resolver_results.get(p["id"]) for p in items)
+                        if isinstance(r, dict) and r.get("evidence_path")}))
                     for p in items:
                         judged[p["id"]] = _judge_resolution(
                             p, resolver_results[p["id"]], active_items, push_range,
-                            review_root, tip, tip_cache)
+                            review_root, tip, tip_cache, oids)
 
                 _judge_all(to_resolve)
                 _mark_phase("resolve", priors=len(to_resolve))
@@ -4658,10 +4678,9 @@ def _supervise_run(state_path, run_id):
                     if ev_path and ev_path == (p["finding"].get("path") or ""):
                         self_resolved.setdefault(ev_path, set()).add(p["id"])
                 if self_resolved and _ledger_enabled():
-                    _drop_self_resolved(active_items, self_resolved, common_dir, fp, run_id)
+                    _drop_self_resolved(active_items, self_resolved, common_dir, fp)
                 if ran and carry_items and _ledger_enabled():
-                    _attach_to_carried_records(deduped_new, carry_items, common_dir, fp,
-                                               run_id, review_root, tip)
+                    _attach_to_carried_records(deduped_new, carry_items, common_dir, fp)
 
                 # Info notes: same code as a finding, elsewhere. Never blocking,
                 # never recorded; a prior's in-push matches went to the reviewer.
@@ -5138,10 +5157,14 @@ def _collect_diff_entries(root, base, tip):
     if rc != 0:
         return None, ["could not run git diff --raw; skipping chunking"]
 
-    stat_out, _ = _git(["diff", "-M", "--numstat", "-z", f"{base}..{tip}"], cwd=root)
+    stat_out, stat_rc = _git(["diff", "-M", "--numstat", "-z", f"{base}..{tip}"], cwd=root)
 
     entries = {}
     warnings = []
+    if stat_rc != 0:
+        # The --raw call above checks rc; degrade here too, or chunks get
+        # packed and the file ceiling picked on silently zeroed line counts.
+        warnings.append("git diff --numstat failed; line counts default to 0")
     # Records are ":meta\0path\0", or ":meta\0src\0dst\0" for R/C.
     fields = raw_out.split("\0")
     i = 0
@@ -5247,6 +5270,23 @@ def _group_into_chunks(entries, sizes=None, budget=None):
     return chunks if chunks else [[]]
 
 
+def _cap_reviewable(entries, warnings):
+    """The allowlist filter plus the _MAX_FILES ceiling, shared by both
+    planners (_plan_chunks, _plan_review): kept in one place so the two cannot
+    drift -- they already differed in their not-allowed sentinel (None vs []),
+    which stays with the callers."""
+    allowed = [e for e in entries if _is_allowed_path(e["path"])]
+    if len(allowed) > _MAX_FILES:
+        allowed.sort(key=lambda e: e["lines"], reverse=True)
+        skipped = len(allowed) - _MAX_FILES
+        warnings.append(
+            f"file ceiling: {skipped} file(s) skipped (only the {_MAX_FILES} with "
+            "the largest diffs are reviewed; set OCR_MAX_FILES to raise the cap)"
+        )
+        allowed = allowed[:_MAX_FILES]
+    return allowed
+
+
 def _plan_chunks(root, base, tip):
     """Return (None, warnings) for single-chunk mode, or (chunks, warnings).
 
@@ -5260,18 +5300,9 @@ def _plan_chunks(root, base, tip):
     if entries is None:
         return None, warnings
 
-    allowed = [e for e in entries if _is_allowed_path(e["path"])]
+    allowed = _cap_reviewable(entries, warnings)
     if not allowed:
         return None, warnings
-
-    if len(allowed) > _MAX_FILES:
-        allowed.sort(key=lambda e: e["lines"], reverse=True)
-        skipped = len(allowed) - _MAX_FILES
-        warnings.append(
-            f"file ceiling: {skipped} file(s) skipped (only the {_MAX_FILES} with "
-            "the largest diffs are reviewed; set OCR_MAX_FILES to raise the cap)"
-        )
-        allowed = allowed[:_MAX_FILES]
 
     if len(allowed) <= _CHUNK_THRESHOLD:
         return None, warnings  # below threshold: single-context mode
@@ -5302,11 +5333,13 @@ def _record_key(path, old_path, status, base_oid):
 
 def _finding_id(f):
     """Stable sha256 id for a finding (path, existing_code, content)."""
-    raw = "\x00".join([
+    # String findings hash exactly as before; a malformed one (numeric or
+    # list field, straight from reviewer JSON) is coerced, not crashed on.
+    raw = "\x00".join(str(v) for v in (
         f.get("path") or "",
         f.get("existing_code") or "",
         f.get("content") or "",
-    ])
+    ))
     return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()
 
 
@@ -5375,6 +5408,8 @@ def _dismiss_finding(argv):
     while i < len(args):
         if args[i] == "--glob":
             glob = args[i + 1] if i + 1 < len(args) else None
+            if glob is None:
+                _warn("--dismiss: --glob given with no pattern; ignoring it")
             i += 2
         elif not fid and not args[i].startswith("--"):
             fid = args[i]
@@ -5426,11 +5461,20 @@ def _dismiss_finding(argv):
     if record.get("error"):
         _warn(f"dismissal could not be recorded: {_sanitize(record['error'], 200)}")
         return 1
+    # ocr_memory's matcher requires a non-empty category AND a non-empty
+    # path/glob: a false promise costs trust, so say when THIS dismissal can
+    # never match a future finding (gate-synthesized findings may have no
+    # category) instead of claiming demotions that will not happen.
+    caveat = ""
+    if not (str(record.get("category") or "").strip()
+            and str(record.get("glob") or "").strip()):
+        caveat = ("  note: this finding has no 'category' (or no path/glob), so the "
+                  "dismissal can never match a future finding; it is recorded but inert.\n")
     sys.stdout.write(
         f"dismissed [{_sanitize(f.get('severity', '?'), 20)}] "
         f"{_sanitize(f.get('path', '?'), 120)}: {_sanitize(f.get('content') or '', 100)}\n"
         f"recorded to {ocr_memory.store_path(repo_root)} -- future matches demote "
-        "to low severity with a 'previously dismissed' note.\n")
+        "to low severity with a 'previously dismissed' note.\n" + caveat)
     return 0
 
 
@@ -5545,11 +5589,8 @@ def _write_ledger_record(common_dir, fp, key, head_oid, path, old_path,
             data["source_tip"] = source_tip
         if source_ref:
             data["source_ref"] = source_ref
+        # The write itself sets the mtime the TTL pruner reads; no touch().
         _write_state(rpath, data)
-        try:
-            rpath.touch(exist_ok=True)  # refresh mtime for TTL
-        except Exception:
-            pass
     except Exception:
         pass
 
@@ -5623,7 +5664,9 @@ def _find_delta_record(common_dir, fp, key, head_oid, tip="", root=None, ancestr
         candidates.append((data.get("reviewed_ts") or 0, data))
     if not candidates:
         return None, ""
-    candidates.sort(reverse=True)
+    # Key-only sort: equal reviewed_ts values fall back to comparing the
+    # record DICTS otherwise, which crashes.
+    candidates.sort(key=lambda t: t[0], reverse=True)
     record = candidates[0][1]
     from_oid = record.get("head_oid") or ""
     return (record, from_oid) if from_oid else (None, "")
@@ -5674,10 +5717,13 @@ def _cat_blob_texts(root, oids):
             break
         header = data[pos:nl].decode("ascii", "replace").split()
         pos = nl + 1
-        if len(header) < 3 or header[1] != "blob" or not header[2].isdigit():
-            continue  # "<oid> missing", or not a blob
+        if len(header) < 3 or not header[2].isdigit():
+            continue  # "<oid> missing": no body follows the header line
         size = int(header[2])
-        out[oid] = data[pos:pos + size].decode("utf-8", "replace")
+        # A non-blob object (tag/commit/tree) HAS a body: skip over it too,
+        # or the parser desyncs and every oid after it reads garbage.
+        if header[1] == "blob":
+            out[oid] = data[pos:pos + size].decode("utf-8", "replace")
         pos += size + 1  # the object body is followed by a newline
     return out
 
@@ -5723,7 +5769,7 @@ def _resolution_target_facts(review_root, tip, finding):
         if text is None:
             return {}
         return {"target_path": path, "flagged_code": code,
-                "flagged_code_absent": _norm_ws(code) not in _norm_ws(text),
+                "flagged_code_absent": not _norm_in(code, text),
                 "target_blob_oid": blob}
     except Exception:
         return {}
@@ -5802,7 +5848,7 @@ def _find_valid_resolution(common_dir, fp, fid, target_oid, review_root, tip, bl
             continue
         if need_target:
             t_text = texts.get(t_cur)
-            if t_text is None or code in _norm_ws(t_text):
+            if t_text is None or _norm_in(code, t_text):
                 continue  # unreadable (fail closed), or the flagged code is back
         return data
     return None
@@ -5855,18 +5901,9 @@ def _plan_review(root, base, tip, common_dir, fp, push_ref=""):
     if entries is None:
         return None, warnings
 
-    allowed = [e for e in entries if _is_allowed_path(e["path"])]
+    allowed = _cap_reviewable(entries, warnings)
     if not allowed:
         return [], warnings
-
-    if len(allowed) > _MAX_FILES:
-        allowed.sort(key=lambda e: e["lines"], reverse=True)
-        skipped = len(allowed) - _MAX_FILES
-        warnings.append(
-            f"file ceiling: {skipped} file(s) skipped (only the {_MAX_FILES} with "
-            "the largest diffs are reviewed; set OCR_MAX_FILES to raise the cap)"
-        )
-        allowed = allowed[:_MAX_FILES]
 
     force = os.environ.get("OCR_FORCE_REVIEW", "").strip().lower() in ("1", "true", "yes")
     use_ledger = _ledger_enabled() and not force
@@ -5924,7 +5961,7 @@ def _blob_diff_lines(root, from_oid, to_oid):
     return total
 
 
-def _classify_priors(plan_items, tip, review_root, common_dir, fp, run_id):
+def _classify_priors(plan_items, tip, review_root, common_dir, fp):
     """Decide the fate of prior findings from carry/delta records.
 
     Returns (to_resolve, auto_resolved, carried_findings):
@@ -5941,6 +5978,14 @@ def _classify_priors(plan_items, tip, review_root, common_dir, fp, run_id):
         f.get("path") or item["entry"]["path"]
         for item in plan_items if item.get("record") is not None
         for f in item["record"].get("findings") or []}))
+    blobs_ok = True
+    if blobs and not any(blobs.values()):
+        # All-empty also means "the ls-tree FAILED" (its rc is not observable
+        # through _blob_oids_at); probe the tip itself to tell. On failure
+        # treat the answer as UNKNOWN and keep the priors for re-judging
+        # instead of auto-resolving them en masse (fail closed).
+        _t, rc = _git(["cat-file", "-t", tip], cwd=review_root)
+        blobs_ok = rc == 0
 
     for item in plan_items:
         record = item.get("record")
@@ -5957,7 +6002,8 @@ def _classify_priors(plan_items, tip, review_root, common_dir, fp, run_id):
             sev = (f.get("severity") or "").lower()
             blob = blobs.get(fpath, "")
             if not blob:
-                auto_resolved.append(f)
+                if blobs_ok:
+                    auto_resolved.append(f)
                 continue
             target_oid = f.get("target_oid") or record.get("head_oid") or ""
             if _find_valid_resolution(common_dir, fp, fid, target_oid,
@@ -6015,8 +6061,10 @@ def _refresh_index(review_root, push_paths):
 
     Uses the context filter (t01): spec/test files are indexed as
 coupling/ref sources even though they are never review targets. Returns a
-list of warning strings (empty when disabled or clean); fail-soft exactly
-like _compute_impact.
+list of warning strings (empty when disabled or clean). Fail-soft in spirit,
+but NOT 'exactly like _compute_impact': that one answers None-or-dict, this
+one answers a warning list -- a failure becomes a warning string, never an
+exception.
     """
     if not _index_enabled():
         return []
@@ -6045,7 +6093,8 @@ def _compute_impact(review_root, tip, active_items):
 
     A delta file is compared with the state it was last reviewed at; any other
     file with its base version, i.e. everything the push changed in it.
-    Returns None when disabled or on failure.
+    Returns None when disabled; on FAILURE it returns an empty result dict
+    whose `warnings` carry the error (never an exception).
     """
     if not _impact_enabled() or not active_items or not tip:
         return None
@@ -6056,8 +6105,19 @@ def _compute_impact(review_root, tip, active_items):
             e = item["entry"]
             old_oid = item.get("from_oid") if item["mode"] == "delta" else e.get("old_oid")
             new_oid = e.get("new_oid")
-            old_text = None if _is_null_oid(old_oid) else run(["cat-file", "-p", old_oid])[0]
-            new_text = None if _is_null_oid(new_oid) else run(["cat-file", "-p", new_oid])[0]
+            # A failed blob read used to degrade impact SILENTLY (the file
+            # looked fully new); name it in warnings instead.
+            old_text, new_text = None, None
+            if not _is_null_oid(old_oid):
+                old_text, rc = run(["cat-file", "-p", old_oid])
+                if rc != 0:
+                    old_text = None
+                    warnings.append(f"impact: could not read base blob of {e['path']}")
+            if not _is_null_oid(new_oid):
+                new_text, rc = run(["cat-file", "-p", new_oid])
+                if rc != 0:
+                    new_text = None
+                    warnings.append(f"impact: could not read tip blob of {e['path']}")
             got = ocr_impact.changed_symbols(e["path"], old_text, new_text)
             if not got.get("supported"):
                 unsupported.append(e["path"])
@@ -6236,7 +6296,7 @@ def _rewrite_record_findings(common_dir, fp, key, rec, findings):
         pass
 
 
-def _attach_to_carried_records(findings, carry_items, common_dir, fp, run_id, review_root, tip):
+def _attach_to_carried_records(findings, carry_items, common_dir, fp):
     """Also keep a finding about a carried file on THAT file's record, so it
     stays owed however the files that revealed it change later.
 
@@ -6470,19 +6530,31 @@ def _norm_ws(text):
     return " ".join((text or "").split())
 
 
+def _norm_in(code, text):
+    """Whitespace-normalised plain-substring check, shared by
+    _resolution_target_facts and _find_valid_resolution so the absent-check
+    semantics (plain substring, no token boundaries -- unlike the
+    evidence-side _quote_in_text) cannot silently drift apart."""
+    return _norm_ws(code) in _norm_ws(text)
+
+
 def _quote_in_added_lines(diff_args, quote, review_root):
     diff_out, rc = _git(diff_args, cwd=review_root)
     if rc != 0:
         return False
     added = "\n".join(
         line[1:] for line in diff_out.splitlines()
-        if line.startswith("+") and not line.startswith("+++")
+        # Only the real file headers are excluded: '+++ b/<path>' and
+        # '+++ /dev/null'. An ADDED line whose own content starts with '++'
+        # renders as '+++...' and must stay -- a fix's evidence can sit on it.
+        if line.startswith("+")
+        and not (line.startswith("+++ b/") or line.startswith("+++ /dev/null"))
     )
     return _norm_ws(quote) in _norm_ws(added)
 
 
 def _guard_resolution(resolution, active_plan_items, push_range, review_root,
-                      prior=None, tip=""):
+                      prior=None, tip="", tip_cache=None, tip_oids=None):
     """True if a 'resolved' verdict passes the Python guard.
 
     A resolution is accepted only when evidence_quote appears verbatim
@@ -6518,7 +6590,10 @@ def _guard_resolution(resolution, active_plan_items, push_range, review_root,
     if evidence_path != (prior["finding"].get("path") or ""):
         return False
     target_oid = prior.get("target_oid") or ""
-    tip_oid = _blob_oids_at(review_root, tip, [evidence_path]).get(evidence_path, "")
+    if tip_oids is not None and evidence_path in tip_oids:
+        tip_oid = tip_oids[evidence_path]  # the caller's batch result
+    else:
+        tip_oid = _blob_oids_at(review_root, tip, [evidence_path]).get(evidence_path, "")
     if not target_oid or not tip_oid or target_oid == tip_oid:
         return False
     if _quote_in_added_lines(["diff", target_oid, tip_oid], evidence_quote, review_root):
@@ -6530,7 +6605,8 @@ def _guard_resolution(resolution, active_plan_items, push_range, review_root,
     #   not pre-existing unchanged code that a hallucinating resolver cited).
     # Note: target_oid and tip_oid are BLOB OIDs here; use `git show <oid>` (no
     # `:<path>` suffix) to read the blob content directly.
-    tip_text = _tip_text(review_root, tip, evidence_path, {})
+    tip_text = _tip_text(review_root, tip, evidence_path,
+                         tip_cache if tip_cache is not None else {})
     if not (tip_text and _norm_ws(evidence_quote) in _norm_ws(tip_text)):
         return False
     orig_blob, rc = _git(["show", target_oid], cwd=review_root)
@@ -6547,7 +6623,7 @@ def _tip_text(review_root, tip, path, cache):
 
 
 def _judge_resolution(prior, res, active_plan_items, push_range, review_root, tip,
-                      _cache=None):
+                      _cache=None, _oids=None):
     """'resolved' | 'still_present' | 'unverified' | 'failed' for one normalized verdict.
 
     failed        -- the resolver call itself failed (see _failed): no answer to
@@ -6564,7 +6640,8 @@ def _judge_resolution(prior, res, active_plan_items, push_range, review_root, ti
     if res.get("status") == "failed":
         return "failed"
     if res.get("status") == "resolved" and _guard_resolution(
-            res, active_plan_items, push_range, review_root, prior=prior, tip=tip):
+            res, active_plan_items, push_range, review_root, prior=prior, tip=tip,
+            tip_cache=cache, tip_oids=_oids):
         return "resolved"
     f = prior["finding"]
     if res.get("status") == "still_present":
@@ -6613,8 +6690,17 @@ def _prune_ledger(common_dir):
             if not fp_dir.is_dir():
                 continue
             try:
-                # Prune whole fp dir if its mtime is stale
-                if fp_dir.stat().st_mtime < cutoff:
+                # Writes inside timeouts/ (and seg/, dep/) bump only the
+                # SUBdir's mtime, not fp_dir's -- fold those in, or a dir of
+                # stale records whose timeout marks are fresh gets rmtree'd
+                # wholesale, deleting the retry throttle they provide.
+                mtimes = [fp_dir.stat().st_mtime]
+                for sub in ("timeouts", "seg", "dep"):
+                    try:
+                        mtimes.append((fp_dir / sub).stat().st_mtime)
+                    except OSError:
+                        pass
+                if max(mtimes) < cutoff:
                     shutil.rmtree(fp_dir, ignore_errors=True)
                     continue
             except OSError:
@@ -6675,6 +6761,16 @@ def _item_record_key(item):
     return _record_key(e["path"], e.get("old_path") or "", e["status"], e["old_oid"])
 
 
+def _mark_int(mark, key):
+    """int(mark[key] or 0) that never raises: a syntactically valid but corrupt
+    marker (e.g. a hand-edited {"timeout_s": "soon"}) reads as 0, matching
+    _read_timeout_mark's absent/corrupt/expired contract at the field level."""
+    try:
+        return int(mark.get(key) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _read_timeout_mark(path):
     """The marker at `path`, or None (absent, corrupt, expired)."""
     try:
@@ -6698,14 +6794,14 @@ def _timeout_marks(common_dir, fp, items):
         e = item["entry"]
         mark = _read_timeout_mark(_timeout_mark_path(
             common_dir, fp, _item_record_key(item), e["new_oid"]))
-        if mark and int(mark.get("timeout_s") or 0) >= _CHUNK_TIMEOUT:
+        if mark and _mark_int(mark, "timeout_s") >= _CHUNK_TIMEOUT:
             out[e["path"]] = mark
     return out
 
 
 def _stuck_paths(marks):
     """Files that timed out twice on their own."""
-    return [p for p, m in marks.items() if int(m.get("solo_attempts") or 0) >= 2]
+    return [p for p, m in marks.items() if _mark_int(m, "solo_attempts") >= 2]
 
 
 def _chunk_members(items):
@@ -6725,13 +6821,13 @@ def _note_chunk_timeout(common_dir, fp, chunk_items, timeout_s):
             mark_path = _timeout_mark_path(
                 common_dir, fp, _item_record_key(item), e["new_oid"])
             prev = _read_timeout_mark(mark_path) or {}
-            if int(prev.get("timeout_s") or 0) < timeout_s:
+            if _mark_int(prev, "timeout_s") < timeout_s:
                 prev = {}
-            solo = int(prev.get("solo_attempts") or 0) + (1 if n == 1 else 0)
+            solo = _mark_int(prev, "solo_attempts") + (1 if n == 1 else 0)
             mark_path.parent.mkdir(parents=True, exist_ok=True)
             _write_state(mark_path, {
                 "path": e["path"], "chunk_size": n, "timeout_s": timeout_s,
-                "attempts": int(prev.get("attempts") or 0) + 1, "solo_attempts": solo,
+                "attempts": _mark_int(prev, "attempts") + 1, "solo_attempts": solo,
                 "ts": time.time(),
             })
             if n == 1 and solo >= 2:
@@ -7021,12 +7117,11 @@ def _build_item_diff(run, spec, budget=None):
     file gets NO precomputed diff and goes to the orchestrator's own git path:
     never an empty diff the reviewer would take for "no change".
     """
-    res = {"text": "", "lines": 0, "bytes": 0, "changed": 0, "truncated": False,
-           "binary": False, "level": "none", "failed": False}
     full, rc = run(_diff_command(spec))
     if rc != 0 or not full.strip():
-        res["failed"] = True
-        return res
+        return _failed_diff()  # the failure shape lives in exactly one place
+    res = {"text": "", "lines": 0, "bytes": 0, "changed": 0, "truncated": False,
+           "binary": False, "level": "none", "failed": False}
     if _BINARY_DIFF_RE.search(full):
         res["binary"] = True
         return res
@@ -7039,24 +7134,31 @@ def _build_item_diff(run, spec, budget=None):
         return (m[2] <= _PRECOMPUTED_MAX_LINES and m[1] <= _PRECOMPUTED_MAX_BYTES
                 and (budget is None or m[0] <= budget))
 
+    u0_note = "# context lines omitted (-U0); every changed line is shown"
+    stat_note = ("# diff truncated: too large for the review limits; hunk headers "
+                 "only. Read the file at the hunks below.")
+
+    def notes_for(lvl):
+        return (([spec["header"]] if spec.get("header") else [])
+                + ([u0_note] if lvl == "u0" else [stat_note] if lvl == "stat" else []))
+
+    # Notes are prepended to the DELIVERED text, so the fit checks must budget
+    # for them too (the (lines, bytes, changed) counts are measured after).
+    def with_notes(t, lvl):
+        ns = notes_for(lvl)
+        return "\n".join(ns) + "\n" + t if ns else t
+
     text, cut = _cap_diff_lines(full)
     level = "full"
-    if not fits(measure(text)):
+    if not fits(measure(with_notes(text, "full"))):
         u0, rc0 = run(_diff_command(spec, 0))
         u0_text, u0_cut = _cap_diff_lines(u0) if (rc0 == 0 and u0.strip()) else (None, 0)
-        if u0_text is not None and fits(measure(u0_text)):
+        if u0_text is not None and fits(measure(with_notes(u0_text, "u0"))):
             text, cut, level = u0_text, u0_cut, "u0"
         else:
             text = _hunk_headers_only(u0_text if u0_text is not None else text)
             cut, level = 0, "stat"
-    notes = []
-    if spec.get("header"):
-        notes.append(spec["header"])
-    if level == "u0":
-        notes.append("# context lines omitted (-U0); every changed line is shown")
-    elif level == "stat":
-        notes.append("# diff truncated: too large for the review limits; hunk headers "
-                     "only. Read the file at the hunks below.")
+    notes = notes_for(level)
     if notes:
         text = "\n".join(notes) + "\n" + text
     lines, size, changed = measure(text)
@@ -7113,9 +7215,12 @@ def _diff_items(directory, entries, role=None, mark_owned=True):
     records on the diff result that Python delivered it to the reviewer."""
     items = []
     for n, (meta, d) in enumerate(entries):
+        # Every key of the documented item shape is present even when the
+        # diff failed (level "none"): consumers may read item["level"]
+        # unconditionally.
         it = {"kind": "file_diff", "path": meta["path"], "old_path": meta.get("old_path") or "",
               "mode": meta.get("mode") or "full", "file": "", "lines": 0, "bytes": 0,
-              "truncated": False, "binary": False}
+              "truncated": False, "binary": False, "level": "none"}
         if role:
             it["role"] = role
         if d and not d["failed"]:
@@ -8020,7 +8125,8 @@ def _build_review_manifest(common_dir, run_id, k, total, chunk_items, other_chan
     `diffs` (_build_diffs) it adds `items[]` -- one file_diff per file whose diff
     is written under this run's diffs/<k>/ -- `context` items for the files the
     reviewer should treat as background, and `tasks[]` (0.11.0, Part S: caller
-    checks, empty otherwise). A chunk's virtual items (see _SegState) add
+    checks, empty otherwise). A chunked run also emits chunk_index/chunks_total
+    (absent for the single-context review, i.e. k None). A chunk's virtual items (see _SegState) add
     `unit_diff` items for the changed units of a big file, a `file_context` item per
     such file, and a `caller` (+ `callee_diff`) context item per task.
     """
@@ -8030,12 +8136,12 @@ def _build_review_manifest(common_dir, run_id, k, total, chunk_items, other_chan
     # A chunk of caller checks alone (Part S's retry) has files in its items[] as
     # context only: they are not under review, so they are not in paths/files.
     all_items = chunk_items
-    chunk_items = [it for it in chunk_items if not _context_only(it)]
+    reviewed_items = [it for it in all_items if not _context_only(it)]
     manifest.update({
-        "paths": [item["entry"]["path"] for item in chunk_items],
+        "paths": [item["entry"]["path"] for item in reviewed_items],
         "renames": [
             [item["entry"]["old_path"], item["entry"]["path"]]
-            for item in chunk_items if item["entry"].get("old_path")
+            for item in reviewed_items if item["entry"].get("old_path")
         ],
         "other_changed": list(other_changed or []),
         "files": [
@@ -8045,7 +8151,7 @@ def _build_review_manifest(common_dir, run_id, k, total, chunk_items, other_chan
                 "from_oid": item.get("from_oid") or "",
                 "to_oid": item["entry"].get("new_oid") or "",
             }
-            for item in chunk_items
+            for item in reviewed_items
         ],
         "carried": list(carry_paths or []),
     })
@@ -8055,7 +8161,7 @@ def _build_review_manifest(common_dir, run_id, k, total, chunk_items, other_chan
             directory,
             [({"path": it["entry"]["path"], "old_path": it["entry"].get("old_path"),
                "mode": it["mode"]}, diffs.get(it["entry"]["path"]))
-             for it in chunk_items
+             for it in reviewed_items
              if it.get("seg_file") is None
              or any(a["kind"] == "filediff" for a in it["seg_work"])])
         tasks = []
@@ -8084,14 +8190,16 @@ def _build_review_manifest(common_dir, run_id, k, total, chunk_items, other_chan
     return manifest
 
 
-def _write_manifest_file(manifest_path, manifest, what):
-    """Atomically write a manifest; ReviewGateError (fail closed) when it can't be."""
+def _write_manifest_file(manifest_path, manifest, label):
+    """Atomically write a manifest; ReviewGateError (fail closed) when it can't
+    be. `label` names the manifest in the error text (e.g. 'chunk manifest for
+    chunk 3')."""
     try:
         tmp = manifest_path + ".tmp"
         Path(tmp).write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, manifest_path)
     except Exception as exc:
-        raise ReviewGateError(f"could not write {what}: {exc}")
+        raise ReviewGateError(f"could not write {label}: {exc}")
 
 
 def _owned_truncation(diffs):
@@ -8121,7 +8229,7 @@ def _truncated_paths(result, owned=None):
             elif diff_trunc:
                 out.add("*")
     for f in (result.get("findings") or []):
-        if isinstance(f, dict) and f.get("diff_truncated") and f.get("path")                 and f["path"] not in owned:
+        if isinstance(f, dict) and f.get("diff_truncated") and f.get("path") and f["path"] not in owned:
             out.add(f["path"])
     return out
 
@@ -8285,11 +8393,28 @@ def _orphan_homes(own_items, active_paths):
             if it.get("mode") == "carry" and it["entry"]["path"] not in active_paths]
 
 
+def _place_orphans(orphans, own_items, active_paths, common_dir, fp):
+    """Cross-file findings go to the record of the file they NAME (when that
+    file has a carried record to take them), not into every record being
+    written here. Returns the orphans that found no home; the caller keeps
+    those on its own records (conservative: never lost). Shared by
+    _write_run_records and _SegState.finalize; _SegState.apply has its own
+    stamped-orphan variant of the same rule."""
+    if not (orphans and own_items and _ledger_enabled()):
+        return list(orphans)
+    placed = _attach_to_carried_records(
+        orphans, _orphan_homes(own_items, active_paths), common_dir, fp)
+    if placed:
+        placed_ids = {id(f) for f in placed}
+        orphans = [f for f in orphans if id(f) not in placed_ids]
+    return orphans
+
+
 def _write_run_records(result, active_items, common_dir, fp, run_id, review_root="", tip="",
                        precomputed=None, own_items=None, push_ref=""):
     """Write per-file ledger records after a completed review of `active_items`.
 
-    None at all unless the review finished cleanly. A file whose diff the
+    Writes none at all unless the review finished cleanly. A file whose diff the
     reviewer saw only partly -- named by a truncation warning, any file of the
     chunk when the warning names none ("*"), or over the gate's own size cap --
     gets its record flagged `truncated`: the same blob would be truncated the
@@ -8317,10 +8442,9 @@ def _write_run_records(result, active_items, common_dir, fp, run_id, review_root
     precomputed = precomputed or {}
     owned_here = {item["entry"]["path"] for item in active_items} & set(precomputed)
     truncated = _truncated_paths(result, owned_here)
-    # A "*" names no file: with a precomputed diff for EVERY file of the chunk
-    # there is no file it can be about.
-    if len(owned_here) == len(active_items):
-        truncated.discard("*")
+    # No "*" handling needed here: when EVERY file of the chunk has a
+    # precomputed diff, each takes the Python-owned flag below and '*'/'path
+    # in truncated' are never consulted (precomputed = Part B governs them).
     active_paths = {item["entry"]["path"] for item in active_items}
     findings = [f for f in (result.get("findings") or []) if isinstance(f, dict)]
     oids = _blob_oids_at(review_root, tip, sorted({f.get("path") for f in findings if f.get("path")})) \
@@ -8334,13 +8458,7 @@ def _write_run_records(result, active_items, common_dir, fp, run_id, review_root
             new_by_path.setdefault(p, []).append(f)
         else:
             orphans.append(f)
-    if orphans and own_items and _ledger_enabled():
-        mine = _orphan_homes(own_items, active_paths)
-        placed = _attach_to_carried_records(orphans, mine, common_dir, fp, run_id,
-                                            review_root, tip)
-        if placed:
-            placed_ids = {id(f) for f in placed}
-            orphans = [f for f in orphans if id(f) not in placed_ids]
+    orphans = _place_orphans(orphans, own_items, active_paths, common_dir, fp)
     suppressed = _resolution_suppressor(common_dir, fp, review_root, tip)
     for item in active_items:
         e = item["entry"]
@@ -8358,7 +8476,11 @@ def _write_run_records(result, active_items, common_dir, fp, run_id, review_root
             existing = _read_ledger_record(
                 _record_path(common_dir, fp, key, e["new_oid"]), fp, key, e["new_oid"])
             if existing is not None and not _is_truncated_record(existing):
-                continue  # a complete review of this very blob is already on file
+                # A complete review of this very blob is already on file; the
+                # loop tail's _clear_timeout_mark is skipped by this continue,
+                # so retire any stale mark here (a record means it WAS reviewed).
+                _clear_timeout_mark(common_dir, fp, key, e["new_oid"])
+                continue
             flagged_paths.add(path)
         _write_ledger_record(
             common_dir, fp, key, e["new_oid"], path, old_path, e["status"], e["old_oid"],
@@ -8369,7 +8491,7 @@ def _write_run_records(result, active_items, common_dir, fp, run_id, review_root
     return flagged_paths
 
 
-def _drop_self_resolved(active_items, resolved_ids_by_path, common_dir, fp, run_id):
+def _drop_self_resolved(active_items, resolved_ids_by_path, common_dir, fp):
     """Rewrite an active file's record without priors whose fix lies in that
     same file: a property of this content, so it holds for any tip carrying it.
     Fixes evidenced in another file stay in the record; the resolution entry,
@@ -8512,7 +8634,10 @@ def _merge_chunk_results(chunk_results, planner_warnings=None):
         if isinstance(r.get("dep_verdicts"), dict):
             dep_verdicts.update(r["dep_verdicts"])
         s = r.get("status") or ""
-        rank = _STATUS_RANK.get(s, 0)
+        # Unknown or ABSENT status fails closed: a chunk reviewer that emits
+        # well-formed JSON without its status is merged as
+        # completed_with_errors, never silently as success.
+        rank = _STATUS_RANK.get(s, _STATUS_RANK["completed_with_errors"])
         if rank > worst_status_rank:
             worst_status_rank = rank
     # Self-check contract (intent findings), enforced ONCE here on the whole
@@ -8621,11 +8746,9 @@ def _write_seg_rec(common_dir, fp, sub, key, payload):
     try:
         path = _seg_rec_path(common_dir, fp, sub, key)
         path.parent.mkdir(parents=True, exist_ok=True)
+        # No touch() after this: _write_state just wrote a tmp with a fresh
+        # mtime and os.replace preserves it, so the extra syscall was dead work.
         _write_state(path, dict(payload, schema=_LEDGER_SCHEMA, fp=fp, key=key, ts=time.time()))
-        try:
-            path.touch(exist_ok=True)
-        except Exception:
-            pass
         return True
     except Exception:
         return False
@@ -8899,6 +9022,7 @@ class _SegState:
             else:
                 targets.append(u["idx"])
         edges = ocr_segment.callers_of(sf.lang, units, calls, targets)
+        planned = set()  # one caller check per (caller, callee) pair
         for (ch, callee, stale), target in zip(jobs, targets):
             for hit in edges.get(target, [])[:_SEG_DEP_PER_UNIT]:
                 caller = sf.tip_units[hit["caller"]]
@@ -8906,6 +9030,12 @@ class _SegState:
                     continue
                 key = _dep_key(self.fp, sf.lang, sf.path, caller["hash"], sf.path,
                                ("-" if stale else "") + callee["hash"])
+                # The key deliberately ignores the call-site line (one check
+                # per pair); a second hit in the same caller unit would plan
+                # a duplicate task whose verdicts overwrite the same record.
+                if key in planned:
+                    continue
+                planned.add(key)
                 a = max(caller["start"], min(hit["line"] - 30, caller["end"] - _SEG_CTX_UNIT_LINES + 1))
                 dep = {"ch": ch, "callee": callee, "stale": stale, "caller": caller,
                        "name": hit["name"], "line": hit["line"],
@@ -8999,19 +9129,27 @@ class _SegState:
         return self
 
     def _plan_one(self, item, diffs, run):
+        """Plan one item, mutating `item` (and `diffs[path]`) IN PLACE.
+
+        Restore convention: never rebind `item` -- on failure the caller's
+        dict is restored with item.clear()/item.update(saved), because
+        plan_active's rollback hinges on `item` keeping its identity.
+        Branch legend: `diff_res` is the whole-file diff result (rebuilt after
+        a delta->full switch); `over_limit` means 'over Part B's delivery
+        limit' (level != "full"), the candidate for unit review."""
         path = item["entry"]["path"]
-        d = diffs.get(path)
-        usable = d is not None and not d["failed"] and not d["binary"]
-        over = usable and d["level"] != "full"
+        diff_res = diffs.get(path)
+        usable = diff_res is not None and not diff_res["failed"] and not diff_res["binary"]
+        over_limit = usable and diff_res["level"] != "full"
         sf = None
         trial = self.trials.get(path)
         if trial is not None:
             # a flagged-truncated carry that CAN be segmented: reviewed in units when
             # its diff is still over the limit, plainly (and properly) when it is not
-            if over:
+            if over_limit:
                 self.complete(trial)
                 sf = trial
-        elif over:
+        elif over_limit:
             if item["mode"] == "delta":
                 # the units carry the cache now: this file is reviewed over the whole push
                 # range (its record stays, for what it still owes)
@@ -9023,10 +9161,10 @@ class _SegState:
                     item.update(saved)
                 else:
                     try:
-                        diffs[path] = d = _build_item_diff(
+                        diffs[path] = diff_res = _build_item_diff(
                             run, _item_diff_spec(item, self.base, self.tip), _CHUNK_DIFF_LINES)
                     except Exception:
-                        diffs[path] = d = _failed_diff()
+                        diffs[path] = diff_res = _failed_diff()
             else:
                 sf = self.build(item)
         elif usable and item["mode"] == "delta":
@@ -9034,9 +9172,15 @@ class _SegState:
             if sf is not None and not sf.deps:
                 del self.files[path]
                 sf = None
-        if sf is not None and not sf.delta and d is not None:
-            self.orig_diffs[path] = d
-            diffs[path] = dict(d, owned=True, truncated=False, segmented=True)
+        if sf is not None and not sf.delta and diff_res is not None:
+            self.orig_diffs[path] = diff_res
+            if diff_res.get("failed"):
+                # The units carry this file's review, so the flags adjust the
+                # DELIVERY bookkeeping only -- but a failed whole-file diff
+                # must not parade as a clean `truncated=False` one.
+                diffs[path] = dict(diff_res, owned=True, segmented=True)
+            else:
+                diffs[path] = dict(diff_res, owned=True, truncated=False, segmented=True)
 
     def abandon(self, diffs):
         """Part S gave up on this run (a planning error): every unit-reviewed file goes
@@ -9048,19 +9192,21 @@ class _SegState:
 
     def _cap_delta_deps(self, sf):
         """A delta file's chunk cannot be split, so its caller checks must fit one."""
-        kept, total = [], 0
+        kept, total, dropped = [], 0, 0
         for d in sf.deps:
             if d["status"] != "needed":
                 kept.append(d)
                 continue
             n = d["ctx"][1] - d["ctx"][0] + 1
             if total + n > _SEG_CTX_CHUNK_LINES:
-                self.warnings.append(
-                    f"caller checks capped: {sf.path} has more caller context than one chunk holds; "
-                    "the callers of one changed unit were not checked")
+                dropped += 1
                 continue
             total += n
             kept.append(d)
+        if dropped:  # one warning per file, with the count, not N copies
+            self.warnings.append(
+                f"caller checks capped: {sf.path} has more caller context than one chunk holds; "
+                f"{dropped} caller check(s) were not checked")
         sf.deps = kept
 
     def active_files(self):
@@ -9344,7 +9490,11 @@ class _SegState:
                 continue
             d = a["dep"]
             callee = d["callee"]
-            if id(d["ch"]) not in in_chunk and not a.get("callee_in"):
+            # Ground truth is THIS chunk's unit set, not the callee_in flag
+            # set at cluster time: when a cluster split (or chunk packing)
+            # lands the caller check away from its callee's unit diff, the
+            # callee diff must ride along or the check has nothing to judge.
+            if id(d["ch"]) not in in_chunk:
                 text = "\n".join(sf.parts(d["ch"])[:1])
                 items.append({"kind": "context", "role": "callee_diff", "task": d["id"], "path": sf.path,
                               "unit": callee.get("qualname") or callee.get("sig"),
@@ -9427,10 +9577,10 @@ class _SegState:
             if u is None:
                 continue
             text = ocr_segment.render_numbered(seg["lines"], u["start"], u["end"])
-            if len(text.encode("utf-8", "replace")) > _SEG_WIDEN_BYTES \
-                    or total + len(text.encode("utf-8", "replace")) > _SEG_WIDEN_TOTAL:
+            nbytes = len(text.encode("utf-8", "replace"))
+            if nbytes > _SEG_WIDEN_BYTES or total + nbytes > _SEG_WIDEN_TOTAL:
                 continue
-            total += len(text.encode("utf-8", "replace"))
+            total += nbytes
             site["snippet"] = text
             site["widened"] = True
 
@@ -9492,8 +9642,7 @@ class _SegState:
             # Same rule as _write_run_records: a finding about a carried file goes to
             # THAT file's record, not into every unit record too.
             placed = _attach_to_carried_records(stamped, _orphan_homes(self.own_items, set(chunk)),
-                                                self.common_dir, self.fp, self.run_id,
-                                                self.review_root, self.tip)
+                                                self.common_dir, self.fp)
             if placed:
                 placed_ids = {id(f) for f in placed}
                 stamped = [f for f in stamped if id(f) not in placed_ids]
@@ -9577,7 +9726,7 @@ class _SegState:
                 vi["mode"] = "full"
                 cur[sf.path] = vi
             vi["seg_work"].append({"kind": "dep", "dep": d, "size": n, "callee_in": False})
-            vi["members"] = 1
+            vi["members"] += 1  # one per dep appended, like the sibling planner path
             ctx += n
         if cur:
             chunks.append(cur)
@@ -9631,16 +9780,10 @@ class _SegState:
             oids = _blob_oids_at(self.review_root, self.tip, [sf.path])
         stamped_own = [dict(f, target_oid=f.get("target_oid") or oids.get(sf.path, "")) for f in own]
         orphans = list(sf.orphans)
-        if orphans and self.own_items:
-            # Same rule as _write_run_records: a finding about another file goes
-            # to THAT file's record when it has one, not into this file's too.
-            # One with no record yet stays here (conservative: never lost).
-            mine = _orphan_homes(self.own_items, {sf.path})
-            placed = _attach_to_carried_records(orphans, mine, self.common_dir, self.fp,
-                                                self.run_id, self.review_root, self.tip)
-            if placed:
-                placed_ids = {id(f) for f in placed}
-                orphans = [f for f in orphans if id(f) not in placed_ids]
+        # Same rule as _write_run_records: a finding about another file goes
+        # to THAT file's record when it has one, not into this file's too.
+        orphans = _place_orphans(orphans, self.own_items, {sf.path},
+                                 self.common_dir, self.fp)
         orphans += self.replayed_foreign
         key = _record_key(sf.path, sf.old_path, e["status"], e["old_oid"])
         _write_ledger_record(
@@ -9664,7 +9807,14 @@ def _seg_classify_foreign(findings, review_root, tip, common_dir, fp, seen):
     """Findings a cached unit review had about OTHER files: the same fate as the
     priors of a carried record -- re-judged when that file changed since, replayed
     when it did not, dropped when the file is gone or a resolution already covers
-    them. `seen` (finding ids) is extended."""
+    them. `seen` (finding ids) is extended.
+
+    Divergences from _classify_priors are deliberate: no record.head_oid
+    fallback (these findings carry their own target_oid, stamped at write
+    time), no severity gating (a cached cross-file finding has no record to
+    upgrade against), and a finding whose file is gone is dropped rather than
+    reported auto_resolved (its host unit was already reviewed; the finding
+    belonged to the OTHER file's record, which names its own fate)."""
     to_resolve, carried = [], []
     blobs = _blob_oids_at(review_root, tip, sorted({f.get("path") for f in findings if f.get("path")}))
     for f in findings:
@@ -9693,12 +9843,13 @@ def _seg_suppress_resolved(findings, priors, review_root, tip, common_dir, fp):
     a finding twice). Two units with the same text keep their own findings: the
     same finding on two lines is two findings."""
     out = []
+    blobs = {}  # {path: oid at tip} memo: one lookup per run, not per finding
     for f in findings:
         fid = f.get("id") or _finding_id(f)
         if fid in priors:
             continue
         if _find_valid_resolution(common_dir, fp, fid, f.get("target_oid") or "",
-                                  review_root, tip) is not None:
+                                  review_root, tip, blobs) is not None:
             continue
         out.append(f)
     return out
@@ -9769,13 +9920,12 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
             _debug_log(f"seg planning failed, reviewing whole files: {type(exc).__name__}: {exc}")
             seg.abandon(diffs or {})
             seg, chunks = None, None
-    if chunks is not None:
-        pass
-    elif diffs is not None:
-        sizes = {p: d["lines"] for p, d in diffs.items() if not d["failed"] and d["lines"]}
-        chunks = _plan_to_chunks(active_items, timeout_marks, sizes, _CHUNK_DIFF_LINES)
-    else:
-        chunks = _plan_to_chunks(active_items, timeout_marks)
+    if chunks is None:
+        if diffs is not None:
+            sizes = {p: d["lines"] for p, d in diffs.items() if not d["failed"] and d["lines"]}
+            chunks = _plan_to_chunks(active_items, timeout_marks, sizes, _CHUNK_DIFF_LINES)
+        else:
+            chunks = _plan_to_chunks(active_items, timeout_marks)
     total = len(chunks)
     results_by_k = {}
     progress_n = {"done": 0, "new": 0, "secs": 0.0}
@@ -9908,7 +10058,10 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
                 _remove_run_dir(common_dir, run_id, sub=k)
             chunk_secs = time.monotonic() - chunk_t0
             try:
-                _tele_chunk(k, total_now, len(chunk_items),
+                # len(chunks) NOW, not total_now from dispatch: splits
+                # (SPEC-07) and seg retries grow the plan while chunks are
+                # in flight, and the dispatch-time figure under-reports them.
+                _tele_chunk(k, len(chunks), len(chunk_items),
                             sum(int(it["entry"].get("lines") or 0) for it in chunk_items),
                             chunk_outcome, chunk_secs)
             except Exception:
@@ -10061,12 +10214,11 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
                                 _timeout_marks(common_dir, fp, chunk_items))
                             if pieces:
                                 chunks.extend(pieces)
-                                # Splits grow the plan after the first count:
-                                # keep the progress total honest.
-                                total = len(chunks)
+                                # Splits grow the plan after the first count;
+                                # the dispatch loop recomputes len(chunks)
+                                # before every use, so nothing tracks it here.
                             elif _chunk_members(chunk_items) == 1:
                                 chunks.append(chunk_items)  # one more try alone, then stuck
-                                total = len(chunks)
                             else:
                                 _give_up(chunk_items, exc)  # cannot be split further
                     else:
@@ -10168,6 +10320,10 @@ def _chunk_progress(st):
         running = 0
     if running > 1:
         return f", chunks {cd}/{ct} done, {running} running"
+    if cd >= ct:
+        # All chunks done but the run still 'running' (merging/recording):
+        # never render 'chunk {ct+1}/{ct}'.
+        return f", chunks {cd}/{ct} done"
     return f", chunk {cd + 1}/{ct}"
 
 
@@ -10362,15 +10518,13 @@ def _failed_reason(st, mode):
 
 
 def _replay_note(st):
-    """What a retry says when the verdict was recorded earlier."""
+    """What a retry says when the verdict was recorded earlier. Just the head:
+    both replay call sites already print the run's reasons in the same
+    message, so re-emitting the findings here would print them twice
+    back-to-back."""
     age = max(0, int((time.time() - float(st.get("done_ts") or time.time())) // 60))
     verdict = _sanitize(str(st.get("verdict") or "?"), 20)
-    lines = ["  " + _sanitize(line, 600) for line in str(st.get("reasons") or "").splitlines()
-             if line.strip()]
-    head = f"review recorded {age} min ago for these exact commits (verdict: {verdict})"
-    if not lines:
-        return head
-    return head + " - findings from that run:\n" + "\n".join(lines)
+    return f"review recorded {age} min ago for these exact commits (verdict: {verdict})"
 
 
 def _format_reasons(result, limit=20):
@@ -10624,7 +10778,19 @@ def _park_pending(session_id, repo_root, head, kind="review", extra=None):
                 "kind": kind}
         if extra:
             body.update(extra)
-        (data / name).write_text(json.dumps(body), encoding="utf-8")
+        # Atomic (tmp+replace) with the 0o600 of the store's peer files
+        # (D12): the notes live in a SHARED data dir, and _pending_entries
+        # unlinks a half-written note as 'never useful' -- a kill between
+        # truncate and full write would silently drop the announcement this
+        # note exists to deliver.
+        note = data / name
+        tmp = note.with_name(note.name + f".tmp-{os.getpid()}")
+        tmp.write_text(json.dumps(body), encoding="utf-8")
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
+        os.replace(str(tmp), str(note))
     except Exception:
         pass  # a lost note costs a report, never a push
 
@@ -10674,7 +10840,9 @@ def _pending_is_ours(info, session_id):
     if owner:
         return owner == session_id
     repo, here = info.get("repo") or "", _repo_root()
-    if not repo or not here:
+    # _repo_root() never answers falsy since it falls back to os.getcwd() --
+    # only the note's own repo field needs guarding; realpath still decides.
+    if not repo:
         return False
     try:
         return os.path.realpath(repo) == os.path.realpath(here)
@@ -10896,7 +11064,13 @@ def _async_note(path, info, session_id):
         return ""
     try:
         info["notified_ts"] = time.time()
-        Path(path).write_text(json.dumps(info), encoding="utf-8")
+        # Atomic (tmp+replace) like _write_state: _pending_entries unlinks a
+        # half-written note as 'never useful', which would kill the
+        # still-running review announcement the rate-limit rewrite serves.
+        p = Path(path)
+        tmp = p.with_name(p.name + f".tmp-{os.getpid()}")
+        tmp.write_text(json.dumps(info), encoding="utf-8")
+        os.replace(str(tmp), str(p))
     except Exception:
         pass
     started = float(st.get("started_ts") or st.get("claimed_ts") or time.time())
@@ -11005,8 +11179,7 @@ def _mode_post(argv):
     # command parsing at all: the breadcrumb is written by the adapter that
     # already had to work this out in order to review the right thing.
     repo_root = _read_breadcrumb(session_id) or _repo_root()
-    if not repo_root:
-        return 0
+    # _repo_root() never answers falsy (os.getcwd() fallback): no guard needed.
     # The pushed tip is in this session's parked note for the repo; a push may
     # send a branch other than the checked-out one. No note: fall back to HEAD.
     heads = []
@@ -11211,10 +11384,16 @@ def _print_range(repo_root=None):
     if _base_v1():
         tip = _head_sha(repo_root)
         for ref in ("@{u}", "origin/main", "origin/master", "origin/HEAD"):
-            _o, rc = _git(["rev-parse", "--verify", "--quiet", ref], cwd=repo_root)
-            if tip and rc == 0:
-                sys.stdout.write(f"{ref}..{tip}\n")
-                return 0
+            out, rc = _git(["rev-parse", "--verify", "--quiet", ref + "^{commit}"],
+                           cwd=repo_root)
+            if tip and rc == 0 and out:
+                # The documented contract is "<ancestor sha>..<HEAD sha>":
+                # resolve the ref AND take the merge-base. Printing the ref
+                # name would hand callers a base that is no ancestor of HEAD.
+                base, rc = _git(["merge-base", out, tip], cwd=repo_root)
+                if rc == 0 and base:
+                    sys.stdout.write(f"{base}..{tip}\n")
+                    return 0
         sys.stderr.write("[review-gate] --print-range: no upstream to compare HEAD with\n")
         return 1
     rng, rb = _head_range(repo_root)
@@ -11489,10 +11668,21 @@ def _main_inner(argv, mode):
     else:
         decision, info = _hook_target(repo_root, cmd)
         if decision == "allow":
-            # An allow from _hook_target is always the empty range: the
-            # remote already holds every commit in this push. Say so (see
-            # _noop_push_note) instead of landing the push silently.
-            _noop_push_note()
+            # An allow is NOT always the empty range: say WHICH kind it is --
+            # a dry run or a deletion getting the "remote already holds every
+            # commit" line would describe a push nothing is sending.
+            why = str(info.get("why") or "")
+            if why == "delete":
+                _delete_push_note()
+            elif why == "dry_run":
+                try:
+                    sys.stderr.write("review-gate: nothing to review — dry run "
+                                     "(no refs would be updated).\n")
+                    sys.stderr.flush()
+                except Exception:
+                    pass
+            else:
+                _noop_push_note()
             allow()
         if decision == "deny":
             if _fail_open_requested():

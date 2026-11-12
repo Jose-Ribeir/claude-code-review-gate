@@ -397,12 +397,12 @@ def test_classify_priors_suppresses_a_prior_carried_by_any_record(tmp_path):
     record = {"head_oid": fx.target_oid, "findings": [prior]}
     item = {"entry": entry, "mode": "carry", "record": record, "from_oid": fx.target_oid}
     to_resolve, auto, carried = review_gate._classify_priors(
-        [item], tip, str(fx.work), fx.common, FP, "r3")
+        [item], tip, str(fx.work), fx.common, FP)
     assert (to_resolve, auto, carried) == ([], [], [])
     # With the fix reverted it goes back to the resolver.
     tip2 = _commit(fx.work, {"x.py": f"x = 7\n{BAD}\n", "c.py": "# c, fix gone\n"})
     to_resolve, auto, carried = review_gate._classify_priors(
-        [item], tip2, str(fx.work), fx.common, FP, "r3")
+        [item], tip2, str(fx.work), fx.common, FP)
     assert [p["id"] for p in to_resolve] == [_FID]
 
 

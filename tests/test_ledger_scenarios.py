@@ -423,8 +423,11 @@ def test_scenario_10_deleted_target_auto_resolved(monkeypatch, tmp_path):
     # app/x.py has been deleted → blob returns "".
     monkeypatch.setattr(review_gate, "_blob_oids_at",
                         lambda root, tip, paths: {p: "" for p in paths})
+    # All-empty blobs now trigger _classify_priors' tip probe (fail-closed
+    # guard against a failed ls-tree); a readable tip means true deletions.
+    monkeypatch.setattr(review_gate, "_git", lambda args, cwd=None: ("", 0))
     to_resolve, auto_resolved, carried = review_gate._classify_priors(
-        plan_items, "tip", str(tmp_path), str(tmp_path), fp, "run2"
+        plan_items, "tip", str(tmp_path), str(tmp_path), fp
     )
     fid = finding.get("id") or review_gate._finding_id(finding)
     resolved_ids = [f.get("id") or review_gate._finding_id(f) for f in auto_resolved]
@@ -468,7 +471,7 @@ def test_identical_blob_prior_replays_without_the_resolver(monkeypatch, tmp_path
     monkeypatch.setattr(review_gate, "_blob_oids_at",
                         lambda root, tip, paths: {p: blob for p in paths})
     to_resolve, auto_resolved, carried = review_gate._classify_priors(
-        plan, "tip", str(tmp_path), str(tmp_path), fp, "run2")
+        plan, "tip", str(tmp_path), str(tmp_path), fp)
     assert to_resolve == [] and auto_resolved == []
     assert [f["provenance"] for f in carried] == ["carried"]
     assert carried[0]["content"] == finding["content"]
@@ -483,7 +486,7 @@ def test_a_prior_whose_file_changed_since_the_finding_still_goes_to_the_resolver
     monkeypatch.setattr(review_gate, "_blob_oids_at",
                         lambda root, tip, paths: {p: blob_now for p in paths})
     to_resolve, _, carried = review_gate._classify_priors(
-        plan, "tip", str(tmp_path), str(tmp_path), fp, "run2")
+        plan, "tip", str(tmp_path), str(tmp_path), fp)
     assert len(to_resolve) == 1 and carried == []
 
 
@@ -497,7 +500,7 @@ def test_a_prior_aimed_at_an_older_blob_is_rejudged_even_on_a_carry_record(
     monkeypatch.setattr(review_gate, "_blob_oids_at",
                         lambda root, tip, paths: {p: blob_now for p in paths})
     to_resolve, _, carried = review_gate._classify_priors(
-        plan, "tip", str(tmp_path), str(tmp_path), fp, "run2")
+        plan, "tip", str(tmp_path), str(tmp_path), fp)
     assert len(to_resolve) == 1 and carried == []
 
 
@@ -575,7 +578,7 @@ def test_cost_rule_reviews_the_whole_range_when_it_costs_about_the_same(tmp_path
     assert item["mode"] == "full" and item["miss_reason"] == "cost_rule"
     assert item["record"] is not None and item["from_oid"] == blob1
     to_resolve, _, _ = review_gate._classify_priors(
-        [item], tip, str(work), str(tmp_path / "common"), "c" * 64, "r2")
+        [item], tip, str(work), str(tmp_path / "common"), "c" * 64)
     assert [p["finding"]["content"] for p in to_resolve] == ["bad"]
 
 
@@ -1182,7 +1185,7 @@ def test_scenario_4_reviewer_overrides_resolver_no_resolution_written(monkeypatc
                         lambda root, tip, paths: {p: "some_oid" for p in paths})
 
     to_resolve, auto_resolved, carried = review_gate._classify_priors(
-        plan_items, "tip", str(tmp_path), str(tmp_path), fp, "run2"
+        plan_items, "tip", str(tmp_path), str(tmp_path), fp
     )
     fid = review_gate._finding_id(finding)
     assert any(p["id"] == fid for p in to_resolve), "high finding must go to resolver"
