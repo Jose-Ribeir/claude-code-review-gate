@@ -17,7 +17,9 @@ environment variables so one command line serves every scenario:
   STUB_RESOLVE       JSON mapping finding_id → {status, evidence_path, evidence_quote}
                      Used when --resolve <file> is in argv; return resolver output.
                      Values are passed through verbatim, so a malformed answer
-                     (e.g. `true`) can be scripted too.
+                     (e.g. `true`) can be scripted too. The key "*" applies its
+                     value to every prior (docs-gate 02, where the finding id
+                     embeds the checker's wording).
   STUB_RESOLVE_RECHECK like STUB_RESOLVE, but used instead of it when the resolver
                      manifest has "recheck": true (the gate's second look).
   STUB_RESOLVE_VERDICT pass|fail|garbage  Controls resolver exit for all ids (default pass).
@@ -41,6 +43,27 @@ name (0.10.0), read at call time. (A file_diff is keyed `review:<path>`; since 0
 unit_diff is `unit:<path>:<unit>:<part>` and a context item `context:<role>:<path>:<n>`.)
 
 0.11.0 (Part S) knobs:
+  STUB_DOCS_FINDING  JSON {content, severity?, path?, category?, existing_code?,
+                     source_doc?, confidence?, docs_kind?, stale_passage?,
+                     doc_path?} -- a documentation-checker finding, only when the
+                     manifest carries docs_context (docs-gate 01). Contradiction
+                     class (docs-gate 03): dropped per the checker's contract when
+                     either quote is missing or source_doc names a document outside
+                     docs_context.corpus. Drift class (docs-gate 04): docs_kind/
+                     stale_passage/doc_path pass through verbatim when scripted; a
+                     scripted confidence overrides the tier default.
+  STUB_MISSING_RECORD  truthy -- a missing-decision-record finding (docs-gate 02),
+                     but only when the manifest carries docs_context AND non-empty
+                     arch_flags (a flag must fire; flags without model agreement
+                     never produce this finding). Blocking class (medium, above
+                     the block bar) when the payload names a records_root; warning
+                     class (medium, below the bar) when the repo has none.
+  STUB_FILTER_DROP   JSON [substring, ...] -- simulate the skill's §3b falsify
+                     pass: would-be-blocking findings whose content carries one of
+                     the substrings are dropped, code and doc findings alike.
+docs-gate 05 knobs (generation mode, `--docs-summary` in argv):
+  STUB_DOCS_SUMMARY         the summary markdown the generation call returns
+  STUB_DOCS_SUMMARY_VERDICT "fail" -- exit 1, exercising the gate's fail-closed path
   STUB_UNIT_FINDINGS  JSON {unit qualname: {severity, content, offset}} -- a finding anchored
                       `offset` lines into every unit_diff item of that unit (first part only),
                       at the unit's tip line numbers, with `existing_code` read from the tree.
@@ -49,17 +72,20 @@ unit_diff is `unit:<path>:<unit>:<part>` and a context item `context:<role>:<pat
                       first time a task id is seen, ok afterwards). broken also emits a finding
                       at the caller, with dep_task set.
 
-The last non-flag argument is the range the gate asked to review; it is echoed
-into the trace so a test can assert what was reviewed.
+The last non-flag argument is the range the gate asked to review (in
+docs-summary mode: the tip the summary is generated for); it is echoed into
+the trace so a test can assert what was reviewed.
 """
 import json
 import os
 import sys
 import time
 
-# Parse arguments: range is the last non-flag arg; --paths-file and --resolve are optional.
+# Parse arguments: range is the last non-flag arg; --paths-file, --resolve and
+# --docs-summary (docs-gate 05) are optional.
 paths_file = None
 resolve_file = None
+docs_summary = False
 args = sys.argv[1:]
 i = 0
 while i < len(args):
@@ -69,6 +95,9 @@ while i < len(args):
     elif args[i] == "--resolve" and i + 1 < len(args):
         resolve_file = args[i + 1]
         i += 2
+    elif args[i] == "--docs-summary":
+        docs_summary = True
+        i += 1
     else:
         i += 1
 rng = args[-1] if args and not args[-1].startswith("--") else ""
@@ -136,6 +165,7 @@ if trace:
             "pid": os.getpid(), "cwd": os.getcwd(), "range": rng,
             "ts": time.time(), "paths_file": paths_file,
             "resolve_file": resolve_file,
+            "docs_summary": docs_summary,
             "resolve_manifest": resolve_input,
             "manifest": manifest,
             "item_files": _read_item_files(manifest or resolve_input),
@@ -248,9 +278,30 @@ if resolve_file is not None:
         fid = p.get("id") or ""
         if fid in scripted:
             resolutions[fid] = scripted[fid]
+        elif "*" in scripted:
+            resolutions[fid] = scripted["*"]
         else:
             resolutions[fid] = {"status": "still_present", "evidence_path": "", "evidence_quote": ""}
     emit(json.dumps({"resolutions": resolutions}))
+    sys.exit(0)
+
+# --- docs-summary generation mode (docs-gate 05) ---------------------------
+# The gate's freshness tracker regenerates .ocr/docs-summary.md through one
+# headless worker call with `--docs-summary` in argv. Behaviour knobs:
+#   STUB_DOCS_SUMMARY         the summary markdown the generation writes
+#                             (default: a canned stub summary)
+#   STUB_DOCS_SUMMARY_VERDICT "fail" -- exit 1 with no usable output, so the
+#                             gate's fail-closed path can be exercised
+if docs_summary:
+    time.sleep(float(os.environ.get("STUB_SLEEP", "0") or 0))
+    if os.environ.get("STUB_DOCS_SUMMARY_VERDICT", "").strip().lower() == "fail":
+        sys.stdout.write("stub: docs summary generation failed\n")
+        sys.exit(1)
+    emitted = os.environ.get("STUB_DOCS_SUMMARY") or (
+        "# Documentation summary\n"
+        "\n"
+        "Stub-generated summary of the repository documentation.\n")
+    sys.stdout.write(emitted)
     sys.exit(0)
 
 # --- review mode --------------------------------------------------------
@@ -309,8 +360,7 @@ if findings_for_raw:
                 sev = spec.get("severity", "high")
                 findings.append({
                     "path": path,
-                    "start_line": 1, "end_line": 2,
-                    "confidence": _confidence(sev, spec),
+                    "start_line": 1, "end_line": 2, "confidence": _confidence(sev, spec),
                     "category": "correctness", "evidence": "stub",
                     "severity": sev,
                     "content": spec.get("content", "stub scripted finding"),
@@ -373,9 +423,10 @@ if unit_findings and manifest:
                 code = fh.read().split(chr(10))[line - 1].rstrip(chr(13))
         except Exception:
             code = ""
+        sev = spec.get("severity", "high")
         findings.append({
-            "path": it["path"], "start_line": line, "end_line": line, "confidence": _confidence(spec.get("severity", "high"), spec),
-            "category": "correctness", "evidence": "stub", "severity": spec.get("severity", "high"),
+            "path": it["path"], "start_line": line, "end_line": line, "confidence": _confidence(sev, spec),
+            "category": "correctness", "evidence": "stub", "severity": sev,
             "content": spec.get("content", "stub unit finding"), "existing_code": code.strip()})
 tasks = (manifest or {}).get("tasks") or []
 dep_mode = os.environ.get("STUB_DEP_VERDICT", "ok")
@@ -414,4 +465,91 @@ if os.environ.get("STUB_CONFIRM_SIBLINGS") == "1":
         })
 if os.environ.get("STUB_CROSS_FILE"):
     out["cross_file_context_summary"] = json.loads(os.environ["STUB_CROSS_FILE"])
+# docs-gate 01: a documentation-checker finding. Only emitted when the manifest
+# carries `docs_context` (the gate injected the repo's .ocr/docs-summary.md) --
+# with no artifact the checker pass never runs and no finding can appear.
+# docs-gate 03 (the checker's contract): a contradiction finding quotes BOTH
+# the decision text and the contradicting code -- drop it when either quote is
+# missing -- and only a binding-corpus source can veto, so a spec naming a
+# `source_doc` outside the manifest's docs_context.corpus is dropped too
+# (READMEs/runbooks and excluded docs never veto).
+docs_finding = os.environ.get("STUB_DOCS_FINDING", "")
+_docs_ctx = (manifest or {}).get("docs_context") or {}
+if docs_finding and _docs_ctx:
+    try:
+        spec = json.loads(docs_finding)
+        content = spec.get("content", "stub docs finding")
+        code_quote = spec.get("existing_code", "stub code")
+        source_doc = spec.get("source_doc")
+        corpus = [_p for cls in (_docs_ctx.get("corpus") or {}).values() for _p in cls]
+        if content and code_quote and (source_doc is None or source_doc in corpus):
+            anchor = spec.get("path") or (manifest.get("paths") or ["?"])[0]
+            sev = spec.get("severity", "high")
+            f = {
+                "path": anchor, "start_line": 1, "end_line": 2,
+                "confidence": _confidence(sev, spec),
+                "category": spec.get("category", "documentation"),
+                "evidence": "docs_context",
+                "severity": sev,
+                "content": content,
+                "existing_code": code_quote,
+            }
+            for k in ("docs_kind", "stale_passage", "doc_path"):
+                if k in spec:
+                    f[k] = spec[k]
+            findings.append(f)
+    except Exception:
+        pass
+
+# docs-gate 02: a missing-decision-record finding (the checker's judgment,
+# simulated). Emitted only when flags fired AND the checker agrees a record is
+# needed and absent -- the persona never reports this class on flags alone, so
+# without this knob a flagged push passes. The content names the firing flag
+# families (from the manifest's payload) and states the fix convention.
+arch = (manifest or {}).get("arch_flags") or {}
+arch_flags = arch.get("flags") or []
+if os.environ.get("STUB_MISSING_RECORD") and manifest and manifest.get("docs_context") \
+        and arch_flags:
+    fams = sorted({str(f.get("family", "?")) for f in arch_flags})
+    records_root = arch.get("records_root")
+    where = ("the decision-records directory " + records_root) if records_root \
+        else "no decision-records directory in this repository (warning only)"
+    content = (
+        "missing decision record: architectural-change flag(s) fired ("
+        + ", ".join(fams) + ") and no commit in this push records the decision "
+        + "-- " + where + ". To unblock: the fix must touch a code file that "
+        "references the record (that touch is how the gate recognizes the fix); "
+        "a documentation-only fix re-blocks once and proceeds via a logged "
+        "git push --no-verify."
+    )
+    # blocking class vs warning-only class, via the stub's single confidence fn
+    conf = _confidence("medium", {"confidence": 0.9 if records_root else 0.5})
+    findings.append({
+        "path": (manifest.get("paths") or ["?"])[0], "start_line": 1, "end_line": 2,
+        "confidence": conf,
+        "category": "documentation",
+        "evidence": "docs_context",
+        "severity": "medium",
+        "content": content,
+        "existing_code": "stub code",
+    })
+
+# STUB_FILTER_DROP (docs-gate 03): simulate the skill's 3b falsify pass -- a
+# JSON array of substrings; every would-be-blocking finding whose content
+# carries one is dropped as the filter's drop_ids would have it. Code and doc
+# findings share the pass identically.
+filter_drop = json.loads(os.environ.get("STUB_FILTER_DROP", "[]") or "[]")
+if filter_drop:
+    would_block = [f for f in findings
+                   if f.get("severity") == "high" or
+                   (f.get("severity") == "medium" and float(f.get("confidence", 0)) >= 0.7)]
+    dropped = [f for f in would_block
+               if any(s in (f.get("content") or "") for s in filter_drop)]
+    if dropped:
+        findings = [f for f in findings if f not in dropped]
+        out["findings"] = findings
+        out["filter"] = {"dropped": [f.get("content") for f in dropped]}
+        if trace:
+            with open(trace, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps({"filter": out["filter"]}) + "\n")
 emit(json.dumps(out))

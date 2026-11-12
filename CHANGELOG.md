@@ -46,6 +46,23 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   override, and a `jira` coordinates block. Verdict records carry the intent
   context actually used (sources, text capped at 2,000 chars, per-chunk
   counts, fetch notes) as tolerated extra fields — no protocol version bump.
+- **The documentation gate: pushes are checked against the project's own
+  writing.** A checker pass reads a compressed summary of the tracked
+  documentation (`.ocr/docs-summary.md`, regenerated inline when the git
+  blob hashes of the tracked docs no longer match its freshness marker —
+  never file timestamps — and gitignored so it can never become a tracked
+  file) together with a pointer map of the binding corpus (decision
+  records, glossaries, architecture documents). It blocks a push whose code
+  contradicts a recorded decision (formal records and informal D-numbered
+  notes alike), an architectural change with no decision record
+  (dependency-manifest and similar flags), or a change that makes an
+  existing README/runbook claim stale; a fix to a documentation finding
+  must touch a code file that references the record. Generation and checker
+  failures are fail-closed, and a docs-only push records staleness instead
+  of paying a model call. Ships with `tests/sim_harness.py`, a
+  scenario-driven acceptance harness that runs the installed gate and the
+  real worker against a scratch copy of any target repository, asserting
+  remote isolation and original-repo integrity around the run.
 - `scripts/ocr_report.py` — every recorded gate review in one analyzable
   summary: aggregates the verdict store (all repos), and with `--repo` joins
   that repo's finding-level records and raw-stream history. `--json` emits

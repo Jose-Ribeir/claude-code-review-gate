@@ -174,6 +174,14 @@ A gate that cannot be bypassed by its owner is a denial-of-service tool, not a
 control. `--no-verify` skips the git pre-push hook entirely and is the documented
 emergency path; use it deliberately.
 
+Every honored `OCR_FAIL_OPEN=1` bypass is audited: the gate appends a
+`gate_skipped` line to its telemetry log (`review-gate-debug.log` under the
+external state store) naming the repository, the time, and the revision range
+that went unreviewed, so exceptions can be accounted for after the fact.
+`git push --no-verify` is different: it never invokes the hook, so no gate code
+runs at all and **no telemetry entry can be written** — that escape is
+undetectable by design, stated here rather than faked as detection.
+
 ## Modes and environment
 
 - default: block confident high-severity findings (any high-severity finding
@@ -181,6 +189,13 @@ emergency path; use it deliberately.
 - `OCR_ADVISORY=1` — warn only, never block
 - `OCR_MODEL=…` — override the reviewer model pin
 - `OCR_TIMEOUT`, `OCR_INLINE_BUDGET` — review wall-clock and hook join budget
+- `OCR_KIMI_ARGS` / `OCR_KIMI_EXTRA_ARGS` — worker argv escape hatches, applied
+  identically in EVERY worker (reviewer, docs-summary generator): an
+  `OCR_KIMI_ARGS` value replaces the per-purpose default argv wholesale (neither
+  the defaults nor any extras are consulted under an override);
+  `OCR_KIMI_EXTRA_ARGS` only rides along inside a per-purpose default argv —
+  each worker's default-args builder decides its own extras (e.g. the
+  docs-summary generator applies them, then pins its own `--model`)
 - `OCR_STUB_WORKER=1` — run the stub reviewer instead of `kimchi` (tests)
 - `OCR_FAIL_OPEN=1` / `git push --no-verify` — the bypasses
 

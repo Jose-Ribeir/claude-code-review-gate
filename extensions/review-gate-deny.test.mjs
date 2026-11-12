@@ -22,19 +22,56 @@ function check(label, cond) {
   }
 }
 
-// Wire a fake pi the way `kimchi -e` would, capturing the subscriber.
-function handler() {
-  const subs = []
-  ext.default ? null : null
-  const pi = { on: (name, fn) => subs.push(fn) }
+// Wire a fake pi the way `kimchi -e` would, capturing the subscribers by
+// event name. The extension registers tool_call AND resources_discover
+// (DOCS-GATE-08: it also puts this plugin's review SKILL.md on the skill
+// resolution path, so the worker's `/skill:review` resolves to it and not
+// to a foreign global skill).
+function handlers() {
+  const subs = new Map()
+  const pi = { on: (name, fn) => subs.set(name, fn) }
   ext(pi)
-  if (subs.length !== 1) throw new Error("extension did not register exactly one subscriber")
-  return subs[0]
+  if (!subs.has("tool_call")) throw new Error("extension did not register tool_call")
+  return subs
+}
+
+function handler() {
+  return handlers().get("tool_call")
 }
 
 function call(toolName, input) {
   return handler()({ toolName, input })
 }
+
+// --- DOCS-GATE-08: resources_discover registers the plugin review skill -----
+//
+// Red test for the worker skill-resolution gap (ticket 08): inert without
+// OCR_IN_REVIEW; active inside a worker it must return exactly ONE path, this
+// plugin's skills/review/SKILL.md, which must exist on disk.
+
+delete process.env.OCR_IN_REVIEW
+check("skill wiring: inert resources_discover returns undefined",
+  handlers().get("resources_discover")({ type: "resources_discover" }) === undefined)
+
+process.env.OCR_IN_REVIEW = "1"
+{
+  const res = handlers().get("resources_discover")({ type: "resources_discover" })
+  check("skill wiring: returns one skill path",
+    res && Array.isArray(res.skillPaths) && res.skillPaths.length === 1)
+  const p = res && res.skillPaths[0]
+  check("skill wiring: points at skills/review/SKILL.md",
+    typeof p === "string" && p.replace(/\\/g, "/").endsWith("/skills/review/SKILL.md"))
+  if (typeof p === "string") {
+    const { existsSync, readFileSync } = await import("node:fs")
+    check("skill wiring: the SKILL.md exists on disk", existsSync(p))
+    if (existsSync(p)) {
+      const head = readFileSync(p, "utf-8").slice(0, 400)
+      check("skill wiring: SKILL.md frontmatter names it 'review'", /\nname:\s*review\s*\n/.test(head))
+    }
+  }
+}
+
+delete process.env.OCR_IN_REVIEW
 
 // --- inertness: OCR_IN_REVIEW unset => nothing is ever blocked -------------------
 
@@ -233,6 +270,8 @@ for (const [cmd] of EXPLICIT_DENY) {
   const r = call("bash", { command: cmd })
   check("DENY " + JSON.stringify(cmd), r !== undefined && r.block === true)
 }
+
+process.env.OCR_IN_REVIEW = "1"
 
 // --- summary ---------------------------------------------------------------------
 

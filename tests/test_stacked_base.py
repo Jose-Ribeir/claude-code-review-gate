@@ -337,6 +337,24 @@ def _git_mode(work, lines, env, *extra):
     return proc
 
 
+def test_git_mode_names_the_pushed_branch_not_the_checkout(repo, tmp_path):
+    """The state's branch label must name the branch BEING PUSHED, not the one
+    checked out where the hook runs: `git push origin feat` from a main
+    checkout is "the review of feat". Mislabeling it as the checkout made a
+    push of one branch look like a review of another (observed: a kimchi push
+    reported as "the review of integration/intent-context")."""
+    _git(["switch", "-q", "-c", "feat"], cwd=repo)
+    tip = _commit(repo, "feat.txt")
+    _git(["switch", "-q", "main"], cwd=repo)   # the checkout is main; the push sends feat
+    env = _env(tmp_path)
+    env["STUB_SLEEP"] = "5"   # outrun the 3 s inline budget: a still-running deny
+    proc = _git_mode(repo, [f"refs/heads/feat {tip} refs/heads/feat {ZERO}"], env)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode != 0, out
+    assert "review of feat" in out, out
+    assert "review of main" not in out, out
+
+
 def test_an_all_deletion_push_never_falls_back_to_reviewing_HEAD(repo, tmp_path):
     """A push whose only ref update is a DELETION (local sha all zeros) carries
     no commits, so there is nothing to review: allow, with a note saying so.

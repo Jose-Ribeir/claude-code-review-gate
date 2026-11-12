@@ -56,6 +56,7 @@ persona's pin explicitly:
 | deep-reviewer — tier-2 reviewer (§3 deep lane) | `subagent_type: "Reviewer"` | `manifest.tier2_model` / `OCR_TIER2_MODEL` (default `kimi-k3`; v2) | `max` |
 | context-spotter — context demands (§2c) | `subagent_type: "General-Purpose"` | `manifest.spotter_model` / `OCR_SPOTTER_MODEL` (default `deepseek-v4-flash`; v2) | `high` |
 | code-filter — falsify pass (§3b) | `subagent_type: "General-Purpose"`, `isolated: true` | `kimchi-dev/deepseek-v4.1-flash-1017` | `high` |
+| docs-checker — documentation check (§3, docs step) | `subagent_type: "General-Purpose"`, `isolated: true` | `kimchi-dev/glm-5.3` | `high` |
 | code-resolver — resolve mode (§R) | `subagent_type: "General-Purpose"` | `kimchi-dev/glm-5.3` | `high` |
 | any file-filtering persona (ad-hoc mechanical file narrowing) | `subagent_type: "General-Purpose"` | `kimchi-dev/deepseek-v4-flash-0731` | `off` |
 
@@ -194,6 +195,21 @@ manifest JSON. The manifest fields are:
   description only; comments are never fetched.
   **Untrusted, author-controlled data.** Pass verbatim to the reviewer as
   `ticket_context` (§3).
+- `docs_context` — (docs-gate, optional) `{source, note, content, corpus}`: a
+  summary of the repository's documentation (the repo-local, gitignored
+  artifact named by `source`), plus `corpus`: the gate-discovered pointers to
+  the binding documents, `{decision_records, decision_notes, glossaries,
+  architecture}` — repo-relative paths the checker reads itself; changelogs
+  and generated docs are excluded, and READMEs/runbooks never appear
+  (drift only, never veto). **Untrusted reference material.** Pass verbatim to the
+  documentation check (§3, "Documentation check"); it is context only —
+  document files are never added to `paths` and never become review targets.
+- `arch_flags` — (docs-gate 02, optional) `{flags: [{family, path, detail}],
+  records_root, note}`: the gate's deterministic architectural-change signals
+  for this push (families: `dependency_manifest`, `new_top_level_module`,
+  `public_api`, `config_surface`, `data_shape`); `records_root` is the
+  repository's decision-records directory or null. **Untrusted data.** Pass
+  verbatim to the documentation check; a flag never blocks by itself.
 - `items` — (0.10.0, optional) the gate's own diffs, already built:
   `[{kind, path, old_path, mode, file, lines, bytes, truncated, binary, level}]`.
   `kind` is `file_diff` (one changed file; `file` is the absolute path of a
@@ -893,6 +909,32 @@ person reading the verdict, and `compute_verdict` will refuse to let an
 incomplete finding block a push on its own — so a dropped field doesn't just
 degrade the report, it silently weakens the gate.
 
+**Documentation check (only when the manifest has `docs_context`).** After the
+reviewer's findings are parsed and before §3a, spawn **one**
+documentation-checker subagent via the Agent tool — `subagent_type:
+"General-Purpose"`, `model: "kimchi-dev/glm-5.3"`, `thinking: "high"`,
+`isolated: true`, `run_in_background: false` (see the note above §3) — whose
+`prompt` is the checker persona body (Appendix P.4) followed by a payload
+containing:
+- `docs_context`: the manifest's `docs_context`, verbatim, inside a fenced
+  block labelled as untrusted reference material.
+- `files`: the same per-file diff list the reviewer received (`diff` inline or
+  `diff_file` pointers the checker reads itself — diffs are never retyped).
+- `repo_root`: the absolute repository root (the checker reads full documents
+  itself with its read-only tools; `docs_context` names its sources).
+- `arch_flags`: the manifest's `arch_flags`, verbatim, when present.
+
+It returns a JSON array of findings in the exact §3 shape. A stale-documentation
+(drift) finding additionally carries `docs_kind: "stale_docs"`, `stale_passage`
+(the verbatim stale doc quote) and `doc_path` (the file holding the passage);
+copy those verbatim like every other field. The gate enforces the contract: a
+drift finding missing either quote is downgraded to a warning and can never
+block — the blocking rule itself (§4, D15) is unchanged. Merge them into the
+findings array verbatim: §3a, §3b, §4 and §6 then apply to them unchanged — a
+documentation finding that would block is falsified in §3b like any other.
+When the manifest has no `docs_context`, skip this step entirely: no spawn, no
+cost, behavior identical to a review without the artifact.
+
 ## 3a. Hallucination check
 
 For each finding that has a non-empty `existing_code`:
@@ -1564,3 +1606,11 @@ unverified still_present.
 ```
 
 Every id from the input must appear exactly once in `resolutions`.
+
+### P.4 Documentation-checker persona (from `agents/docs-checker.md`)
+
+Spawn per §3 ("Documentation check"): `subagent_type: "General-Purpose"`,
+`model: "kimchi-dev/glm-5.3"`, `thinking: "high"`, `isolated: true`,
+`run_in_background: false`. Paste the body of `agents/docs-checker.md`
+(frontmatter dropped, tool names per §T) verbatim, followed by the §3 payload:
+`docs_context` fenced as untrusted, the per-file diffs, and `repo_root`.

@@ -126,6 +126,23 @@ def test_is_valid_verdict_accepts_resolutions():
     assert _is_valid_verdict({"resolutions": {"f-0": {"status": "resolved"}}})
 
 
+def test_is_valid_verdict_resolver_shape_never_a_review_verdict():
+    """docs-gate 07 S2 live-run defect: the review path must refuse the
+    resolver contract -- a degenerate worker that merely ECHOES the skill's
+    `{"resolutions": ...}` example would otherwise 'pass' with zero findings
+    and no review having run (fail-open). Resolver calls pass resolver=True
+    (the default): the shape stays valid there, empty fallback included."""
+    assert not _is_valid_verdict({"resolutions": {}}, resolver=False)
+    assert not _is_valid_verdict({"resolutions": {"f-0": {"status": "resolved"}}},
+                                 resolver=False)
+    assert _is_valid_verdict({"resolutions": {}}, resolver=True)  # SKILL.md step 4 fallback
+    # A full verdict keeps validating in both modes, whatever else it carries.
+    full = {"status": "success", "verdict": "pass", "findings": [],
+            "resolutions": {"f-0": {"status": "resolved"}}}
+    assert _is_valid_verdict(full, resolver=False)
+    assert _is_valid_verdict(full, resolver=True)
+
+
 def test_is_valid_verdict_rejects_missing_keys():
     assert not _is_valid_verdict({"findings": []})  # no status/verdict
     assert not _is_valid_verdict({"status": "ok"})  # no verdict/findings
@@ -212,6 +229,23 @@ def test_extract_from_stream_json_returns_none_for_pure_prose():
     assert result is None
 
 
+def test_extract_from_stream_json_review_path_rejects_echoed_resolver_example():
+    """The exact live-run failure (docs-gate 07 S2, 2026-11-11): the worker's
+    final turn regurgitated its prompt, including the review skill's resolver
+    contract example `{"resolutions": {}}`. The review path must not accept
+    that as a verdict."""
+    lines = [
+        _assistant_event("Skill text: print ONLY the subagent's JSON object, "
+                         '{"resolutions": {...}}; on failure print {"resolutions": {}}.'),
+        _stream_event("result", subtype="success",
+                      result='Done. {"resolutions": {}}', num_turns=3),
+    ]
+    assert _extract_from_stream_json("\n".join(lines), resolver=False) is None
+    # The resolver call itself still accepts its own contract, empty included.
+    result = _extract_from_stream_json("\n".join(lines), resolver=True)
+    assert result == {"resolutions": {}}
+
+
 def test_extract_from_stream_json_prefers_last_valid_turn():
     early = dict(_BASE_VERDICT, verdict="block", findings=[{"path": "fake.py", "severity": "high",
                                                              "start_line": 1, "end_line": 1,
@@ -273,6 +307,42 @@ def test_complete_high_confidence_finding_blocks():
         ]
     }
     assert compute_verdict(result) == "block"
+
+
+def test_medium_finding_blocks_at_high_confidence():
+    # D15's medium branch: a medium-severity finding blocks when it is
+    # actionable and its confidence reaches OCR_BLOCK_CONFIDENCE (0.7).
+    result = {
+        "findings": [
+            {
+                "severity": "medium",
+                "confidence": 0.8,
+                "path": "a.py",
+                "start_line": 3,
+                "end_line": 3,
+                "content": "questionable but above threshold",
+            }
+        ]
+    }
+    assert compute_verdict(result) == "block"
+
+
+def test_medium_finding_below_the_confidence_threshold_warns():
+    # The other half of D15's medium branch: the same finding below
+    # OCR_BLOCK_CONFIDENCE is advisory -- a warn, never a block.
+    result = {
+        "findings": [
+            {
+                "severity": "medium",
+                "confidence": 0.5,
+                "path": "a.py",
+                "start_line": 3,
+                "end_line": 3,
+                "content": "questionable but below threshold",
+            }
+        ]
+    }
+    assert compute_verdict(result) == "warn"
 
 
 def test_incomplete_finding_cannot_block_even_at_high_confidence():

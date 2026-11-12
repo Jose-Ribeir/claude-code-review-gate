@@ -101,6 +101,11 @@ def drop_failed_intent_findings(findings):
     intent_gap finding survives only when its self-check holds."""
     return [f for f in findings
             if not _is_intent_finding(f) or _intent_self_check_ok(f)]
+# docs-gate 04: the documentation-drift finding class (see
+# agents/docs-checker.md). Only this class is subject to the two-quote
+# credibility rule in _is_actionable; other documentation-check classes keep
+# their own strictness.
+_DOCS_DRIFT_KIND = "stale_docs"
 
 
 def _is_actionable(f):
@@ -113,6 +118,15 @@ def _is_actionable(f):
     block on by itself, but still worth a warning -- it still counts toward
     `has_warn` below, and _format_reasons/the raw-output log still surface it
     for a human to look at.
+
+    A documentation-drift finding (docs_kind "stale_docs", docs-gate 04)
+    must additionally quote BOTH sides to be blocking-credible: the verbatim
+    stale passage from the documentation (stale_passage) AND the verbatim
+    contradicting code (existing_code). Missing either quote it is downgraded
+    to warning, never block -- at ANY severity or confidence. This changes
+    nothing about the blocking rule below (any high blocks; medium blocks at
+    OCR_BLOCK_CONFIDENCE): it only gates which findings the rule may act on,
+    exactly like the dropped-field checks above.
     """
     # f.get("content", "") only falls back to "" when the key is absent -- an
     # explicit JSON null ("content": null) makes it return None, and str(None)
@@ -124,6 +138,11 @@ def _is_actionable(f):
             if int(f.get(key)) <= 0:
                 return False
         except (TypeError, ValueError):
+            return False
+    if str(f.get("docs_kind") or "") == _DOCS_DRIFT_KIND:
+        if not str(f.get("stale_passage") or "").strip():
+            return False
+        if not str(f.get("existing_code") or "").strip():
             return False
     return True
 

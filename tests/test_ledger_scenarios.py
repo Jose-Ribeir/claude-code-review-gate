@@ -359,7 +359,8 @@ def _plugin_copy(tmp_path):
     (root / "agents").mkdir()
     for rel in ("skills/review/SKILL.md", "skills/review/rubric.md",
                 "skills/review/rules/python.md", "agents/code-reviewer.md",
-                "agents/code-filter.md", "agents/code-resolver.md"):
+                "agents/code-filter.md", "agents/code-resolver.md",
+                "agents/docs-checker.md"):
         (root / rel).write_text(f"{rel} v1\n", encoding="utf-8")
     return root
 
@@ -382,7 +383,8 @@ def test_fingerprint_tracks_criteria_not_mechanics(tmp_path, monkeypatch):
     assert fp() == base, "mechanics must not invalidate the ledger"
 
     for rel in ("skills/review/rubric.md", "skills/review/rules/python.md",
-                "agents/code-reviewer.md", "agents/code-filter.md"):
+                "agents/code-reviewer.md", "agents/code-filter.md",
+                "agents/docs-checker.md"):
         before = fp()
         (root / rel).write_text(f"{rel} tightened\n", encoding="utf-8")
         assert fp() != before, f"{rel} is review criteria"
