@@ -282,9 +282,12 @@ def _forge_cmd(cli, name):
 
 
 def _forge_hits(stdout):
-    """Extract path hits from forge JSON output (a list of objects carrying
+    """Extract hits from forge JSON output (a list of objects carrying
     'path' / 'filename' keys, as `gh search code --json` and `glab api
-    .../search?scope=blobs` both emit)."""
+    .../search?scope=blobs` both emit) as {"path", "repository"} dicts.
+    'repository' is the owning repo slug (gh's repository.nameWithOwner) or
+    '' when the provider does not say -- only a stated slug can be filtered
+    against the origin remote."""
     try:
         data = json.loads(stdout)
     except ValueError:
@@ -296,10 +299,27 @@ def _forge_hits(stdout):
         if isinstance(item, dict):
             path = item.get("path") or item.get("filename")
             if isinstance(path, str) and path:
-                hits.append(path)
+                repo = item.get("repository")
+                if isinstance(repo, dict):
+                    repo = repo.get("nameWithOwner") or repo.get("full_name") or ""
+                if not isinstance(repo, str):
+                    repo = ""
+                hits.append({"path": path, "repository": repo})
         if len(hits) >= MAX_FORGE_HITS:
             break
     return hits
+
+
+def _origin_slug(url):
+    """The owner/repo slug of an origin URL (https://host/o/r(.git) or
+    scp-like git@host:o/r), lower-cased, or '' when unparsable."""
+    url = (url or "").strip()
+    if url.endswith(".git"):
+        url = url[:-4]
+    parts = [p for p in re.split(r"[:/]", url) if p]
+    if len(parts) < 2:
+        return ""
+    return "/".join(parts[-2:]).lower()
 
 
 def _forge_lookup(repo_root, run, target, timeout, negcache, warnings):
@@ -368,7 +388,26 @@ def _forge_lookup(repo_root, run, target, timeout, negcache, warnings):
     if not hits:
         remember("miss")
         return None
-    return {"status": "resolved", "via": "forge", "forge": cli, "hits": hits}
+    # `gh search code` is forge-WIDE: a hit in an unrelated repository can
+    # not back a resolution here. Hits whose provider states a repository
+    # that is not the origin's are dropped (with a warning); hits whose
+    # provider says nothing (glab blobs) are kept as before.
+    slug = _origin_slug(url)
+    kept, dropped = [], []
+    for hit in hits:
+        if hit["repository"] and slug and hit["repository"].lower() != slug:
+            dropped.append(hit["repository"])
+        else:
+            kept.append(hit["path"])
+    if dropped:
+        warnings.append("forge: dropped %d %s hit(s) from unrelated "
+                        "repositories (%s); a forge-wide search cannot back "
+                        "a resolution in this repo"
+                        % (len(dropped), cli, ", ".join(sorted(set(dropped)))))
+    if not kept:
+        remember("miss")
+        return None
+    return {"status": "resolved", "via": "forge", "forge": cli, "hits": kept}
 
 
 # ---------------------------------------------------------------------------
@@ -382,7 +421,6 @@ def make_pointer_resolver(repo_root, *, timeout=FORGE_TIMEOUT):
     calls, so a degraded forge is paid for once per collect run.
     """
     repo_root = os.path.abspath(str(repo_root))
-    warnings = []
     run = _git_runner(repo_root)
     negcache = _load_negcache(repo_root)
     utterance_cache = {}
@@ -392,6 +430,12 @@ def make_pointer_resolver(repo_root, *, timeout=FORGE_TIMEOUT):
         if not target:
             return {"status": "unavailable", "via": "none",
                     "warning": "forge: empty pointer target"}
+        # Per-target warnings list: a degradation note raised while resolving
+        # one target must never appear in another target's warnings_tail.
+        # (Shared across calls were only the CACHES -- utterance paths and
+        # forge negatives -- precisely because they are answer-shaped, not
+        # warning-shaped.)
+        warnings = []
         try:
             if target not in utterance_cache:
                 utterance_cache[target] = _utterance_paths(repo_root, target,
