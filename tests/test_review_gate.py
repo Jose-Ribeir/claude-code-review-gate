@@ -2657,10 +2657,10 @@ def test_only_read_only_git_may_precede_a_push():
 
 
 def test_git_C_is_a_final_cd_for_the_resolver():
-    assert review_gate._push_c_dir("git -C /repo push origin main") == "/repo"
-    assert review_gate._push_c_dir('git -C "/a b" push') == "/a b"
+    assert review_gate._push_c_dirs("git -C /repo push origin main") == ["/repo"]
+    assert review_gate._push_c_dirs('git -C "/a b" push') == ["/a b"]
     assert review_gate._looks_like_real_push('git -C "/a b" push') is True
-    assert review_gate._push_c_dir("git push origin main") == ""
+    assert review_gate._push_c_dirs("git push origin main") == []
 
 
 # --- inside the review: the write guard ----------------------------------------

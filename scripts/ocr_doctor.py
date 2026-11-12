@@ -76,12 +76,14 @@ def _store_root(env):
 
 
 def _kimchi_bin(env):
-    """The kimchi CLI the gate itself would use: PATH, then KIMCHI_BIN."""
-    found = shutil.which("kimchi", path=env.get("PATH"))
-    if found:
-        return found
+    """The kimchi CLI the gate itself would use: KIMCHI_BIN, then PATH.
+
+    Mirrors review-gate._find_kimi: the env var is an OVERRIDE, so it must
+    beat a stale kimchi on PATH (rg_jira_fetch._kimchi_bin precedent)."""
     exe = env.get("KIMCHI_BIN", "").strip()
-    return exe if exe and os.path.isfile(exe) else None
+    if exe and os.path.isfile(exe):
+        return exe
+    return shutil.which("kimchi", path=env.get("PATH"))
 
 
 def _pid_alive(pid):

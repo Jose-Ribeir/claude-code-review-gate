@@ -1191,14 +1191,30 @@ def _is_advisory(repo_root):
             continue
         try:
             txt = p.read_text(encoding="utf-8")
-            if name.endswith(".json"):
-                if json.loads(txt).get("blocking") is False:
-                    return True
-            elif "blocking" in txt and "false" in txt.lower():
-                return True
         except Exception:
             continue
+        if _advisory_says_nonblocking(txt):
+            return True
     return False
+
+
+def _advisory_says_nonblocking(txt):
+    """True only when a .ocr/config file EXPLICITLY disables blocking.
+
+    The substring scan this replaced ("blocking" anywhere + "false" anywhere,
+    case-insensitive) flipped the gate into advisory mode on prose asserting
+    the opposite -- a comment that SAYS blocking must stay on still contains
+    both words. So the file must BE a JSON object with "blocking": false, or
+    -- the graceful fallback for a config that does not parse as a JSON
+    object -- carry that exact pair verbatim. Any looser evidence is ignored
+    and a parse failure is silent: advisory lookups never break the gate."""
+    try:
+        obj = json.loads(txt)
+    except (ValueError, TypeError):
+        obj = None
+    if isinstance(obj, dict):
+        return obj.get("blocking") is False
+    return bool(re.search(r'"blocking"\s*:\s*false', txt))
 
 
 def _write_gate_pointer():
@@ -1789,10 +1805,11 @@ def _gate_repo(payload):
     # applied after every explicit one. Without it `git -C /repo push` was
     # resolved against the session directory -- and, containing no "git push"
     # substring, was not even routed to this hook until 0.6.0.
-    hops = _cd_targets(cmd)
-    c_dir = _push_c_dir(cmd)
-    if c_dir:
-        hops = hops + [c_dir]
+    # Every `-C <dir>` the push command carries, in order: git applies
+    # repeated -C options sequentially (a later relative -C resolves against
+    # the previous one), which is exactly the cd-chain semantics the hop
+    # resolver already applies.
+    hops = _cd_targets(cmd) + _push_c_dirs(cmd)
     for raw in hops:
         try:
             if raw == "-" or _UNEXPANDABLE.search(raw):
@@ -1862,8 +1879,12 @@ _REAL_PUSH = re.compile(
 )
 # Same shape, capturing git's global options and the subcommand, for every
 # `git <sub>` at a command position -- used to vet what runs BEFORE the push.
+    # Command positions mirror _REAL_PUSH's prefix set, including the
+    # opening subshell/brace/command-substitution ones: a mutating
+    # subcommand runs inside `( ... )`, `{ ...; }`, backticks and
+    # `$( ... )`, so those openers must count here too.
 _GIT_CMD = re.compile(
-    "(?:^|[;&|\\n\\r\"']|&&|\|\|)\\s*"
+    "(?:^|[;&|(){}\\n\\r\"'`]|\\$\(|&&|\|\|)\\s*"
     "(?:" + _ENV_PREFIX + "\\s+)?"
     "(?:[A-Za-z_][A-Za-z0-9_]*=\\S*\\s+)*"
     + _spliceable("git") + "\\s+"
@@ -1987,16 +2008,20 @@ def _pre_push_git_commands(cmd):
     return found
 
 
-def _push_c_dir(cmd):
-    """The `-C <dir>` of the push command itself, or "". A final cd, in effect."""
+def _push_c_dirs(cmd):
+    """Every `-C <dir>` of the push command itself, in order. Final cds.
+
+    git applies repeated -C options in the order given -- a later relative
+    one resolves against the previous, a later absolute one replaces it --
+    so honoring only the first (what this replaced) resolved `git -C /repoA
+    -C sub push` against /repoA while git actually pushes from /repoA/sub.
+    """
     code = _strip_heredocs(cmd or "")
     m = _REAL_PUSH.search(code)
     if not m:
-        return ""
-    c = _GIT_C_DIR.search(code[m.start():m.end()])
-    if not c:
-        return ""
-    return next((g for g in c.groups() if g), "")
+        return []
+    return [next((g for g in c.groups() if g), "")
+            for c in _GIT_C_DIR.finditer(code[m.start():m.end()])]
 
 
 def _parse_push(cmd):
@@ -2448,6 +2473,11 @@ def _normalize_verdict(obj):
                      if k in g]
             g["content"] = "\n".join(p for p in parts if p)
         g["severity"] = norm_severity(g.get("severity") or "info")
+        if "confidence" in g:
+            # Coerce the model's confidence defensively here too: the shaped
+            # findings still flow into _merge_near_dup_findings, which must
+            # never meet a confidence float() cannot parse.
+            g["confidence"] = _finding_confidence(g)
         findings.append(g)
     shaped = dict(obj)
     shaped["findings"] = findings
@@ -2698,15 +2728,15 @@ def _extract_json(text, resolver=True):
 
 
 def _find_kimi():
-    """Locate the kimchi CLI so the gate works from any shell. Order: PATH;
-    then the KIMCHI_BIN override (port spec section 3)."""
-    found = shutil.which("kimchi")
-    if found:
-        return found
-    exe = os.environ.get("KIMCHI_BIN", "")
+    """Locate the kimchi CLI so the gate works from any shell. Order: the
+    KIMCHI_BIN override, then PATH (port spec section 3) -- an override that
+    loses to PATH is not an override, and rg_jira_fetch.py's _kimchi_bin
+    resolves the same variable env-first. A stale kimchi on PATH must never
+    shadow the KIMCHI_BIN the user pointed at the intended CLI."""
+    exe = os.environ.get("KIMCHI_BIN", "").strip()
     if exe and os.path.isfile(exe):
         return exe
-    return None
+    return shutil.which("kimchi")
 
 
 # Upstream name kept as an alias for callers/tests written against it.
@@ -3127,6 +3157,23 @@ def _tele_chunk(index, total, files, lines, outcome, seconds):
                 outcome=outcome, s=entry["seconds"])
 
 
+def _timeout_knob(override, used):
+    """The env var that feeds the timeout that actually fired.
+
+    _run_review_once's escalation text hardcoded OCR_TIMEOUT, which is wrong
+    advice when the caller passed a per-call override: the deep lane runs on
+    _DEEP_TIMEOUT (OCR_DEEP_TIMEOUT) and the chunked lane on _CHUNK_TIMEOUT
+    (OCR_CHUNK_TIMEOUT). An override matching neither constant keeps the
+    global knob as the honest hint."""
+    if override is None:
+        return "OCR_TIMEOUT"
+    if used == _DEEP_TIMEOUT:
+        return "OCR_DEEP_TIMEOUT"
+    if used == _CHUNK_TIMEOUT:
+        return "OCR_CHUNK_TIMEOUT"
+    return "OCR_TIMEOUT"
+
+
 def _run_review(repo_root, mode, git_dir=None, head_sha="", push_range="",
                 paths_file=None, timeout=None, raw_tag="", resolve_file=None,
                 tier="", common_dir=None):
@@ -3408,6 +3455,7 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
                     f"duration_s={time.monotonic()-started_mono:.1f}"
                 )
     except subprocess.TimeoutExpired:
+        knob = _timeout_knob(timeout, _run_timeout)
         if mode == "hook":
             # This process is the detached supervisor, which inherits Claude
             # Code's own launch environment, NOT the shell env of the `git
@@ -3417,14 +3465,14 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
             # not get) a matching rise in hooks/hooks.json: that timeout has
             # to stay under the desktop app's ~16 min session wall.
             escalation = (
-                f"  Give Claude more time : export OCR_TIMEOUT={TIMEOUT * 2} in the environment\n"
+                f"  Give Claude more time : export {knob}={_run_timeout * 2} in the environment\n"
                 f"    Kimchi itself is launched from (a shell prefix on `git push` will\n"
                 f"    NOT work in hook mode). Leave hooks/hooks.json's PreToolUse timeout\n"
                 f"    alone: the review runs detached from the hook, and that timeout must\n"
                 f"    stay below the host's session watchdog."
             )
         else:
-            escalation = f"  Give Claude more time : OCR_TIMEOUT={TIMEOUT * 2} git push ..."
+            escalation = f"  Give Claude more time : {knob}={_run_timeout * 2} git push ..."
         used = _run_timeout
         raise ReviewGateError(
             f"review timed out after {used}s - blocking commit to preserve gate integrity.\n"
@@ -4224,8 +4272,17 @@ def _supervise_run(state_path, run_id):
                                                       "base": base, "range": push_range})
                               if _is_allowed_path(p)]
                 _globs, deep_threshold = _risk_config(review_root)
+                # Rename pairs for the manifest's contract, fail-soft (the
+                # deep lane's whole discipline): no diff data, no renames --
+                # never a blocked push for a rename-table failure.
+                try:
+                    _entries, _w = _collect_diff_entries(review_root, base, tip)
+                    deep_renames = [[e["old_path"], e["path"]]
+                                    for e in (_entries or []) if e.get("old_path")]
+                except Exception:
+                    deep_renames = []
                 manifest = _build_deep_manifest(deep_paths, st.get("deep_reasons") or [],
-                                                deep_threshold)
+                                                deep_threshold, renames=deep_renames)
                 # docs-gate 02/01: the deep lane likewise feeds the docs context
                 # and the push-wide arch flags into its manifest -- escalation
                 # changes WHO reviews, never what the checker sees.
@@ -7352,7 +7409,7 @@ def _verdict_intent_extras(base, chunk_stats):
     return extra or None
 
 
-def _build_deep_manifest(paths, reasons, threshold):
+def _build_deep_manifest(paths, reasons, threshold, renames=None):
     """The tier-2 (t10) reviewer's manifest: ONE deep pass over the whole
     push, no items[] (the deep reviewer reads diffs and repo state itself,
     via the skill), no ledger carries. `deep_review` is what the skill's
@@ -7364,7 +7421,10 @@ def _build_deep_manifest(paths, reasons, threshold):
     this run (and would apply had it not already been escalated)."""
     return {
         "paths": list(paths),
-        "renames": [],
+        # The rename contract is the chunked manifest's: run claims a set of
+        # [old_path, new_path] pairs the reviewer may treat as one file's
+        # move. Hardcoding [] hid every push rename from the deep reviewer.
+        "renames": [list(r) for r in (renames or [])],
         "other_changed": [],
         "files": [{"path": p, "mode": "full", "from_oid": "", "to_oid": ""}
                   for p in paths],
@@ -8434,6 +8494,18 @@ def _findings_similar(f1, f2):
     return _norm(f1) == _norm(f2)
 
 
+def _finding_confidence(f):
+    """A finding's confidence as a float; model output is UNTRUSTED.
+
+    A kimi model in the wild reported a string here ("high", findings log,
+    tip 1642900) and float("high") raised ValueError out of the merger.
+    Non-numeric confidence coerces to the default; it never raises."""
+    try:
+        return float(f.get("confidence") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _merge_near_dup_findings(findings):
     """Remove near-duplicates; keep the one with higher confidence."""
     kept = []
@@ -8441,7 +8513,7 @@ def _merge_near_dup_findings(findings):
         merged = False
         for i, k in enumerate(kept):
             if _findings_similar(k, f):
-                if float(f.get("confidence") or 0) > float(k.get("confidence") or 0):
+                if _finding_confidence(f) > _finding_confidence(k):
                     kept[i] = f
                 merged = True
                 break
@@ -10875,7 +10947,12 @@ def _async_note(path, info, session_id):
         Path(path).write_text(json.dumps(info), encoding="utf-8")
     except Exception:
         pass
-    started = float(st.get("started_ts") or st.get("claimed_ts") or time.time())
+    try:
+        # Mirrors the notified_ts guard above: state files are hand-editable
+        # and partially written, a non-numeric ts must not take down the note.
+        started = float(st.get("started_ts") or st.get("claimed_ts") or time.time())
+    except (TypeError, ValueError):
+        started = time.time()
     mins = max(0, int((time.time() - started) // 60))
     return (
         f"review-gate: the review of {label} is still running ({mins} min). Re-run the same "
@@ -11016,6 +11093,13 @@ def _mode_post(argv):
 # "the review can be fooled" into "the review can be skipped". So the plugin's
 # hook, which is registered inside the review session too, vets every Bash
 # call there instead of blanket-allowing it.
+# The short form, equally denied -- extensions/review-gate-deny.ts treats a
+# bare `-o` token exactly as it treats --output: none of the read verbs the
+# reviewer's sandbox admits need a file sink. The token test below checks
+# exact equality with `-o`; this regex is only the same check for the
+# unparseable-command fallback.
+_SHORT_OUTPUT_OPT = re.compile(r"(?:^|[\s;&|])-o(?=\s|;|&|\||$)")
+
 # `--output` and every abbreviation git's option parser would accept for it
 # (`--o`, `--ou`, ... are ambiguous with --output-indicator-* today, but that
 # is git's business, not a property this guard should lean on).
@@ -11042,11 +11126,11 @@ def _guard_reviewer_command(cmd):
     except ValueError:
         toks = None
     if toks is None:
-        hit = bool(_OUTPUT_OPT.search(code))
+        hit = bool(_OUTPUT_OPT.search(code) or _SHORT_OUTPUT_OPT.search(code))
     else:
-        hit = any(_OUTPUT_OPT.match(" " + t) for t in toks)
+        hit = any(_OUTPUT_OPT.match(" " + t) or t == "-o" for t in toks)
     if hit:
-        return "review-gate: `--output` writes a file; the reviewer is read-only. Print to stdout instead."
+        return "review-gate: `--output` (short: `-o`) writes a file; the reviewer is read-only. Print to stdout instead."
     for m in _REDIRECT.finditer(code):
         target = next((g for g in m.groups() if g is not None), "")
         if not target or target.startswith("&"):
@@ -11159,6 +11243,29 @@ def _refuse_huge_range(mode, allow, count, limit, repo_root="", push_range=""):
         _warn(_huge_range_reason(count, limit) + _bypass_hint(mode))
         allow()
     _fail_closed(mode, _huge_range_reason(count, limit) + _bypass_hint(mode))
+
+
+def _refuse_unparseable_stdin(mode):
+    """The 'cannot see what this is' exit for the hook paths.
+
+    An unparseable stdin payload used to fall through with payload = {},
+    where the empty command read as 'not a push' and the hook exited 0 --
+    the same silent fail-open every other ambiguity in this file blocks on.
+    Block instead, naming the same OCR_FAIL_OPEN escape. Never returns."""
+    if _fail_open_requested():
+        _log_gate_skipped("payload_unparseable", mode)
+        _pass_through()
+    _fail_closed(
+        mode,
+        "review-gate: could not read the hook payload from stdin, so this tool "
+        "call was not vetted. Blocking, because a gate that cannot see what a "
+        "tool call is must not wave it through.\n\n"
+        "The hook payload must be a single JSON object on stdin.\n"
+        "  - Emergency bypass: set OCR_FAIL_OPEN=1 in the environment the host "
+        "itself was launched from.\n"
+        "  - Or run the push from a plain terminal, which this adapter does "
+        "not gate.",
+    )
 
 
 def _fail_closed(mode, msg):
@@ -11308,7 +11415,10 @@ def _main_inner(argv, mode):
         try:
             _peek = json.loads(_raw_in) or {}
         except Exception:
-            _peek = {}
+            # Same rule here: OCR_IN_REVIEW is spoofable, and a push whose
+            # payload cannot be parsed cannot be FAILED OPEN by pretending
+            # the command is unknown.
+            _refuse_unparseable_stdin("hook")
         _peek_cmd = _payload_command(_peek) if isinstance(_peek, dict) else ""
         if not _looks_like_real_push(_peek_cmd):
             _mode_guard(argv)  # exits: guards file writes, passes the rest
@@ -11331,7 +11441,7 @@ def _main_inner(argv, mode):
             if not _looks_like_real_push(cmd):
                 _pass_through()
         except Exception:
-            payload = {}  # if we can't read it, fall through and review anyway
+            _refuse_unparseable_stdin("hook")
 
     # WHICH repository is being pushed. In git mode the pre-push hook already
     # runs inside it, so the process cwd is right by construction. In hook mode
