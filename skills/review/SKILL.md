@@ -171,6 +171,8 @@ manifest JSON. The manifest fields are:
   - `from_oid`, `to_oid` — blob OIDs; only meaningful when `mode = "delta"`.
 - `carried` — (0.8.0, optional) paths already reviewed in a prior run and not
   re-reviewed in this chunk; include in reviewer context as "previously reviewed".
+- `chunk_index`, `chunks_total` — (chunked runs only) which chunk this is and
+  how many the run has. Absent in the single-context review.
 - `impact` — (0.9.0, optional) call sites of symbols this chunk changed, found
   by the gate with a deterministic search:
   `{symbols, sites: [{id, path, line, name, snippet}], dropped_symbols, truncated, unsupported}`.
