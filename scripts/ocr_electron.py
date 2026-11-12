@@ -165,35 +165,58 @@ def _diff_names(repo: str, a: str, b: str) -> List[str]:
     return [p for p in out.split("\0") if p]
 
 
-def _diff_map(repo: str, a: str, b: str) -> Tuple[Dict[str, Set[int]], Dict[str, Set[int]]]:
+def _diff_map(repo: str, a: str, b: str) -> Tuple[Dict[str, Set[int]], Dict[str, Set[int]], Dict[str, str]]:
     """Added/deleted line numbers per file for the range, via git diff -U0.
 
-    Added line numbers are relative to the file at B; deleted ones are
-    relative to the file at A (that is what callers compare against).
+    Added line numbers are relative to the file at B and keyed by its
+    B-side path; deleted ones are relative to the file at A and keyed by
+    its A-side path. Whole-file deletions ('+++ /dev/null') and renames
+    therefore keep their hunks instead of dropping out, so checks 3b and
+    4 can still read the file at A. The third return value maps the
+    B-side path to the A-side path for files both renamed and edited.
     """
     out, rc = _run_git(repo, ["diff", "-U0", "--no-prefix", "--no-color", a, b])
     added: Dict[str, Set[int]] = {}
     deleted: Dict[str, Set[int]] = {}
+    renames: Dict[str, str] = {}
     if rc != 0:
-        return added, deleted
-    cur: Optional[str] = None
+        return added, deleted, renames
+    old_cur: Optional[str] = None
+    new_cur: Optional[str] = None
+    in_headers = False  # '--- '/'+++ ' are headers only before the first hunk;
+    # content lines can legitimately start with '--- '/'+++ ' too
     for line in out.split("\n"):
-        if line.startswith("+++ "):
+        if line.startswith("diff --git"):
+            old_cur = new_cur = None
+            in_headers = True
+        elif in_headers and line.startswith("--- "):
             name = line[4:].split("\t")[0].strip()
-            cur = None if name == "/dev/null" else name
-            if cur is not None:
-                added.setdefault(cur, set())
-                deleted.setdefault(cur, set())
-        elif line.startswith("@@") and cur is not None:
+            old_cur = None if name == "/dev/null" else name
+        elif in_headers and line.startswith("+++ "):
+            name = line[4:].split("\t")[0].strip()
+            new_cur = None if name == "/dev/null" else name
+            in_headers = False
+            if new_cur is not None:
+                added.setdefault(new_cur, set())
+                deleted.setdefault(old_cur or new_cur, set())
+                if old_cur is not None and old_cur != new_cur:
+                    renames[new_cur] = old_cur
+            elif old_cur is not None:
+                # Whole-file deletion: keep the A-side path addressable so
+                # check 3b can see the removed registrations.
+                deleted.setdefault(old_cur, set())
+        elif line.startswith("@@"):
             m = _HUNK_RE.match(line)
             if m:
                 old_start, old_len = int(m.group(1)), int(m.group(2) or "1")
                 new_start, new_len = int(m.group(3)), int(m.group(4) or "1")
-                if old_len:
-                    deleted[cur].update(range(old_start, old_start + old_len))
-                if new_len:
-                    added[cur].update(range(new_start, new_start + new_len))
-    return added, deleted
+                if old_len and old_cur is not None:
+                    deleted.setdefault(old_cur, set()).update(
+                        range(old_start, old_start + old_len))
+                if new_len and new_cur is not None:
+                    added.setdefault(new_cur, set()).update(
+                        range(new_start, new_start + new_len))
+    return added, deleted, renames
 
 
 # ---------------------------------------------------------------------------
@@ -211,16 +234,26 @@ def _ext(path: str) -> str:
 
 def _handler_body(text: str, start: int) -> Optional[str]:
     """The callback body for an ipcMain registration starting after the
-    channel literal — None when the registration is a bare reference
-    (`ipcMain.on("ch", handler)` / statement ends before any brace) or the
-    braces never balance (v1 counts braces naively; strings and comments
+    channel literal — None when the registration has no inline callback:
+    the registration call's closing paren (or a ';') is reached before
+    any brace. That matches a bare reference (`ipcMain.on("ch", handler)`)
+    in ANY semicolon style — in ASI code there is no `;`, so the scan
+    must not roll into the next statement's block — or when the braces
+    never balance (v1 counts braces naively; strings and comments
     containing braces can perturb it, at worst widening the body).
     """
     i = start
     limit = min(len(text), start + 400)
+    depth = 1  # scanning begins inside the ipcMain.on( ... ) call
     while i < limit:
         c = text[i]
-        if c == "{":
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return None  # the call closed before any brace: bare reference
+        elif c == "{":
             depth = 0
             j = i
             end = min(len(text), i + MAX_HANDLER_BODY_CHARS)
@@ -272,7 +305,7 @@ def analyze(repo: str, range_str: str) -> Dict:
 
     changed_files = sorted(_diff_names(repo, a, b))
     result["changed_files"] = changed_files
-    added, deleted = _diff_map(repo, a, b)
+    added, deleted, renames = _diff_map(repo, a, b)
     if not changed_files:
         warnings.append("empty diff for range %s" % range_str)
 
@@ -379,12 +412,13 @@ def analyze(repo: str, range_str: str) -> Dict:
             repo_exports.add(m.group(1))
 
     for f in changed_code:
-        old = _read_at(repo, a, f)
+        old_path = renames.get(f, f)  # A-side path (renames included)
+        old = _read_at(repo, a, old_path)
         if old is None:
             continue
         removed_names: Set[str] = set()
         for m in EXPORT_DECL_RE.finditer(old):
-            if _line_of(old, m.start()) in deleted.get(f, set()):
+            if _line_of(old, m.start()) in deleted.get(old_path, set()):
                 removed_names.add(m.group(1))
         added_names: Set[str] = set()
         for m in EXPORT_DECL_RE.finditer(contents[f]):

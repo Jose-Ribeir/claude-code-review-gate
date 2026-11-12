@@ -44,6 +44,22 @@ def _valid_ident(name: str) -> bool:
     return bool(_IDENT_RE.match(name))
 
 
+def _valid_search_name(name: str, lang: str = "") -> bool:
+    """Identifier safety for names destined for git grep -F -e.
+
+    PowerShell's mandatory Verb-Noun convention (Get-Foo, Invoke-Build)
+    legitimately uses '-'; validate those with the dash folded to '_' —
+    mirroring the powershell branch of _regex_defs, so dashed names
+    survive to the impact analysis. Every other language keeps the
+    strict identifier rule.
+    """
+    if not name:
+        return False
+    if _valid_ident(name):
+        return True
+    return lang == "powershell" and _valid_ident(name.replace("-", "_"))
+
+
 def name_matches(query: str, candidate: str) -> bool:
     """Loose basename/stem match either way, so 'weekly-2026-11',
     'weekly-2026-11.md' and 'out/weekly-2026-11.md' name the same artifact.
@@ -73,10 +89,16 @@ def git_runner(cwd: str) -> Callable[[List[str]], Tuple[str, int]]:
     The callable never raises: exceptions become rc=1 with empty stdout.
     Leading whitespace on lines is preserved (snippets need indentation);
     only a single trailing newline is stripped.
+    Kimchi's per-session GIT_TRACE* env vars are scrubbed: they point at
+    temp dirs that vanish, and any git inheriting them dies with exit 128.
     """
+    # GIT_TRACE* scrub policy shared verbatim with ocr_janitor._scrub_env
+    # and ocr_forge._git_runner: drop every GIT_TRACE* key (see
+    # tests/conftest.py). Keep the three runners identical.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_TRACE")}
     # Paths passed as pathspecs come from the untrusted tree; a file named
     # ":(exclude)*" must be matched as a name, not parsed as pathspec magic.
-    env = dict(os.environ, GIT_LITERAL_PATHSPECS="1")
+    env["GIT_LITERAL_PATHSPECS"] = "1"
 
     def run(args: List[str]) -> Tuple[str, int]:
         try:
@@ -724,7 +746,11 @@ def _changed_symbols_inner(path, old_text, new_text, warnings):
             continue
         seen_keys.add((name, qualname))
 
-        if not _valid_ident(name):
+        # THIS is the drop site for unsearchable names (the twin guard in
+        # _regex_defs.add is benign — the powershell branch bypasses it).
+        # Dashed PowerShell names (Get-Foo) are kept: _regex_defs validated
+        # them with "-" -> "_", and git grep -F -e handles the dash fine.
+        if not _valid_search_name(name, lang):
             continue
 
         old_d = old_by_qual.get(qualname) or old_by_name.get(name)
@@ -971,6 +997,13 @@ def _find_references_inner(run, tip, symbols, *, is_context_allowed, max_sites, 
             args += ["-e", p]
         args += [tip, "--"]
         out, rc = run(args)
+        # git grep exit codes: 1 = no matches (fine), >1 = real error.
+        # An error must not silently look like an empty result (module
+        # contract: failures surface in the warnings list).
+        if rc > 1:
+            warnings.append(f"git grep importers of {def_file} failed (rc={rc}); "
+                            "tier-1 importer search skipped")
+            continue
         if rc != 0 or not out:
             continue
 
@@ -1001,7 +1034,8 @@ def _find_references_inner(run, tip, symbols, *, is_context_allowed, max_sites, 
             continue
 
         # Search for symbol names in those importer files
-        names = [s["name"] for s in syms if _valid_ident(s.get("name", ""))]
+        names = [s["name"] for s in syms
+                 if _valid_search_name(s.get("name", ""), lang or "")]
         if not names:
             continue
 
@@ -1012,6 +1046,10 @@ def _find_references_inner(run, tip, symbols, *, is_context_allowed, max_sites, 
                 name_args += ["-e", nm]
             name_args += [tip, "--"] + batch
             out2, rc2 = run(name_args)
+            if rc2 > 1:
+                warnings.append(f"git grep call sites in importers of {def_file} "
+                                f"failed (rc={rc2}); batch skipped")
+                continue
             if rc2 == 0 and out2:
                 for line in out2.splitlines():
                     parsed = _parse_grep_line(line, tip)
@@ -1028,13 +1066,21 @@ def _find_references_inner(run, tip, symbols, *, is_context_allowed, max_sites, 
                         tier1_files.add(fpath)
 
     # Tier 2: global search for all names
-    all_names = list({s["name"] for s in to_search if _valid_ident(s.get("name", ""))})
+    def _lang_of(sym):
+        return _EXT_LANG.get(os.path.splitext(
+            sym.get("defined_in", "") or "")[1].lower(), "")
+
+    all_names = list({s["name"] for s in to_search
+                      if _valid_search_name(s.get("name", ""), _lang_of(s))})
     if all_names:
         args2 = ["grep", "-n", "--null", "-w", "-F"]
         for nm in all_names:
             args2 += ["-e", nm]
         args2 += [tip, "--"]
         out3, rc3 = run(args2)
+        if rc3 > 1:
+            warnings.append(f"git grep global symbol search failed (rc={rc3}); "
+                            "tier-2 call-site search skipped")
         if rc3 == 0 and out3:
             # Map name -> every changed file defining it, for exclusion
             def_files_by_name: Dict[str, Set[str]] = {}
@@ -1421,6 +1467,10 @@ def _find_siblings_inner(run, tip, finding, *, push_paths, is_context_allowed,
     args = ["grep", "-n", "-F", "--null", "-e", sig, tip, "--"]
     out, rc = run(args)
 
+    # rc==1 means "no matches"; rc>1 is a real git failure and must not be
+    # mistaken for "no siblings" (contract: failures surface as warnings).
+    if rc > 1:
+        warnings.append(f"git grep sibling sweep failed (rc={rc}); sweep skipped")
     if rc != 0 and not out:
         return {"siblings": [], "warnings": warnings}
 
