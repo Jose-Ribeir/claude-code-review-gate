@@ -2460,8 +2460,12 @@ def _normalize_verdict(obj):
     if not isinstance(obj, dict) or not isinstance(obj.get("findings"), list):
         return None
     findings = []
+    dropped = 0
     for f in obj.get("findings") or []:
         if not isinstance(f, dict):
+            # Unreconstructable signal must never silently normalize to a
+            # pass: keep the drop visible and let it fail closed below.
+            dropped += 1
             continue
         if _is_intent_finding(f):
             # Contracted family, not a near miss to normalize: the
@@ -2490,8 +2494,19 @@ def _normalize_verdict(obj):
         findings.append(g)
     shaped = dict(obj)
     shaped["findings"] = findings
+    if dropped:
+        shaped["dropped_unparseable_findings"] = dropped
+        if not findings:
+            # Every entry was unparseable: no support for pass, warn or
+            # block -- the signal is unknowable, so fail closed.
+            shaped["verdict"] = "block"
     shaped.setdefault("status", "success")
-    shaped.setdefault("verdict", compute_verdict(shaped))
+    # The model's `verdict` key is advisory only (docstring above): recompute
+    # unconditionally, like _rescue_verdict, never `setdefault` it through.
+    # Sole exception, just decided above: every findings entry was
+    # unparseable, which compute_verdict cannot see -- fail closed.
+    shaped["verdict"] = ("block" if dropped and not findings
+                         else compute_verdict(shaped))
     shaped.setdefault("summary", _findings_summary(findings))
     return shaped
 
