@@ -554,9 +554,11 @@ the ledger fingerprint and had to change): one full re-review per active branch.
   `.review-gate` directory, file or symlink there can neither redirect a write nor
   plant a diff, and nothing tracked is excluded from review. They are removed when
   the run ends, and by the reaper for a run that died.
-- **A manifest is always written** (one `_build_review_manifest` replaces the two
-  duplicated builders): a small first push no longer uses the bare 0.7.0 command
-  line. With the plan unavailable the review is still manifest-less. The manifest
+- **A manifest is always written on the default path** (one `_build_review_manifest`
+  replaces the two duplicated builders): a small first push no longer uses the bare
+  0.7.0 command line. With the plan unavailable the review is still manifest-less —
+  as it is on the `OCR_PRECOMPUTED_DIFFS=0` rollback above, which restores the
+  manifest-less 0.9.x argv exactly, for one release. The manifest
   keeps `paths`, `renames`, `other_changed`, `files[]` (unchanged shape), `carried`
   and the impact / known-defect extras, and gains `items[]`
   (`kind: file_diff | unit_diff | context`; `file_diff` carries `path`, `old_path`,

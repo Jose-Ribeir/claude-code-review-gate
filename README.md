@@ -154,8 +154,10 @@ The gate assumes the commits being pushed are **untrusted input**:
   hard-denied, and `bash` is an **allowlist** — git read verbs (`diff`, `log`,
   `show`, `rev-parse`, `cat-file`, `blame`, `ls-files`, `grep`, `status`,
   `describe`, `merge-base`) plus `grep`/`rg`/`find`/`ls`/`wc`/`cat`/`head`/
-  `tail`/`sed -n`; everything else is denied with a reason naming what to do
-  instead (network clients, git write/network verbs, git escapes like
+  `tail` — deliberately NOT `sed`: sed's script language writes files
+  (`sed -n 'w /tmp/out' f`) and GNU sed executes the shell (`e` command,
+  `s///e` flag), so no flag can make it read-only; everything else is denied
+  with a reason naming what to do instead (network clients, git write/network verbs, git escapes like
   `-C`/`--git-dir`/`-c`, interpreters and package managers, and the
   `kimchi`/`claude` binaries themselves). Parsing is quote-tolerant
   (`git log --grep "git push"` allows; `bash -c "git push"` denies) and
