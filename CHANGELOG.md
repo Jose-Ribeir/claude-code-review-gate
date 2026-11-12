@@ -134,6 +134,56 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Reporting text fixes.** Failure and still-running messages no longer read
   as almost-done: wording was corrected so a failed or refused review is not
   mistaken for a nearly finished one.
+- **2026-11-12 review wave 2 — 299-finding cycle3 disposition** (commits
+  `00d4ea8`, `7dbf518`+`dec7bcd`, `2563706`, `6cb096d`, `28b4aa9`, `2f625e5`;
+  full ledger in `.kimchi/docs/disposition-299.md`):
+  - **Hook mode fails closed on unparseable stdin** (`scripts/review-gate.py`
+    ~10619): the `json.load` failure path can no longer reach the pass-through
+    exit; an unreadable payload blocks with a message naming the `OCR_FAIL_OPEN`
+    escape.
+  - **Push vetting closed three bypasses**: `_GIT_CMD` now treats `(`, `{`,
+    backtick and `$(` as command positions like `_REAL_PUSH`; every repeated
+    `-C <dir>` is resolved in order, not just the first; and `KIMCHI_BIN` is
+    honoured before PATH per its docstring (the companion fix-dependency list
+    for the claude port lives in `.kimchi/tickets/claude-parity-*.md`).
+  - **Reviewer-command guard denies `-o <dir>`** exactly as the long
+    `--output` form and as `extensions/review-gate-deny.ts` does.
+  - **Verdict contract hardening**: model `confidence` is coerced defensively
+    in both merge paths (non-numeric never raises); the `.ocr/config` advisory
+    check parses JSON instead of substring-matching "blocking"+"false";
+    timeout escalation text names the actually-fired per-call env knob; the
+    deep lane honours the rename contract instead of hardcoding `renames: []`;
+    `_flush_pending`'s timestamp float conversion is guarded per entry;
+    `_normalize_verdict` alignment fixes the t24 handoff items (`28b4aa9`).
+  - **86 low-tier findings in `scripts/review-gate.py`** fixed across t24
+    batches 1-2 (`7dbf518`, `dec7bcd`): shared `_env_int` floors/defaults for
+    all env-parsed caps, stale-lock identity re-check, reaping/mkdir/atomicity
+    races, non-atomic ledger writes now tmp+replace with `0o600`, orphan
+    placement single-sourced, chunk/ledger/run-record logic fixes and
+    docstring/hint text corrections; seven judgement-call items recorded
+    for-user and one truncated finding marked cannot-reproduce in
+    `.kimchi/docs/t24-low-ledger.md`.
+  - **ocr_impact / ocr_index / ocr_electron** (`2563706`): all three git
+    runners scrub `GIT_TRACE*`; git failures surface as warnings per the
+    documented contract; PowerShell `Verb-Noun` names survive impact analysis
+    (known_defects anchor re-pointed); result caps break the outer loop and
+    warn exactly once; deleted/renamed files are visible to electron checks
+    3b/4.
+  - **Hooks, installers, sync and config** (`6cb096d`): BSD-safe `dirname`
+    usage in `hooks/sh/gate-hook.sh`; the PowerShell hook's raw-payload
+    prefilter handles quote-spliced subcommands; uninstallers only restore
+    previous hook state while the current value is still ours and guard the
+    `pre-push.user` mv; `sync-local-install.py`'s `--check` ignore set matches
+    the copy step's EXCLUDE and `installed_plugins.json` is written atomically;
+    `rg_config`'s jira timeout accepts the README-documented JSON-number form.
+  - **Deep lane forwards `docs_context`/`arch_flags` to the docs-checker
+    manifest** (`2f625e5`), and bare fixture repos keep their empty refs dirs
+    in test fixtures.
+- **Architecture findings formally dismissed with a written plan**: the
+  Divergent Change/Shotgun Surgery module-smell and the `_SegState` Large Class
+  finding are dismissed as accepted structural debt; the split is ticketed in
+  `docs/architecture-split-proposal.md` (banner seams, module names, leaf-first
+  roll-out, and the ledger-orphaning warning for a full split).
 
 Context expansion beyond the diff ("v2"): the gate now spots what a change touches,
 collects the evidence deterministically, and reviews with that evidence in hand.
