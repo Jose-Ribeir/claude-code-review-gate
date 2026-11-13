@@ -48,7 +48,7 @@ import hashlib
 import io
 import json
 import os
-from collections import deque
+from collections import deque, namedtuple
 from typing import NamedTuple, Optional
 import re
 import shutil
@@ -4929,7 +4929,9 @@ def _supervise_run(state_path, run_id):
         rg_store.record_verdict(
             remote_id, tip, base, verdict, blocked, reasons,
             rg_store.record_commits(repo_root, base, tip),
-            intent=intent_extra)
+            intent=intent_extra,
+            coverage=_record_coverage(repo_root, base, tip),
+            branch=branch, content_keyed=not _coverage_v1())
     except Exception:
         pass
     record = _record_review(git_dir, tip, branch, mode, verdict, advisory, blocked, result, raw_name)
@@ -10488,6 +10490,306 @@ def _record_range_within(repo_root, rec, base):
     return rc == 0
 
 
+# --- content-keyed coverage (restack-a, 0.14.0 PR1) ---------------------------
+
+
+class CoverageSet(namedtuple("CoverageSet", "tip_tree commits patch_ids sha_only")):
+    """What a review of base..tip actually covered, keyed by content.
+
+    `patch_ids` maps commit SHA -> stable patch-id (`git patch-id --stable`):
+    the identity of a commit's DIFF, which survives a rebase. `sha_only` is
+    the commits no patch-id can vouch for (binary changes carry no readable
+    text diff), so only their SHA can cover them -- a restack rewrites it,
+    and the join must then refuse rather than skip.
+    """
+
+
+def _coverage_v1():
+    """OCR_COVERAGE_V1=1 restores the pre-change SHA-only join end to end."""
+    return os.environ.get("OCR_COVERAGE_V1", "").strip().lower() in ("1", "true", "yes")
+
+
+_SHA40_LINE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _tip_tree(repo_root, tip):
+    """The tree SHA at `tip`, or "" when it cannot be resolved."""
+    if not str(tip or "").strip():
+        return ""
+    out, rc = _git(["rev-parse", f"{tip}^{{tree}}"], cwd=repo_root)
+    return out.strip() if rc == 0 and out.strip() else ""
+
+
+def _commit_patch_id(repo_root, sha):
+    """The stable patch-id of `sha`'s diff against its (single) parent, or "".
+
+    Merges, root commits, empty diffs, and BINARY changes return "": a
+    patch-id computed over `Binary files ... differ` lines is a hash of a
+    placeholder, not of the content, so it must never vouch for coverage.
+    """
+    try:
+        sha = str(sha or "").strip()
+        if not sha:
+            return ""
+        out, rc = _git(["rev-list", "--parents", "-n", "1", sha], cwd=repo_root)
+        if rc != 0 or len(out.split()) != 2:
+            return ""      # root or merge: no single-parent diff to key on
+        # --numstat renders binary files as `-\t-\tpath`; any binary file
+        # makes the whole commit SHA-only (its pid hashes no real content).
+        num, rc = _git(["diff-tree", "-r", "--numstat", "--no-commit-id", "--root", sha],
+                       cwd=repo_root)
+        if rc != 0:
+            return ""
+        for line in num.splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 3 and parts[0] == "-" and parts[1] == "-":
+                return ""
+        diff = subprocess.run(
+            ["git", "diff-tree", "-p", "-r", "--no-commit-id", "--root", sha],
+            cwd=repo_root or None, capture_output=True, text=True, timeout=30,
+        )
+        if diff.returncode != 0 or not diff.stdout.strip():
+            return ""      # an empty diff has no patch-id
+        pid = subprocess.run(
+            ["git", "patch-id", "--stable"], input=diff.stdout,
+            capture_output=True, text=True, timeout=30,
+        )
+        if pid.returncode != 0:
+            return ""
+        tok = pid.stdout.split()
+        return tok[0] if tok else ""
+    except Exception:
+        return ""
+
+
+def _coverage_batch(repo_root, base, tip, commits):
+    """(patch_ids, sha_only) for the whole range in three batch pipes.
+
+    A per-commit loop costs 4 git spawns per commit -- 34 s on the 1000-commit
+    range of SPEC-09's full-history push, which delayed the verdict record
+    (and so the done state) past the hook's wait. The batch pipes produce
+    IDENTICAL patch-ids (verified against the per-commit `diff-tree -p |
+    patch-id --stable` form): `diff-tree --stdin` emits one patch per fed
+    commit, and `patch-id --stable` splits on the commit headers. Returns
+    (None, None) when any pipe fails -- the caller falls back to the loop.
+    """
+    rng = tip if (not str(base or "").strip()
+                  or str(base).strip() == _EMPTY_TREE) else f"{base}..{tip}"
+    # 1. parents: only a single-parent commit has one diff a patch-id keys
+    out, rc = _git(["rev-list", "--parents", rng], cwd=repo_root)
+    if rc != 0 or not out:
+        return None, None
+    single, rev_lines = set(), []
+    for line in out.splitlines():
+        parts = line.split()
+        if parts:
+            rev_lines.append(parts[0])
+            if len(parts) == 2:
+                single.add(parts[0])
+    if not rev_lines:
+        return None, None
+    rev = "\n".join(rev_lines) + "\n"
+    # 2. numstat: any binary file makes the whole commit SHA-only
+    binary = set()
+    try:
+        num = subprocess.run(
+            ["git", "diff-tree", "--stdin", "-r", "--numstat", "--root"],
+            input=rev, cwd=repo_root or None, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=60,
+        )
+        if num.returncode != 0:
+            return None, None
+        cur = ""
+        for line in num.stdout.splitlines():
+            if _SHA40_LINE.match(line):
+                cur = line.strip()
+                continue
+            parts = line.split("\t")
+            if len(parts) >= 3 and parts[0] == "-" and parts[1] == "-" and cur:
+                binary.add(cur)
+    except Exception:
+        return None, None
+    # 3. the stable patch-id per commit
+    pids = {}
+    try:
+        diff = subprocess.run(
+            ["git", "diff-tree", "--stdin", "-p", "-r", "--root"],
+            input=rev, cwd=repo_root or None, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=120,
+        )
+        if diff.returncode != 0:
+            return None, None
+        pid = subprocess.run(
+            ["git", "patch-id", "--stable"], input=diff.stdout,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=120,
+        )
+        if pid.returncode != 0:
+            return None, None
+        for line in pid.stdout.splitlines():
+            tok = line.split()
+            if len(tok) == 2:
+                pids[tok[1]] = tok[0]
+    except Exception:
+        return None, None
+    patch_ids, sha_only = {}, []
+    for sha in commits:
+        p = pids.get(sha) or ""
+        if p and sha in single and sha not in binary:
+            patch_ids[sha] = p
+        else:
+            sha_only.append(sha)
+    return patch_ids, sha_only
+
+
+def compute_coverage_set(repo_root, base, tip):
+    """CoverageSet for base..tip, or None when it cannot be enumerated.
+
+    Fail closed: an unreadable range or tip tree yields None, never a
+    partial set that could authorize half a range.
+    """
+    commits = rg_store.record_commits(repo_root, base, tip)
+    tip_tree = _tip_tree(repo_root, tip)
+    if not commits or not tip_tree:
+        return None
+    patch_ids, sha_only = _coverage_batch(repo_root, base, tip, commits)
+    if patch_ids is None:
+        # the batch pipes could not run (old git, odd repo): the per-commit
+        # loop computes the same set, just slower
+        patch_ids, sha_only = {}, []
+        for sha in commits:
+            pid = _commit_patch_id(repo_root, sha)
+            if pid:
+                patch_ids[sha] = pid
+            else:
+                sha_only.append(sha)
+    return CoverageSet(tip_tree=tip_tree, commits=commits,
+                       patch_ids=patch_ids, sha_only=sha_only)
+
+
+def _join_records(repo_root, remote, base):
+    """The verdict records a join may consult: passes, not blocked, whose
+    reviewed range contains this push's (record base is an ancestor of the
+    push base, per _record_range_within -- A4, no vacuous authorizations)."""
+    out = []
+    for rec in rg_store.records_for_remote(remote):
+        if str(rec.get("verdict") or "") != "pass" or rec.get("blocked"):
+            continue
+        if not _record_range_within(repo_root, rec, base):
+            continue
+        out.append(rec)
+    return out
+
+
+def _coverage_marker(git_dir, tip, base):
+    """Write the pass marker an adopted verdict deserves, and reap old ones."""
+    if not git_dir:
+        return
+    try:
+        marker = _marker_path(git_dir, tip, base)
+        _write_marker(marker, tip, "pass", False, "")
+        _reap_markers(git_dir, keep=marker)
+    except Exception:
+        pass
+
+
+def _coverage_join(repo_root, remote_id, base, tip, branch, git_dir=None):
+    """Join a push to previously-reviewed CONTENT; a note on success, "" if
+    the range must be reviewed.
+
+    Two joins, both all-or-nothing over the pushed range:
+      - fast path: some recorded pass has this push's exact tip TREE (a
+        restack rewrote every SHA but no content), and holds no sha_only
+        commits (those are keyed by a SHA the restack destroyed). The join
+        adopts the verdict for the new tip: same patch-ids, new SHAs, no
+        patch-id computation at all.
+      - general: every commit in the range is covered by a recorded pass
+        either through its patch-id (v2 records only -- a legacy record
+        cannot vouch for content it never keyed) or through its SHA (any
+        record, which is all a pre-fix record ever had).
+
+    A successful join writes the v2 record for the new tip (so the next push
+    joins on it directly) and the pass marker, then returns the note.
+    """
+    if _coverage_v1():
+        return ""
+    records = _join_records(repo_root, remote_id, base)
+    if not records:
+        return ""
+    tree = _tip_tree(repo_root, tip)
+    if not tree:
+        return ""
+    for rec in records:
+        if int(rec.get("protocol_version") or 0) != 2:
+            continue
+        if rec.get("sha_only"):
+            continue      # SHA-keyed commits cannot survive a rewrite
+        if str(rec.get("tip_tree") or "") != tree:
+            continue
+        commits = rg_store.record_commits(repo_root, base, tip)
+        if not commits:
+            return ""
+        try:
+            rg_store.record_verdict(
+                remote_id, tip, base, "pass", False, "", commits,
+                coverage={"tip_tree": tree,
+                          "patch_ids": list(rec.get("patch_ids") or []),
+                          "sha_only": []},
+                branch=branch)
+        except Exception:
+            return ""
+        _coverage_marker(git_dir, tip, base)
+        return ("review-gate: already-reviewed - identical content passed review at tip "
+                f"{str(rec.get('tip') or '')[:12]}; that verdict was adopted for this push.")
+    # General join: all-or-nothing over patch-ids first, SHAs as fallback.
+    cs = compute_coverage_set(repo_root, base, tip)
+    if cs is None:
+        return ""      # fail closed: an unenumerable range is an unreviewable one
+    pid_union, sha_union = set(), set()
+    for rec in records:
+        if int(rec.get("protocol_version") or 0) == 2:
+            pid_union.update(p for p in (rec.get("patch_ids") or [])
+                             if isinstance(p, str) and p)
+        sha_union.update(str(c) for c in (rec.get("commits") or []) if c)
+    new_pids, new_shas = [], []
+    for sha in cs.commits:
+        pid = cs.patch_ids.get(sha) or ""
+        if pid and pid in pid_union:
+            if pid not in new_pids:
+                new_pids.append(pid)
+        elif sha in sha_union:
+            if sha not in new_shas:
+                new_shas.append(sha)
+        else:
+            return ""      # one uncovered commit reviews the whole range
+    try:
+        rg_store.record_verdict(
+            remote_id, tip, base, "pass", False, "", cs.commits,
+            coverage={"tip_tree": tree, "patch_ids": sorted(new_pids),
+                      "sha_only": sorted(new_shas)},
+            branch=branch)
+    except Exception:
+        return ""
+    _coverage_marker(git_dir, tip, base)
+    return ("review-gate: already-reviewed - a recorded pass covers every commit in this "
+            "range (patch-ids/SHAs), so the duplicate review was skipped.")
+
+
+def _record_coverage(repo_root, base, tip):
+    """The coverage dict for a verdict record, or None when it could not be
+    computed -- coverage is an accelerator, never a reason to lose the record
+    itself (degrades to an empty v2 record the join simply cannot use)."""
+    try:
+        cs = compute_coverage_set(repo_root, base, tip)
+    except Exception:
+        return None
+    if cs is None:
+        return None
+    return {"tip_tree": cs.tip_tree,
+            "patch_ids": sorted(set(cs.patch_ids.values())),
+            "sha_only": sorted(set(cs.sha_only))}
+
+
 def _verdict_backing(common_dir, tip, base, remote_id, repo_root, push_range):
     """("ok"|"missing"|"corrupt"|"uncovered") -- does the external verdict
     store back the recorded state for this (remote, tip)?
@@ -11916,6 +12218,15 @@ def _main_inner(argv, mode):
         if note:
             _warn(note + _output_hints(git_dir, _findings_log_path(git_dir)))
         allow(note)
+
+    # Content-keyed coverage join (restack-a): a restack rewrites every SHA
+    # but no content, and the gate used to pay the full re-review for that.
+    # With the v2 record shape, a recorded pass over identical CONTENT can
+    # vouch for this push. OCR_COVERAGE_V1 restores the SHA-only behaviour.
+    if backing == "ok" and not force and push_range and not _coverage_v1():
+        joined = _coverage_join(repo_root, remote_id, base, tip, branch, git_dir=git_dir)
+        if joined:
+            allow(joined)
 
     session_id = str(payload.get("session_id") or "") if isinstance(payload, dict) else ""
     count = ""
