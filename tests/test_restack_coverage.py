@@ -277,6 +277,29 @@ def test_record_with_patch_ids_round_trips():
         rg_store.load_verdict("origin", "u" * 40)
 
 
+# --- the restack join's store scan survives a vanishing record --------------
+
+def test_records_for_remote_skips_records_that_vanish_mid_scan(monkeypatch):
+    rg_store.record_verdict("origin", "t" * 40, "b" * 40, "pass", False, "", [])
+    rg_store.record_verdict("origin", "u" * 40, "b" * 40, "pass", False, "", [])
+    real = rg_store._load_verdict_at
+    gone = rg_store.verdict_path("origin", "u" * 40)
+
+    def vanish(path):
+        # A record removed between the glob and the read (concurrent
+        # remove_verdict / in-flight replace / TTL prune; the store is
+        # machine-global) surfaces as FileNotFoundError -- None, not
+        # StoreError -- from _load_verdict_at.
+        if path == gone:
+            return None
+        return real(path)
+
+    monkeypatch.setattr(rg_store, "_load_verdict_at", vanish)
+    recs = rg_store.records_for_remote("origin")
+    assert None not in recs, "a vanished record landed in the join's scan output"
+    assert [r["tip"] for r in recs] == ["t" * 40]
+
+
 # --- binary commits: SHA coverage, never poison ------------------------------
 
 def test_binary_only_commit_falls_back_to_sha_coverage(repo):

@@ -209,9 +209,15 @@ def records_for_remote(remote):
         prefix = _remote_key(remote) + "-"
         for path in sorted((store_root() / "verdicts").glob(prefix + "*.json")):
             try:
-                out.append(_load_verdict_at(path))
+                rec = _load_verdict_at(path)
             except StoreError:
                 continue
+            # A record that vanished between the glob and the read (concurrent
+            # remove_verdict / in-flight replace / TTL prune; the store is
+            # machine-global) is FileNotFoundError -> None, not StoreError:
+            # skipping it here keeps None out of the join's record list.
+            if rec is not None:
+                out.append(rec)
     except Exception:
         return []
     return out

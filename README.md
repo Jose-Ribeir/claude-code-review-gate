@@ -147,8 +147,10 @@ The gate assumes the commits being pushed are **untrusted input**:
   (`git push <remote> <ref>)`. Unknown is never allowed.
 - The gate **fails closed**: a missing `python3`, a missing `kimchi` CLI, a
   crashed review, a timeout, or unparseable reviewer output blocks the push.
-  Three failed attempts put the tip in a sticky error state whose message
-  points at the doctor command.
+  A failed run is retried by the next push of the same tip (up to 3
+  attempts); past that the tip is `exhausted` — a loud block naming
+  `review-gate.py --reset-tip <tip>`, cleared only by that command or by
+  pushing a new tip.
 - **Invariant: a push that lands without gate output means the gate was
   absent — never infer a PASS from a landed push.** Silence is absence of
   approval, not approval.

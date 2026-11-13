@@ -286,6 +286,46 @@ def test_unverified_prior_stays_blocking_after_join(repo, tmp_path):
     assert "prior high finding" in rec["reasons"]
 
 
+# --- two uncovered commits, one file: the span covers both -------------------
+
+def test_two_uncovered_commits_same_file_full_span(repo, tmp_path):
+    _git(["switch", "-q", "-c", "feat"], cwd=repo)
+    _commit(repo, "f1.py")
+    _commit(repo, "f2.py")
+    env = _env(tmp_path)
+
+    decision, out = _run(repo, "git push -u origin feat", env)
+    assert decision == "pass", out
+    _await_record(repo, _sha(repo, "feat"))
+
+    _restack(repo)
+    # Two genuinely-new commits, both touching the same two files: g.py is
+    # ADDED by the first and extended by the second (its entry takes the
+    # committing-range branch); f1.py predates the uncovered commits and is
+    # modified by both (its entry takes the blob-pair branch).
+    (repo / "g.py").write_text("g-first\n")
+    (repo / "f1.py").write_text("f1\ntouch-one\n")
+    _git(["add", "."], cwd=repo)
+    _git(["commit", "-q", "-m", "add g.py, touch f1.py"], cwd=repo)
+    (repo / "g.py").write_text("g-first\ng-second\n")
+    (repo / "f1.py").write_text("f1\ntouch-one\ntouch-two\n")
+    _git(["add", "."], cwd=repo)
+    _git(["commit", "-q", "-m", "extend g.py, touch f1.py again"], cwd=repo)
+    tip = _sha(repo, "feat")
+
+    decision, out = _run(repo, "git push -u origin feat", env)
+    assert decision == "pass", out
+    traces = _trace(tmp_path)
+    assert len(traces) == 2, "the covered commits were re-reviewed"
+    items = traces[1].get("item_files") or {}
+    assert set(items) == {"review:g.py", "review:f1.py"}
+    # The incremental entry's span must cover the FIRST uncovered touch of a
+    # file through the tip blob -- never just the last commit's change to it.
+    assert "+g-first" in items["review:g.py"]
+    assert "+g-second" in items["review:g.py"]
+    assert "+touch-one" in items["review:f1.py"]
+    assert "+touch-two" in items["review:f1.py"]
+
 # --- a no-patch-id commit enters the range individually ----------------------
 
 def test_no_patchid_commit_reviews_itself_only_not_the_range(repo, tmp_path):

@@ -690,7 +690,7 @@ class ReviewGateError(Exception):
     NEVER fails open), and a malformed or unreadable verdict is a block,
     never an allow. That is the class of failure this module controls end
     to end. The recorded process-level escapes are enumerated in the module
-    header ("What still fails OPEN, in full") and in ADR 0002/0003: the
+    header ("What still fails OPEN, in full"): the
     deliberate "claude not found" bypass; the operator switches
     OCR_FAIL_OPEN=1 (one-shot) and OCR_ADVISORY=1 (permanent warn-only);
     and -- outside this code's reach -- a hook that fails to launch or gets
@@ -11256,11 +11256,13 @@ def _incremental_entries(repo_root, commits):
     """{path: entry} for the uncovered commits' own diffs, or None on failure.
 
     Each uncovered commit is diffed against its first parent (the empty tree
-    for a root) and merged oldest-first with later commits winning a path, so
-    the reviewer sees the first uncovered touch of a file through the last --
-    never a covered commit's change when the uncovered ones are contiguous,
-    and only that one commit's own diff when they are not. None (not {}) means
-    git could not enumerate a diff: the caller fails closed to the full range.
+    for a root) and merged oldest-first, a later commit winning only a path's
+    TIP side (old_oid / inc_parent stay the first uncovered touch's), so
+    the reviewer sees the first uncovered touch of a file through the last
+    -- never a covered commit's change when the uncovered ones are
+    contiguous, and only that one commit's own diff when they are not.
+    None (not {}) means git could not enumerate a diff: the caller fails
+    closed to the full range.
     """
     entries = {}
     for sha in commits:
@@ -11275,7 +11277,21 @@ def _incremental_entries(repo_root, commits):
             return None
         got, _warnings = _parse_diff_entries(raw_out, stat_out, [])
         for e in got:
-            entries[e["path"]] = dict(e, inc_commit=sha, inc_parent=parent)
+            prev = entries.get(e["path"])
+            if prev is None:
+                entries[e["path"]] = dict(e, inc_commit=sha, inc_parent=parent)
+            else:
+                # The path was already touched by an EARLIER uncovered commit:
+                # only the tip side moves. Keeping the first touch's base
+                # (old_oid / inc_parent) makes the entry's span cover first
+                # uncovered parent -> tip blob, so the incremental diff shows
+                # every uncovered commit's change to the file. Overwriting the
+                # whole entry (the previous behavior) kept only the LAST
+                # commit's pair and silently skipped the earlier commits'
+                # changes to it.
+                entries[e["path"]] = dict(e, old_oid=prev["old_oid"],
+                                          inc_parent=prev["inc_parent"],
+                                          inc_commit=sha)
     return entries
 
 
