@@ -401,7 +401,16 @@ POLL_S = 1.0
 HEARTBEAT_S = 10
 STALE_S = 45          # a supervisor silent this long is presumed dead
 LOCK_STALE_S = 60
-ATTEMPT_CAP = 3       # failed attempts before the sticky error state (port plan C1)
+ATTEMPT_CAP = 3       # failed attempts before the exhausted state (port plan C1, PR4)
+# PR4 (restack-d, spec Q4/Q10): a failed run in one of these classes is a
+# transient, environmental failure -- the next push for the same tip spawns
+# a fresh attempt while attempts < ATTEMPT_CAP. MARKER_TTL never replays a
+# deny for them; it only rate-limits respawns (a re-push inside the window
+# joins the in-flight attempt). Every other failure reason -- a machinery
+# error (review), a usage limit, an unreviewable range -- keeps the fail-closed
+# posture of ADR 0002: sticky for the TTL at the cap.
+_RETRIABLE_FAILURE_REASONS = frozenset(
+    {"budget", "timeout", "crash", "unparseable-output", "spawn"})
 
 # --- chunking / checkpoint (0.7.0) -------------------------------------------
 _CHUNK_THRESHOLD = _env_int("OCR_CHUNK_THRESHOLD", 15, floor=1)
@@ -4051,12 +4060,17 @@ def _drive_review(common_dir, repo_root, meta, mode, budget):
         s = st.get("state")
         now = time.time()
         # A non-terminal state from an older protocol is stale: start fresh.
-        if s in ("running", "claimed", "failed"):
+        if s in ("running", "claimed", "failed", "exhausted"):
             if int(st.get("protocol_version") or 0) < PROTOCOL_VERSION:
                 s = None  # treat as absent; fall through to (re)start
         if s == "done":
             if now - float(st.get("done_ts") or 0) < MARKER_TTL and not (force and not forced_once):
                 return st
+        elif s == "exhausted":
+            # PR4 (Q4/Q10): a retriable failure that burned its attempts is
+            # terminal for this tip. Only --reset-tip (equivalent to removing
+            # the state file) or a new tip clears it -- NOT OCR_FORCE_REVIEW.
+            return st
         elif s in ("running", "claimed"):
             beat = float(st.get("heartbeat_ts") or st.get("claimed_ts") or 0)
             if now - beat < STALE_S:
@@ -4080,6 +4094,22 @@ def _drive_review(common_dir, repo_root, meta, mode, budget):
                     if now - float(st.get("failed_ts") or 0) < 900:
                         return st
             if fresh and int(st.get("attempts") or 0) >= ATTEMPT_CAP and not (force and not forced_once):
+                # PR4 (Q4/Q10): a retriable failure at the cap is walled as
+                # `exhausted` -- the push that FINDS it (not the run that
+                # produced it: that one's caller is still observing its own
+                # failure, and its state must stay `failed` for the deny
+                # record). The transition is what makes the NEXT push deny
+                # with the reset instructions instead of restarting.
+                if (not forced_once
+                        and st.get("reason") in _RETRIABLE_FAILURE_REASONS):
+                    with _StateLock(state_path):
+                        st2 = _read_state(state_path) or {}
+                        if (st2.get("state") == "failed"
+                                and int(st2.get("attempts") or 0) >= ATTEMPT_CAP
+                                and st2.get("reason") in _RETRIABLE_FAILURE_REASONS):
+                            st2["state"] = "exhausted"
+                            _write_state(state_path, st2)
+                            st = st2
                 return st
             if forced_once:
                 return st  # the run THIS call started failed; retry on the next push, not now
@@ -4095,7 +4125,8 @@ def _drive_review(common_dir, repo_root, meta, mode, budget):
                 stale_pids = tuple(dict.fromkeys(
                     (list(pids) if isinstance(pids, list) else [])
                     + [st2.get("reviewer_pid"), st2.get("supervisor_pid")]))
-            attempts = int(st2.get("attempts") or 0) if st2.get("state") == "failed" else 0
+            attempts = int(st2.get("attempts") or 0) \
+                if st2.get("state") in ("failed", "exhausted") else 0
             if force:
                 attempts = 0
             run_id = _new_run_id()
@@ -4122,6 +4153,9 @@ def _drive_review(common_dir, repo_root, meta, mode, budget):
             new.update({"state": "failed", "failed_ts": time.time(),
                         "attempts": attempts + 1, "reason": "spawn",
                         "detail": f"could not start the review supervisor ({exc})"})
+            if attempts + 1 >= ATTEMPT_CAP:
+                # PR4: the spawn failure burned the last attempt.
+                new["state"] = "exhausted"
             _write_state(state_path, new)
             return new
 
@@ -4810,7 +4844,12 @@ def _supervise_run(state_path, run_id):
         failure = ("unreviewable", str(exc))
         result, ran, raw_name, chunks_new = None, False, "", progress["new"]
     except ReviewGateError as exc:
-        failure = ("review", str(exc))
+        # PR4: an unparseable reviewer answer is its own retriable class --
+        # distinct from a machinery error ("review") -- so the next push
+        # retries it inside ATTEMPT_CAP.
+        failure = ("unparseable-output"
+                   if (exc.is_parse_failure and not exc.is_timeout) else "review",
+                   str(exc))
         result, ran, raw_name, chunks_new = None, False, "", progress["new"]
     except BaseException as exc:  # noqa: BLE001 -- the file must always say why
         failure = ("crash", f"{type(exc).__name__}: {exc}")
@@ -4835,24 +4874,28 @@ def _supervise_run(state_path, run_id):
                 # attempts unchanged: a limit is not an attempt
             })
         elif failure[0] == "budget":
-            # Budget exhaustion: not an attempt; resume on next push.
-            # Preserve the chunks_done written by _run_chunked.
+            # PR4 (Q4/Q10): budget exhaustion is retriable -- progress with a
+            # failure now burns an attempt like every retriable failure. The
+            # resume-from-checkpoint behaviour itself is unchanged: the next
+            # push picks up the chunks_done _run_chunked already wrote.
             st.update({
                 "state": "failed", "failed_ts": time.time(),
+                "attempts": int(st.get("attempts") or 0) + 1,
                 "reason": "budget", "detail": _sanitize(failure[1], 1500),
-                # attempts unchanged; chunks_done already in state from _run_chunked
+                # chunks_done already in state from _run_chunked
             })
         elif failure[0] == "timeout":
-            # The timed-out chunk's files are marked: the next push splits it, so
-            # a timeout WITH completed chunks is progress toward a verdict, not
-            # an attempt that burns the cap. A timeout with zero completed
-            # chunks (a hung worker -- C2's fail-closed trio) is no progress at
-            # all and burns an attempt like any other failure, so a permanently
-            # stuck reviewer reaches the sticky error state instead of being
-            # retried forever.
+            # PR4 (Q4/Q10): a timeout is retriable and always burns one
+            # attempt, with or without completed chunks. (The timed-out
+            # chunk's files are still marked, so the next push splits them
+            # smaller and resumes from the checkpoint -- the progress itself
+            # is preserved in chunks_done; only the attempt accounting
+            # changed from the pre-PR4 "progress means no attempt" rule.) A
+            # permanently stuck reviewer therefore reaches the cap instead of
+            # being retried forever.
             st.update({
                 "state": "failed", "failed_ts": time.time(),
-                "attempts": int(st.get("attempts") or 0) + (1 if chunks_new == 0 else 0),
+                "attempts": int(st.get("attempts") or 0) + 1,
                 "reason": "timeout", "detail": _sanitize(failure[1], 1500),
             })
         elif failure[0] == "unreviewable":
@@ -4863,9 +4906,16 @@ def _supervise_run(state_path, run_id):
                 "reason": "unreviewable", "detail": _sanitize(failure[1], 1500),
             })
         else:
-            # Increment attempts only when no new chunks were reviewed.
+            # PR4 (Q4/Q10): a retriable failure (crash, unparseable output,
+            # spawn) always burns an attempt -- the next push for this tip
+            # retries it while attempts < ATTEMPT_CAP, and the push that
+            # finds the capped state walls it as `exhausted`. A machinery
+            # error ("review") keeps the pre-PR4 rule: it counts only when
+            # no new chunks were reviewed, so genuine progress still defers
+            # the cap.
             new_attempts = int(st.get("attempts") or 0) + (
-                1 if chunks_new == 0 else 0
+                1 if (failure[0] in _RETRIABLE_FAILURE_REASONS
+                      or chunks_new == 0) else 0
             )
             st.update({
                 "state": "failed", "failed_ts": time.time(),
@@ -10597,6 +10647,22 @@ def _failed_reason(st, mode):
     why = _sanitize(str(st.get("reason") or "error"), 40)
     detail = str(st.get("detail") or "")
     attempts = int(st.get("attempts") or 0)
+    if st.get("state") == "exhausted":
+        # PR4 (Q4/Q10): the retriable failure classes (budget, timeout, crash,
+        # unparseable output, spawn) ran out of attempts for this tip. The
+        # ONLY ways through are the reset flag -- equivalent to removing the
+        # state file -- or pushing a new tip; re-pushing the same one replays
+        # this state, and OCR_FORCE_REVIEW does not clear it.
+        tip = _sanitize(str(st.get("tip") or ""), 64)
+        return (
+            f"review-gate: the review of this tip is exhausted - it failed "
+            f"{attempts} times ({why}) and will not be retried automatically. "
+            "Nothing was approved.\n"
+            f"  Clear it with: python3 review-gate.py --reset-tip {tip}\n"
+            "  (equivalent to removing the state file; or push a new tip.)\n"
+            + "\n".join("  " + line for line in detail.splitlines()[:12])
+            + ("\n" if detail else "") + _bypass_hint(mode)
+        )
     if why == "limit":
         # Usage-limit failure: show chunk progress and reset time.
         cd = int(st.get("chunks_done") or 0)
@@ -10773,6 +10839,40 @@ def _print_telemetry_report(argv):
         return 1
     sys.stdout.write(f"{ocr_telemetry.telemetry_dir(common)} (last {days} day(s))\n\n")
     sys.stdout.write(ocr_telemetry.report(ocr_telemetry.load(common, days)) + "\n")
+    return 0
+
+
+def _reset_tip(argv):
+    """`review-gate.py --reset-tip <tip>` - clear a tip's exhausted/failed state.
+
+    Returns an exit code. PR4 (Q4/Q10): a retriable failure that burned its
+    attempts walls the tip as `exhausted`; this flag is the documented way
+    through -- equivalent to removing the state file(s) for that tip, and
+    nothing else. Standalone like --history: no review, no markers, no hook
+    payload. Exits 1 when nothing matched (the tip has no state to clear).
+    """
+    i = argv.index("--reset-tip")
+    if i + 1 >= len(argv):
+        _warn("usage: review-gate.py --reset-tip <tip>")
+        return 1
+    tip = argv[i + 1].strip()
+    repo_root = _repo_root()
+    common = _git_common_dir(repo_root)
+    if not common or not tip:
+        _warn("not inside a git repository, or no tip given - nothing to reset.")
+        return 1
+    try:
+        hits = [p for p in _async_dir(common).glob(f"*{tip}.json")
+                if p.name.endswith(f"{tip}.json")]
+    except OSError:
+        hits = []
+    if not hits:
+        _warn(f"no review state found for tip {tip[:12]} - nothing to reset.")
+        return 1
+    for p in hits:
+        _unlink(p)
+    _warn(f"cleared the review state for tip {tip[:12]} "
+          f"({len(hits)} file(s)) - the next push reviews it fresh.")
     return 0
 
 
@@ -11171,7 +11271,7 @@ def _async_note(path, info, session_id):
     if st is None:
         return ""  # mid-write; next call
     s = st.get("state")
-    if not st or s not in ("running", "claimed", "done", "failed"):
+    if not st or s not in ("running", "claimed", "done", "failed", "exhausted"):
         _unlink(path)
         return ""
     if s == "done":
@@ -11188,8 +11288,15 @@ def _async_note(path, info, session_id):
                else "Re-run the same `git push` to have it go through.")
         )
         return head + ("\n" + body if body else "")
-    if s == "failed":
+    if s in ("failed", "exhausted"):
         _unlink(path)
+        if s == "exhausted":
+            # PR4: the tip is walled; name the one way through.
+            return (
+                f"review-gate: the review of {label} is exhausted - it will not "
+                "be retried automatically. Nothing was approved. Clear it with "
+                "`review-gate.py --reset-tip <tip>` or push a new tip."
+            )
         return (
             f"review-gate: the review of {label} did NOT finish - it failed "
             f"({_sanitize(str(st.get('reason') or 'error'), 40)}), nothing was approved. "
@@ -11252,7 +11359,7 @@ def _mode_resume(argv):
         s = st.get("state")
         ts = float(st.get("done_ts") or st.get("failed_ts") or st.get("heartbeat_ts")
                    or st.get("claimed_ts") or 0)
-        if s not in ("running", "claimed", "done", "failed") or ts < cutoff:
+        if s not in ("running", "claimed", "done", "failed", "exhausted") or ts < cutoff:
             continue
         tip = _sanitize(str(st.get("tip") or ""), 40)[:7]
         branch = _sanitize(str(st.get("branch") or "?"), 80)
@@ -11264,6 +11371,9 @@ def _mode_resume(argv):
         elif s == "done":
             what = "finished: " + ("BLOCKED" if st.get("blocked") else
                                    _sanitize(str(st.get("verdict") or "?"), 20))
+        elif s == "exhausted":
+            what = ("exhausted (needs review-gate.py --reset-tip "
+                    f"{_sanitize(str(st.get('tip') or ''), 12)})")
         else:
             why = _sanitize(str(st.get("reason") or "error"), 40)
             cd, ct = st.get("chunks_done"), st.get("chunks_total")
@@ -11593,6 +11703,9 @@ def main(argv):
     # it never spawns a review, touches a marker, or needs a hook payload.
     if "--history" in argv:
         sys.exit(_print_history(argv))
+    if "--reset-tip" in argv:
+        # Standalone like --history: no review, no markers, no payload.
+        sys.exit(_reset_tip(argv))
     if "--dismiss" in argv:
         # Records a dismissal into .ocr/memory.jsonl -- the store's only write
         # path. Standalone like --history: no review, no markers, no payload.
@@ -11979,7 +12092,7 @@ def _main_inner(argv, mode):
     # budget deny for the same tip must not announce it a second time.
     _unlink(_gate_data_dir() / (PENDING_PREFIX + _marker_digest(session_id, repo_root, tip, "async")))
 
-    if st.get("state") == "failed":
+    if st.get("state") in ("failed", "exhausted"):
         if _fail_open_requested():
             _log_gate_skipped("failed_review", mode, repo_root, push_range)
             _warn(
