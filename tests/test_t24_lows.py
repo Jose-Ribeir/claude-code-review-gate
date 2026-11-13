@@ -316,3 +316,27 @@ def test_diff_exceeds_caps_measures_streamed_diff_not_vfall_back_sizes(monkeypat
     item2 = {"entry": {"lines": 10, "old_oid": "0" * 40, "new_oid": "b" * 40,
                        "path": "small.py"}, "mode": "full"}
     assert rg._diff_exceeds_caps(item2, ".") is False  # 100 < 16k
+
+
+# --- wave-3: a `<<` inside arithmetic or quoting is not a heredoc opener -----
+
+def test_shift_in_arithmetic_is_not_a_heredoc_opener():
+    # The old regex treated every `<<name` match on a line as an opener; a
+    # spurious marker with no terminator silently dropped the ENTIRE
+    # remainder of the command from the scanned text.
+    cmd = "echo $((n << bits))\ngit push origin main"
+    assert rg._strip_heredocs(cmd) == cmd
+
+
+def test_quoted_angle_brackets_are_not_a_heredoc_opener():
+    cmd = "echo 'x << y'\ngit push origin main"
+    assert rg._strip_heredocs(cmd) == cmd
+
+
+def test_two_openers_on_one_line_still_strip_both_bodies():
+    # The fix constrains what counts as an opener; it must not regress the
+    # real multi-opener shape.
+    cmd = "cat <<A <<B\nbody-a\nA\nbody-b\nB\necho done"
+    out = rg._strip_heredocs(cmd)
+    assert "body-a" not in out and "body-b" not in out
+    assert "echo done" in out

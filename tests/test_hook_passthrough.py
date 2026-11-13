@@ -622,3 +622,23 @@ def test_core_does_not_self_disable_on_a_spoofed_in_review_env(tmp_path):
     assert decision == "deny", proc.stdout
     # And the guard routing for non-push commands is preserved.
     _assert_passes(_run(argv, "git diff HEAD~1", OCR_IN_REVIEW="1"))
+
+
+@needs_bash
+def test_sh_adapter_ignores_shift_like_spans_and_still_sees_the_push_after():
+    # A spurious opener (`$((n << bits))`, quoted `'x << y'`) used to make
+    # the bash port drop the ENTIRE remainder of the command from the scanned
+    # text -- hiding a real push after it. The scanned text must stay intact.
+    for prefix in ("echo $((n << bits))", "echo 'x << y'"):
+        proc = _run([_BASH, _SH], prefix + "\ngit push --all")
+        decision, reason = parse_pretooluse(proc.stdout)
+        assert decision == "deny", (prefix, proc.stdout)
+        assert "could not parse push command" in reason, reason
+
+
+@needs_bash
+def test_sh_adapter_strips_both_bodies_of_two_openers_on_one_line():
+    # The opener rule got stricter; the genuine multi-opener shape must keep
+    # stripping both bodies (they are data, never code).
+    cmd = "cat <<A <<B\ncd /evil\ngit push --all\nA\ncd /evil\ngit push --all\nB\necho done"
+    _assert_passes(_run([_BASH, _SH], cmd))

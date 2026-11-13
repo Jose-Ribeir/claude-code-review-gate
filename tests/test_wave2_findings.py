@@ -168,3 +168,185 @@ def test_big_blob_small_diff_modified_file_is_not_flagged(tmp_path, monkeypatch)
     assert rg._diff_exceeds_caps(item, review_root=str(repo)) is False
     assert not [a for a in git_calls if a[:2] == ["cat-file", "-s"]], git_calls
     assert ["git", "diff", "--no-ext-diff", oid_old, oid_new] in popen_calls
+
+
+# --- wave-3: _streamed_diff_bytes failure/timeout parity with _git -----------
+
+def test_streamed_diff_bytes_times_out_on_a_hung_diff(monkeypatch):
+    import threading as _th
+    import time as _time
+
+    class _Hung:
+        def __init__(self):
+            self.killed = _th.Event()
+            self.stdout = self
+            self.returncode = None
+
+        def read(self, _n):
+            self.killed.wait(30)
+            return b""
+
+        def close(self):
+            pass
+
+        def kill(self):
+            self.killed.set()
+
+        def wait(self):
+            self.returncode = -9
+
+    proc = _Hung()
+    monkeypatch.setattr(rg, "subprocess_run_popen", lambda *a, **k: proc)
+    monkeypatch.setattr(rg, "_STREAMED_DIFF_TIMEOUT_S", 1)
+    started = _time.monotonic()
+    assert rg._streamed_diff_bytes("a" * 40, "b" * 40, "/x") == 0
+    assert _time.monotonic() - started < 20
+    assert proc.killed.is_set()
+
+
+def test_streamed_diff_bytes_returns_zero_on_a_midstream_oserror(monkeypatch):
+    class _Broken:
+        def __init__(self):
+            self.stdout = self
+            self.returncode = 0
+            self._n = 0
+
+        def read(self, _n):
+            self._n += 1
+            if self._n == 1:
+                return b"x" * 100
+            raise OSError("broken pipe")
+
+        def close(self):
+            pass
+
+        def kill(self):
+            pass
+
+        def wait(self):
+            self.returncode = 0
+
+    monkeypatch.setattr(rg, "subprocess_run_popen", lambda *a, **k: _Broken())
+    assert rg._streamed_diff_bytes("a" * 40, "b" * 40, "/x") == 0
+
+
+def test_subprocess_run_popen_forwards_create_no_window(monkeypatch):
+    captured = {}
+
+    class _P:
+        stdout = None
+
+    def fake_popen(argv, **kwargs):
+        captured.update(kwargs)
+        return _P()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    rg.subprocess_run_popen(["git", "diff"], cwd="/tmp")
+    assert captured.get("creationflags") == getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    assert captured.get("stderr") == subprocess.DEVNULL
+
+
+# --- wave-3: parked-note tmp zombies (sweep + single retry) ------------------
+
+def test_atomic_write_json_note_retries_past_a_same_name_zombie(tmp_path):
+    zombie = tmp_path / (f".tmp-{os.getpid()}-note-x")
+    zombie.write_text("zombie", encoding="utf-8")
+    rg._atomic_write_json_note(tmp_path, "note-x", '{"a": 1}')
+    assert json.loads((tmp_path / "note-x").read_text(encoding="utf-8")) == {"a": 1}
+    assert not zombie.exists()  # the retry unlinked it
+
+
+def test_pending_entries_sweeps_stale_tmp_zombies(tmp_path, monkeypatch):
+    import time as _time
+    monkeypatch.setattr(rg, "_gate_data_dir", lambda: tmp_path)
+    stale = tmp_path / (f".tmp-{os.getpid()}-{rg.PENDING_PREFIX}dead")
+    stale.write_text("{}", encoding="utf-8")
+    old = _time.time() - rg.MARKER_TTL - 60
+    os.utime(stale, (old, old))
+    fresh = tmp_path / ".tmp-999999-live"
+    fresh.write_text("x", encoding="utf-8")
+    rg._pending_entries()
+    assert not stale.exists(), "stale .tmp-* zombie must be swept"
+    assert fresh.exists(), "a fresh in-flight tmp must NOT be swept"
+
+
+def test_park_pending_survives_a_same_name_tmp_zombie(tmp_path, monkeypatch):
+    monkeypatch.setattr(rg, "_gate_data_dir", lambda: tmp_path)
+    name = rg.PENDING_PREFIX + rg._marker_digest("s1", "/repo", "h" * 40, "review")
+    (tmp_path / (f".tmp-{os.getpid()}-{name}")).write_text("zombie", encoding="utf-8")
+    rg._park_pending("s1", "/repo", "h" * 40)
+    entries = rg._pending_entries()
+    assert len(entries) == 1  # the note was still delivered, exactly once
+    assert entries[0][1]["head"] == "h" * 40
+    assert not (tmp_path / (f".tmp-{os.getpid()}-{name}")).exists()
+
+
+# --- wave-3: _async_dir store-unavailable warning fires once per process -----
+
+def test_async_dir_store_warning_fires_once_per_process(monkeypatch, capsys, tmp_path):
+    def _down(common_dir):
+        raise RuntimeError("store down")
+
+    monkeypatch.setattr(rg.rg_store, "async_dir", _down)
+    rg._WARNED_ONCE.discard("external-store")
+    d1 = rg._async_dir(str(tmp_path / "c1"))
+    d2 = rg._async_dir(str(tmp_path / "c2"))
+    assert d1 == tmp_path / "c1" / rg.ASYNC_DIR
+    assert d2 == tmp_path / "c2" / rg.ASYNC_DIR
+    err = capsys.readouterr().err
+    assert err.count("external state store") == 1, err
+
+
+# --- wave-3: _state_path glob/stat race hardening ----------------------------
+
+def test_state_path_skips_a_candidate_vanishing_between_glob_and_stat(monkeypatch, tmp_path):
+    from pathlib import Path as _Path
+
+    tip = "f" * 40
+    a = tmp_path / f"aaaa-{tip}.json"
+    b = tmp_path / f"bbbb-{tip}.json"
+    a.write_text("{}", encoding="utf-8")
+    b.write_text("{}", encoding="utf-8")
+    os.utime(a, (1000, 1000))  # older
+    os.utime(b, (2000, 2000))  # newest: would win without the race
+    monkeypatch.setattr(rg, "_async_dir", lambda common_dir: tmp_path)
+    real_stat = _Path.stat
+
+    def flaky(self, *args, **kwargs):
+        if self == b:
+            raise OSError("vanished between glob and stat")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(_Path, "stat", flaky)
+    # The vanished newest candidate is skipped; the survivor is still
+    # selected by the (mtime, str(path)) ordering instead of degrading to
+    # the default path.
+    assert rg._state_path("any", tip, base=None) == a
+
+
+def test_state_path_tie_breaks_on_mtime_then_path(monkeypatch, tmp_path):
+    tip = "e" * 40
+    a = tmp_path / f"aaaa-{tip}.json"
+    b = tmp_path / f"bbbb-{tip}.json"
+    a.write_text("{}", encoding="utf-8")
+    b.write_text("{}", encoding="utf-8")
+    os.utime(a, (1500, 1500))
+    os.utime(b, (1500, 1500))  # same mtime: str(path) decides, newest last
+    monkeypatch.setattr(rg, "_async_dir", lambda common_dir: tmp_path)
+    assert rg._state_path("any", tip, base=None) == b
+
+
+# --- wave-3: _arch_flags reuses an already-fetched entry list ----------------
+
+def test_arch_flags_with_entries_never_reenumerates_the_diff(monkeypatch):
+    def _boom(*a, **k):
+        raise AssertionError("_collect_diff_entries must not run when entries are given")
+
+    monkeypatch.setattr(rg, "_collect_diff_entries", _boom)
+    entries = [{"path": "package.json", "status": "M", "old_path": None}]
+    # _added_lines_by_path still needs git, which fails softly against this
+    # non-repo root -- the point here is only that the enumeration is NOT
+    # repeated.
+    out = rg._arch_flags("/nonexistent", "", "t" * 40, entries=entries)
+    assert out is None or isinstance(out, dict)
+    assert rg._arch_flags("/nonexistent", "", "t" * 40, entries=[]) is None

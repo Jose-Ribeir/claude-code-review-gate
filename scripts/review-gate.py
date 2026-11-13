@@ -728,6 +728,23 @@ def _warn(msg):
     sys.stderr.write("[review-gate] " + msg + "\n")
 
 
+_WARNED_ONCE = set()
+
+
+def _warn_once(key, msg):
+    """_warn, but at most once per process for the same key.
+
+    For warnings emitted by hot helpers on a persistent failure (a broken
+    external store fires once per _async_dir call -- several per push), where
+    hook stderr is surfaced to the user and dozens of identical lines is
+    spam, not signal.
+    """
+    if key in _WARNED_ONCE:
+        return
+    _WARNED_ONCE.add(key)
+    _warn(msg)
+
+
 def _git(args, cwd=None):
     try:
         out = subprocess.run(
@@ -1683,8 +1700,14 @@ def _latest_record_for_head(git_dir, head, cap=POST_SCAN_CAP):
 # The opener must END its line, bar a redirection or pipe/separator; a body is
 # dropped only when a terminator is actually found, since stripping to
 # end-of-command would delete the real commands after it.
+# The lookbehind rejects `<<` that is glued onto a word or sits inside
+# arithmetic/quoting (`$((n << bits))`, `a << b`) -- only a `<<` that starts
+# where a redirection operator can legally start (start-of-line, or after
+# whitespace or a command operator) may be an opener. Spurious openers are
+# doubly dangerous in this strip loop: an unmatched marker discards the
+# whole remainder of the command.
 _HEREDOC = re.compile(
-    r"""<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1(?=\s*(?:[0-9]*[<>|&;]|$))"""
+    r"""(?<![A-Za-z0-9_$()'"=<])<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1(?=\s*(?:[0-9]*[<>|&;]|$))"""
 )
 
 
@@ -3669,8 +3692,9 @@ def _async_dir(common_dir):
     try:
         return rg_store.async_dir(common_dir)
     except Exception as exc:
-        _warn(f"could not use the external state store ({exc}); "
-              "falling back to the in-repo async dir")
+        _warn_once("external-store",
+                   f"could not use the external state store ({exc}); "
+                   "falling back to the in-repo async dir")
         fallback = Path(common_dir) / ASYNC_DIR
         try:
             # rg_store.async_dir mkdirs its dir and callers write manifests
@@ -4352,6 +4376,7 @@ def _supervise_run(state_path, run_id):
                 # Rename pairs for the manifest's contract, fail-soft (the
                 # deep lane's whole discipline): no diff data, no renames --
                 # never a blocked push for a rename-table failure.
+                _entries = None
                 try:
                     _entries, _w = _collect_diff_entries(review_root, base, tip)
                     deep_renames = [[e["old_path"], e["path"]]
@@ -4362,11 +4387,13 @@ def _supervise_run(state_path, run_id):
                                                 deep_threshold, renames=deep_renames)
                 # docs-gate 02/01: the deep lane likewise feeds the docs context
                 # and the push-wide arch flags into its manifest -- escalation
-                # changes WHO reviews, never what the checker sees.
+                # changes WHO reviews, never what the checker sees. The flags
+                # ride on the SAME already-fetched entries (wave-3: the old
+                # call let _arch_flags re-enumerate the full base..tip diff).
                 deep_docs = _docs_context(review_root)
                 if deep_docs:
                     manifest["docs_context"] = deep_docs
-                    deep_flags = _arch_flags(review_root, base, tip)
+                    deep_flags = _arch_flags(review_root, base, tip, entries=_entries)
                     if deep_flags:
                         manifest["arch_flags"] = deep_flags
                 manifest_path = str(_async_dir(common_dir) / f"manifest-{run_id}-deep.json")
@@ -5502,6 +5529,7 @@ def _dismiss_finding(argv):
     args = argv[argv.index("--dismiss") + 1:]
     fid = ""
     glob = None
+    rationale = ""
     i = 0
     while i < len(args):
         if args[i] == "--glob":
@@ -5509,13 +5537,19 @@ def _dismiss_finding(argv):
             if glob is None:
                 _warn("--dismiss: --glob given with no pattern; ignoring it")
             i += 2
+        elif args[i] == "--rationale":
+            rationale = args[i + 1] if i + 1 < len(args) else ""
+            if not rationale:
+                _warn("--dismiss: --rationale given with no text; ignoring it")
+            i += 2
         elif not fid and not args[i].startswith("--"):
             fid = args[i]
             i += 1
         else:
             i += 1
     if not fid:
-        _warn("usage: review-gate.py --dismiss <finding-id> [--glob PATTERN]")
+        _warn("usage: review-gate.py --dismiss <finding-id> [--glob PATTERN] "
+              "[--rationale TEXT]")
         return 1
     repo_root = _repo_root()
     git_dir = _git_dir(repo_root)
@@ -5555,7 +5589,10 @@ def _dismiss_finding(argv):
         repo_root, dict(f, id=sid), glob=glob,
         context={"verdict": str(entry.get("verdict") or ""),
                  "head": str(entry.get("head") or ""),
-                 "branch": str(entry.get("branch") or "")})
+                 "branch": str(entry.get("branch") or ""),
+                 # Why this was judged incorrect (points at the ADR / commit
+                 # that settles the subject), for whoever audits the store.
+                 "rationale": str(rationale or "")})
     if record.get("error"):
         _warn(f"dismissal could not be recorded: {_sanitize(record['error'], 200)}")
         return 1
@@ -8175,7 +8212,7 @@ def _records_root(review_root):
     return None
 
 
-def _arch_flags(root, base, tip):
+def _arch_flags(root, base, tip, entries=None):
     """Push-wide architectural-change flags for the docs-checker, or None.
 
     Runs over EVERY changed entry of base..tip (dependency manifests, data
@@ -8183,11 +8220,17 @@ def _arch_flags(root, base, tip):
     flag detector must see them anyway). Returns {flags: [{family, path,
     detail}], records_root, note} when at least one of the five families
     fired; None (no manifest key) otherwise or on any error.
+
+    `entries`: an ALREADY-FETCHED _collect_diff_entries list for base..tip
+    (the deep lane fetches it to build deep_renames anyway); None fetches
+    here as before. Note a caller's base "" has not been folded to
+    _EMPTY_TREE -- a passed-in list is always used verbatim.
     """
     try:
-        if not base:
-            base = _EMPTY_TREE
-        entries, _warnings = _collect_diff_entries(root, base, tip)
+        if entries is None:
+            if not base:
+                base = _EMPTY_TREE
+            entries, _warnings = _collect_diff_entries(root, base, tip)
         if not entries:
             return None
         added = _added_lines_by_path(root, base, tip)
@@ -8485,31 +8528,74 @@ def _record_findings_for(item, new_by_path, orphans, active_paths, suppressed=No
     return _dedup_by_id(own + list(orphans) + carried)
 
 
+# Wall budget for the streamed diff count, matching _git's timeout=30 (the
+# call this measurement replaces could never hang longer than that).
+_STREAMED_DIFF_TIMEOUT_S = 30
+
+
 def _streamed_diff_bytes(old_oid, new_oid, review_root):
     """Byte length of `git diff --no-ext-diff old new` without holding the
-    diff in memory: streamed through a pipe and summed in 64k chunks. 0 on
-    any failure (the call sites treat 0 as 'cannot count' == under cap, per
-    the historic 'fail soft on git errors' convention of this check)."""
+    diff in memory: streamed through a pipe and summed in 64k chunks.
+
+    Parity contract with the _git() call this replaces: NEVER raises and
+    NEVER blocks longer than _STREAMED_DIFF_TIMEOUT_S -- 0 on any failure
+    (Popen-construction OSError, an OSError raised mid-stream by the read,
+    a wall-clock overrun on a hung diff, a nonzero diff exit). The read loop
+    runs on a daemon thread so the budget is enforced WITHOUT buffering the
+    whole diff in memory. The call sites treat 0 as 'cannot count' == under
+    cap, per the historic 'fail soft on git errors' convention of this
+    check."""
     try:
         popen = subprocess_run_popen(
             ["git", "diff", "--no-ext-diff", old_oid, new_oid],
             cwd=review_root)
     except OSError:
         return 0
-    total = 0
-    try:
-        while True:
-            chunk = popen.stdout.read(65536)
-            if not chunk:
-                break
-            total += len(chunk)
-    finally:
+    result = {}
+
+    def _drain():
+        try:
+            total = 0
+            while True:
+                chunk = popen.stdout.read(65536)
+                if not chunk:
+                    break
+                total += len(chunk)
+            result["total"] = total
+        # A broken pipe / IO error mid-stream is the same 'cannot count' as
+        # any other git failure; this thread must never propagate it.
+        except Exception:
+            result["failed"] = True
+
+    worker = threading.Thread(target=_drain, daemon=True)
+    worker.start()
+    worker.join(_STREAMED_DIFF_TIMEOUT_S)
+    if worker.is_alive():
+        # Budget spent on a hung diff: kill the child and fail soft.
+        try:
+            popen.kill()
+        except Exception:
+            pass
+        try:
+            popen.wait()
+        except Exception:
+            pass
         try:
             popen.stdout.close()
-        except OSError:
+        except Exception:
             pass
+        return 0
+    try:
+        popen.stdout.close()
+    except OSError:
+        pass
+    try:
         popen.wait()
-    return total if popen.returncode == 0 else 0
+    except Exception:
+        return 0
+    if result.get("failed") or "total" not in result:
+        return 0
+    return result["total"] if popen.returncode == 0 else 0
 
 
 def subprocess_run_popen(argv, cwd=""):
@@ -8517,7 +8603,12 @@ def subprocess_run_popen(argv, cwd=""):
     test seam can monkeypatch it without touching _git."""
     import subprocess as _sp
     return _sp.Popen(argv, cwd=cwd, stdout=_sp.PIPE,
-                     stderr=_sp.DEVNULL)
+                     stderr=_sp.DEVNULL,
+                     # Parity with _git (its comment): the supervisor runs
+                     # DETACHED_PROCESS with no console, so every console
+                     # child started without this flag gets its own window on
+                     # Windows -- one per streamed diff measurement.
+                     creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0))
 
 
 def _diff_exceeds_caps(item, review_root=""):
@@ -10945,6 +11036,43 @@ def _unlink(path):
         pass
 
 
+def _atomic_write_json_note(dirpath, name, text):
+    """Publish `text` as <dirpath>/<name> atomically (tmp + os.replace).
+
+    The tmp name is `.tmp-<pid>-<name>`: it must NOT match _pending_entries'
+    PENDING_PREFIX glob (a parked-note tmp would read as a live note), and
+    _pending_entries sweeps `.tmp-*` files older than the marker TTL, so a
+    kill between write and replace leaves a swept zombie instead of a
+    ghost note.
+
+    Created via os.open O_CREAT|O_EXCL at 0o600 from the start -- under the
+    shared data dir (D12) even the create-to-chmod window exposes the note
+    body. A FileExistsError means a same-named zombie from an earlier killed
+    process (or a recycled pid): it is superseded by THIS write, so it is
+    unlinked and the open retried exactly once; a second failure raises for
+    the caller's own swallow policy.
+    """
+    dirpath = Path(dirpath)
+    note = dirpath / name
+    tmp = dirpath / (f".tmp-{os.getpid()}-" + name)
+    for _attempt in range(2):
+        try:
+            fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            _unlink(tmp)  # stale same-name tmp; superseded by this write
+            continue
+        break
+    else:
+        raise FileExistsError(str(tmp))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+    except BaseException:
+        _unlink(tmp)
+        raise
+    os.replace(str(tmp), str(note))
+
+
 def _park_pending(session_id, repo_root, head, kind="review", extra=None):
     """Note that a review is recorded and has not been reported yet.
 
@@ -10973,20 +11101,10 @@ def _park_pending(session_id, repo_root, head, kind="review", extra=None):
         # a kill between write and replace (or a swallowed failed replace)
         # would otherwise leave a fully-valid JSON zombie that reads as a
         # live parked note although its atomic publish never completed.
-        note = data / name
-        tmp = data / (f".tmp-{os.getpid()}-" + name)
-        # Write with restrictive permissions from the start (os.open mode),
-        # not write-then-chmod: under the shared data dir (D12) even the
-        # create-to-chmod window exposes the note body.
-        text = json.dumps(body)
-        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(text)
-        except BaseException:
-            _unlink(tmp)
-            raise
-        os.replace(str(tmp), str(note))
+        # Write with restrictive permissions from the start (os.open mode
+        # inside the helper), not write-then-chmod: under the shared data dir
+        # (D12) even the create-to-chmod window exposes the note body.
+        _atomic_write_json_note(data, name, json.dumps(body))
     except Exception:
         pass  # a lost note costs a report, never a push
 
@@ -10999,6 +11117,19 @@ def _pending_entries():
     entry point somebody has to remember to run.
     """
     entries = []
+    cutoff = time.time() - MARKER_TTL
+    try:
+        # Sweep stale `.tmp-*` zombies left by _atomic_write_json_note (a
+        # kill between write and os.replace): never useful, and a recycled
+        # pid hitting the same name would otherwise wedge the retried open.
+        for stale in _gate_data_dir().glob(".tmp-*"):
+            try:
+                if stale.stat().st_mtime < cutoff:
+                    _unlink(stale)
+            except OSError:
+                _unlink(stale)
+    except Exception:
+        pass
     try:
         paths = sorted(
             _gate_data_dir().glob(f"{PENDING_PREFIX}*"),
@@ -11007,7 +11138,6 @@ def _pending_entries():
         )
     except Exception:
         return entries
-    cutoff = time.time() - MARKER_TTL
     for path in paths:
         try:
             if path.stat().st_mtime < cutoff:
@@ -11263,10 +11393,11 @@ def _async_note(path, info, session_id):
         # Atomic (tmp+replace) like _write_state: _pending_entries unlinks a
         # half-written note as 'never useful', which would kill the
         # still-running review announcement the rate-limit rewrite serves.
+        # The tmp name must NOT match the PENDING_PREFIX glob (the old
+        # `<name>.tmp-<pid>` did: a concurrent flusher swept the half-written
+        # tmp, and this process's os.replace then hit FileNotFoundError).
         p = Path(path)
-        tmp = p.with_name(p.name + f".tmp-{os.getpid()}")
-        tmp.write_text(json.dumps(info), encoding="utf-8")
-        os.replace(str(tmp), str(p))
+        _atomic_write_json_note(p.parent, p.name, json.dumps(info))
     except Exception:
         pass
     try:

@@ -79,16 +79,15 @@ Run once per repository you want gated. It installs three things:
    `OCR_IN_REVIEW=1`).
 
 Uninstall with `bash scripts/uninstall-kimchi-hook.sh` from inside the gated
-repository: it removes all three components and restores any pre-existing
-`.git/hooks/pre-push` it displaced — **with one guard**: it only ever touches an entry
-hook that is recognizably ours (it contains `review-gate.py`). If the current
-`pre-push` is NOT ours (a `pre-push` you replaced by hand — the natural way to
-disable the gate without uninstalling), the uninstaller prints
-`WARNING: <dir>/pre-push exists and is not ours; leaving it in place and
-keeping <dir>/pre-push.user untouched.` and leaves both your hook and the
-preserved `pre-push.user` exactly where they are. (`scripts/install-git-hook.sh` /
-`uninstall-git-hook.sh` are upstream holdovers that manage only the pre-push
-layer.)
+repository: it removes all three components; it restores a pre-existing
+`.git/hooks/pre-push` it displaced **unless** the current pre-push is not ours
+(no `review-gate.py` marker — e.g. a `pre-push` you replaced by hand, the
+natural way to disable the gate without uninstalling) — then it prints a
+warning (`WARNING: <dir>/pre-push exists and is not ours; leaving it in place
+and keeping <dir>/pre-push.user untouched.`), leaves that file in place, and
+leaves `pre-push.user` untouched.
+(`scripts/install-git-hook.sh` / `uninstall-git-hook.sh` are upstream
+holdovers that manage only the pre-push layer.)
 
 The explicit human escape is `git push --no-verify` (or `OCR_FAIL_OPEN=1`) —
 see the threat model above.

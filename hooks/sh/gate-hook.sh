@@ -239,11 +239,29 @@ strip_heredocs() {
     # Mirrors the finditer + per-opener loop of _strip_heredocs in
     # scripts/review-gate.py -- matching only the first opener leaves the
     # later bodies in `out`, still scanned for cds/pushes.
+    # An opener match is valid only where a redirection operator can legally
+    # start: preceded by start-of-line/whitespace/`&`/`|`/`;`/`{` -- i.e. NOT
+    # glued onto a word and not inside arithmetic or quoting (`$((n << bits))`,
+    # `echo 'a << b shift'`). And, mirroring _strip_heredocs, the marker must
+    # END its line bar a redirection or pipe/separator. A spurious marker is
+    # doubly dangerous in the loop below: when it has no terminator line, i
+    # runs to the end and the ENTIRE remainder of the command would silently
+    # drop out of `out` (never scanned for cds/pushes).
+    local _hd_re _tl_re _after _cand
+    _hd_re='(^|[^A-Za-z0-9_$()'"'"'"=<])<<-?[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)'
+    # Bash ERE has no lookahead: the 'ends its line bar a redirection or
+    # pipe/separator' trailer is checked against the text AFTER the consumed
+    # match, so a second opener's `<<` is never eaten mid-line.
+    _tl_re='^[[:space:]]*[0-9]*[><|&;]'
     openers=()
     rest="$line"
-    while [[ "$rest" =~ \<\<-?[[:space:]]*([A-Za-z_][A-Za-z0-9_]*) ]]; do
-      openers+=("${BASH_REMATCH[1]}")
-      rest="${rest#*"${BASH_REMATCH[0]}"}"
+    while [[ "$rest" =~ $_hd_re ]]; do
+      _cand="${BASH_REMATCH[2]}"
+      _after="${rest#*"${BASH_REMATCH[0]}"}"
+      if [ -z "${_after//[[:space:]]/}" ] || [[ "$_after" =~ $_tl_re ]]; then
+        openers+=("$_cand")
+      fi
+      rest="$_after"
     done
     [ "${#openers[@]}" -eq 0 ] && continue
     for marker in ${openers[@]+"${openers[@]}"}; do
