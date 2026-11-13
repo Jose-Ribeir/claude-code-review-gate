@@ -128,6 +128,18 @@ def test_sh_adapter_passes_through_a_command_embedding_a_quoted_push_string():
 
 
 @needs_bash
+def test_sh_adapter_strips_ALL_heredoc_bodies_opened_on_one_line():
+    # Parity with _strip_heredocs (scripts/review-gate.py, wave-2 finding):
+    # `cmd <<A <<B` opens TWO bodies on one line; the old bash port matched
+    # only the FIRST opener, leaving the second body ('cd /evil', a push
+    # shape) in the scanned text to be misread as code. Bodies are data.
+    cmd = "cat <<A <<B\ncd /evil\ngit push --all\nA\ncd /evil\ngit push --all\nB\necho done"
+    _assert_passes(_run([_BASH, _SH], cmd))
+    # The single-opener behavior the loop replaced still holds.
+    _assert_passes(_run([_BASH, _SH], "cat <<EOF\ncd /evil\ngit push --all\nEOF"))
+
+
+@needs_bash
 @pytest.mark.parametrize("cmd", [
     "git push --all",
     "git push --mirror",

@@ -664,10 +664,17 @@ def _history_limit():
 class ReviewGateError(Exception):
     """Raised to fail the gate closed (timeout, subprocess crash, parse error).
 
-    Nothing in this module fails open: a reviewer that cannot be launched
-    raises this error too (D9 of the port plan: a missing reviewer NEVER fails
-    open). The only fail-open path left is outside this code's reach: a hook
-    that fails to launch or gets killed is treated as non-blocking by the host.
+    No machine SIGNAL in this module fails open: a reviewer that cannot be
+    launched raises this error too (D9 of the port plan: a missing reviewer
+    NEVER fails open), and a malformed or unreadable verdict is a block,
+    never an allow. That is the class of failure this module controls end
+    to end. The recorded process-level escapes are enumerated in the module
+    header ("What still fails OPEN, in full") and in ADR 0002/0003: the
+    deliberate "claude not found" bypass; the operator switches
+    OCR_FAIL_OPEN=1 (one-shot) and OCR_ADVISORY=1 (permanent warn-only);
+    and -- outside this code's reach -- a hook that fails to launch or gets
+    killed, which the host treats as non-blocking. Those are operator
+    decisions and host behavior, not fail-open signal paths in this code.
     """
     def __init__(self, msg="", is_timeout=False, is_parse_failure=False):
         super().__init__(msg)
@@ -1194,11 +1201,14 @@ def _advisory_says_nonblocking(txt):
     the opposite -- a comment that SAYS blocking must stay on still contains
     both words. So the file must BE a JSON object with "blocking": false, or
     -- the graceful fallback for a config that does not parse as a JSON
-    object -- carry that exact pair verbatim. Any looser evidence is ignored
-    and a parse failure is silent: advisory lookups never break the gate."""
+    object -- carry that exact pair verbatim. Any looser evidence is ignored.
+    A parse failure is silent: the net covers every malformed input without
+    hanging the gate on pathological JSON -- json.loads raises RecursionError
+    (not ValueError) past ~1000 nesting levels -- so advisory lookups never
+    break the gate, only quietly decline to downgrade it."""
     try:
         obj = json.loads(txt)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, RecursionError):
         obj = None
     if isinstance(obj, dict):
         return obj.get("blocking") is False
@@ -1386,8 +1396,11 @@ def _record_review(git_dir, head_sha, branch, mode, verdict, advisory, blocked, 
     next run. Findings are stored verbatim (JSON-encoded, so control characters
     cannot escape the line); readers sanitize at print time.
 
-    One line, one buffered append per process, so concurrent adapters interleave
-    records rather than corrupting each other's.
+    One line per record, written as a single unbuffered O_APPEND
+    os.open/os.write sequence (write-per-record), so concurrent adapters
+    interleave records rather than corrupting each other's. Buffered writers
+    were dropped precisely because their ~8 KiB flush chunks could interleave
+    mid-record -- see the inline comment at the write site below.
     """
     if not git_dir:
         return None
@@ -6792,8 +6805,11 @@ def _prune_ledger(common_dir):
                 # SUBdir's mtime, not fp_dir's -- fold those in, or a dir of
                 # stale records whose timeout marks are fresh gets rmtree'd
                 # wholesale, deleting the retry throttle they provide.
+                # Same protection for 'resolutions': a resolution entry written
+                # after the dirs' records went stale must keep the fp dir alive
+                # (otherwise the resolution ledger entry vanishes with it).
                 mtimes = [fp_dir.stat().st_mtime]
-                for sub in ("timeouts", "seg", "dep"):
+                for sub in ("timeouts", "seg", "dep", "resolutions"):
                     try:
                         mtimes.append((fp_dir / sub).stat().st_mtime)
                     except OSError:
@@ -8469,6 +8485,41 @@ def _record_findings_for(item, new_by_path, orphans, active_paths, suppressed=No
     return _dedup_by_id(own + list(orphans) + carried)
 
 
+def _streamed_diff_bytes(old_oid, new_oid, review_root):
+    """Byte length of `git diff --no-ext-diff old new` without holding the
+    diff in memory: streamed through a pipe and summed in 64k chunks. 0 on
+    any failure (the call sites treat 0 as 'cannot count' == under cap, per
+    the historic 'fail soft on git errors' convention of this check)."""
+    try:
+        popen = subprocess_run_popen(
+            ["git", "diff", "--no-ext-diff", old_oid, new_oid],
+            cwd=review_root)
+    except OSError:
+        return 0
+    total = 0
+    try:
+        while True:
+            chunk = popen.stdout.read(65536)
+            if not chunk:
+                break
+            total += len(chunk)
+    finally:
+        try:
+            popen.stdout.close()
+        except OSError:
+            pass
+        popen.wait()
+    return total if popen.returncode == 0 else 0
+
+
+def subprocess_run_popen(argv, cwd=""):
+    """The one Popen call site for streamed git output; kept separate so the
+    test seam can monkeypatch it without touching _git."""
+    import subprocess as _sp
+    return _sp.Popen(argv, cwd=cwd, stdout=_sp.PIPE,
+                     stderr=_sp.DEVNULL)
+
+
 def _diff_exceeds_caps(item, review_root=""):
     """True when the gate's own size check says the skill capped this file's diff.
 
@@ -8497,16 +8548,12 @@ def _diff_exceeds_caps(item, review_root=""):
         out, rc = _git(["cat-file", "-s", new_oid], cwd=review_root)
         size = int(out) if rc == 0 and out.isdigit() else 0
     else:
-        # Blob sizes bound memory: this branch fires precisely on large
-        # over-cap files, so materializing the whole diff just to measure
-        # it is the wrong budget (finding 7524). Deliberate approximation:
-        # the sum of the two blobs is NOT the diff's byte size -- it
-        # over-counts similar files and under-counts contextual churn --
-        # so the cap trips a little more conservatively, which for a
-        # truncation signal is the acceptable direction.
-        out, rc = _git(["cat-file", "-s", old_oid, new_oid], cwd=review_root)
-        nums = [int(x) for x in out.split() if x.isdigit()] if rc == 0 else []
-        size = sum(nums) if len(nums) == 2 else 0
+        # Bounded-memory EXACT measurement: the diff streams through a pipe,
+        # read in 64k chunks and summed (the blob-sum of the previous unit
+        # over-counted modified files with small real diffs -- finding
+        # wave-2: 'per the docstring the cap applies to what the reviewer
+        # was handed: the delta diff').
+        size = _streamed_diff_bytes(old_oid, new_oid, review_root)
     return size > _TRUNC_MAX_BYTES
 
 
@@ -10922,13 +10969,23 @@ def _park_pending(session_id, repo_root, head, kind="review", extra=None):
         # unlinks a half-written note as 'never useful' -- a kill between
         # truncate and full write would silently drop the announcement this
         # note exists to deliver.
+        # The tmp name must NOT match _pending_entries' PENDING_PREFIX glob:
+        # a kill between write and replace (or a swallowed failed replace)
+        # would otherwise leave a fully-valid JSON zombie that reads as a
+        # live parked note although its atomic publish never completed.
         note = data / name
-        tmp = note.with_name(note.name + f".tmp-{os.getpid()}")
-        tmp.write_text(json.dumps(body), encoding="utf-8")
+        tmp = data / (f".tmp-{os.getpid()}-" + name)
+        # Write with restrictive permissions from the start (os.open mode),
+        # not write-then-chmod: under the shared data dir (D12) even the
+        # create-to-chmod window exposes the note body.
+        text = json.dumps(body)
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
-            os.chmod(tmp, 0o600)
-        except OSError:
-            pass
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(text)
+        except BaseException:
+            _unlink(tmp)
+            raise
         os.replace(str(tmp), str(note))
     except Exception:
         pass  # a lost note costs a report, never a push

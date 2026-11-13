@@ -276,20 +276,43 @@ def test_reanchor_prefers_the_occurrence_nearest_the_stale_line(monkeypatch):
     assert ok3 and (f3["start_line"], f3["end_line"]) == (1, 1)
 
 
-def test_diff_exceeds_caps_measures_blob_sizes_not_the_painted_diff(monkeypatch):
-    """7524: bounded-memory measurement via cat-file -s; conservative over count."""
+def test_diff_exceeds_caps_measures_streamed_diff_not_vfall_back_sizes(monkeypatch):
+    """7524 (wave-2 re-review): bounded-memory measurement via a STREAMED
+    git diff (no in-memory buffer, no blob-sum over-count). Big blobs with a
+    small painted diff stay below the cap; a genuinely huge diff exceeds."""
+    import io, subprocess
+
+    class _FakeProc:
+        def __init__(self, payload):
+            self.stdout = subprocess.PIPE if False else __import__("io").BytesIO(payload)
+            self.returncode = 0
+        def wait(self):
+            return 0
+
     calls = []
+    popen_calls = []
     def fake_git(a, cwd=None):
         calls.append(a)
-        if a[:2] == ["cat-file", "-s"]:
-            return "\n".join("9000" for _ in a[2:]), 0
-        return "", 0
+        return "", 1  # cat-file count path never reached in this branch now
     monkeypatch.setattr(rg, "_git", fake_git)
+
+    # Small real diff over large blobs "a"→"b": under cap.
+    monkeypatch.setattr(rg, "subprocess_run_popen",
+                        lambda argv, cwd=None: popen_calls.append(argv) or _FakeProc(b"diff junk"))
     item = {"entry": {"lines": 10, "old_oid": "a" * 40, "new_oid": "b" * 40,
                       "path": "big.py"}, "mode": "full"}
-    assert rg._diff_exceeds_caps(item, ".") is True   # 9000+9000 > 16k
-    assert calls and calls[-1][0] == "cat-file"                # no in-memory diff
+    assert rg._diff_exceeds_caps(item, ".") is False
+    assert popen_calls and popen_calls[0][0] == "git"
+    assert not calls  # no cat-file -s blob-sum fallback
+
+    # Genuinely huge streamed diff: exceeds the cap.
+    monkeypatch.setattr(rg, "subprocess_run_popen",
+                        lambda argv, cwd=None: _FakeProc(b"x" * (rg._TRUNC_MAX_BYTES + 1)))
+    assert rg._diff_exceeds_caps(item, ".") is True
+
+    # New-file branch still uses cat-file -s (new blob IS the whole review
+    # payload; no old/new pair to diff against).
+    monkeypatch.setattr(rg, "_git", lambda a, cwd=None: ("100", 0))
     item2 = {"entry": {"lines": 10, "old_oid": "0" * 40, "new_oid": "b" * 40,
                        "path": "small.py"}, "mode": "full"}
-    monkeypatch.setattr(rg, "_git", lambda a, cwd=None: ("100", 0))
     assert rg._diff_exceeds_caps(item2, ".") is False  # 100 < 16k
