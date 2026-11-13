@@ -77,6 +77,18 @@ def _remote_key(remote):
     return hashlib.sha256(str(remote or "").encode("utf-8", "replace")).hexdigest()[:12]
 
 
+_HEX40 = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _dedup_strs(values):
+    """A coverage list as the store writes it: str-only, non-empty, sorted, deduped.
+
+    A stray non-str entry is dropped rather than failing the write (coverage
+    is a join accelerator, never a reason to lose the verdict itself).
+    """
+    return sorted({str(v) for v in (values or []) if isinstance(v, str) and v})
+
+
 def verdict_path(remote, tip):
     """The verdict record for (remote, tip). `remote` is the push remote URL
     when it can be resolved (see remote_url), the name otherwise."""
@@ -84,7 +96,7 @@ def verdict_path(remote, tip):
 
 
 def record_verdict(remote, tip, base, verdict, blocked, reasons, commits, note="",
-                   intent=None):
+                   intent=None, coverage=None, branch="", content_keyed=True):
     """Write the verdict record for (remote, tip) with its covered commit set.
 
     `intent` is an optional extras dict recording the intent context the
@@ -92,6 +104,12 @@ def record_verdict(remote, tip, base, verdict, blocked, reasons, commits, note="
     notes) -- provenance for a later before/after quality study. The store
     tolerates extra keys at protocol_version 1, so this adds NO version bump,
     and load_verdict tolerates its absence in older records.
+
+    `coverage` (restack-a, protocol_version 2) keys the record by CONTENT as
+    well as SHA: the tip's tree hash and the stable patch-id of every commit
+    in the range, so a restack that rewrites every SHA but no content still
+    joins this verdict. `content_keyed=False` writes the exact v1 shape
+    (OCR_COVERAGE_V1: the rollback switch).
     """
     commits = [str(c) for c in (commits or [])][:_MAX_COMMITS]
     record = {
@@ -107,6 +125,16 @@ def record_verdict(remote, tip, base, verdict, blocked, reasons, commits, note="
         "ts": _now(),
         "protocol_version": 1,
     }
+    if content_keyed:
+        cov = coverage if isinstance(coverage, dict) else {}
+        tip_tree = str(cov.get("tip_tree") or "")
+        if not _HEX40.match(tip_tree):
+            tip_tree = ""      # anything not a real tree hash fails to "no tree"
+        record["protocol_version"] = 2
+        record["tip_tree"] = tip_tree
+        record["patch_ids"] = _dedup_strs(cov.get("patch_ids"))
+        record["sha_only"] = _dedup_strs(cov.get("sha_only"))
+        record["branch"] = str(branch or "")
     if intent is not None:
         # An extras dict, copied so a later caller-side mutation cannot reach
         # into the record. A stray non-dict value is kept as text rather than
@@ -121,7 +149,12 @@ def load_verdict(remote, tip):
     Raises StoreError when a record EXISTS but is corrupt, partial, or
     unparseable -- the caller must DENY (never parse-or-allow).
     """
-    path = verdict_path(remote, tip)
+    return _load_verdict_at(verdict_path(remote, tip))
+
+
+def _load_verdict_at(path):
+    """load_verdict for an explicit record path (records_for_remote scans
+    the store by remote key, so it cannot go through (remote, tip))."""
     try:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -142,9 +175,46 @@ def load_verdict(remote, tip):
             raise StoreError(f"verdict record is partial (missing {field!r})")
     if not isinstance(data["commits"], list):
         raise StoreError("verdict record has a malformed covered commit set")
-    if int(data.get("protocol_version") or 0) != 1:
+    try:
+        version = int(data.get("protocol_version") or 0)
+    except (TypeError, ValueError):
+        raise StoreError("verdict record is from an unknown protocol version") from None
+    if version not in (1, 2):
         raise StoreError("verdict record is from an unknown protocol version")
+    if version == 2:
+        # v2 adds the content-keyed coverage the restack join depends on. A
+        # record that claims v2 without it is corrupt by definition, exactly
+        # like a record missing `commits`: it cannot vouch for what it never
+        # recorded, so it must DENY rather than degrade to a SHA-only join.
+        for field in ("tip_tree", "patch_ids", "sha_only"):
+            if field not in data:
+                raise StoreError(f"verdict record is partial (missing {field!r})")
+        if not isinstance(data["tip_tree"], str) \
+                or not isinstance(data["patch_ids"], list) \
+                or not isinstance(data["sha_only"], list):
+            raise StoreError("verdict record has malformed coverage fields")
     return data
+
+
+def records_for_remote(remote):
+    """Every verdict record for `remote` (any tip), skipping corrupt ones.
+
+    The restack join scans the whole ledger for the remote rather than the
+    one (remote, tip) slot a re-push lands in. A corrupt record authorizes
+    nothing (the direct lookup DENIES), but it must not blind the scan to
+    the usable records beside it -- so it is skipped, not fatal.
+    """
+    out = []
+    try:
+        prefix = _remote_key(remote) + "-"
+        for path in sorted((store_root() / "verdicts").glob(prefix + "*.json")):
+            try:
+                out.append(_load_verdict_at(path))
+            except StoreError:
+                continue
+    except Exception:
+        return []
+    return out
 
 
 def covers(record, commits):
