@@ -86,6 +86,18 @@ PROMPT = "/skill:review --unpushed --json"
 # the gate used to.
 PROMPT_RANGE = "/skill:review --range {rng} --json"
 
+# restack-b: an incremental (partial) review sees only the uncovered commits.
+# The reviewer must know that, or it will judge the fragment as if it were
+# the whole change -- so it is told to recover context with Grep/Read instead
+# of assuming it has it (spec: "Incremental review and verdict combination").
+_PARTIAL_REVIEW_NOTE = (
+    "\n\nCONTEXT: this is a PARTIAL re-review after a restack. The --range names "
+    "only the commits that are new to review; the rest of the branch was already "
+    "reviewed under previous commit SHAs and is NOT part of this review. Do not "
+    "assume you are seeing the whole change: use Grep and Read on the repository "
+    "to recover whatever context around these commits you need."
+)
+
 # The plugin's own root (scripts/.. == the plugin dir). Passed explicitly so the
 # review skill still resolves when we skip user settings below.
 _PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -3242,13 +3254,15 @@ def _timeout_knob(override, used):
 
 def _run_review(repo_root, mode, git_dir=None, head_sha="", push_range="",
                 paths_file=None, timeout=None, raw_tag="", resolve_file=None,
-                tier="", common_dir=None):
+                tier="", common_dir=None, partial=False):
     """_run_review_once, timed into the run log.
 
     tier is one of ocr_telemetry's v2 tier names when this call IS that
     tier's model call (the fast lane's tier-1 review, the deep lane's tier-2
     pass) and lands a per-tier cost record; "" for calls that are not one of
-    the four tiers (resolver/recheck), which record nothing."""
+    the four tiers (resolver/recheck), which record nothing. partial=True
+    appends the restack-b partial re-review note to the prompt (the range
+    names only the uncovered commits; the reviewer must Grep for context)."""
     kind = ("recheck" if "recheck" in raw_tag else "resolve") if resolve_file else "review"
     started = time.monotonic()
     outcome = "error"
@@ -3256,7 +3270,8 @@ def _run_review(repo_root, mode, git_dir=None, head_sha="", push_range="",
     try:
         out = _run_review_once(repo_root, mode, git_dir, head_sha, push_range,
                                paths_file=paths_file, timeout=timeout,
-                               raw_tag=raw_tag, resolve_file=resolve_file)
+                               raw_tag=raw_tag, resolve_file=resolve_file,
+                               partial=partial)
         outcome = "ok" if out[1] else "skipped"
         return out
     except ReviewLimitError:
@@ -3366,7 +3381,8 @@ def _worker_invocation(default_args_builder, missing_message):
 
 
 def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
-                     paths_file=None, timeout=None, raw_tag="", resolve_file=None):
+                     paths_file=None, timeout=None, raw_tag="", resolve_file=None,
+                     partial=False):
     """Return (result_dict, True, raw_archive_name) on success.
 
     paths_file: path to a chunk manifest JSON; if given, --paths-file is added
@@ -3415,6 +3431,8 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
         prompt = f'{base_prompt} --paths-file "{pf_fwd}" --json{_reminder}'
     else:
         prompt = (PROMPT_RANGE.format(rng=push_range) if push_range else PROMPT) + _reminder
+    if partial:
+        prompt += _PARTIAL_REVIEW_NOTE
     cmd = [kimi, "-p", prompt] + args
     if stub:
         # Range is always last so stub's sys.argv[-1] still gives the range.
@@ -4267,6 +4285,14 @@ def _supervise_run(state_path, run_id):
     mode = st.get("mode") or "hook"
     tier = st.get("tier") or "fast"   # lane recorded at claim time (t10)
     common_dir = common_dir_of(state_path)
+    # restack-b: an incremental review (the push is partially covered by
+    # recorded passes) reviews only the uncovered commits. The hook computed
+    # the view and stashed it here; OCR_COVERAGE_V1 re-checked because the
+    # env can change between the hook and this supervisor.
+    inc_commits = [str(c) for c in (st.get("inc_commits") or []) if str(c).strip()]
+    inc_range = str(st.get("inc_range") or "")
+    inc_span = str(st.get("inc_span") or "")
+    inc = bool(inc_commits and inc_range) and not _coverage_v1()
     now = time.time()
     # The deep pass's own wall-clock budget replaces the reviewer timeout:
     # browsing past OCR_DEEP_TIMEOUT is a normal timeout failure, retried.
@@ -4338,6 +4364,21 @@ def _supervise_run(state_path, run_id):
         force_review = os.environ.get("OCR_FORCE_REVIEW", "").strip().lower() in ("1", "true", "yes")
         fp = _compute_fingerprint(review_root, tip)
         _TELE.update(fp=fp, fp_parts=_fingerprint_parts(review_root, tip))
+        # The incremental entries: None fails closed to the full range (an
+        # unenumerable diff is an unreviewable one); {} is a legitimate
+        # nothing-to-review (an uncovered empty/binary-only commit).
+        inc_entries = _incremental_entries(review_root, inc_commits) if inc else {}
+        if inc and inc_entries is None:
+            inc = False
+        if inc:
+            _TELE["inc"] = {"commits": len(inc_commits), "files": len(inc_entries),
+                            "range": inc_range}
+        # What the reviewer is told (the incremental range), and the git range
+        # the resolver's added-side evidence is checked against (the span:
+        # never narrower than the uncovered commits).
+        review_range = inc_range if inc else push_range
+        evidence_range = (inc_span or push_range) if inc else push_range
+        partial = bool(inc)
         _prune_ledger(common_dir)
         # The deep lane (t10) skips the planner, chunking, segmentation and
         # the ledger wholesale: ONE deep-reviewer pass interrogates the whole
@@ -4348,6 +4389,11 @@ def _supervise_run(state_path, run_id):
         plan, planner_warnings = (
             (None, []) if tier == "deep"
             else _plan_review(review_root, base, tip, common_dir, fp, push_ref=push_ref))
+        if inc and plan:
+            # restack-b: the incremental review covers only the uncovered
+            # commits' files; everything else is covered content and is never
+            # re-reviewed (a kept carry item's owed findings still replay).
+            plan = _incremental_plan(plan, inc_entries)
         _TELE["plan"] = [
             {"path": p["entry"]["path"], "mode": p["mode"],
              "miss_reason": p.get("miss_reason") or "",
@@ -4369,20 +4415,27 @@ def _supervise_run(state_path, run_id):
             # git diff failed OR no allowed files: fall back to single-context
             # (0.7.0 path) -- or, in the deep lane, THE pass.
             if tier == "deep":
-                deep_paths = [p for p in _push_paths({"repo_root": review_root, "tip": tip,
-                                                      "base": base, "range": push_range})
-                              if _is_allowed_path(p)]
+                if inc:
+                    deep_paths = [p for p in sorted(inc_entries) if _is_allowed_path(p)]
+                    deep_renames = [[e["old_path"], e["path"]]
+                                    for e in inc_entries.values() if e.get("old_path")]
+                    _entries = None
+                else:
+                    deep_paths = [p for p in _push_paths({"repo_root": review_root, "tip": tip,
+                                                          "base": base, "range": push_range})
+                                  if _is_allowed_path(p)]
+                    _entries, _w = _collect_diff_entries(review_root, base, tip)
+                    deep_renames = [[e["old_path"], e["path"]]
+                                    for e in (_entries or []) if e.get("old_path")]
                 _globs, deep_threshold = _risk_config(review_root)
                 # Rename pairs for the manifest's contract, fail-soft (the
                 # deep lane's whole discipline): no diff data, no renames --
                 # never a blocked push for a rename-table failure.
-                _entries = None
-                try:
-                    _entries, _w = _collect_diff_entries(review_root, base, tip)
-                    deep_renames = [[e["old_path"], e["path"]]
-                                    for e in (_entries or []) if e.get("old_path")]
-                except Exception:
-                    deep_renames = []
+                if _entries is None:
+                    try:
+                        _entries, _w = _collect_diff_entries(review_root, base, tip)
+                    except Exception:
+                        _entries = None
                 manifest = _build_deep_manifest(deep_paths, st.get("deep_reasons") or [],
                                                 deep_threshold, renames=deep_renames)
                 # docs-gate 02/01: the deep lane likewise feeds the docs context
@@ -4400,10 +4453,10 @@ def _supervise_run(state_path, run_id):
                 _write_manifest_file(manifest_path, manifest, "deep-review manifest")
                 try:
                     result, ran, raw_name = _run_review_with_retry(
-                        lambda: _run_review(review_root, mode, git_dir, tip, push_range,
+                        lambda: _run_review(review_root, mode, git_dir, tip, review_range,
                                             paths_file=manifest_path, timeout=_DEEP_TIMEOUT,
                                             tier=ocr_telemetry.TIER_DEEP,
-                                            common_dir=common_dir)
+                                            common_dir=common_dir, partial=partial)
                     )
                 finally:
                     try:
@@ -4412,9 +4465,9 @@ def _supervise_run(state_path, run_id):
                         pass
             else:
                 result, ran, raw_name = _run_review_with_retry(
-                    lambda: _run_review(review_root, mode, git_dir, tip, push_range,
+                    lambda: _run_review(review_root, mode, git_dir, tip, review_range,
                                         tier=ocr_telemetry.TIER_REVIEW,
-                                        common_dir=common_dir)
+                                        common_dir=common_dir, partial=partial)
                 )
             chunks_new = 1 if ran else 0
             _mark_phase("review", chunks=chunks_new)
@@ -4555,10 +4608,20 @@ def _supervise_run(state_path, run_id):
             # Handle prior findings from carry/delta records (classified above).
             resolver_results, resolver_warnings, judged = {}, [], {}
             if to_resolve:
-                resolver_results, resolver_warnings = _run_resolver(
-                    review_root, mode, git_dir, tip, push_range,
-                    to_resolve, active_items, common_dir, fp, run_id, diffs=diffs,
-                )
+                if inc:
+                    # restack-b: an incremental run combines the prior verdict
+                    # with the incremental one and never spends a resolver call:
+                    # the priors are judged against the tip with the resolver's
+                    # own evidence-free answer (_no_evidence -- "a still_present
+                    # nobody backed"), which can only ever judge still_present
+                    # or unverified. Only a real resolver run with added-side
+                    # evidence can clear a prior, and nothing here clears one.
+                    resolver_results = {p["id"]: _no_evidence() for p in to_resolve}
+                else:
+                    resolver_results, resolver_warnings = _run_resolver(
+                        review_root, mode, git_dir, tip, evidence_range,
+                        to_resolve, active_items, common_dir, fp, run_id, diffs=diffs,
+                    )
                 tip_cache = {}
 
                 def _judge_all(items):
@@ -4571,13 +4634,14 @@ def _supervise_run(state_path, run_id):
                         if isinstance(r, dict) and r.get("evidence_path")}))
                     for p in items:
                         judged[p["id"]] = _judge_resolution(
-                            p, resolver_results[p["id"]], active_items, push_range,
+                            p, resolver_results[p["id"]], active_items, evidence_range,
                             review_root, tip, tip_cache, oids)
 
                 _judge_all(to_resolve)
                 _mark_phase("resolve", priors=len(to_resolve))
                 # An answer nothing backs gets one more look, told to read the tip.
-                recheck = [p for p in to_resolve if judged[p["id"]] == "unverified"]
+                recheck = ([p for p in to_resolve if judged[p["id"]] == "unverified"]
+                           if not inc else [])
                 if recheck:
                     again, more = _run_resolver(
                         review_root, mode, git_dir, tip, push_range,
@@ -4679,6 +4743,7 @@ def _supervise_run(state_path, run_id):
                     fp=fp, carry_paths=carry_paths, chunk_extras=_review_extras,
                     timeout_marks=timeout_marks, diffs=diffs, seg=seg, impact=impact,
                     own_items=plan, push_ref=push_ref, arch_flags=arch_flags,
+                    review_range=review_range,
                 )
                 n_delta = sum(1 for p in active_items if p["mode"] == "delta")
                 n_full = len(active_items) - n_delta
@@ -4698,9 +4763,9 @@ def _supervise_run(state_path, run_id):
                     # Commit intent (t13) also diverts to a manifest: it enters
                     # via `extras`, so a flagged-off push with commits lands below.
                     result, ran, raw_name = _single(
-                        lambda: _run_review(review_root, mode, git_dir, tip, push_range,
+                        lambda: _run_review(review_root, mode, git_dir, tip, review_range,
                                             tier=ocr_telemetry.TIER_REVIEW,
-                                            common_dir=common_dir)
+                                            common_dir=common_dir, partial=partial)
                     )
                     chunks_new = 1 if ran else 0
                 else:
@@ -4717,10 +4782,10 @@ def _supervise_run(state_path, run_id):
                     try:
                         result, ran, raw_name = _single(
                             lambda: _run_review(
-                                review_root, mode, git_dir, tip, push_range,
+                                review_root, mode, git_dir, tip, review_range,
                                 paths_file=manifest_path,
                                 tier=ocr_telemetry.TIER_REVIEW,
-                                common_dir=common_dir,
+                                common_dir=common_dir, partial=partial,
                             )
                         )
                     finally:
@@ -4751,6 +4816,10 @@ def _supervise_run(state_path, run_id):
                 )
 
             _mark_phase("review", chunks=chunks_new)
+            if inc:
+                plan_summary = (plan_summary or "") + (
+                    f"; incremental re-review ({len(inc_commits)} uncovered commit(s), "
+                    f"{len(inc_entries)} file(s))")
             if seg is not None:
                 seg_unverified = seg.report()[2]       # includes the checks that stayed unsure just now
                 if seg.segmented_paths():
@@ -5285,13 +5354,32 @@ def _collect_diff_entries(root, base, tip):
         return None, ["could not run git diff --raw; skipping chunking"]
 
     stat_out, stat_rc = _git(["diff", "-M", "--numstat", "-z", f"{base}..{tip}"], cwd=root)
-
-    entries = {}
     warnings = []
     if stat_rc != 0:
         # The --raw call above checks rc; degrade here too, or chunks get
         # packed and the file ceiling picked on silently zeroed line counts.
         warnings.append("git diff --numstat failed; line counts default to 0")
+    return _parse_diff_entries(raw_out, stat_out, warnings)
+
+
+def _parse_diff_entries(raw_out, stat_out, warnings):
+    """Parse `git diff --raw -z -M --no-abbrev` plus `--numstat -z` output into
+    (entries, warnings). Shared by _collect_diff_entries and the restack-b
+    incremental entries, so the -z/-M record contract lives in one place.
+
+    Each entry: {path, old_path, status, old_oid, new_oid, lines}.
+
+    Both formats rely on -z: without it git's default core.quotePath=true
+    C-quotes any non-ASCII path ("caf\\303\\251.py"), which the allowlist then
+    rejects on its extension -- an unreviewed file passing the gate. -z
+    output is never quoted, and renames arrive as separate fields rather
+    than numstat's ambiguous `{a => b}` shorthand.
+
+    --no-abbrev, not --full-index (which only widens patch `index` lines):
+    --raw OIDs are otherwise abbreviated, yet they key ledger records and are
+    compared with the full blob OIDs from _blob_oids_at.
+    """
+    entries = {}
     # Records are ":meta\0path\0", or ":meta\0src\0dst\0" for R/C.
     fields = raw_out.split("\0")
     i = 0
@@ -7202,8 +7290,22 @@ _BINARY_DIFF_RE = re.compile(r"^(?:Binary files .* differ|GIT binary patch)$", r
 
 def _item_diff_spec(item, base, tip):
     """What to diff for an active plan item: its delta blobs, or its whole range
-    (both paths of a rename, so git can pair them)."""
-    e = item["entry"]
+    (both paths of a rename, so git can pair them).
+
+    An incremental run (restack-b) attaches `inc_entry`: the uncovered
+    commits' own diff for the file. The item is then diffed over THAT entry
+    only -- between its pre-uncovered blob and its tip blob (the committing
+    pair when the file was added), so the covered majority of the range is
+    never re-shown to the reviewer.
+    """
+    e = item.get("inc_entry") or item["entry"]
+    if item.get("inc_entry") is not None:
+        if e.get("old_oid") and set(e["old_oid"]) != {"0"}:
+            return {"path": e["path"], "blobs": (e["old_oid"], e["new_oid"]),
+                    "header": f"# path: {e['path']} (uncovered commits only)"}
+        # Added by an uncovered commit: its own commit diff, nothing wider.
+        return {"path": e["path"], "range": f"{e.get('inc_parent')}..{e.get('inc_commit')}",
+                "paths": [p for p in (e.get("old_path"), e["path"]) if p]}
     if item.get("mode") == "delta" and item.get("from_oid"):
         return {"path": e["path"], "blobs": (item["from_oid"], e["new_oid"]),
                 "header": f"# path: {e['path']} (delta since last review)"}
@@ -10153,8 +10255,13 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
                  tip, push_range, active_items, planner_warnings, fenced,
                  progress=None, fp="", carry_paths=None, chunk_extras=None,
                  timeout_marks=None, diffs=None, seg=None, impact=None, own_items=None,
-                 push_ref="", arch_flags=None):
+                 push_ref="", arch_flags=None, partial=False, review_range=""):
     """Run per-chunk reviews with fencing, budget and retry.
+
+    review_range (restack-b) overrides the range the reviewer is told for each
+    chunk: an incremental run reviews only the uncovered commits, so that is
+    the range in every chunk prompt (push_range stays the push's own span,
+    used for fencing and telemetry).
 
     diffs ({path: _build_item_diff result}, see _build_diffs) switches on the
     precomputed-diff path: chunks are packed by the lines of diff delivered
@@ -10289,12 +10396,13 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
                     raise _ChunkStopped()
                 try:
                     result, _, _ = _run_review(
-                        slot_root, mode, git_dir, tip, push_range,
+                        slot_root, mode, git_dir, tip, review_range or push_range,
                         paths_file=manifest_path,
                         timeout=_CHUNK_TIMEOUT,
                         raw_tag=f"-c{k}",
                         tier=ocr_telemetry.TIER_REVIEW,
                         common_dir=common_dir,
+                        partial=partial,
                     )
                     last_exc = None
                     break
@@ -10805,13 +10913,19 @@ def compute_coverage_set(repo_root, base, tip):
                        patch_ids=patch_ids, sha_only=sha_only)
 
 
-def _join_records(repo_root, remote, base):
+def _join_records(repo_root, remote, base, passes_only=True):
     """The verdict records a join may consult: passes, not blocked, whose
     reviewed range contains this push's (record base is an ancestor of the
-    push base, per _record_range_within -- A4, no vacuous authorizations)."""
+    push base, per _record_range_within -- A4, no vacuous authorizations).
+
+    passes_only=False (restack-b) also counts BLOCKED records: a denied
+    review still reviewed its commits, so the incremental range may treat
+    their content as covered -- the prior verdict then combines worst-of,
+    never adopted as a pass. The allow-path join always stays passes-only.
+    """
     out = []
     for rec in rg_store.records_for_remote(remote):
-        if str(rec.get("verdict") or "") != "pass" or rec.get("blocked"):
+        if passes_only and (str(rec.get("verdict") or "") != "pass" or rec.get("blocked")):
             continue
         if not _record_range_within(repo_root, rec, base):
             continue
@@ -10880,26 +10994,21 @@ def _coverage_join(repo_root, remote_id, base, tip, branch, git_dir=None):
         return ("review-gate: already-reviewed - identical content passed review at tip "
                 f"{str(rec.get('tip') or '')[:12]}; that verdict was adopted for this push.")
     # General join: all-or-nothing over patch-ids first, SHAs as fallback.
-    cs = compute_coverage_set(repo_root, base, tip)
+    # A partially-covered push returns "" here -- restack-b's incremental
+    # review (see _incremental_view) owns that case.
+    cs, uncovered = _uncovered_commits(repo_root, remote_id, base, tip)
     if cs is None:
         return ""      # fail closed: an unenumerable range is an unreviewable one
-    pid_union, sha_union = set(), set()
-    for rec in records:
-        if int(rec.get("protocol_version") or 0) == 2:
-            pid_union.update(p for p in (rec.get("patch_ids") or [])
-                             if isinstance(p, str) and p)
-        sha_union.update(str(c) for c in (rec.get("commits") or []) if c)
+    if uncovered:
+        return ""      # partially covered: the incremental review decides
     new_pids, new_shas = [], []
     for sha in cs.commits:
         pid = cs.patch_ids.get(sha) or ""
-        if pid and pid in pid_union:
+        if pid:
             if pid not in new_pids:
                 new_pids.append(pid)
-        elif sha in sha_union:
-            if sha not in new_shas:
-                new_shas.append(sha)
-        else:
-            return ""      # one uncovered commit reviews the whole range
+        elif sha not in new_shas:
+            new_shas.append(sha)
     try:
         rg_store.record_verdict(
             remote_id, tip, base, "pass", False, "", cs.commits,
@@ -10926,6 +11035,173 @@ def _record_coverage(repo_root, base, tip):
     return {"tip_tree": cs.tip_tree,
             "patch_ids": sorted(set(cs.patch_ids.values())),
             "sha_only": sorted(set(cs.sha_only))}
+
+
+# --- incremental review (restack-b, 0.14.0 PR2) --------------------------------
+
+
+class IncrementalView(namedtuple("IncrementalView", "commits span range")):
+    """What a partially-covered push still owes: the uncovered commits.
+
+    commits  the uncovered SHAs, OLDEST FIRST: the incremental range. A commit
+             without a patch-id (binary/merge/empty) enters INDIVIDUALLY, and
+             its presence never widens the range beyond itself (Q14).
+    span     "<parent-of-oldest-uncovered>..<tip>": a real git range that
+             contains every uncovered commit (and, when they are scattered,
+             the covered ones in between) -- the evidence window the resolver
+             guards prior-finding resolutions against.
+    range    the range string the reviewer is told: the span when the
+             uncovered commits are one contiguous suffix of the push (then
+             diff(span) is exactly their union diff), the space-joined SHAs
+             when they are scattered (each reviewed on its own, so no covered
+             commit is ever swept in).
+    """
+
+
+def _commit_parent(repo_root, sha):
+    """The first parent of `sha`, or "" for a root/unevaluable commit."""
+    sha = str(sha or "").strip()
+    if not sha:
+        return ""
+    out, rc = _git(["rev-list", "--parents", "-n", "1", sha], cwd=repo_root)
+    if rc != 0:
+        return ""
+    parts = out.split()
+    return parts[1] if len(parts) >= 2 else ""
+
+
+def _uncovered_commits(repo_root, remote_id, base, tip, passes_only=True):
+    """(CoverageSet, uncovered oldest-first) for the push, or (None, None).
+
+    A commit is covered when a joinable pass record holds its patch-id (v2
+    records only -- legacy records never keyed content) or its SHA. None, None
+    fails closed: an unevaluable range is a full-review range, never a skip.
+
+    passes_only=False (restack-b's incremental view) also counts blocked
+    records' coverage: a denied review reviewed its commits too, and its
+    prior findings combine worst-of instead of being re-reviewed away.
+    """
+    records = _join_records(repo_root, remote_id, base, passes_only=passes_only)
+    cs = compute_coverage_set(repo_root, base, tip)
+    if cs is None or not records:
+        return None, None
+    pid_union, sha_union = set(), set()
+    for rec in records:
+        if int(rec.get("protocol_version") or 0) == 2:
+            pid_union.update(p for p in (rec.get("patch_ids") or [])
+                             if isinstance(p, str) and p)
+        sha_union.update(str(c) for c in (rec.get("commits") or []) if c)
+    uncovered = []
+    for sha in reversed(cs.commits):     # rev-list is newest first
+        pid = cs.patch_ids.get(sha) or ""
+        if not (pid and pid in pid_union) and sha not in sha_union:
+            uncovered.append(sha)
+    return cs, uncovered
+
+
+def _contiguous_suffix(repo_root, uncovered, tip):
+    """(span_base, chain) when the uncovered commits are one contiguous
+    first-parent suffix of the range ending at tip; ("", None) otherwise.
+
+    The rev-list re-check is the widening guard: every commit in
+    span_base..tip must be uncovered, so diff(span_base..tip) shows exactly
+    the uncovered commits' own diffs and never a covered one's change (a
+    covered side branch merged inside the suffix fails here and falls back
+    to individual commits -- over-review of nothing, never a skip).
+    """
+    todo = set(uncovered)
+    chain, cur = [], str(tip)
+    while cur in todo:
+        chain.append(cur)
+        cur = _commit_parent(repo_root, cur)
+        if not cur:
+            return "", None
+    if not chain or set(chain) != todo:
+        return "", None
+    out, rc = _git(["rev-list", f"{cur}..{tip}"], cwd=repo_root)
+    if rc != 0 or set(out.split()) != todo:
+        return "", None
+    return cur, chain
+
+
+def _incremental_view(repo_root, remote_id, base, tip):
+    """IncrementalView for a partially-covered push, or None.
+
+    None when the push is fully covered (the join's job), fully uncovered (a
+    plain full review: there is no reduction to gain), or unevaluable (fail
+    closed). The caller gates this on OCR_COVERAGE_V1 being off.
+    """
+    cs, uncovered = _uncovered_commits(repo_root, remote_id, base, tip,
+                                        passes_only=False)
+    if cs is None or not uncovered or len(uncovered) == len(cs.commits):
+        return None
+    span_base, chain = _contiguous_suffix(repo_root, uncovered, tip)
+    if chain is not None:
+        rng = f"{span_base}..{tip}"
+    else:
+        # Scattered: each uncovered commit is named individually, so the
+        # range can never widen past them (Q14).
+        rng = " ".join(uncovered)
+        span_base = _commit_parent(repo_root, uncovered[0]) or base or _EMPTY_TREE
+    return IncrementalView(commits=uncovered, span=f"{span_base}..{tip}", range=rng)
+
+
+def _incremental_entries(repo_root, commits):
+    """{path: entry} for the uncovered commits' own diffs, or None on failure.
+
+    Each uncovered commit is diffed against its first parent (the empty tree
+    for a root) and merged oldest-first with later commits winning a path, so
+    the reviewer sees the first uncovered touch of a file through the last --
+    never a covered commit's change when the uncovered ones are contiguous,
+    and only that one commit's own diff when they are not. None (not {}) means
+    git could not enumerate a diff: the caller fails closed to the full range.
+    """
+    entries = {}
+    for sha in commits:
+        parent = _commit_parent(repo_root, sha) or _EMPTY_TREE
+        raw_out, rc = _git(["diff", "--raw", "-z", "-M", "--no-abbrev",
+                            f"{parent}..{sha}"], cwd=repo_root)
+        if rc != 0:
+            return None
+        stat_out, stat_rc = _git(["diff", "-M", "--numstat", "-z",
+                                  f"{parent}..{sha}"], cwd=repo_root)
+        if stat_rc != 0:
+            return None
+        got, _warnings = _parse_diff_entries(raw_out, stat_out, [])
+        for e in got:
+            entries[e["path"]] = dict(e, inc_commit=sha, inc_parent=parent)
+    return entries
+
+
+def _incremental_plan(plan, inc_entries):
+    """The plan of an incremental run: only the uncovered commits' files.
+
+    - a path the uncovered commits touch becomes an ACTIVE full item carrying
+      its `inc_entry` (the uncovered commits' own diff for it), whatever the
+      full-range planner said -- a restack preserves blob content, so the
+      ledger would happily CARRY a file whose only coverage key (its SHA, for
+      a binary commit) the restack destroyed. The item keeps any ledger
+      record: the findings owed on it still flow through _classify_priors.
+    - any other path is covered content: it is never re-reviewed. It stays
+      only as a carry item WITH a record (its owed findings still replay);
+      a covered path with no record owes nothing and is dropped.
+
+    `plan` may be None (git diff failed): passed through, so the run fails
+    closed to the single-context fallback exactly as a full review would.
+    """
+    if plan is None:
+        return None
+    out = []
+    for item in plan:
+        path = item["entry"]["path"]
+        e = inc_entries.get(path)
+        if e is not None:
+            e = dict(e)
+            out.append(dict(item, entry=e, inc_entry=e, mode="full",
+                            from_oid="", miss_reason="none"))
+        elif item.get("record") is not None:
+            out.append(dict(item, mode="carry"))
+    return out
 
 
 def _verdict_backing(common_dir, tip, base, remote_id, repo_root, push_range):
@@ -12411,10 +12687,21 @@ def _main_inner(argv, mode):
     # but no content, and the gate used to pay the full re-review for that.
     # With the v2 record shape, a recorded pass over identical CONTENT can
     # vouch for this push. OCR_COVERAGE_V1 restores the SHA-only behaviour.
+    inc_meta = {}
     if backing == "ok" and not force and push_range and not _coverage_v1():
         joined = _coverage_join(repo_root, remote_id, base, tip, branch, git_dir=git_dir)
         if joined:
             allow(joined)
+        # Partially covered (the normal push: a restack plus genuinely new
+        # work): restack-b shrinks the review to the uncovered commits and
+        # combines verdicts worst-of, findings as a deduped union. Records
+        # superseded by the new coverage are only ever replaced AFTER the new
+        # record exists (the supervisor writes it at the end of the run).
+        view = _incremental_view(repo_root, remote_id, base, tip)
+        if view is not None:
+            inc_meta = {"inc_commits": list(view.commits),
+                        "inc_range": view.range,
+                        "inc_span": view.span}
 
     session_id = str(payload.get("session_id") or "") if isinstance(payload, dict) else ""
     count = ""
@@ -12446,6 +12733,7 @@ def _main_inner(argv, mode):
         "push_ref": push_ref, "common_dir": common_dir,
         "remote": remote_name, "remote_url": rg_store.remote_url(repo_root, remote_name),
     }
+    meta.update(inc_meta)
     budget = _inline_budget(mode)
     try:
         # Provider guard: refuse a misconfigured review model BEFORE any

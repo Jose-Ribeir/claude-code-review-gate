@@ -7,8 +7,9 @@ survived a SHA rewrite. These tests pin the new join:
   - a pure restack (same content, new SHAs) joins the recorded pass with
     zero chunk calls (telemetry), via the tip-tree fast path or the
     patch-id union;
-  - a restack plus new work still reviews the full range (ALL-OR-NOTHING in
-    this PR; the incremental narrowing is restack-b);
+  - a restack plus new work reviews only the NEW work (restack-b: the
+    incremental range is the uncovered commits; restack-a's interim
+    all-or-nothing full-range re-review is superseded);
   - pre-fix (protocol_version 1) records join by SHA-subset only, never via
     patch-ids, and are never backfilled;
   - commits with no usable patch-id (binary changes) are SHA-covered and
@@ -193,7 +194,6 @@ def test_restack_plus_new_commit_still_reviews(repo, tmp_path):
     _git(["switch", "-q", "-c", "feat"], cwd=repo)
     _commit(repo, "f1.txt")
     _commit(repo, "f2.txt")
-    fork = _sha(repo, "main")
     env = _env(tmp_path)
 
     decision, out = _run(repo, "git push -u origin feat", env)
@@ -201,13 +201,17 @@ def test_restack_plus_new_commit_still_reviews(repo, tmp_path):
     _await_record(repo, _sha(repo, "feat"))
 
     _restack(repo)
+    restacked = _sha(repo, "feat")   # every SHA rewritten, content identical
     _commit(repo, "f3.txt")                # new work on top of the restack
     tip = _sha(repo, "feat")
     decision, out = _run(repo, "git push -u origin feat", env)
     assert decision == "pass", out
     traces = _trace(tmp_path)
-    assert len(traces) == 2, "restack + new commit must re-review (interim, restack-b narrows)"
-    assert traces[1]["range"] == f"{fork}..{tip}"      # the full range, not a join
+    assert len(traces) == 2, "restack + new commit must re-review the new work"
+    # restack-b: only the new commit is reviewed -- the covered commits' content
+    # is never re-paid (restack-a's interim full-range expectation is superseded
+    # by PR2's incremental semantics).
+    assert traces[1]["range"] == f"{restacked}..{tip}"   # the new commit only
 
 
 # --- legacy records: SHA-subset only, never patch-ids ------------------------
