@@ -2,8 +2,10 @@
 
 Every review record can store the intent context actually used -- sources
 present, the intent text, counts, fetch notes -- as an `intent` extra dict the
-store tolerates at protocol_version 1 (NO version bump). Records written
-before this feature (no `intent` key) must still load.
+store tolerates at any protocol version (the intent work itself bumped
+nothing; records are protocol_version 2 since restack-a's content-keyed
+coverage). Records written before this feature (no `intent` key) must still
+load.
 """
 import json
 import os
@@ -26,14 +28,24 @@ _INTENT = {
 
 def test_record_with_intent_round_trips_through_load():
     rg_store.record_verdict("origin", "a" * 40, "b" * 40, "pass", False,
-                            "ok", ["c1", "c2"], intent=_INTENT)
+                            "ok", ["c1", "c2"],
+                            coverage={"tip_tree": "c" * 40,
+                                      "patch_ids": ["pid-2", "pid-1"],
+                                      "sha_only": ["d" * 40]},
+                            branch="feat", intent=_INTENT)
     loaded = rg_store.load_verdict("origin", "a" * 40)
     assert loaded is not None
     assert loaded["intent"] == _INTENT
     # The core record fields are untouched by the extra.
     assert loaded["verdict"] == "pass"
     assert loaded["commits"] == ["c1", "c2"]
-    assert loaded["protocol_version"] == 1
+    # The v2 record shape (restack-a): the coverage the caller passed rides
+    # the record (patch-ids deduped and sorted), as does the branch.
+    assert loaded["protocol_version"] == 2
+    assert loaded["tip_tree"] == "c" * 40
+    assert loaded["patch_ids"] == ["pid-1", "pid-2"]
+    assert loaded["sha_only"] == ["d" * 40]
+    assert loaded["branch"] == "feat"
 
 
 def test_record_without_intent_loads_and_has_no_intent_key():
@@ -63,11 +75,21 @@ def test_old_record_without_intent_still_loads():
     assert loaded["verdict"] == "pass"
 
 
-def test_no_protocol_version_bump():
+def test_intent_extra_adds_no_protocol_bump_of_its_own():
+    """The record's protocol version is the store's own (v2 since restack-a's
+    content keying); the intent extra is tolerated at whatever version the
+    record carries and adds no field of its own beyond `intent`."""
     rg_store.record_verdict("origin", "a" * 40, "b" * 40, "pass", False, "",
                             ["c1"], intent=_INTENT)
-    raw = json.loads(rg_store.verdict_path("origin", "a" * 40).read_text(encoding="utf-8"))
-    assert raw["protocol_version"] == 1
+    with_intent = json.loads(
+        rg_store.verdict_path("origin", "a" * 40).read_text(encoding="utf-8"))
+    rg_store.record_verdict("origin", "c" * 40, "b" * 40, "pass", False, "",
+                            ["c1"])
+    without = json.loads(
+        rg_store.verdict_path("origin", "c" * 40).read_text(encoding="utf-8"))
+    assert with_intent["protocol_version"] == 2
+    assert with_intent["protocol_version"] == without["protocol_version"]
+    assert set(with_intent) - set(without) == {"intent"}
 
 
 def test_intent_none_is_the_same_as_not_passing_it():

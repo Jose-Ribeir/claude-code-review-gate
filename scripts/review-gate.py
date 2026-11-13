@@ -4326,6 +4326,10 @@ def _supervise_run(state_path, run_id):
     inc_commits = [str(c) for c in (st.get("inc_commits") or []) if str(c).strip()]
     inc_range = str(st.get("inc_range") or "")
     inc_span = str(st.get("inc_span") or "")
+    # A linear extension (a joinable record's tip is an ancestor of this
+    # one: the covered commits were NOT rewritten) is the ordinary fix-push,
+    # not a restack -- its priors still reach the resolver (see below).
+    inc_linear = bool(st.get("inc_linear"))
     inc = bool(inc_commits and inc_range) and not _coverage_v1()
     now = time.time()
     # The deep pass's own wall-clock budget replaces the reviewer timeout:
@@ -4642,14 +4646,21 @@ def _supervise_run(state_path, run_id):
             # Handle prior findings from carry/delta records (classified above).
             resolver_results, resolver_warnings, judged = {}, [], {}
             if to_resolve:
-                if inc:
-                    # restack-b: an incremental run combines the prior verdict
-                    # with the incremental one and never spends a resolver call:
-                    # the priors are judged against the tip with the resolver's
-                    # own evidence-free answer (_no_evidence -- "a still_present
-                    # nobody backed"), which can only ever judge still_present
-                    # or unverified. Only a real resolver run with added-side
-                    # evidence can clear a prior, and nothing here clears one.
+                if inc and not inc_linear:
+                    # restack-b: an incremental run over RESTACKED content
+                    # combines the prior verdict with the incremental one and
+                    # never spends a resolver call: the priors are judged
+                    # against the tip with the resolver's own evidence-free
+                    # answer (_no_evidence -- "a still_present nobody backed"),
+                    # which can only ever judge still_present or unverified.
+                    # Only a real resolver run with added-side evidence can
+                    # clear a prior, and nothing here clears one.
+                    # A LINEAR extension (inc_linear: the recorded tip is an
+                    # ancestor, nothing was rewritten) is exempt: it is the
+                    # ordinary fix-push, whose priors must still reach the
+                    # resolver -- the fix-recognition convention is the only
+                    # clearing path, and skipping it here re-blocked a fixed
+                    # push as "unverified" forever.
                     resolver_results = {p["id"]: _no_evidence() for p in to_resolve}
                 else:
                     resolver_results, resolver_warnings = _run_resolver(
@@ -4675,7 +4686,7 @@ def _supervise_run(state_path, run_id):
                 _mark_phase("resolve", priors=len(to_resolve))
                 # An answer nothing backs gets one more look, told to read the tip.
                 recheck = ([p for p in to_resolve if judged[p["id"]] == "unverified"]
-                           if not inc else [])
+                           if not (inc and not inc_linear) else [])
                 if recheck:
                     again, more = _run_resolver(
                         review_root, mode, git_dir, tip, push_range,
@@ -11216,6 +11227,31 @@ def _incremental_view(repo_root, remote_id, base, tip):
     return IncrementalView(commits=uncovered, span=f"{span_base}..{tip}", range=rng)
 
 
+def _extends_recorded_tip(repo_root, remote_id, base, tip):
+    """True when a joinable record's tip is an ancestor of this push's tip.
+
+    The incremental view fires both for a RESTACK (the covered commits' SHAs
+    were rewritten; the recorded tip is unrelated to the new one) and for the
+    ordinary fix-push: a linear extension of a previously-judged push, where
+    the covered commits keep their SHAs and the recorded tip is the new tip's
+    own history. The two owe the resolver differently. A restack never spends
+    a resolver call (restack-b), but a linear extension is the fix-recognition
+    flow: the developer is answering the recorded verdict, and only a resolver
+    run with added-side evidence can clear its priors (the fix must touch a
+    code file that references the record). Over-inclusive is safe here -- an
+    extra resolver run can judge still_present/unverified exactly as the
+    _no_evidence shortcut would, it just cannot silently clear anything.
+    """
+    for rec in _join_records(repo_root, remote_id, base, passes_only=False):
+        rec_tip = str(rec.get("tip") or "")
+        if not rec_tip or rec_tip == tip:
+            continue
+        _out, rc = _git(["merge-base", "--is-ancestor", rec_tip, tip], cwd=repo_root)
+        if rc == 0:
+            return True
+    return False
+
+
 def _incremental_entries(repo_root, commits):
     """{path: entry} for the uncovered commits' own diffs, or None on failure.
 
@@ -12834,7 +12870,12 @@ def _main_inner(argv, mode):
         if view is not None:
             inc_meta = {"inc_commits": list(view.commits),
                         "inc_range": view.range,
-                        "inc_span": view.span}
+                        "inc_span": view.span,
+                        # A linear extension (the recorded tip is an ancestor:
+                        # nothing was restacked) keeps the resolver in the
+                        # fix-recognition loop; a restack does not (restack-b).
+                        "inc_linear": _extends_recorded_tip(
+                            repo_root, remote_id, base, tip)}
 
     session_id = str(payload.get("session_id") or "") if isinstance(payload, dict) else ""
     count = ""

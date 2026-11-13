@@ -216,8 +216,9 @@ def test_single_context_run_records_the_intent_used(repo, gate_env):
     assert intent["range"].endswith(f"..{tip}")
     # Single-context: no per-chunk digest section at all.
     assert "chunks" not in intent
-    # The core record is untouched by the extra (protocol_version 1).
-    assert rec["verdict"] == "pass" and rec["protocol_version"] == 1
+    # The core record is untouched by the extra (protocol_version 2, the
+    # store's own since restack-a's content keying -- not the intent's).
+    assert rec["verdict"] == "pass" and rec["protocol_version"] == 2
 
 
 def test_ticket_context_lands_in_the_record_without_a_verdict_time_refetch(
