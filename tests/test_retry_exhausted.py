@@ -144,6 +144,14 @@ def test_reset_tip_clears_exhausted(repo, tmp_path):
     tip = _commit(repo)
     for i in range(3):
         _push_fail(repo, tmp_path, session=f"s{i + 1}")
+    # The third failure leaves `failed` at the cap: the run that produced it
+    # keeps its failed deny record, and the push that FINDS the capped state
+    # walls it as `exhausted` (same as the sibling test above). Drive that
+    # transition before exercising --reset-tip.
+    decision, reason, _, _ = _hook(repo, "git push origin main", _garbage(tmp_path),
+                                   session="s4")
+    assert decision == "deny"
+    assert "--reset-tip" in reason and "exhaust" in reason.lower()
     assert _state(repo, tip)["state"] == "exhausted"
     # The flag is equivalent to removing the state file: it clears the
     # exhausted/failed state for the tip and nothing else.
@@ -155,7 +163,7 @@ def test_reset_tip_clears_exhausted(repo, tmp_path):
     assert not list(review_gate._async_dir(common).glob(f"*{tip}.json"))
     # The next push gets a fresh attempt -- and it succeeds.
     decision, reason, _, _ = _hook(repo, "git push origin main", _env(tmp_path),
-                                  session="s4")
+                                  session="s5")
     assert decision == "pass", reason
     assert _wait_state(repo, tip, {"done"})["verdict"] == "pass"
 
