@@ -196,6 +196,15 @@ class TestModelProvider:
         assert review_gate._model_provider(model) == "openai"
 
     @pytest.mark.parametrize("model", [
+        "openrouter/anthropic/claude-sonnet-4-5",
+        "relay/anthropic/claude-opus-4-5",
+        "a/b/c/gpt-5",
+    ])
+    def test_double_vendor_prefixes_classify_on_the_model(self, model):
+        # Relay chains stack prefixes; every one must peel, not just the first.
+        assert review_gate._model_provider(model) in ("anthropic", "openai")
+
+    @pytest.mark.parametrize("model", [
         "kimchi-dev/kimi-k3", "some-vendor/glm-5.3",
     ])
     def test_vendor_prefixed_open_models_are_not_blocked(self, model):

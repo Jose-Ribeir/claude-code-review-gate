@@ -192,8 +192,11 @@ def _model_provider(model):
     classified on the model part AFTER the prefix: `anthropic/claude-sonnet-4-5`
     is an anthropic model, regardless of the prefix it was routed under."""
     ident = (model or "").strip().lower()
-    if "/" in ident:
-        ident = ident.split("/", 1)[-1]
+    # Strip EVERY vendor prefix, not just the first: relay chains write
+    # `openrouter/anthropic/claude-...` and one split leaves the mid-chain
+    # vendor in place, defeating the deny-list (finding: double prefix).
+    while "/" in ident:
+        ident = ident.split("/", 1)[1]
     first = ident.split("-", 1)[0]
     for provider, tokens in _PROVIDER_FIRST_TOKENS:
         if first in tokens:
