@@ -242,8 +242,9 @@ def test_findings_move_with_their_unit_when_fifty_lines_are_inserted_above(tmp_p
 
 
 def test_a_cached_finding_survives_a_rebase_of_the_base(tmp_path, gate_env):
-    """The file's record is keyed by its base blob; the units' records are not: a base that
-    moved under the same tip still replays every unit that did not change."""
+    """The file's record is keyed by its head blob, not its base: a base that
+    moved under the same tip leaves the head blob identical, so the judgement
+    is carried as-is (and the units' records are not even needed)."""
     gate_env.setenv("STUB_UNIT_FINDINGS", json.dumps({"f3": {"severity": "high", "content": "f3 bad", "offset": 2}}))
     work, tip = push_big(tmp_path, {"big.py": module(40)}, {"keep.py": "x = 0\n", "big.py": "# v1\n"})
     st, calls = run(work, tip, tmp_path, gate_env)
@@ -257,7 +258,7 @@ def test_a_cached_finding_survives_a_rebase_of_the_base(tmp_path, gate_env):
     st, calls = run(work, tip, tmp_path, gate_env)
     assert st["state"] == "done"
     assert not [i for c in reviews(calls) for i in kinds(c, "unit_diff") if i["unit"] == "f3"]
-    assert st["verdict"] == "block" and "f3 bad" in st["reasons"]       # replayed, still blocking
+    assert st["verdict"] == "block" and "f3 bad" in st["reasons"]       # carried, still blocking
 
 
 def test_duplicate_units_replay_to_the_right_occurrence(tmp_path, gate_env):
@@ -273,7 +274,8 @@ def test_duplicate_units_replay_to_the_right_occurrence(tmp_path, gate_env):
     assert len(starts) == 2
     first = sorted(f["start_line"] for f in result_findings(work) if "dup bad" in f["content"])
     assert first == starts
-    # again from the units alone (the base moved, so the file record is not found)
+    # again with the base moved: the head blob is unchanged, so the file's
+    # record is an exact hit and the whole judgement is carried as-is
     ag._git(["checkout", "-q", "-B", "other", "HEAD~1"], cwd=work)
     commit(work, {"big.py": "# v2 of the base\nz = 1\n"})
     ag._git(["push", "-q", "-f", "origin", "other:main"], cwd=work)
@@ -281,10 +283,13 @@ def test_duplicate_units_replay_to_the_right_occurrence(tmp_path, gate_env):
     ag._git(["fetch", "-q", "origin"], cwd=work)
     st, calls = run(work, tip, tmp_path, gate_env)
     assert st["state"] == "done"
-    # every unit replayed from its record; only the base's own lines, now gone, are a new change
-    assert [i["deleted"] for c in reviews(calls) for i in kinds(c, "unit_diff")] == [True]
-    again = sorted(f["start_line"] for f in result_findings(work) if "dup bad" in f["content"])
-    assert again == starts, (again, starts)
+    # an exact-hit carry re-derives nothing: no unit diffs, no review calls
+    assert reviews(calls) == []
+    # the file record consolidates findings by identity (path, code, content),
+    # so two identical duplicate occurrences hold one entry, at the first's
+    # line -- unit replay no longer runs to widen it back to both
+    again = [f["start_line"] for f in result_findings(work) if "dup bad" in f["content"]]
+    assert again == [starts[0]], (again, starts)
 
 
 # --- a truncated record is no longer carried when the file can be segmented -----------------------

@@ -5410,9 +5410,20 @@ def _fp_dir(common_dir, fp):
     return _ledger_dir(common_dir) / fp[:16]
 
 
-def _record_key(path, old_path, status, base_oid):
-    """16-hex key that identifies a file entry independent of its head blob."""
-    raw = "\x00".join([path or "", old_path or "", status or "", base_oid or ""])
+def _record_key(path, old_path, status, base_oid=None):
+    """16-hex key that identifies a file entry independent of its head blob.
+
+    Identity is (path, old_path, status) since the ledger de-keying
+    (restack-content-keyed-coverage, PR3): base_oid used to be part of the
+    key, so a restack that rewrote the range's base blob made every record
+    miss even when the reviewed file was byte-identical. base_oid is still
+    accepted (and stored on the record as metadata only) but no longer
+    enters the identity; the head blob oid -- carried in the record's
+    filename and verified by _read_ledger_record -- and the criteria
+    fingerprint of the directory the record lives in complete it. Records
+    written under the old, base-keyed identity simply miss and age out via
+    the ledger TTL; they are never migrated."""
+    raw = "\x00".join([path or "", old_path or "", status or ""])
     return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()[:16]
 
 
@@ -5649,6 +5660,11 @@ def _write_ledger_record(common_dir, fp, key, head_oid, path, old_path,
                          source_tip="", source_ref=""):
     """Write one per-file ledger record. Best-effort: never breaks the gate.
 
+    base_oid is stored as METADATA ONLY (what the range's base held when the
+    record was written); it is not part of the record's identity -- see
+    _record_key -- so two pushes whose base blobs differ still share records
+    for identical head blobs.
+
     truncated=True marks a review that saw only part of the diff. It is stored
     only when set, so every other record stays byte-identical to 0.9.4's.
     source_tip is the full sha of the tip whose review wrote the record; it lets
@@ -5707,14 +5723,18 @@ def _find_delta_record(common_dir, fp, key, head_oid, tip="", root=None, ancestr
     so we review only X→head_oid. Returns (record, from_oid) or (None, '').
     A truncated record is never a base: its review did not cover all of X.
 
-    With `tip` given, a record is skipped only when BOTH hold: its `source_tip`
-    is not an ancestor of `tip` (its findings came from a branch this tip does
-    not contain), and its `source_ref` and the current push's `ref` are both
-    known and differ. A same-ref rewrite (amend/rebase + force push) is the same
-    line of work and stays eligible; so does a record or push of unknown ref, and
-    a record without `source_tip` (written before 0.13). `root` is the
-    repo/worktree to ask git in; `ancestry_cache` is a dict shared across one
-    run's calls so each distinct source_tip costs one subprocess.
+    Candidates are every record of the same key -- which since the de-keying
+    is every (path, old_path, status) record, whatever base blob it was
+    reviewed under -- so selection among them is by `source_tip` ancestry, not
+    by a base-keyed prefix. With `tip` given, a record is skipped only when
+    BOTH hold: its `source_tip` is not an ancestor of `tip` (its findings came
+    from a branch this tip does not contain), and its `source_ref` and the
+    current push's `ref` are both known and differ. A same-ref rewrite
+    (amend/rebase + force push) is the same line of work and stays eligible;
+    so does a record or push of unknown ref, and a record without
+    `source_tip` (written before 0.13). `root` is the repo/worktree to ask
+    git in; `ancestry_cache` is a dict shared across one run's calls so each
+    distinct source_tip costs one subprocess.
     """
     fp_d = _fp_dir(common_dir, fp)
     if not fp_d.is_dir():
