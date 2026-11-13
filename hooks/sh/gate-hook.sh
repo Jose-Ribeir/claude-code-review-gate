@@ -224,9 +224,9 @@ _hook_gated() {
 # code. Only strips when a terminator is found, matching upstream.
 # ---------------------------------------------------------------------------
 strip_heredocs() {
-  local in="$1" out="" marker found
+  local in="$1" out="" marker found rest
   [ "${in#*"<<"}" = "$in" ] && { REPLY="$in"; return 0; }
-  local -a lines=()
+  local -a lines=() openers=()
   local _line
   while IFS= read -r _line; do lines+=("$_line"); done <<< "$in"
   local i=0 m=${#lines[@]}
@@ -234,8 +234,19 @@ strip_heredocs() {
     local line="${lines[i]}"
     out+="$line"$'\n'
     i=$((i + 1))
-    if [[ "$line" =~ \<\<-?[[:space:]]*([A-Za-z_][A-Za-z0-9_]*) ]]; then
-      marker="${BASH_REMATCH[1]}"
+    # Collect EVERY opener on this line, left to right: `cat <<A <<B` opens
+    # two bodies, which arrive in order, each closed by its own terminator.
+    # Mirrors the finditer + per-opener loop of _strip_heredocs in
+    # scripts/review-gate.py -- matching only the first opener leaves the
+    # later bodies in `out`, still scanned for cds/pushes.
+    openers=()
+    rest="$line"
+    while [[ "$rest" =~ \<\<-?[[:space:]]*([A-Za-z_][A-Za-z0-9_]*) ]]; do
+      openers+=("${BASH_REMATCH[1]}")
+      rest="${rest#*"${BASH_REMATCH[0]}"}"
+    done
+    [ "${#openers[@]}" -eq 0 ] && continue
+    for marker in ${openers[@]+"${openers[@]}"}; do
       found=0
       while [ "$i" -lt "$m" ]; do
         if [ "$(printf '%s' "${lines[i]}" | tr -d ' \t')" = "$marker" ]; then
@@ -246,7 +257,7 @@ strip_heredocs() {
         i=$((i + 1))   # body dropped
       done
       [ "$found" = 1 ] && out+="$marker"$'\n'
-    fi
+    done
   done
   REPLY="${out%$'\n'}"
 }

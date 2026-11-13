@@ -45,6 +45,7 @@ context spotter to its pre-index behavior; verdict authority never depends on it
   doctor (`ocr_doctor.py`) reports index health under both settings.
 - Future config-surface changes to either surface require updating this ADR (or a
   successor), keeping the docs-checker satisfied.
+- ADR 0003 extends this scope to the rest of the wave-2 config-surface changes.
 
 ## Alternatives considered
 
