@@ -7,6 +7,37 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Content-keyed review coverage (2026-11-13, spec `docs/plans/restack-content-keyed-coverage.md`).**
+  The gate now identifies reviewed work by content instead of by SHA: verdict
+  records (protocol v2) carry per-commit `patch_ids` (`git patch-id --stable`),
+  a `tip_tree` fast-path key, a `sha_only` list for commits without a usable
+  patch-id (merges, binary-only, empty), and the branch name as audit
+  metadata. A restack that rewrites SHAs but preserves content joins its
+  recorded verdict instead of re-reviewing the branch; a push that is only
+  partially covered reviews **only the genuinely-unseen commits** and combines
+  the result with the prior verdict (worst-of verdict, union of findings
+  deduped by finding-id — a quiet incremental run clears nothing; the
+  resolver remains the only clearing path). Legacy records join by SHA-subset
+  only and are never backfilled. `OCR_COVERAGE_V1=1` restores pre-change
+  SHA-only behaviour.
+- **`review-gate.py --reset-tip <tip>`** clears `failed`/`exhausted` run
+  state for a tip (documented equivalent: removing the state file).
+
+### Changed
+- **Failed review runs retry; failures are no longer sticky walls.**
+  A run that dies on budget, timeout, crash, unparseable output, or spawn
+  failure is retried by the next push for the same tip (up to 3 attempts),
+  with the previous TTL demoted from "replay the deny" to a respawn
+  rate-limiter. At the cap the tip enters `exhausted`: a loud block naming
+  `--reset-tip`, cleared only by that command or a new tip. Real `block`
+  verdicts are unchanged and never auto-retry.
+- **The review ledger is keyed by content, not by base.** Ledger record
+  identity drops `base_oid` (demoted to metadata): judgements survive
+  restacks whenever the reviewed file blobs are unchanged, and delta records
+  are selected by `source_tip` ancestry rather than base-prefix globbing. Old
+  base-keyed records expire via the existing TTL; no migration.
+
+### Added
 - **Intent context: commit messages and linked tickets (2026-11-11).** The
   pushed commits' messages (subjects + bodies + touched files, verbatim) ride
   the manifest-extras seam as `commit_intent`, fenced for the reviewer as
