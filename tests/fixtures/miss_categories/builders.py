@@ -100,22 +100,29 @@ def commit(root, files, message="c"):
     return git(["rev-parse", "HEAD"], cwd=root).strip()
 
 
+# Frozen pre-v2 sources (`git show 4f1849b:scripts/<name>.py`, the last main
+# commit before the v2 merge). `main` can no longer stand in for "pre-v2" -- it
+# contains v2 -- and a shallow CI checkout has no history to show. Only modules
+# that existed pre-v2 are vendored; a module with no file here "did not exist".
+_PRE_V2 = os.path.join(_HERE, "pre_v2")
+
+
 def load_main_module(name):
-    """Exec ``scripts/<name>.py`` from the project's `main` branch as a fresh
-    module. Returns None when the module did not exist pre-v2.
+    """Exec the frozen pre-v2 ``scripts/<name>.py`` as a fresh module. Returns
+    None when the module did not exist pre-v2.
 
     Used for the old-misses half of the fixture assertions: run the actual
     pre-v2 machinery (or assert its absence) against the same fixture state.
     """
-    proc = subprocess.run(["git", "-C", _ROOT, "show", "main:scripts/%s.py" % name],
-                          capture_output=True, text=True)
-    if proc.returncode != 0:
+    path = os.path.join(_PRE_V2, "%s.py" % name)
+    if not os.path.isfile(path):
         return None
+    with open(path, encoding="utf-8") as fh:
+        source = fh.read()
     spec = importlib.util.spec_from_loader("main_%s" % name, loader=None,
-                                           origin="main:scripts/%s.py" % name)
+                                           origin="pre_v2/%s.py" % name)
     module = importlib.util.module_from_spec(spec)
-    exec(compile(proc.stdout, "main:scripts/%s.py" % name, "exec"),
-         module.__dict__)
+    exec(compile(source, path, "exec"), module.__dict__)
     return module
 
 
