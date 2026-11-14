@@ -35,6 +35,22 @@ def _private_state_store(tmp_path_factory, monkeypatch):
         monkeypatch.delenv(k, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _kimchi_backend_unless_a_test_selects_one(monkeypatch):
+    """Backend selection (scripts/ocr_profile.py) auto-detects from the
+    developer's own harness: CLAUDECODE inside Claude Code, or whichever backend
+    CLI happens to be the only one on PATH. Left alone, the same suite would
+    review with claude on one machine and kimchi on another. Pin the historical
+    default for every test; a test about selection removes or overrides this
+    (test_backend_select.py, test_claude_profile.py)."""
+    monkeypatch.setenv("OCR_BACKEND", "kimchi")
+    monkeypatch.delenv("OCR_HARNESS", raising=False)
+    # ...and the harness signals themselves, so a test about the environment
+    # sets exactly the ones it means (the suite often runs inside Claude Code).
+    for k in [x for x in os.environ if x == "CLAUDECODE" or x.startswith("CLAUDE_CODE_")]:
+        monkeypatch.delenv(k, raising=False)
+
+
 @pytest.fixture
 def gate_env(monkeypatch, tmp_path):
     """Environment for an in-process supervisor run against the stub reviewer

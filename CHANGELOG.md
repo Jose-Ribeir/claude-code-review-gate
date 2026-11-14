@@ -7,6 +7,20 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **The `claude` backend can review a push (unified gate).** `OCR_BACKEND=claude`
+  (or a repo pin, the `OCR_HARNESS` hint a hook adapter sets, a Claude Code
+  session environment, or claude being the only backend CLI on PATH) now
+  launches `claude -p /review-gate:review ...` with the read-only
+  `--allowedTools`/`--disallowedTools` argv, the session-bridge env scrub and
+  `--output-format stream-json` parsing carried over from the Claude plugin.
+  The CLI is found on PATH, then `OCR_CLAUDE_BIN`/`CLAUDE_CODE_EXECPATH`, then
+  the Windows Desktop-app bundle; `OCR_CLAUDE_ARGS`/`OCR_CLAUDE_EXTRA_ARGS`
+  override/extend the argv and `OCR_CLAUDE_MODEL` (else an unprefixed
+  `OCR_MODEL`, else `sonnet`) pins the model. The deny-extension canary is
+  kimchi-only. A missing/unauthenticated/unparseable claude still blocks, and
+  `ocr_doctor.py` reports the selected backend and checks that backend's CLI.
+  Kimchi launches are unchanged. The two bash/PowerShell hook adapters export
+  `OCR_HARNESS` so the core knows which harness fired it.
 - **Content-keyed review coverage (2026-11-13, spec `docs/plans/restack-content-keyed-coverage.md`).**
   The gate now identifies reviewed work by content instead of by SHA: verdict
   records (protocol v2) carry per-commit `patch_ids` (`git patch-id --stable`),

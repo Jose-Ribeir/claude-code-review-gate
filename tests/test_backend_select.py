@@ -31,6 +31,16 @@ def _only(*present):
     return lambda name: f"/bin/{name}" if name in present else None
 
 
+def _unready(monkeypatch, name):
+    """Make profile `name` look half-built (launch_ready=False): the generic
+    guard that keeps a profile without a launch path from reviewing a push.
+    Every shipped profile is ready, so the guard is exercised on a patched
+    registry."""
+    patched = dict(ocr_profile.PROFILES)
+    patched[name] = patched[name]._replace(launch_ready=False)
+    monkeypatch.setattr(ocr_profile, "PROFILES", patched)
+
+
 def _pin(tmp_path, value):
     cfg = tmp_path / ".ocr"
     cfg.mkdir()
@@ -60,10 +70,17 @@ def test_repo_pin_used_when_no_env_override(tmp_path):
 
 
 def test_env_override_beats_repo_pin(tmp_path):
-    # The pin names a backend that cannot launch; the env override must win
-    # without ever consulting (and failing on) the pin.
     repo = _pin(tmp_path, "claude")
     sel = select_backend(env={"OCR_BACKEND": "kimchi"}, repo_root=repo, which=_no_cli)
+    assert (sel.name, sel.reason) == ("kimchi", "OCR_BACKEND override")
+
+
+def test_env_override_beats_a_repo_pin_that_cannot_launch(tmp_path, monkeypatch):
+    # With the pinned backend unlaunchable, the env override must still win
+    # without ever consulting (and failing on) the pin.
+    _unready(monkeypatch, "claude")
+    sel = select_backend(env={"OCR_BACKEND": "kimchi"},
+                         repo_root=_pin(tmp_path, "claude"), which=_no_cli)
     assert sel.name == "kimchi"
 
 
@@ -79,22 +96,37 @@ def test_unknown_repo_pin_fails_closed(tmp_path):
         select_backend(env={}, repo_root=_pin(tmp_path, "gemini"), which=_only("kimchi"))
 
 
-def test_explicit_backend_that_cannot_launch_yet_fails_closed_not_swapped(tmp_path):
-    # claude is a known profile but not launch-ready in this build: choosing
-    # it explicitly must block, never silently review with kimchi instead.
+@pytest.mark.parametrize("name", ["claude", "kimchi"])
+def test_explicit_backend_that_cannot_launch_fails_closed_not_swapped(tmp_path, monkeypatch, name):
+    # A profile without a launch path must block when chosen explicitly (env or
+    # repo pin), never silently review with the other backend instead.
+    other = "kimchi" if name == "claude" else "claude"
+    _unready(monkeypatch, name)
     with pytest.raises(BackendError) as exc:
-        select_backend(env={"OCR_BACKEND": "claude"}, which=_only("kimchi", "claude"))
-    assert "not implemented" in str(exc.value)
+        select_backend(env={"OCR_BACKEND": name}, which=_only("kimchi", "claude"))
+    assert "not implemented" in str(exc.value) and other in str(exc.value)
     with pytest.raises(BackendError):
-        select_backend(env={}, repo_root=_pin(tmp_path, "claude"), which=_only("claude"))
+        select_backend(env={}, repo_root=_pin(tmp_path, name), which=_only("claude", "kimchi"))
+
+
+def test_both_shipped_profiles_can_launch():
+    assert all(p.launch_ready for p in ocr_profile.PROFILES.values())
+    assert select_backend(env={"OCR_BACKEND": "claude"}, which=_no_cli).name == "claude"
+
+
+def test_explicit_claude_choice_launches_from_the_repo_pin_too(tmp_path):
+    sel = select_backend(env={}, repo_root=_pin(tmp_path, "claude"), which=_only("kimchi"))
+    assert (sel.name, sel.reason) == ("claude", "repo config pin")
 
 
 def test_harness_hint_selects_a_launchable_backend():
-    sel = select_backend(env={"OCR_HARNESS": "kimchi"}, which=_no_cli)
-    assert (sel.name, sel.reason) == ("kimchi", "harness hint (OCR_HARNESS)")
+    for hint in ("kimchi", "claude"):
+        sel = select_backend(env={"OCR_HARNESS": hint}, which=_no_cli)
+        assert (sel.name, sel.reason) == (hint, "harness hint (OCR_HARNESS)")
 
 
-def test_harness_hint_for_an_unready_or_unknown_backend_is_skipped_with_a_note():
+def test_harness_hint_for_an_unready_or_unknown_backend_is_skipped_with_a_note(monkeypatch):
+    _unready(monkeypatch, "claude")
     for hint in ("claude", "gemini"):
         sel = select_backend(env={"OCR_HARNESS": hint}, which=_no_cli)
         assert sel.name == "kimchi"
@@ -106,10 +138,25 @@ def test_kimchi_environment_is_autodetected():
     assert sel.name == "kimchi" and "auto-detected" in sel.reason
 
 
-def test_claude_environment_does_not_hijack_selection_while_claude_cannot_launch():
-    # The case that matters on this branch today: a push fired from inside
-    # Claude Code (CLAUDECODE set) with kimchi installed. It must keep being
-    # reviewed by kimchi, with a note saying why claude was skipped.
+def test_a_push_from_inside_claude_code_selects_claude():
+    # The case that matters: CLAUDECODE set (a push fired from a Claude Code
+    # session), with or without kimchi installed alongside.
+    env = {"CLAUDECODE": "1", "CLAUDE_CODE_ENTRYPOINT": "cli"}
+    for present in (("claude",), ("kimchi", "claude"), ()):
+        sel = select_backend(env=env, which=_only(*present))
+        assert sel.name == "claude" and "auto-detected" in sel.reason
+
+
+def test_an_explicit_kimchi_choice_beats_the_claude_code_environment():
+    sel = select_backend(env={"CLAUDECODE": "1", "OCR_BACKEND": "kimchi"},
+                         which=_only("kimchi", "claude"))
+    assert (sel.name, sel.reason) == ("kimchi", "OCR_BACKEND override")
+
+
+def test_claude_environment_does_not_hijack_selection_while_claude_cannot_launch(monkeypatch):
+    # The same push while claude has no launch path: keep reviewing with
+    # kimchi, with a note saying why claude was skipped.
+    _unready(monkeypatch, "claude")
     env = {"CLAUDECODE": "1", "CLAUDE_CODE_ENTRYPOINT": "cli"}
     sel = select_backend(env=env, which=_only("kimchi", "claude"))
     assert sel.name == "kimchi"
@@ -121,13 +168,7 @@ def test_single_launchable_cli_on_path_is_used():
     assert (sel.name, sel.reason) == ("kimchi", "only the kimchi CLI is on PATH")
 
 
-def test_a_future_ready_claude_profile_is_autodetected(monkeypatch):
-    # Flip claude to launch-ready (what the next slice does) and check the
-    # precedence rules already do the right thing for it, with no code change.
-    ready = dict(ocr_profile.PROFILES)
-    ready["claude"] = ready["claude"]._replace(launch_ready=True)
-    monkeypatch.setattr(ocr_profile, "PROFILES", ready)
-
+def test_the_claude_profile_is_autodetected():
     assert select_backend(env={"CLAUDECODE": "1"}, which=_no_cli).name == "claude"
     assert select_backend(env={"OCR_HARNESS": "claude"}, which=_no_cli).name == "claude"
     assert select_backend(env={}, which=_only("claude")).name == "claude"
@@ -136,7 +177,7 @@ def test_a_future_ready_claude_profile_is_autodetected(monkeypatch):
     assert both.name == "kimchi" and any("more than one" in n for n in both.notes)
     # Both CLIs on PATH and no other signal: default, not a coin flip.
     assert select_backend(env={}, which=_only("claude", "kimchi")).reason == "default"
-    # An explicit choice now launches.
+    # An explicit choice launches.
     assert select_backend(env={"OCR_BACKEND": "claude"}, which=_no_cli).name == "claude"
 
 
@@ -179,9 +220,29 @@ def test_gate_blocks_on_an_unusable_explicit_backend(monkeypatch):
 def test_gate_blocks_when_the_repo_pins_a_backend_that_cannot_launch(monkeypatch, tmp_path):
     for k in ("OCR_STUB_WORKER", "OCR_REVIEWER_CMD", "OCR_BACKEND"):
         monkeypatch.delenv(k, raising=False)
+    _unready(monkeypatch, "claude")
     with pytest.raises(rg.ReviewGateError) as exc:
         _launch(repo_root=_pin(tmp_path, "claude"))
     assert "not implemented" in str(exc.value)
+
+
+def test_gate_launches_the_backend_the_repo_pins(monkeypatch, tmp_path):
+    for k in ("OCR_STUB_WORKER", "OCR_REVIEWER_CMD", "OCR_BACKEND"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setattr(rg, "_find_claude", lambda: "/fake/claude")
+    inv = _launch(repo_root=_pin(tmp_path, "claude"))
+    assert inv.launch.name == "claude" and inv[0] == "/fake/claude"
+
+
+def test_a_ready_profile_without_a_launch_description_blocks_instead_of_falling_back(
+        monkeypatch):
+    for k in ("OCR_STUB_WORKER", "OCR_REVIEWER_CMD"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("OCR_BACKEND", "claude")
+    monkeypatch.setattr(rg, "_LAUNCHES", {"kimchi": rg._KIMCHI_LAUNCH})
+    with pytest.raises(rg.ReviewGateError) as exc:
+        _launch()
+    assert "no launch description" in str(exc.value) and "claude" in str(exc.value)
 
 
 def test_stub_workers_skip_backend_selection(monkeypatch):
@@ -214,6 +275,9 @@ def test_the_selection_breadcrumb_is_per_thread(monkeypatch, tmp_path):
     for k in ("OCR_STUB_WORKER", "OCR_REVIEWER_CMD", "OCR_BACKEND"):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setattr(rg, "_find_kimi", lambda: None)   # stop right after selection
+    # "plain" must fall to the default whatever this machine has installed.
+    monkeypatch.delenv("CLAUDECODE", raising=False)
+    monkeypatch.setattr(ocr_profile.shutil, "which", lambda *_a, **_k: None)
     pinned = _pin(tmp_path, "kimchi")
     barrier = threading.Barrier(2)
     seen, errors = {}, []

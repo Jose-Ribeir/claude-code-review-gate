@@ -273,8 +273,112 @@ DEFAULT_KIMI_ARGS = [
     # No MCP servers. A code review needs read/grep/find and nothing else.
     "--mcp-config", '{"mcpServers":{}}',
 ]
-# Legacy alias (upstream name, kept for diff parity of callers/tests).
+# Legacy alias (upstream name, kept for diff parity of callers/tests). It is
+# the KIMCHI argv; the claude profile's argv is CLAUDE_WORKER_ARGS below.
 DEFAULT_CLAUDE_ARGS = DEFAULT_KIMI_ARGS
+
+
+def _read_claude_model(*role_vars):
+    """The model a claude worker is pinned to (`claude --model`): the first set
+    of the role's own variables, then OCR_CLAUDE_MODEL, then OCR_MODEL (the
+    claude lineage's variable), else sonnet. Pinned deliberately: without
+    --model the spawned session inherits the PARENT Claude Code session's
+    model, so a user on Opus would pay Opus rates for every gate run.
+
+    A vendor-prefixed id (`kimchi-dev/kimi-k3`, the kimchi convention that
+    OCR_MODEL / OCR_DOCS_SUMMARY_MODEL carry on that profile) is not a claude
+    model and is skipped, so one environment can serve both profiles."""
+    for var in tuple(role_vars) + ("OCR_CLAUDE_MODEL", "OCR_MODEL"):
+        value = os.environ.get(var, "").strip()
+        if not value:
+            continue
+        if "/" in value and not var.startswith("OCR_CLAUDE_"):
+            continue
+        return value
+    return "sonnet"
+
+
+_CLAUDE_MODEL = _read_claude_model()
+_CLAUDE_DOCS_SUMMARY_MODEL = _read_claude_model(
+    "OCR_CLAUDE_DOCS_SUMMARY_MODEL", "OCR_DOCS_SUMMARY_MODEL")
+
+# The claude profile's headless worker argv. Unlike kimchi (whose -p sessions
+# ignore permission flags, so the sandbox is the -e deny extension), claude
+# enforces its sandbox from argv: a read-only --allowedTools list plus
+# --disallowedTools for every writing/web tool. Ported unchanged from the
+# claude lineage's DEFAULT_CLAUDE_ARGS.
+CLAUDE_WORKER_ARGS = [
+    # The reviewer's input is an UNTRUSTED diff. Anything it is pre-approved to
+    # run is therefore reachable by prompt injection from a hostile branch, so
+    # the allowlist is read-only: the review reads code and asks git what
+    # changed, and needs nothing else. Each rule is its own argv element -- the
+    # documented form is `--allowedTools "Bash(git log *)" "Bash(git diff *)"`,
+    # and note the SPACE before `*`, not a colon: a `param:value` rule against
+    # Bash's primary `command` field is ignored (with a startup warning) because
+    # it would be bypassable by a compound command.
+    #
+    # Everything outside this list still *exists*, it just is not pre-approved,
+    # and a headless session has nobody to prompt -- so it is refused. That is
+    # only true while --dangerously-skip-permissions is absent.
+    "--allowedTools",
+    "Bash(git diff *)",
+    "Bash(git ls-files *)",
+    "Bash(git log *)",
+    "Bash(git show *)",
+    "Bash(git rev-parse *)",
+    "Bash(git status *)",
+    "Read",
+    "Grep",
+    "Glob",
+    "Task",
+    # Belt and braces: a bare tool name removes the tool from the model's
+    # context entirely rather than merely denying calls to it.
+    "--disallowedTools",
+    "Write",
+    "Edit",
+    "NotebookEdit",
+    "WebFetch",
+    "WebSearch",
+    # Pin the model rather than inheriting the parent session's.
+    "--model", _CLAUDE_MODEL,
+    # Load NO settings sources. The user's ~/.claude/settings.json is where
+    # global hooks live, and project settings live in the repo BEING REVIEWED
+    # -- attacker-controlled on a hostile branch, and settings can define
+    # hooks, which execute. An empty value loads none of the three. Auth is
+    # unaffected -- OAuth/keychain is not a settings source.
+    "--setting-sources", "",
+    # Load the review plugin from disk. Required because --setting-sources
+    # above drops the user-level enabledPlugins registry.
+    "--plugin-dir", _PLUGIN_ROOT,
+    # No MCP servers; --strict-mcp-config makes the empty set authoritative.
+    "--mcp-config", '{"mcpServers":{}}',
+    "--strict-mcp-config",
+    # Move per-machine sections (cwd, env, git status) out of the system prompt
+    # so the cached prefix stays stable across runs.
+    "--exclude-dynamic-system-prompt-sections",
+    # NDJSON, one event per turn: the verdict parser scans EVERY assistant turn,
+    # so a stray task-notification ack after the verdict cannot replace it.
+    "--output-format", "stream-json",
+    "--verbose",   # required with stream-json in -p mode
+]
+
+
+def _claude_review_args():
+    """The claude review worker's default argv with the caller's extras
+    appended; only consulted without an OCR_CLAUDE_ARGS override (see
+    _worker_invocation)."""
+    args = list(CLAUDE_WORKER_ARGS)
+    args += shlex.split(os.environ.get("OCR_CLAUDE_EXTRA_ARGS", ""))
+    return args
+
+
+def _claude_docs_summary_args():
+    """_claude_review_args with the docs-summary role's model pin (the claude
+    counterpart of _docs_summary_model_args)."""
+    args = _claude_review_args()
+    if "--model" in args and args.index("--model") + 1 < len(args):
+        args[args.index("--model") + 1] = _CLAUDE_DOCS_SUMMARY_MODEL
+    return args
 
 # --- C3: the deny-extension startup canary --------------------------------------
 # `-p` sessions run yolo: permission FLAGS are not enforced (verified), so the
@@ -2825,8 +2929,30 @@ def _find_kimi():
     return shutil.which("kimchi")
 
 
-# Upstream name kept as an alias for callers/tests written against it.
-_find_claude = _find_kimi
+def _find_claude():
+    """Locate the claude CLI so the gate works from any shell, not just inside
+    Claude Code. Order: PATH; then OCR_CLAUDE_BIN / CLAUDE_CODE_EXECPATH; then,
+    on Windows, the Desktop App's bundled claude.exe (a versioned path that is
+    not on PATH) -- newest version wins. (Ported from the claude lineage.)"""
+    found = shutil.which("claude")
+    if found:
+        return found
+    for var in ("OCR_CLAUDE_BIN", "CLAUDE_CODE_EXECPATH"):
+        exe = os.environ.get(var, "")
+        if exe and os.path.isfile(exe):
+            return exe
+    import glob
+
+    roots = [p for p in (os.environ.get("LOCALAPPDATA"),
+                         os.path.join(os.path.expanduser("~"), "AppData", "Local")) if p]
+    cands = []
+    for root in roots:
+        cands += glob.glob(os.path.join(root, "Packages", "Claude_*", "LocalCache",
+                                        "Roaming", "Claude", "claude-code", "*", "claude.exe"))
+    if cands:
+        cands.sort(key=lambda f: os.path.getmtime(f), reverse=True)
+        return cands[0]
+    return None
 
 
 # Substrings that identify a credentials problem rather than a review problem.
@@ -3101,6 +3227,28 @@ _SESSION_BRIDGE_ENV = (
     "PI_ENTRYPOINT",
     "KIMCHI_PERMISSIONS",
     "KIMCHI_PERMISSIONS_MODE",
+)
+
+# The claude profile's session-bridge vars (confirmed present on a real Claude
+# Code Desktop session by a live OCR_DEBUG smoke test, 2026-09-11): together
+# they tell a CLI process "you are the desktop host's SDK child, on messaging
+# channel X, tracking session Y" -- state an independent reviewer must not
+# inherit. Left inherited on purpose: CLAUDECODE (harmless, and the harness
+# signal backend selection reads), CLAUDE_CODE_EXECPATH (read by _find_claude)
+# and the per-feature flags, which configure behaviour rather than claim a
+# session.
+_CLAUDE_SESSION_BRIDGE_ENV = (
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_HOST_SESSION_ID",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_PID",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_AGENT_SDK_VERSION",
+    "CLAUDE_CODE_SDK_HAS_HOST_AUTH_REFRESH",
+    "CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH",
+    "CLAUDE_CODE_OAUTH_SCOPES",
 )
 
 # Values safe to log verbatim in the OCR_DEBUG breadcrumb (not secret-adjacent
@@ -3400,7 +3548,26 @@ _KIMCHI_LAUNCH = WorkerLaunch(
         "    stale -- the gate breaks with no visible sign anything logged out.\n"),
 )
 
-_LAUNCHES = {"kimchi": _KIMCHI_LAUNCH}
+_CLAUDE_LAUNCH = WorkerLaunch(
+    name="claude", label="claude", host="Claude Code",
+    cli_where="PATH, OCR_CLAUDE_BIN or CLAUDE_CODE_EXECPATH",
+    install_hint="Install Claude Code, or point OCR_CLAUDE_BIN at the CLI",
+    find_cli=lambda: _find_claude(),
+    default_args={"review": lambda: _claude_review_args(),
+                  "docs_summary": lambda: _claude_docs_summary_args()},
+    args_env="OCR_CLAUDE_ARGS",
+    prompt="/review-gate:review --unpushed --json",
+    prompt_range="/review-gate:review --range {rng} --json",
+    scrub_env=lambda env: _scrub_claude_worker_env(env),
+    canary=False,
+    debug_prefixes=("CLAUDE", "ANTHROPIC"),
+    auth_note=(
+        "  Note   : a Claude Code Desktop session refreshes its own auth in-process,\n"
+        "    so the app keeps working while the on-disk credentials the CLI reads go\n"
+        "    stale -- the gate breaks with no visible sign anything logged out.\n"),
+)
+
+_LAUNCHES = {"kimchi": _KIMCHI_LAUNCH, "claude": _CLAUDE_LAUNCH}
 
 
 class _Invocation(tuple):
@@ -4014,9 +4181,12 @@ _KIMCHI_ENV_DENY_PREFIXES = ("KIMCHI_PERMISSIONS",)
 _GIT_TRACE_ENV_PREFIXES = ("GIT_TRACE",)
 
 
-def _scrub_worker_env(child_env):
+def _scrub_worker_env(child_env, session_env=None, deny_prefixes=None):
     """Pop the session-bridge vars from the worker env (in place); return the
     names removed (for the OCR_DEBUG breadcrumb).
+
+    session_env / deny_prefixes: the profile's default scrub set (kimchi's
+    when None). The OCR_UNSET_ENV policy below applies to either.
 
     unset/empty OCR_UNSET_ENV -> scrub _SESSION_BRIDGE_ENV plus every
     KIMCHI_PERMISSIONS* variant (the default); "none" (case-insensitive) ->
@@ -4032,7 +4202,8 @@ def _scrub_worker_env(child_env):
     """
     _override = os.environ.get("OCR_UNSET_ENV", "").strip()
     if not _override:
-        _unset_names, _prefixes = list(_SESSION_BRIDGE_ENV), _KIMCHI_ENV_DENY_PREFIXES
+        _unset_names = list(_SESSION_BRIDGE_ENV if session_env is None else session_env)
+        _prefixes = _KIMCHI_ENV_DENY_PREFIXES if deny_prefixes is None else deny_prefixes
     elif _override.lower() == "none":
         _unset_names, _prefixes = [], ()
     else:
@@ -4053,12 +4224,22 @@ def _scrub_worker_env(child_env):
     return scrubbed
 
 
+def _scrub_claude_worker_env(child_env):
+    """The claude worker's env prep: the cwd is the untrusted branch, whose
+    CLAUDE.md a session would load -- --setting-sources "" also blocks that,
+    but OCR_CLAUDE_ARGS can drop it -- then the same scrub as the kimchi
+    worker over the claude session-bridge set."""
+    child_env["CLAUDE_CODE_DISABLE_CLAUDE_MDS"] = "1"
+    return _scrub_worker_env(child_env, _CLAUDE_SESSION_BRIDGE_ENV, ())
+
+
 def _supervisor_env():
     """Environment for the supervisor: the parent's, minus the session bridge
     (see _SESSION_BRIDGE_ENV), minus git's hook exports, and NOT in-review --
     the supervisor is the gate, only the reviewer it spawns is the review."""
     env = dict(os.environ)
-    for name in _SESSION_BRIDGE_ENV + _GIT_ENV_SCRUB + ("OCR_IN_REVIEW",):
+    for name in (_SESSION_BRIDGE_ENV + _CLAUDE_SESSION_BRIDGE_ENV + _GIT_ENV_SCRUB
+                 + ("OCR_IN_REVIEW",)):
         key = name.upper() if os.name == "nt" else name
         env.pop(key, None)
     for key in [k for k in env if k.startswith(_KIMCHI_ENV_DENY_PREFIXES)]:

@@ -37,8 +37,9 @@ from pathlib import Path
 # cli: the executable looked up on PATH for step 5.
 # env_markers: env var names / prefixes whose presence says "this process was
 #   launched by that harness" (step 4). Prefix entries end with "*".
-# launch_ready: False while the profile's launch + output-parsing half is
-#   still being ported; see PROFILES below.
+# launch_ready: False while a profile's launch + output-parsing half is
+#   still being ported (a half-built profile is never auto-selected and an
+#   explicit choice of it fails closed); every profile is ready today.
 Profile = namedtuple("Profile", "name cli env_markers launch_ready")
 
 PROFILES = {
@@ -48,15 +49,15 @@ PROFILES = {
         env_markers=("KIMCHI_*", "PI_CODING_AGENT*"),
         launch_ready=True,
     ),
-    # Selection knows about claude so the precedence rules are final, but the
-    # claude launch path (argv, env scrub, `--output-format json` parsing,
-    # CLAUDE_PLUGIN_DATA state root) is ported in a later slice. Until then an
-    # EXPLICIT claude choice fails closed and auto-detect skips it.
+    # The claude launch path (argv, env scrub, `claude -p` stream-json
+    # parsing) lives in review-gate.py next to the kimchi one; see its
+    # _LAUNCHES table. Flipping this to False takes claude out of auto-detect
+    # and makes an explicit claude choice fail closed again.
     "claude": Profile(
         name="claude",
         cli="claude",
         env_markers=("CLAUDECODE", "CLAUDE_CODE_*"),
-        launch_ready=False,
+        launch_ready=True,
     ),
 }
 
