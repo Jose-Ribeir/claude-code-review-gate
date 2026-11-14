@@ -780,9 +780,10 @@ def _git(args, cwd=None):
             encoding="utf-8",
             errors="replace",
             timeout=30,
-            # The supervisor runs DETACHED_PROCESS, with no console: on Windows
-            # every console child it starts without this flag gets a window of
-            # its own, one per git call -- dozens per review.
+            # The supervisor runs CREATE_NO_WINDOW (a hidden console): on
+            # Windows every console child it starts without this flag can get
+            # a window or console of its own, one per git call -- dozens per
+            # review.
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         return out.stdout.strip(), out.returncode
@@ -3994,7 +3995,16 @@ def _spawn_supervisor(state_path, run_id, repo_root):
         kw["stdout"] = fh
         kw["stderr"] = fh
         if sys.platform == "win32":
-            base = (subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
+            # CREATE_NO_WINDOW, not DETACHED_PROCESS: the supervisor still
+            # runs without a visible window and in its own process group, but
+            # it owns a HIDDEN console that its git/kimchi children inherit.
+            # Fully console-less (DETACHED_PROCESS) makes every console
+            # allocation in the tree -- the venv launcher's child python, and
+            # each git call without CREATE_NO_WINDOW -- go through the
+            # default-terminal handoff, which costs ~3 s apiece when Windows
+            # Terminal is the default host (verified: supervisor startup went
+            # from ~0.5 s to ~3.4 s and blew the hook's 4 s inline window).
+            base = (subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP)
             try:
                 return subprocess.Popen(cmd, creationflags=base | subprocess.CREATE_BREAKAWAY_FROM_JOB, **kw).pid
             except OSError:
@@ -8814,9 +8824,9 @@ def subprocess_run_popen(argv, cwd=""):
     return _sp.Popen(argv, cwd=cwd, stdout=_sp.PIPE,
                      stderr=_sp.DEVNULL,
                      # Parity with _git (its comment): the supervisor runs
-                     # DETACHED_PROCESS with no console, so every console
-                     # child started without this flag gets its own window on
-                     # Windows -- one per streamed diff measurement.
+                     # CREATE_NO_WINDOW (a hidden console), and a console
+                     # child started without this flag can get its own window
+                     # on Windows -- one per streamed diff measurement.
                      creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0))
 
 
