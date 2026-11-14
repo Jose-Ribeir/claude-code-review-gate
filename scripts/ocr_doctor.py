@@ -7,11 +7,14 @@ DENY, and 3 failed attempts leave a sticky error state whose only advice is
 "run the doctor". This script is that doctor -- a pure-stdlib, Python 3.7+
 health check over every dependency the gate has:
 
-  - python3 >= 3.7, git, and the kimchi CLI (checked against TESTED_PIN;
-    an untested kimchi version is a WARN, not a FAIL -- the gate still
-    runs, it is just running on an unverified release),
-  - the deny extension (repo layout + installed slot): nonempty text with
-    the tool_call subscriber and the OCR_IN_REVIEW gate string,
+  - python3 >= 3.7, git, the backend the gate would select for this machine
+    (ocr_profile: OCR_BACKEND > repo pin > harness > PATH > default) and THAT
+    backend's CLI -- kimchi (checked against TESTED_PIN; an untested kimchi
+    version is a WARN, not a FAIL -- the gate still runs, it is just running
+    on an unverified release) or claude,
+  - kimchi only: the deny extension (repo layout + installed slot): nonempty
+    text with the tool_call subscriber and the OCR_IN_REVIEW gate string
+    (the claude worker's sandbox is its argv tool allowlist, nothing to check),
   - hook health (with --repo): the EFFECTIVE hook path git resolves for the
     repo (core.hooksPath, repo-top-relative when relative, else the default
     hooks dir -- the common dir for a linked worktree), whether a gate hook
@@ -55,6 +58,11 @@ ATTEMPT_CAP = 3
 
 GATE_ROOT = Path(__file__).resolve().parents[1]
 
+# The backend-selection rules live in ocr_profile (pure, importable); the
+# doctor must answer with the SAME rules the gate uses, not a copy.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import ocr_profile  # noqa: E402
+
 _VERSION_RE = re.compile(r"\d+(?:\.\d+)+")
 
 
@@ -89,6 +97,30 @@ def _kimchi_bin(env):
     if exe and os.path.isfile(exe):
         return exe
     return shutil.which("kimchi", path=env.get("PATH"))
+
+
+def _claude_bin(env):
+    """The claude CLI the gate itself would use. Mirrors review-gate._find_claude:
+    PATH, then OCR_CLAUDE_BIN / CLAUDE_CODE_EXECPATH, then the newest Windows
+    Desktop-app bundled claude.exe."""
+    found = shutil.which("claude", path=env.get("PATH"))
+    if found:
+        return found
+    for var in ("OCR_CLAUDE_BIN", "CLAUDE_CODE_EXECPATH"):
+        exe = env.get(var, "").strip()
+        if exe and os.path.isfile(exe):
+            return exe
+    import glob
+    roots = [p for p in (env.get("LOCALAPPDATA"),
+                         os.path.join(os.path.expanduser("~"), "AppData", "Local")) if p]
+    cands = []
+    for root in roots:
+        cands += glob.glob(os.path.join(root, "Packages", "Claude_*", "LocalCache",
+                                        "Roaming", "Claude", "claude-code", "*", "claude.exe"))
+    if cands:
+        cands.sort(key=lambda f: os.path.getmtime(f), reverse=True)
+        return cands[0]
+    return None
 
 
 def _pid_alive(pid):
@@ -197,6 +229,48 @@ def check_kimchi(add, env):
             f"{bin_} version {version} is UNTESTED (tested: {', '.join(TESTED_PIN)}); "
             "the gate runs but on an unverified release -- watch for fail-closed "
             "denies and report drift")
+
+
+def check_backend(add, env, repo=None):
+    """Report which backend the gate would select here, and why. Returns the
+    selected backend name, or None when selection itself fails (an explicit
+    choice that cannot be honoured blocks every push, so that is a FAIL)."""
+    try:
+        sel = ocr_profile.select_backend(
+            env=env, repo_root=repo,
+            which=lambda name: shutil.which(name, path=env.get("PATH")))
+    except ocr_profile.BackendError as exc:
+        add("backend", "fail", f"{exc} -- the gate blocks every push until this is fixed")
+        return None
+    notes = "".join(f"; note: {n}" for n in sel.notes)
+    add("backend", "ok", f"{sel.name} ({sel.reason}){notes}")
+    return sel.name
+
+
+def check_claude(add, env):
+    bin_ = _claude_bin(env)
+    if not bin_:
+        add("claude", "fail",
+            "`claude` CLI not found on PATH, OCR_CLAUDE_BIN or CLAUDE_CODE_EXECPATH -- "
+            "without a reviewer the gate DENIES every push (fail-closed, D9)")
+        return
+    try:
+        out = _run([bin_, "--version"], env)
+    except Exception as exc:
+        add("claude", "warn", f"found at {bin_} but `claude --version` failed to run ({exc})")
+        return
+    text = ((out.stdout or "") + "\n" + (out.stderr or "")).strip()
+    if out.returncode != 0:
+        add("claude", "warn", f"`claude --version` exited {out.returncode}: {text[:200]}")
+        return
+    m = _VERSION_RE.search(text)
+    if not m:
+        add("claude", "warn", f"found at {bin_} but its version could not be parsed "
+                              f"from `claude --version` output: {text[:120]!r}")
+        return
+    add("claude", "ok", f"{bin_} version {m.group(0)} (login state is not checked: if "
+                        "reviews fail with a credentials error, run `claude` interactively "
+                        "and /login)")
 
 
 def _ext_problems(path):
@@ -533,7 +607,13 @@ def check_states(add, env, root=None):
                                     "error state")
 
 
-def check_canary_hint(add, env):
+def check_canary_hint(add, env, backend="kimchi"):
+    if backend == "claude":
+        add("canary-hint", "info",
+            "claude profile: the read-only sandbox is the worker argv itself "
+            "(--allowedTools read-only git/Read/Grep/Glob, --disallowedTools "
+            "Write/Edit/Web*); there is no deny extension and so no startup canary")
+        return
     ext = GATE_ROOT / "extensions" / "review-gate-deny.ts"
     add("canary-hint", "info",
         "manual read-only-sandbox canary (the write MUST be blocked): "
@@ -555,12 +635,17 @@ def run_checks(repo=None, env=None, repo_ext=None, installed_ext=None,
 
     check_python(add, env)
     check_git(add, env)
-    check_kimchi(add, env)
-    check_deny_ext(add, env, repo_ext=repo_ext, installed_ext=installed_ext)
+    backend = check_backend(add, env, repo=repo)
+    if backend == "claude":
+        check_claude(add, env)
+    elif backend is not None:
+        check_kimchi(add, env)
+        check_deny_ext(add, env, repo_ext=repo_ext, installed_ext=installed_ext)
     check_hooks(add, env, repo=repo, hook_dir=hook_dir)
     check_store(add, env)
     check_states(add, env)
-    check_canary_hint(add, env)
+    if backend is not None:
+        check_canary_hint(add, env, backend)
     return checks
 
 
