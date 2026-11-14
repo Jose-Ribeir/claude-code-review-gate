@@ -1934,7 +1934,7 @@ _ENV_PREFIX = (
 _REAL_PUSH = re.compile(
     # start of string, a command separator, a newline, a quote, or an
     # opening subshell/brace/command-substitution (Kimchi port: `$(...)` runs)
-    "(?:^|[;&|(){}\\n\\r\"'`]|\\$\(|&&|\|\|)\\s*"
+    "(?:^|[;&|(){}\\n\\r\"'`]|\\$\\(|&&|\\|\\|)\\s*"
     "(?:" + _ENV_PREFIX + "\\s+)?"            # env(1) prefix: env X=1 git push
     "(?:[A-Za-z_][A-Za-z0-9_]*=\\S*\\s+)*"   # env prefixes: FOO=bar git push
     + _spliceable("git") + "\\s+"
@@ -1950,7 +1950,7 @@ _REAL_PUSH = re.compile(
     # subcommand runs inside `( ... )`, `{ ...; }`, backticks and
     # `$( ... )`, so those openers must count here too.
 _GIT_CMD = re.compile(
-    "(?:^|[;&|(){}\\n\\r\"'`]|\\$\(|&&|\|\|)\\s*"
+    "(?:^|[;&|(){}\\n\\r\"'`]|\\$\\(|&&|\\|\\|)\\s*"
     "(?:" + _ENV_PREFIX + "\\s+)?"
     "(?:[A-Za-z_][A-Za-z0-9_]*=\\S*\\s+)*"
     + _spliceable("git") + "\\s+"
