@@ -395,10 +395,18 @@ def test_sh_adapter_gates_a_push_from_a_linked_worktree_of_the_2026_11_10_instal
     decision, reason = parse_pretooluse(proc.stdout)
     assert decision == "deny", (proc.stdout, proc.stderr)
     assert "review-gate" in reason
-    # The review-start shape (the decision a first push gets): the gate names
-    # the hook-mode retry contract instead of waving the push through.
-    assert "re-run this exact `git push` command" in reason, reason
-    assert "was NOT executed" in reason, reason
+    # The push is blocked, not waved through, and the answer names the retry
+    # contract. Two shapes are legitimate here: the review-start answer (the
+    # review is still running at the inline budget) or the fail-closed
+    # "could not complete" answer (this test passes no reviewer, so on a machine
+    # without a worker CLI -- every CI runner -- the supervisor fails fast
+    # inside the inline budget). Either way the push did not go through.
+    started = ("re-run this exact `git push` command" in reason
+               and "was NOT executed" in reason)
+    failed_closed = ("could not complete" in reason
+                     and "Nothing was approved" in reason
+                     and "retries the review" in reason)
+    assert started or failed_closed, reason
 
 
 @needs_bash

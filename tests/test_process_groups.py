@@ -92,7 +92,10 @@ def test_the_reviewer_is_started_in_its_own_session_on_posix(monkeypatch, tmp_pa
     seen = {}
     import test_review_gate as trg
     monkeypatch.setattr(review_gate.subprocess, "Popen", trg._fake_popen(seen))
-    monkeypatch.setattr(review_gate, "_find_claude", lambda: "claude")
+    # _find_claude is only an alias; patching it does not reach the _find_kimi
+    # call the worker invocation makes, so patch the real name.
+    monkeypatch.setattr(review_gate, "_find_kimi", lambda: "kimchi")
+    monkeypatch.setenv("OCR_SKIP_CANARY", "1")
     monkeypatch.delenv("OCR_REVIEWER_CMD", raising=False)
     monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(tmp_path))
     review_gate._run_review_once(str(tmp_path), "hook", str(tmp_path), "t" * 40, "a..b")
