@@ -443,3 +443,28 @@ def test_the_docs_summary_worker_runs_on_the_selected_backend(clean, monkeypatch
     (launch,) = fake_backend.read_trace(tmp_path / "fake.trace")
     assert launch["flavor"] == "claude" and launch["prompt"].startswith("Summarize this repository")
 
+
+
+# --- review findings on 936d1ee ----------------------------------------------
+
+def test_hook_mode_hints_name_the_selected_host_without_a_worker_having_run(clean, tmp_path):
+    # `--mode hook` never calls _worker_invocation, so the thread has no recorded
+    # selection; the hints must still say which host the user has to relaunch.
+    clean.chdir(tmp_path)
+    clean.delattr(rg._backend_local, "selection", raising=False)
+    clean.setenv("OCR_BACKEND", "claude")
+    for hint in (rg._bypass_hint("hook"), rg._downgrade_hint("hook")):
+        assert "Claude Code" in hint and "Kimchi" not in hint
+    clean.setenv("OCR_BACKEND", "kimchi")
+    for hint in (rg._bypass_hint("hook"), rg._downgrade_hint("hook")):
+        assert "Kimchi" in hint and "Claude Code" not in hint
+    # Resolving a hint must not pre-empt the worker's own authoritative choice.
+    assert getattr(rg._backend_local, "selection", None) is None
+
+
+def test_a_hint_never_raises_when_the_backend_cannot_be_selected(clean, tmp_path):
+    clean.chdir(tmp_path)
+    clean.delattr(rg._backend_local, "selection", raising=False)
+    clean.setenv("OCR_BACKEND", "gemini")
+    assert "Kimchi" in rg._bypass_hint("hook")    # falls back; the worker call reports the error
+

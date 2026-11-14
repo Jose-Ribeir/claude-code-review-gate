@@ -3578,9 +3578,19 @@ class _Invocation(tuple):
 
 
 def _current_launch():
-    """The WorkerLaunch of the backend this thread last selected (kimchi when
-    none has: stub workers never select)."""
+    """The WorkerLaunch of the backend this thread last selected.
+
+    `--mode hook` never launches a worker (the detached supervisor does), so its
+    thread has no recorded selection when it builds the bypass/downgrade hints.
+    Resolve what the supervisor will pick -- read-only, and not recorded, so a
+    later _worker_invocation still makes its own authoritative choice. Falls back
+    to kimchi when selection fails (the worker call reports that failure)."""
     sel = getattr(_backend_local, "selection", None)
+    if sel is None:
+        try:
+            sel = ocr_profile.select_backend(repo_root=os.getcwd())
+        except Exception:  # noqa: BLE001 -- a hint must never raise
+            sel = None
     return _LAUNCHES.get(sel.name if sel is not None else "kimchi", _KIMCHI_LAUNCH)
 
 
