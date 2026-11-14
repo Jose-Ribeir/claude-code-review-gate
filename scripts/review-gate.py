@@ -75,6 +75,7 @@ import ocr_index  # noqa: E402
 import ocr_memory  # noqa: E402
 import ocr_segment  # noqa: E402
 import ocr_telemetry  # noqa: E402
+import ocr_profile  # noqa: E402  # backend (claude / kimchi) selection
 import rg_store  # noqa: E402  # the Kimchi port's external verdict store + sandbox
 import rg_config  # noqa: E402  # t15: single settings read (intent.* switches)
 import rg_tickets  # noqa: E402  # t16: ticket key discovery
@@ -3344,7 +3345,13 @@ def _review_model_args():
 # missing-worker message, the default-args builder (model pins, extras), the
 # prompt and stub argv mode, the spawn loop, output parsing, error wrapping.
 
-def _worker_invocation(default_args_builder, missing_message):
+# The most recent backend selection (an ocr_profile.Selection), kept so the
+# debug breadcrumb in _run_review_once can name it. None until a non-stub
+# worker invocation has resolved one.
+_last_backend_selection = None
+
+
+def _worker_invocation(default_args_builder, missing_message, repo_root=None):
     """Resolve the invocation shared by every headless `kimchi -p` worker call.
 
     default_args_builder: zero-arg callable returning the caller's DEFAULT
@@ -3373,8 +3380,20 @@ def _worker_invocation(default_args_builder, missing_message):
     OCR_KIMI_ARGS replaced the argv wholesale (the caller owns that sandbox);
     OCR_SKIP_CANARY=1 is the emergency escape hatch.
     """
-    kimi = _find_kimi()
     stub = _test_reviewer_cmd() or _stub_worker_cmd()
+    if not stub:
+        # Which backend reviews this push (OCR_BACKEND > repo pin > harness >
+        # PATH > default; see ocr_profile). An explicit choice that cannot be
+        # honoured blocks -- the gate never reviews with a backend the user did
+        # not ask for. Stub workers run INSTEAD of any CLI, so they skip this.
+        # Only the kimchi launch path exists in this build; selection never
+        # auto-picks a profile that cannot launch (ocr_profile.launch_ready).
+        global _last_backend_selection
+        try:
+            _last_backend_selection = ocr_profile.select_backend(repo_root=repo_root)
+        except ocr_profile.BackendError as exc:
+            raise ReviewGateError(f"backend selection failed: {exc}")
+    kimi = _find_kimi()
     if not kimi and not stub:
         raise ReviewGateError(missing_message)
     override = os.environ.get("OCR_KIMI_ARGS")
@@ -3412,7 +3431,8 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
         "integrity (a gate without a reviewer must not wave a push through).\n"
         "  Install Kimchi Studio, or point KIMCHI_BIN at the CLI, then push again.\n"
         f"  Run {_DOCTOR_CMD} (review-gate doctor) to diagnose.\n"
-        f"{bypass}"
+        f"{bypass}",
+        repo_root=repo_root,
     )
     debug = _debug_enabled()
     creationflags = _WIN_FLAGS if sys.platform == "win32" else 0
@@ -3505,6 +3525,10 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
                     f"child_pid={proc.pid} cwd={repo_root!r} scrubbed={scrubbed} "
                     f"present_after_scrub={present} safe_values={safe_values}"
                 )
+                if _last_backend_selection is not None:
+                    _debug_log(f"backend={_last_backend_selection.name} "
+                               f"reason={_last_backend_selection.reason!r} "
+                               f"notes={list(_last_backend_selection.notes)}")
             # Mirrors subprocess.run's own Popen usage exactly, including which
             # exceptions kill the child -- a rewrite that only handled
             # TimeoutExpired would leave an orphaned `claude.exe` running (and
