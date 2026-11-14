@@ -164,7 +164,7 @@ _spec.loader.exec_module(rg)
 
 
 def _launch(repo_root=None):
-    return rg._worker_invocation(lambda: ["--x"], "worker missing", repo_root=repo_root)
+    return rg._worker_invocation("review", "worker missing", repo_root=repo_root)
 
 
 def test_gate_blocks_on_an_unusable_explicit_backend(monkeypatch):
@@ -221,7 +221,7 @@ def test_the_selection_breadcrumb_is_per_thread(monkeypatch, tmp_path):
     def run(name, repo):
         try:
             try:
-                rg._worker_invocation(lambda: [], "worker missing", repo_root=repo)
+                rg._worker_invocation("review", "worker missing", repo_root=repo)
             except rg.ReviewGateError:
                 pass          # expected: no worker installed; selection already stored
             barrier.wait(timeout=20)

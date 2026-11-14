@@ -2918,8 +2918,11 @@ def _final_verdict(result):
     return verdict
 
 
-def _auth_hint(output):
-    """Extra guidance when claude's output looks like a login/credentials failure.
+def _auth_hint(output, launch=None):
+    """Extra guidance when the worker's output looks like a login/credentials failure.
+
+    launch: the WorkerLaunch whose CLI printed it (default kimchi); it supplies
+    the profile-specific closing note.
 
     Returns "" for anything else, so the caller can always interpolate it.
 
@@ -2940,9 +2943,7 @@ def _auth_hint(output):
         "  Fix it : run `claude` in an interactive terminal and log in via /login,\n"
         "    then retry. The headless session the gate spawns cannot complete an\n"
         "    OAuth flow itself (no terminal to hand the browser callback to).\n"
-        "  Note   : a Kimchi Studio session refreshes its own auth in-process,\n"
-        "    so the app keeps working while the on-disk credentials the CLI reads go\n"
-        "    stale -- the gate breaks with no visible sign anything logged out.\n"
+        + (launch or _KIMCHI_LAUNCH).auth_note
     )
 
 
@@ -2958,10 +2959,11 @@ def _bypass_hint(mode):
     not work, with no indication why.
     """
     if mode == "hook":
+        host = _current_launch().host
         return (
             "  Emergency one-shot bypass : export OCR_FAIL_OPEN=1 in the environment\n"
-            "    Kimchi itself is launched from (a shell prefix on `git push` will\n"
-            "    NOT work in hook mode -- this process inherits Kimchi's env, not the\n"
+            f"    {host} itself is launched from (a shell prefix on `git push` will\n"
+            f"    NOT work in hook mode -- this process inherits {host}'s env, not the\n"
             "    Bash tool call's)."
         )
     # The gate fires on push (pre-push hook / PreToolUse on `git push`) in
@@ -2986,10 +2988,11 @@ def _downgrade_hint(mode):
     file route with an explicit human-only/persistent/repo-wide label.
     """
     if mode == "hook":
+        host = _current_launch().host
         return (
             '  Downgrade to advisory (warn-only): export OCR_ADVISORY=1 in the environment\n'
-            "    Kimchi itself is launched from (a shell prefix on `git commit` will NOT\n"
-            "    work in hook mode -- this process inherits Kimchi's env, not the Bash\n"
+            f"    {host} itself is launched from (a shell prefix on `git commit` will NOT\n"
+            f"    work in hook mode -- this process inherits {host}'s env, not the Bash\n"
             '    tool call\'s). A human can also add (or create) {"blocking": false} in\n'
             "    .ocr/config.json, but that is a PERSISTENT, REPO-WIDE change committed into\n"
             "    the repo -- a human decision, not something to self-apply from inside a\n"
@@ -3339,12 +3342,12 @@ def _review_model_args():
 
 
 # --- shared worker-invocation plumbing (docs-gate 09) -------------------------
-# Every headless `kimchi -p` worker (review, docs summary) resolves WHAT to
+# Every headless `<cli> -p` worker (review, docs summary) resolves WHAT to
 # spawn through this one builder. Previously each caller owned a copy of this
 # half; the copies could drift, and a sandbox hardening applied to one would
 # leave the others unprotected. What stays per-caller: the fail-closed
-# missing-worker message, the default-args builder (model pins, extras), the
-# prompt and stub argv mode, the spawn loop, output parsing, error wrapping.
+# missing-worker message, the role (which default argv), the prompt and stub
+# argv mode, the spawn loop, output parsing, error wrapping.
 
 # The backend selection (an ocr_profile.Selection) this THREAD last resolved,
 # kept so the debug breadcrumb in _run_review_once can name it. Thread-local
@@ -3354,61 +3357,153 @@ def _review_model_args():
 # invocation has resolved one on the current thread.
 _backend_local = threading.local()
 
+# What a backend profile supplies to the core to LAUNCH its headless worker.
+# Everything harness-specific that the spawn/parse code needs is here as data
+# (or a late-bound callable), so adding a backend is one more row and the
+# pipeline above it never branches on a backend name.
+#   name            ocr_profile profile id (OCR_BACKEND value).
+#   label           the CLI's name in messages ("`kimchi` exited 1 ...").
+#   host            the harness's name in "environment X was launched from".
+#   cli_where       where the CLI is looked up, for the missing-CLI message.
+#   install_hint    the fix offered when the CLI is missing.
+#   find_cli        () -> path | None. Late-bound: tests patch the finder.
+#   default_args    {role: () -> argv}; roles: "review", "docs_summary".
+#   args_env        env var whose value REPLACES the default argv wholesale.
+#   prompt          the review skill invocation for an unpushed-range review.
+#   prompt_range    the same with an explicit {rng}.
+#   scrub_env       (child_env) -> names removed; prepares the worker env.
+#   canary          True when the sandbox lives in a deny extension that the
+#                   startup canary must prove loaded (kimchi). False when the
+#                   CLI enforces its own tool allowlist from argv (claude).
+#   debug_prefixes  env-name prefixes the OCR_DEBUG breadcrumb lists.
+#   auth_note       the profile-specific tail of the credentials hint.
+WorkerLaunch = namedtuple(
+    "WorkerLaunch",
+    "name label host cli_where install_hint find_cli default_args args_env "
+    "prompt prompt_range scrub_env canary debug_prefixes auth_note")
 
-def _worker_invocation(default_args_builder, missing_message, repo_root=None):
-    """Resolve the invocation shared by every headless `kimchi -p` worker call.
+_KIMCHI_LAUNCH = WorkerLaunch(
+    name="kimchi", label="kimchi", host="Kimchi",
+    cli_where="PATH or KIMCHI_BIN",
+    install_hint="Install Kimchi Studio, or point KIMCHI_BIN at the CLI",
+    find_cli=lambda: _find_kimi(),
+    default_args={"review": lambda: _review_model_args(),
+                  "docs_summary": lambda: _docs_summary_model_args()},
+    args_env="OCR_KIMI_ARGS",
+    prompt=PROMPT, prompt_range=PROMPT_RANGE,
+    scrub_env=lambda env: _scrub_worker_env(env),
+    canary=True,
+    debug_prefixes=("KIMCHI", "PI_"),
+    auth_note=(
+        "  Note   : a Kimchi Studio session refreshes its own auth in-process,\n"
+        "    so the app keeps working while the on-disk credentials the CLI reads go\n"
+        "    stale -- the gate breaks with no visible sign anything logged out.\n"),
+)
 
-    default_args_builder: zero-arg callable returning the caller's DEFAULT
-      argv (e.g. _review_model_args, _docs_summary_model_args); only consulted
-      with no OCR_KIMI_ARGS override, and decides its own extras
-      (OCR_KIMI_EXTRA_ARGS). Uniform rule, identical in every caller: an
-      OCR_KIMI_ARGS override replaces the default argv WHOLESALE -- the
-      default-args builder (and therefore the extras it would have added) is
-      never consulted under an override.
+_LAUNCHES = {"kimchi": _KIMCHI_LAUNCH}
+
+
+class _Invocation(tuple):
+    """The 5-tuple _worker_invocation always returned, now carrying the
+    WorkerLaunch it was built from (`.launch`) for callers that need the
+    profile's prompt / labels. Unpacks exactly as before."""
+    launch = None
+
+
+def _current_launch():
+    """The WorkerLaunch of the backend this thread last selected (kimchi when
+    none has: stub workers never select)."""
+    sel = getattr(_backend_local, "selection", None)
+    return _LAUNCHES.get(sel.name if sel is not None else "kimchi", _KIMCHI_LAUNCH)
+
+
+def _worker_invocation(default_args, missing_message, repo_root=None):
+    """Resolve the invocation shared by every headless `<cli> -p` worker call.
+
+    default_args: which default argv to build. The callers pass a ROLE
+      ("review" or "docs_summary") and the selected profile supplies the
+      builder; a zero-arg callable returning an argv is also accepted and
+      used as-is (the profile-independent form, kept for direct callers and
+      tests). Only consulted with no args override (OCR_KIMI_ARGS /
+      OCR_CLAUDE_ARGS), and the builder decides its own extras
+      (OCR_KIMI_EXTRA_ARGS / OCR_CLAUDE_EXTRA_ARGS). Uniform rule, identical in every caller: an
+      args override REPLACES the default argv WHOLESALE -- the default-args
+      builder (and therefore the extras it would have added) is never
+      consulted under an override.
     missing_message: the caller's own fail-closed message for a missing
       worker (D9: a gate without a worker must not wave a push through; the
-      stubs run INSTEAD of kimchi, so they must not need it installed).
+      stubs run INSTEAD of the CLI, so they must not need it installed). A
+      str, or a callable taking the WorkerLaunch (so the message can name
+      the backend that was actually selected).
 
-    Returns (kimi, stub, args, child_env, scrubbed). The worker's -e wiring
-    (the deny extension) travels in the default argv, which also puts THIS
-    plugin's review skill on the worker's skill-resolution path (DOCS-GATE-08;
-    without it "/skill:review" resolved to a foreign global skill and the
-    verdict contract + docs-checker pass never ran). The env marker guards
-    re-entry: without it, every Bash call the reviewer makes pays a Python
-    spawn, and a push from inside a review would nest a whole second review.
-    Both adapters short-circuit on this (see _in_review).
+    Returns an _Invocation (kimi, stub, args, child_env, scrubbed) whose
+    `.launch` is the selected backend's WorkerLaunch. For kimchi the worker's
+    -e wiring (the deny extension) travels in the default argv, which also
+    puts THIS plugin's review skill on the worker's skill-resolution path
+    (DOCS-GATE-08; without it "/skill:review" resolved to a foreign global
+    skill and the verdict contract + docs-checker pass never ran). The env
+    marker guards re-entry: without it, every Bash call the reviewer makes
+    pays a Python spawn, and a push from inside a review would nest a whole
+    second review. Both adapters short-circuit on this (see _in_review).
 
-    C3 canary: prove the deny extension actually loaded before the first real
-    worker call in this process -- whichever caller gets there first pays the
-    one probe. Skipped for stub workers (no kimchi involved) and when
-    OCR_KIMI_ARGS replaced the argv wholesale (the caller owns that sandbox);
-    OCR_SKIP_CANARY=1 is the emergency escape hatch.
+    C3 canary (backends whose sandbox is a deny extension): prove the
+    extension actually loaded before the first real worker call in this
+    process -- whichever caller gets there first pays the one probe. Skipped
+    for stub workers (no CLI involved), when an args override replaced the
+    argv wholesale (the caller owns that sandbox), and for backends that
+    enforce their sandbox from argv; OCR_SKIP_CANARY=1 is the emergency
+    escape hatch.
     """
     stub = _test_reviewer_cmd() or _stub_worker_cmd()
+    launch = _KIMCHI_LAUNCH
     if not stub:
         # Which backend reviews this push (OCR_BACKEND > repo pin > harness >
         # PATH > default; see ocr_profile). An explicit choice that cannot be
         # honoured blocks -- the gate never reviews with a backend the user did
         # not ask for. Stub workers run INSTEAD of any CLI, so they skip this.
-        # Only the kimchi launch path exists in this build; selection never
-        # auto-picks a profile that cannot launch (ocr_profile.launch_ready).
         try:
             _backend_local.selection = ocr_profile.select_backend(repo_root=repo_root)
         except ocr_profile.BackendError as exc:
             raise ReviewGateError(f"backend selection failed: {exc}")
-    kimi = _find_kimi()
+        launch = _LAUNCHES.get(_backend_local.selection.name)
+        if launch is None:
+            # A profile marked launch_ready with no launch description is a
+            # build defect: block rather than fall back to another backend.
+            raise ReviewGateError(
+                f"backend selection failed: backend "
+                f"{_backend_local.selection.name!r} has no launch description "
+                "in this build; refusing to review with a different backend.")
+    kimi = launch.find_cli()
     if not kimi and not stub:
-        raise ReviewGateError(missing_message)
-    override = os.environ.get("OCR_KIMI_ARGS")
-    args = shlex.split(override) if override else default_args_builder()
+        raise ReviewGateError(
+            missing_message(launch) if callable(missing_message) else missing_message)
+    override = os.environ.get(launch.args_env)
+    if override:
+        args = shlex.split(override)
+    else:
+        build = default_args if callable(default_args) else launch.default_args[default_args]
+        args = build()
     child_env = dict(os.environ)
     child_env["OCR_IN_REVIEW"] = "1"
-    scrubbed = _scrub_worker_env(child_env)
-    if (not stub and not override and not _canary_state["probed"]
+    scrubbed = launch.scrub_env(child_env)
+    if (not stub and launch.canary and not override and not _canary_state["probed"]
             and not os.environ.get("OCR_SKIP_CANARY", "").strip()):
         _canary_state["probed"] = True
         _canary_probe(kimi, args, child_env)
-    return kimi, stub, args, child_env, scrubbed
+    inv = _Invocation((kimi, stub, args, child_env, scrubbed))
+    inv.launch = launch
+    return inv
+
+
+def _missing_review_message(bypass):
+    """The review worker's fail-closed missing-CLI message, for the backend
+    that was selected."""
+    return lambda launch: (
+        f"`{launch.label}` CLI not found on {launch.cli_where} - blocking to preserve "
+        "gate integrity (a gate without a reviewer must not wave a push through).\n"
+        f"  {launch.install_hint}, then push again.\n"
+        f"  Run {_DOCTOR_CMD} (review-gate doctor) to diagnose.\n"
+        f"{bypass}")
 
 
 def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
@@ -3428,15 +3523,10 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
     0.3.0 there is no missing-reviewer fail-open path (D9 of the port plan).
     """
     bypass = _bypass_hint(mode)
-    kimi, stub, args, child_env, scrubbed = _worker_invocation(
-        _review_model_args,
-        "`kimchi` CLI not found on PATH or KIMCHI_BIN - blocking to preserve gate "
-        "integrity (a gate without a reviewer must not wave a push through).\n"
-        "  Install Kimchi Studio, or point KIMCHI_BIN at the CLI, then push again.\n"
-        f"  Run {_DOCTOR_CMD} (review-gate doctor) to diagnose.\n"
-        f"{bypass}",
-        repo_root=repo_root,
-    )
+    inv = _worker_invocation("review", _missing_review_message(bypass),
+                             repo_root=repo_root)
+    kimi, stub, args, child_env, scrubbed = inv
+    launch = inv.launch
     debug = _debug_enabled()
     creationflags = _WIN_FLAGS if sys.platform == "win32" else 0
     _SUFFIX = " --json"
@@ -3446,13 +3536,15 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
         _reminder = _RETRY_CONTRACT_REMINDER
         _RETRY_REMINDER_ACTIVE = False  # one-shot: the reminder rides only the retry
     if resolve_file:
-        base_prompt = PROMPT_RANGE.format(rng=push_range) if push_range else PROMPT
+        base_prompt = (launch.prompt_range.format(rng=push_range)
+                       if push_range else launch.prompt)
         if base_prompt.endswith(_SUFFIX):
             base_prompt = base_prompt[: -len(_SUFFIX)]
         rf_fwd = resolve_file.replace("\\", "/")
         prompt = f'{base_prompt} --resolve "{rf_fwd}" --json{_reminder}'
     elif paths_file:
-        base_prompt = PROMPT_RANGE.format(rng=push_range) if push_range else PROMPT
+        base_prompt = (launch.prompt_range.format(rng=push_range)
+                       if push_range else launch.prompt)
         # Strip exactly the trailing " --json" suffix (both PROMPT constants end
         # with it).  Do NOT use rstrip(" --json") — that strips a character SET.
         if base_prompt.endswith(_SUFFIX):
@@ -3462,7 +3554,8 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
         pf_fwd = paths_file.replace("\\", "/")
         prompt = f'{base_prompt} --paths-file "{pf_fwd}" --json{_reminder}'
     else:
-        prompt = (PROMPT_RANGE.format(rng=push_range) if push_range else PROMPT) + _reminder
+        prompt = (launch.prompt_range.format(rng=push_range)
+                  if push_range else launch.prompt) + _reminder
     if partial:
         prompt += _PARTIAL_REVIEW_NOTE
     cmd = [kimi, "-p", prompt] + args
@@ -3515,7 +3608,7 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
                 # included so a debug run also shows whether the reviewer's
                 # auth path is an inherited API key rather than the host relay.
                 present = sorted(
-                    k for k in child_env if k.upper().startswith(("KIMCHI", "PI_"))
+                    k for k in child_env if k.upper().startswith(launch.debug_prefixes)
                 )
                 # From the ORIGINAL environment, not child_env: several
                 # _DEBUG_SAFE_VALUES names are also in _SESSION_BRIDGE_ENV, so
@@ -3587,7 +3680,7 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
             # to stay under the desktop app's ~16 min session wall.
             escalation = (
                 f"  Give Claude more time : export {knob}={_run_timeout * 2} in the environment\n"
-                f"    Kimchi itself is launched from (a shell prefix on `git push` will\n"
+                f"    {launch.host} itself is launched from (a shell prefix on `git push` will\n"
                 f"    NOT work in hook mode). Leave hooks/hooks.json's PreToolUse timeout\n"
                 f"    alone: the review runs detached from the hook, and that timeout must\n"
                 f"    stay below the host's session watchdog."
@@ -3625,11 +3718,11 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
         # leaving detail empty and hiding why the review failed.
         detail = (out_text or "").strip() or (err_text or "").strip()
         raise ReviewGateError(
-            f"`kimchi` exited {proc.returncode} without running the review -- blocking commit "
+            f"`{launch.label}` exited {proc.returncode} without running the review -- blocking commit "
             "to preserve gate integrity.\n"
             f"  {kimi}\n"
             f"  Output (first 400 chars): {detail[:400]!r}\n"
-            f"{_auth_hint(detail)}"
+            f"{_auth_hint(detail, launch)}"
             f"{bypass}"
         )
     # A resolver call's contract IS `{"resolutions": ...}`; a review call's
@@ -3655,7 +3748,7 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
             f"could not parse review output{_turns_note} - blocking commit to preserve gate integrity.\n"
             f"{_raw_note}"
             f"  Claude stdout (first 400 chars): {out_text[:400]!r}\n"
-            f"{_auth_hint(out_text or '')}"
+            f"{_auth_hint(out_text or '', launch)}"
             f"{bypass}",
             is_parse_failure=True,
         )
@@ -8059,9 +8152,9 @@ def _run_docs_summary_once(review_root, tip, doc_paths, repo_root=None):
     mode -- the caller fails the push closed (see _docs_summary_freshen).
     """
     kimi, stub, args, child_env, _scrubbed = _worker_invocation(
-        _docs_summary_model_args,
-        _docs_summary_failed_message(
-            "`kimchi` CLI not found on PATH or KIMCHI_BIN.")
+        "docs_summary",
+        lambda launch: _docs_summary_failed_message(
+            f"`{launch.label}` CLI not found on {launch.cli_where}.")
         + f"\n  Run {_DOCTOR_CMD} (review-gate doctor) to diagnose.",
         # The docs-summary worker honours the same backend selection as the
         # review worker, including a repo's .ocr/config.json pin: without the
