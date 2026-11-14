@@ -3588,7 +3588,10 @@ def _current_launch():
     sel = getattr(_backend_local, "selection", None)
     if sel is None:
         try:
-            sel = ocr_profile.select_backend(repo_root=os.getcwd())
+            # The repo TOP LEVEL, not the bare cwd: the repo pin is read from
+            # <root>/.ocr/config.json with no upward search, and a hook-mode
+            # cwd can be any subdirectory of the repo.
+            sel = ocr_profile.select_backend(repo_root=_repo_root())
         except Exception:  # noqa: BLE001 -- a hint must never raise
             sel = None
     return _LAUNCHES.get(sel.name if sel is not None else "kimchi", _KIMCHI_LAUNCH)

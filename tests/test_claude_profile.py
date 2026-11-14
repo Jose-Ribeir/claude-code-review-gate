@@ -475,3 +475,17 @@ def test_find_claude_ignores_whitespace_around_an_env_override_like_the_doctor(c
     clean.setattr(rg.shutil, "which", lambda name: None)
     clean.setenv("OCR_CLAUDE_BIN", f"  {exe}\n")
     assert rg._find_claude() == str(exe)
+
+
+def test_hook_mode_hints_find_the_repo_pin_from_a_subdirectory(clean, tmp_path):
+    # The pin is read from <repo top>/.ocr/config.json with no upward search, and
+    # a hook-mode cwd can be any directory inside the repo.
+    repo = tmp_path / "repo"
+    sub = repo / "pkg" / "deep"
+    sub.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / ".ocr").mkdir()
+    (repo / ".ocr" / "config.json").write_text(json.dumps({"backend": "claude"}))
+    clean.chdir(sub)
+    clean.delattr(rg._backend_local, "selection", raising=False)
+    assert "Claude Code" in rg._bypass_hint("hook")
