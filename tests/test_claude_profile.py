@@ -468,3 +468,10 @@ def test_a_hint_never_raises_when_the_backend_cannot_be_selected(clean, tmp_path
     clean.setenv("OCR_BACKEND", "gemini")
     assert "Kimchi" in rg._bypass_hint("hook")    # falls back; the worker call reports the error
 
+
+def test_find_claude_ignores_whitespace_around_an_env_override_like_the_doctor(clean, tmp_path):
+    exe = tmp_path / "claude-bin"
+    exe.write_text("x")
+    clean.setattr(rg.shutil, "which", lambda name: None)
+    clean.setenv("OCR_CLAUDE_BIN", f"  {exe}\n")
+    assert rg._find_claude() == str(exe)

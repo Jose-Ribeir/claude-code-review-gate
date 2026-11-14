@@ -2938,7 +2938,7 @@ def _find_claude():
     if found:
         return found
     for var in ("OCR_CLAUDE_BIN", "CLAUDE_CODE_EXECPATH"):
-        exe = os.environ.get(var, "")
+        exe = os.environ.get(var, "").strip()
         if exe and os.path.isfile(exe):
             return exe
     import glob
