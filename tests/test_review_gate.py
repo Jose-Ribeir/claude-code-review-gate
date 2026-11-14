@@ -1607,6 +1607,10 @@ def test_reviewer_is_isolated_from_the_console_on_windows(monkeypatch, tmp_path)
     # there at all) -- so this pins the branch (win32 uses _WIN_FLAGS, not a
     # hardcoded value), not the flag bits themselves.
     seen = {}
+    # Backend selection is not under test here, and with sys.platform faked
+    # shutil.which (its auto-detect step) breaks on a real POSIX interpreter:
+    # pin the backend so the explicit override short-circuits it.
+    monkeypatch.setenv("OCR_BACKEND", "kimchi")
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(review_gate.subprocess, "Popen", _fake_popen(seen))
     monkeypatch.setattr(review_gate, "_find_kimi", lambda: "kimchi")
@@ -1779,6 +1783,10 @@ def test_unset_env_names_are_matched_case_insensitively_on_windows(monkeypatch, 
     # OCR_UNSET_ENV must still find it there.
     seen = {}
     _clear_session_bridge_env(monkeypatch)
+    # Pin the backend: with os.name faked to "nt" on a POSIX interpreter,
+    # pathlib cannot build the repo-config Path the selection reads. Backend
+    # selection is not what this test is about.
+    monkeypatch.setenv("OCR_BACKEND", "kimchi")
     monkeypatch.setattr(review_gate.os, "name", "nt")
     monkeypatch.setenv("SOME_CLAUDE_MARKER", "1")
     monkeypatch.setenv("OCR_UNSET_ENV", "some_claude_marker")
