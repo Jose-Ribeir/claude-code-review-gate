@@ -2,7 +2,10 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    # `unified` is the integration branch for the merged claude/kimchi gate; it
+    # shares no history with main, so it can never open a PR into main and
+    # would otherwise never get a CI run.
+    branches: [main, unified]
   pull_request:
 
 jobs:
