@@ -3346,10 +3346,13 @@ def _review_model_args():
 # missing-worker message, the default-args builder (model pins, extras), the
 # prompt and stub argv mode, the spawn loop, output parsing, error wrapping.
 
-# The most recent backend selection (an ocr_profile.Selection), kept so the
-# debug breadcrumb in _run_review_once can name it. None until a non-stub
-# worker invocation has resolved one.
-_last_backend_selection = None
+# The backend selection (an ocr_profile.Selection) this THREAD last resolved,
+# kept so the debug breadcrumb in _run_review_once can name it. Thread-local
+# because parallel chunks (_run_chunked's ThreadPoolExecutor) each resolve and
+# then read their own selection; a shared module global let one chunk's
+# breadcrumb name another chunk's backend. Unset until a non-stub worker
+# invocation has resolved one on the current thread.
+_backend_local = threading.local()
 
 
 def _worker_invocation(default_args_builder, missing_message, repo_root=None):
@@ -3389,9 +3392,8 @@ def _worker_invocation(default_args_builder, missing_message, repo_root=None):
         # not ask for. Stub workers run INSTEAD of any CLI, so they skip this.
         # Only the kimchi launch path exists in this build; selection never
         # auto-picks a profile that cannot launch (ocr_profile.launch_ready).
-        global _last_backend_selection
         try:
-            _last_backend_selection = ocr_profile.select_backend(repo_root=repo_root)
+            _backend_local.selection = ocr_profile.select_backend(repo_root=repo_root)
         except ocr_profile.BackendError as exc:
             raise ReviewGateError(f"backend selection failed: {exc}")
     kimi = _find_kimi()
@@ -3526,10 +3528,10 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
                     f"child_pid={proc.pid} cwd={repo_root!r} scrubbed={scrubbed} "
                     f"present_after_scrub={present} safe_values={safe_values}"
                 )
-                if _last_backend_selection is not None:
-                    _debug_log(f"backend={_last_backend_selection.name} "
-                               f"reason={_last_backend_selection.reason!r} "
-                               f"notes={list(_last_backend_selection.notes)}")
+                _sel = getattr(_backend_local, "selection", None)
+                if _sel is not None:
+                    _debug_log(f"backend={_sel.name} reason={_sel.reason!r} "
+                               f"notes={list(_sel.notes)}")
             # Mirrors subprocess.run's own Popen usage exactly, including which
             # exceptions kill the child -- a rewrite that only handled
             # TimeoutExpired would leave an orphaned `claude.exe` running (and

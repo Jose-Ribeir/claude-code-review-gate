@@ -204,3 +204,36 @@ def test_docs_summary_worker_honours_the_repo_backend_pin(monkeypatch, tmp_path)
                                   repo_root=_pin(tmp_path, "gemini"))
     assert "backend selection failed" in str(exc.value) and "gemini" in str(exc.value)
 
+
+def test_the_selection_breadcrumb_is_per_thread(monkeypatch, tmp_path):
+    # Parallel chunks each resolve a selection and later read it back for the
+    # debug log. With a shared global the second writer's selection was read by
+    # both; both threads select BEFORE either reads (the barrier), so a shared
+    # slot would make them agree. Per-thread slots keep them distinct.
+    import threading
+    for k in ("OCR_STUB_WORKER", "OCR_REVIEWER_CMD", "OCR_BACKEND"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setattr(rg, "_find_kimi", lambda: None)   # stop right after selection
+    pinned = _pin(tmp_path, "kimchi")
+    barrier = threading.Barrier(2)
+    seen, errors = {}, []
+
+    def run(name, repo):
+        try:
+            try:
+                rg._worker_invocation(lambda: [], "worker missing", repo_root=repo)
+            except rg.ReviewGateError:
+                pass          # expected: no worker installed; selection already stored
+            barrier.wait(timeout=20)
+            seen[name] = rg._backend_local.selection.reason
+        except Exception as exc:            # surface thread failures in the assert
+            errors.append(repr(exc))
+
+    threads = [threading.Thread(target=run, args=("pinned", pinned)),
+               threading.Thread(target=run, args=("plain", None))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    assert not errors, errors
+    assert seen == {"pinned": "repo config pin", "plain": "default"}
