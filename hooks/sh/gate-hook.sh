@@ -647,6 +647,6 @@ if [ -n "$session" ]; then
 else
   rewrapped='{"tool_name":"Bash","cwd":"'"$esc_cwd"'","tool_input":{"command":"'"$esc_cmd"'"}}'
 fi
-exec "$PY" "$GATE_DIR/review-gate.py" --mode hook <<< "$rewrapped"
+OCR_HARNESS=kimchi exec "$PY" "$GATE_DIR/review-gate.py" --mode hook <<< "$rewrapped"
 # If exec itself failed (cannot happen when the checks above passed), deny.
 _emit_block "$BLOCK_NOGATE"

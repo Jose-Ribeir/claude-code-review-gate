@@ -162,6 +162,8 @@ $psi = New-Object System.Diagnostics.ProcessStartInfo
 $psi.FileName               = $py
 $psi.Arguments              = '"' + $core + '" --mode ' + $(if ($script:GuardMode) { 'guard' } else { 'hook' })
 $psi.UseShellExecute         = $false
+# Tell the core which harness fired it (backend selection reads OCR_HARNESS).
+$psi.EnvironmentVariables['OCR_HARNESS'] = 'claude'
 $psi.RedirectStandardInput   = $true
 $psi.RedirectStandardOutput  = $true
 $psi.RedirectStandardError   = $true

@@ -124,7 +124,7 @@ fi
 # case ('No output and a NON-zero exit ... Block rather than let the silence
 # read as approval'); mirror it: deny instead of exiting silently.
 rc=0
-out="$(printf '%s' "$payload" | "$PY" "$DIR/review-gate.py" --mode hook)" || rc=$?
+out="$(printf '%s' "$payload" | OCR_HARNESS=claude "$PY" "$DIR/review-gate.py" --mode hook)" || rc=$?
 
 if [ -n "$out" ]; then
   # The gate answered: relay its decision verbatim (same as gate-hook.ps1).
