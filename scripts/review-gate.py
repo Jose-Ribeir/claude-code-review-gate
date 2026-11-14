@@ -8040,7 +8040,7 @@ def _extract_worker_text(out):
     return "" if saw_event else out
 
 
-def _run_docs_summary_once(review_root, tip, doc_paths):
+def _run_docs_summary_once(review_root, tip, doc_paths, repo_root=None):
     """One headless worker call that produces the docs summary body.
 
     Invoked under the same plumbing as the review worker (docs-gate 09):
@@ -8060,7 +8060,11 @@ def _run_docs_summary_once(review_root, tip, doc_paths):
         _docs_summary_model_args,
         _docs_summary_failed_message(
             "`kimchi` CLI not found on PATH or KIMCHI_BIN.")
-        + f"\n  Run {_DOCTOR_CMD} (review-gate doctor) to diagnose.")
+        + f"\n  Run {_DOCTOR_CMD} (review-gate doctor) to diagnose.",
+        # The docs-summary worker honours the same backend selection as the
+        # review worker, including a repo's .ocr/config.json pin: without the
+        # repo root the pin is silently skipped on this path.
+        repo_root=repo_root)
     listing = "\n".join("- " + p for p in doc_paths)
     prompt = _PROMPT_DOCS_SUMMARY.format(docs=listing)
     cmd = stub + ["--docs-summary", tip] if stub else [kimi, "-p", prompt] + args
@@ -8215,7 +8219,8 @@ def _docs_summary_freshen(state_path, run_id, repo_root, review_root, tip,
         # The doc-changer's push pays the call: regenerate inline, before the
         # docs check runs. Failures raise (fail-closed).
         _run_start = time.monotonic()
-        body = _run_docs_summary_once(review_root, tip, sorted(hashes))
+        body = _run_docs_summary_once(review_root, tip, sorted(hashes),
+                                      repo_root=repo_root)
         roots = {os.path.realpath(repo_root), os.path.realpath(review_root)}
         for root in sorted(roots):
             _write_docs_summary_artifact(root, body, hashes, tip)

@@ -191,3 +191,16 @@ def test_stub_workers_skip_backend_selection(monkeypatch):
     monkeypatch.setenv("OCR_BACKEND", "gemini")
     kimi, stub, _args, _env, _scrubbed = _launch()
     assert stub
+
+
+def test_docs_summary_worker_honours_the_repo_backend_pin(monkeypatch, tmp_path):
+    # The docs-summary worker is the second _worker_invocation call site. It
+    # used to be called without the repo root, so a repo's pin was silently
+    # ignored there while the review worker blocked on it.
+    for k in ("OCR_STUB_WORKER", "OCR_REVIEWER_CMD", "OCR_BACKEND"):
+        monkeypatch.delenv(k, raising=False)
+    with pytest.raises(rg.ReviewGateError) as exc:
+        rg._run_docs_summary_once(str(tmp_path), "t" * 40, ["docs/a.md"],
+                                  repo_root=_pin(tmp_path, "gemini"))
+    assert "backend selection failed" in str(exc.value) and "gemini" in str(exc.value)
+
