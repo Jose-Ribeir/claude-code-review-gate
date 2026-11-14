@@ -23,6 +23,32 @@ description: AI code review of your changes (open-code-review methodology, run n
 
 You are orchestrating an AI code review. Follow these steps exactly.
 
+## T0. Which host are you on? (read this first)
+
+This one skill is shared by two hosts and was written in Kimchi's dialect (§T).
+Decide which host you are on from your own tool list, then apply the matching rule:
+
+- **Kimchi** (lower-case `read` / `grep` / `find` / `bash` tools and an `Agent`
+  tool): follow §T and everything below exactly as written.
+- **Claude Code** (capitalised `Read` / `Grep` / `Glob` / `Bash` tools and a
+  `Task` tool): use the *left* column of the §T table, and read every Kimchi
+  spawn instruction below with these substitutions:
+  - Spawn personas with the `Task` tool, `subagent_type: "review-gate:<persona>"`
+    (`code-reviewer`, `deep-reviewer`, `context-spotter`, `code-filter`,
+    `docs-checker`, `code-resolver`). Those plugin agents already carry the
+    persona body and their read-only `tools:` list, so the `prompt` is the
+    payload ONLY -- do not paste the Appendix P persona body in front of it.
+    If a `review-gate:<persona>` type is not available, fall back to
+    `subagent_type: "general-purpose"` with the Appendix P body pasted in front
+    of the payload, exactly as the Kimchi path does.
+  - Ignore `model:`, `thinking:`, `isolated:`, `run_in_background:` and the
+    `subagent_type: "Reviewer"` / `"General-Purpose"` names, and every
+    `kimchi-dev/...` or `kimi-k3` pin: they do not exist on this host. Subagents
+    inherit the session's model.
+  - `<skill_dir>` is `${CLAUDE_PLUGIN_ROOT}/skills/review`.
+  - Everything else -- the manifest, the contracts, the verdict schema, the
+    blocking rule -- is host-independent and applies unchanged.
+
 ## T. Platform translation (Claude Code → Kimchi)
 
 This skill is the Kimchi translation of the Claude Code plugin original. The

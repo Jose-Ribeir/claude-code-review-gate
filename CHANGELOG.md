@@ -20,7 +20,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   kimchi-only. A missing/unauthenticated/unparseable claude still blocks, and
   `ocr_doctor.py` reports the selected backend and checks that backend's CLI.
   Kimchi launches are unchanged. The two bash/PowerShell hook adapters export
-  `OCR_HARNESS` so the core knows which harness fired it.
+  `OCR_HARNESS` so the core knows which harness fired it. `skills/review/SKILL.md`
+  gains a host-detection section (§T0) so the Kimchi-dialect skill spawns the
+  plugin's `review-gate:<persona>` agents under Claude Code. Known limit: the
+  claude argv only pre-approves read-only `git` Bash, so the python helper
+  stages (conventions resolver, demands validator) cannot run there and the
+  review proceeds without them, with a warning in the verdict.
 - **Content-keyed review coverage (2026-11-13, spec `docs/plans/restack-content-keyed-coverage.md`).**
   The gate now identifies reviewed work by content instead of by SHA: verdict
   records (protocol v2) carry per-commit `patch_ids` (`git patch-id --stable`),
