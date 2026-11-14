@@ -72,7 +72,26 @@ jobs:
         run: python -m pip install ruff pytest
 
       - name: Run the test suite
-        run: python -m pytest -q
+        run: |
+          set -o pipefail
+          python -m pytest -q -rfE 2>&1 | tee pytest.log
+
+      # The runner's log needs a login to read; annotations do not. Surface the
+      # failing test ids (and the tail of each failure) as one annotation so a
+      # red run says WHAT failed without opening the raw log.
+      - name: Annotate failing tests
+        if: failure()
+        run: |
+          python - <<'PY'
+          lines = [l.rstrip() for l in open("pytest.log", encoding="utf-8", errors="replace")]
+          failed = [l for l in lines if l.startswith(("FAILED", "ERROR"))]
+          errs = [l for l in lines if l.startswith("E   ")][:25]
+          def esc(s):
+              return s.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+          body = failed[:80] + (["...", *errs] if errs else [])
+          print("::error title=pytest: %d failed/errored::%s" % (len(failed), esc("\n".join(x[:260] for x in body))))
+          print("::notice title=pytest summary::%s" % esc(lines[-1] if lines else "no output"))
+          PY
 
   node:
     runs-on: ubuntu-latest
