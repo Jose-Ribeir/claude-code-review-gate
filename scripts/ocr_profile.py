@@ -140,6 +140,21 @@ def _env_says(env, profile):
     return False
 
 
+#: Internal hand-off: the detached supervisor selects the backend, but its
+#: environment has already had the interactive session's markers scrubbed
+#: (KIMCHI_SESSION_ID and friends) while others survive (CLAUDECODE), so
+#: sniffing it there is lopsided. The process that spawns the supervisor sniffs
+#: its own full environment and passes the result here, as a comma-separated
+#: list of profile names (empty string = none matched).
+SNIFFED_VAR = "OCR_SNIFFED"
+
+
+def sniff_env(env=None):
+    """Names of the profiles whose session markers `env` carries."""
+    env = os.environ if env is None else env
+    return [p.name for p in PROFILES.values() if _env_says(env, p)]
+
+
 def select_backend(env=None, repo_root=None, which=None):
     """Pick the backend for this push. Returns a Selection(name, reason, notes).
 
@@ -176,7 +191,11 @@ def select_backend(env=None, repo_root=None, which=None):
             return Selection(profile.name, "harness hint (OCR_HARNESS)", notes)
 
     # 4. environment sniffing
-    sniffed = [p for p in PROFILES.values() if _env_says(env, p)]
+    handed = env.get(SNIFFED_VAR)
+    if handed is not None:
+        sniffed = [PROFILES[n] for n in (x.strip() for x in handed.split(",")) if n in PROFILES]
+    else:
+        sniffed = [p for p in PROFILES.values() if _env_says(env, p)]
     ready = [p for p in sniffed if p.launch_ready]
     for p in sniffed:
         if not p.launch_ready:

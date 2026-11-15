@@ -4251,6 +4251,11 @@ def _supervisor_env():
     (see _SESSION_BRIDGE_ENV), minus git's hook exports, and NOT in-review --
     the supervisor is the gate, only the reviewer it spawns is the review."""
     env = dict(os.environ)
+    # The supervisor is where the backend gets selected, and the scrub below
+    # removes some harness markers (KIMCHI_SESSION_ID) but not others
+    # (CLAUDECODE): sniffing the scrubbed env would be lopsided. Sniff the full
+    # env here and hand the verdict over (see ocr_profile.SNIFFED_VAR).
+    env[ocr_profile.SNIFFED_VAR] = ",".join(ocr_profile.sniff_env(env))
     for name in (_SESSION_BRIDGE_ENV + _CLAUDE_SESSION_BRIDGE_ENV + _GIT_ENV_SCRUB
                  + ("OCR_IN_REVIEW",)):
         key = name.upper() if os.name == "nt" else name

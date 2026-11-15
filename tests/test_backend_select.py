@@ -301,3 +301,42 @@ def test_the_selection_breadcrumb_is_per_thread(monkeypatch, tmp_path):
         t.join(30)
     assert not errors, errors
     assert seen == {"pinned": "repo config pin", "plain": "default"}
+
+
+# --- the supervisor selects from a pre-scrub sniff ---------------------------
+
+def test_a_handed_over_sniff_replaces_sniffing_the_live_env():
+    # The supervisor's own env has had KIMCHI_SESSION_ID scrubbed; the process
+    # that spawned it sniffed first and passes the answer.
+    sel = select_backend(env={"OCR_SNIFFED": "kimchi", "CLAUDECODE": "1"}, which=_no_cli)
+    assert (sel.name, sel.reason) == ("kimchi", "auto-detected from the kimchi environment")
+
+
+def test_a_handed_over_empty_sniff_means_no_harness_signal():
+    sel = select_backend(env={"OCR_SNIFFED": "", "CLAUDECODE": "1"}, which=_no_cli)
+    assert (sel.name, sel.reason) == ("kimchi", "default")
+
+
+def test_a_handed_over_double_sniff_is_ambiguous_not_a_guess():
+    sel = select_backend(env={"OCR_SNIFFED": "kimchi,claude"}, which=_only("kimchi", "claude"))
+    assert (sel.name, sel.reason) == ("kimchi", "default")
+    assert any("more than one backend" in n for n in sel.notes)
+
+
+def test_sniff_env_names_every_matching_profile():
+    assert set(ocr_profile.sniff_env({"CLAUDECODE": "1", "KIMCHI_SESSION_ID": "k"})) == {"claude", "kimchi"}
+    assert ocr_profile.sniff_env({}) == []
+
+
+def test_the_supervisor_env_keeps_the_kimchi_signal_the_scrub_removes(monkeypatch):
+    for k in list(os.environ):
+        if k.upper().startswith(("KIMCHI_", "CLAUDE_CODE_", "OCR_", "PI_CODING_AGENT")) or k == "CLAUDECODE":
+            monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("KIMCHI_SESSION_ID", "k1")
+    monkeypatch.setenv("CLAUDECODE", "1")
+    env = rg._supervisor_env()
+    assert "KIMCHI_SESSION_ID" not in env                     # scrubbed, as before
+    assert set(env["OCR_SNIFFED"].split(",")) == {"claude", "kimchi"}
+    # ...so the supervisor sees an ambiguous session, not a lone claude one.
+    sel = select_backend(env=env, which=_only("kimchi", "claude"))
+    assert (sel.name, sel.reason) == ("kimchi", "default")
