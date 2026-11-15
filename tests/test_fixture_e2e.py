@@ -1,7 +1,16 @@
 """Fixture e2e harness -- each miss-category fixture pushed through the REAL
 gate (review-gate.py --mode hook) with tests/stub_reviewer.py standing in for
-the reviewer via OCR_REVIEWER_CMD (same seam as tests/test_async_gate.py and
-tests/test_spotter_gate.py).
+the reviewer via OCR_REVIEWER_CMD (same seam as tests/test_deep_gate.py).
+
+KIMCHI VARIANT notes (t12 parity):
+* the gate's async state and verdict store are EXTERNAL (D12): the hook-mode
+  subprocess shares the per-test OCR_STATE_DIR conftest sets; hook answers
+  use the Kimchi protocol ({"decision": "block", "reason": ...}) parsed by
+  tests/hook_output.py;
+* verdict semantics differ (D15): this variant blocks high AND medium at
+  confidence >= 0.7, not only high. No conflict here -- the stub is scripted
+  to STUB_VERDICT=pass (no findings) on every e2e push, so both variants
+  would answer "pass".
 
 Where the pipeline-level path matters, these assert that a real push:
 
@@ -41,15 +50,19 @@ def _push_fixture(info, tmp_path):
 
 
 def _telemetry_records(info):
-    """The persisted run records of the fixture repo's gate log. Tier-call
-    records (v2 per-tier cost events sharing the log) are not runs: they are
-    filtered out exactly like report() does."""
+    """The persisted run records of the fixture repo's gate log.
+
+    The Kimchi store is external, but the run log still lands under the
+    repo's git common dir (the supervisor recovers it via common_dir_of).
+    """
     common = builders.review_gate._git_common_dir(info["root"])
     records = []
     for path in sorted(glob.glob(os.path.join(common, "review-gate-telemetry",
                                               "*.jsonl"))):
         with open(path, encoding="utf-8") as fh:
             records += [json.loads(line) for line in fh if line.strip()]
+    # Tier-call records (v2 per-tier cost events sharing the log) are not
+    # runs: filter them out exactly like telemetry report() does.
     return [r for r in records if r.get("kind") != "tier_call"]
 
 

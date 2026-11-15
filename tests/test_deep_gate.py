@@ -72,6 +72,9 @@ def _commit(work, files):
 
 def _env(tmp_path, **kw):
     env = {k: v for k, v in os.environ.items() if not k.startswith(("OCR_", "STUB_"))}
+    # Kimchi port (D12): the gate and this test must share ONE external
+           # state store; conftest points it at a per-test temp dir.
+    env["OCR_STATE_DIR"] = os.environ["OCR_STATE_DIR"]
     env.update({"CLAUDE_PLUGIN_DATA": str(tmp_path / "gate-data"),
                 "OCR_REVIEWER_CMD": f'"{sys.executable}" "{_STUB}"',
                 "STUB_TRACE": str(tmp_path / "stub.trace"), "OCR_INLINE_BUDGET": "30"})
@@ -295,11 +298,14 @@ class TestDeepLaneE2E:
         common = review_gate._git_common_dir(str(work))
         st = review_gate._read_state(review_gate._state_path(common, tip)) or {}
         assert st.get("tier") == "deep"
+        # Kimchi port: hook mode is fire-and-forget (the verdict is reported by a
+        # LATER call), so poll the deep pass done -- the retry then joins its
+        # recorded verdict instead of seeing "still running".
+        st = _state(work, tip)
+        assert st["state"] == "done" and st["tier"] == "deep"
         decision, reason = _push(work, env, timeout=90)  # retry joins the same run
         assert decision == "deny", decision
         assert "stub high finding" in reason
-        st = _state(work, tip)
-        assert st["state"] == "done" and st["tier"] == "deep"
         calls = _review_calls(tmp_path)
         assert len(calls) == 1  # one deep pass; no fast pass plus a deep pass
         manifest = _review_manifest(tmp_path)
@@ -343,22 +349,31 @@ class TestDeepLaneE2E:
         blocking finding and the push passes."""
         work = _repo(tmp_path, {"a.txt": "one\n"})
         tip = _commit(work, {"payments/stripe.py": "x = 1\n"})
-        decision, reason = _push(work, _env(tmp_path, STUB_VERDICT="warn"))
+        # Kimchi port (blocking bar, ocr_verdict D15): upstream never blocks on
+        # a medium, but kimchi blocks medium at confidence >= 0.7 -- so the
+        # non-blocking warning here is a medium at LOW confidence instead of
+        # the upstream STUB_VERDICT=warn stub finding (which would block).
+        findings = {"payments/stripe.py": {"severity": "medium",
+                                           "content": "speculative issue",
+                                           "confidence": 0.4}}
+        decision, reason = _push(work, _env(tmp_path, STUB_FINDINGS_FOR=json.dumps(findings)))
         assert decision == "pass", reason
         st = _state(work, tip)
         assert st["state"] == "done" and st["tier"] == "deep"
         assert st.get("verdict") == "warn"
 
-    def test_a_surviving_high_low_confidence_deep_finding_does_not_block(self, tmp_path):
-        """The blocking bar is compute_verdict's, unchanged: escalation swaps
-        the reviewer, never the bar. High but confidence < 0.7 cannot block
-        (spec: the deep pass is unable to block on anything weaker)."""
+    def test_a_surviving_high_low_confidence_deep_finding_blocks_under_d15(self, tmp_path):
+        """Escalation swaps the reviewer, never the bar: the deep lane keeps
+        compute_verdict as the only verdict authority. DIVERGES from the claude
+        variant: upstream's bar needs high + confidence >= 0.7, so this push
+        PASSES there; kimchi's D15 bar blocks ANY high severity regardless of
+        confidence, so the same finding blocks here (t12 parity item)."""
         work = _repo(tmp_path, {"a.txt": "one\n"})
         tip = _commit(work, {"auth/oauth.py": "x = 1\n"})
         findings = {"auth/oauth.py": {"severity": "high", "content": "speculative race",
                                       "confidence": 0.4}}
         decision, reason = _push(work, _env(tmp_path, STUB_FINDINGS_FOR=json.dumps(findings)))
-        assert decision == "pass", reason
+        assert decision == "deny", reason
         st = _state(work, tip)
         assert st["state"] == "done" and st["tier"] == "deep"
-        assert st.get("verdict") != "block"
+        assert st.get("verdict") == "block"

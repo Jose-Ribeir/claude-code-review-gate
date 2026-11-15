@@ -24,6 +24,22 @@ import sys
 
 _SEVERITY_RANK = {"low": 0, "medium": 1, "high": 2}
 
+# Reviewers sometimes improvise the severity vocabulary (observed on kimi-k3
+# during calibration: critical/major/minor/blocker/nit). The gate's rule
+# engine only ranks low/medium/high, so map the common synonyms.
+_SEVERITY_ALIASES = {
+    "critical": "high", "blocker": "high", "catastrophic": "high",
+    "severe": "high",
+    "major": "medium", "moderate": "medium", "important": "medium",
+    "minor": "low", "nit": "low", "trivial": "low",
+}
+
+
+def norm_severity(s):
+    """Canonical severity for a (possibly improvised) label."""
+    s = str(s or "").strip().lower()
+    return _SEVERITY_ALIASES.get(s, s)
+
 
 def _block_threshold():
     sev = os.environ.get("OCR_BLOCK_SEVERITY", "high").strip().lower()
@@ -47,7 +63,7 @@ def _findings(data):
 # claim (a commit message, a ticket, or the manual requirement text). Its
 # severity vocabulary is its own: "blocking" (the claimed work is entirely
 # absent from the changes) or "warning" (any other mismatch). Neither maps
-# onto the defect severities low/medium/high -- _SEVERITY_RANK must never
+# onto the defect severities low/medium/high -- _SEVERITY_ALIASES must never
 # learn them, or a defect-shaped severity would rank an intent finding.
 _INTENT_SEVERITIES = ("blocking", "warning")
 
@@ -85,6 +101,11 @@ def drop_failed_intent_findings(findings):
     intent_gap finding survives only when its self-check holds."""
     return [f for f in findings
             if not _is_intent_finding(f) or _intent_self_check_ok(f)]
+# docs-gate 04: the documentation-drift finding class (see
+# agents/docs-checker.md). Only this class is subject to the two-quote
+# credibility rule in _is_actionable; other documentation-check classes keep
+# their own strictness.
+_DOCS_DRIFT_KIND = "stale_docs"
 
 
 def _is_actionable(f):
@@ -97,6 +118,15 @@ def _is_actionable(f):
     block on by itself, but still worth a warning -- it still counts toward
     `has_warn` below, and _format_reasons/the raw-output log still surface it
     for a human to look at.
+
+    A documentation-drift finding (docs_kind "stale_docs", docs-gate 04)
+    must additionally quote BOTH sides to be blocking-credible: the verbatim
+    stale passage from the documentation (stale_passage) AND the verbatim
+    contradicting code (existing_code). Missing either quote it is downgraded
+    to warning, never block -- at ANY severity or confidence. This changes
+    nothing about the blocking rule below (any high blocks; medium blocks at
+    OCR_BLOCK_CONFIDENCE): it only gates which findings the rule may act on,
+    exactly like the dropped-field checks above.
     """
     # f.get("content", "") only falls back to "" when the key is absent -- an
     # explicit JSON null ("content": null) makes it return None, and str(None)
@@ -109,11 +139,23 @@ def _is_actionable(f):
                 return False
         except (TypeError, ValueError):
             return False
+    if str(f.get("docs_kind") or "") == _DOCS_DRIFT_KIND:
+        if not str(f.get("stale_passage") or "").strip():
+            return False
+        if not str(f.get("existing_code") or "").strip():
+            return False
     return True
 
 
 def compute_verdict(data):
-    """Return 'block' | 'warn' | 'pass' for a parsed review result."""
+    """Return 'block' | 'warn' | 'pass' for a parsed review result.
+
+    D15 (port plan, user decision): ANY single high-severity finding blocks
+    regardless of confidence; a medium-severity finding blocks at high
+    confidence (OCR_BLOCK_CONFIDENCE, default 0.7). Lowering
+    OCR_BLOCK_SEVERITY below 'high' extends the UNCONDITIONAL bar
+    (e.g. 'medium' makes medium findings block at any confidence).
+    """
     min_rank, min_conf = _block_threshold()
     findings = _findings(data)
     has_warn = False
@@ -132,15 +174,20 @@ def compute_verdict(data):
                 return "block"
             has_warn = True
             continue
-        rank = _SEVERITY_RANK.get(str(f.get("severity", "")).lower(), -1)
+        rank = _SEVERITY_RANK.get(norm_severity(f.get("severity")), -1)
         try:
             conf = float(f.get("confidence", 0.0))
         except (TypeError, ValueError):
             conf = 0.0
-        if rank >= min_rank and conf >= min_conf and _is_actionable(f):
+        if _is_actionable(f) and (rank >= min_rank
+                                 or (rank >= _SEVERITY_RANK["medium"]
+                                     and conf >= min_conf)):
             return "block"
         if rank >= _SEVERITY_RANK["medium"]:
             has_warn = True
+    if not has_warn and isinstance(data, dict) and data.get("unreviewed"):
+        # Files the review could not cover (SPEC-07): never a clean pass.
+        return "warn"
     return "warn" if has_warn else "pass"
 
 

@@ -1,26 +1,6 @@
-# Python
 __pycache__/
-*.py[cod]
+*.pyc
 .venv/
-venv/
-.ruff_cache/
 .pytest_cache/
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Local Claude Code state (never ship personal settings)
-.claude/settings.local.json
-
-# Serena (code-navigation MCP) local project state
-.serena/
-
-# Editor
-.idea/
-.vscode/
-*.swp
-
-# Note: examples/.ocr/rule.json IS tracked (sample config) — do not ignore it.
-
-.delegate-kit/
+.ruff_cache/
+.ocr/docs-summary.md

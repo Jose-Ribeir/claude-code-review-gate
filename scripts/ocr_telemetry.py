@@ -21,6 +21,7 @@
 # next to them (metric_line / rotating_append), carry COUNTS, BYTES AND TIMINGS
 # ONLY -- never a path or any code. metric_line enforces that by construction.
 import json
+import math
 import os
 import re
 import time
@@ -403,10 +404,17 @@ def _avg(vals):
 
 
 def _p90(vals):
+    """Conventional nearest-rank p90: rank = ceil(0.9 * n) (1-based), so the
+    report shows the smallest sample at or above the 90th percentile. The
+    previous floor index skipped the rank->index -1 and silently reported
+    the MAX for any series of <= 10 samples, inflating short-history p90s.
+    Very short series still rank at or near the top by the convention itself
+    (rank n for n <= 1/0.1); that is a sample-size fact, not a floor bug."""
     if not vals:
         return None
     vals = sorted(vals)
-    return vals[min(len(vals) - 1, int(0.9 * len(vals)))]
+    rank = max(1, math.ceil(0.9 * len(vals)))
+    return vals[rank - 1]
 
 
 def _fmt(v, spec=".1f"):

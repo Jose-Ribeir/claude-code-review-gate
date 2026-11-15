@@ -37,6 +37,27 @@ def common_dir(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# _p90: conventional nearest-rank percentile
+# ---------------------------------------------------------------------------
+
+class TestP90:
+    def test_short_series_p90_is_not_silently_the_max(self):
+        """Regression: the floor index without the rank->index -1 reported
+        the MAX for any series of <= 10 samples, inflating short p90s."""
+        assert ot._p90(list(range(1, 11))) == 9  # rank ceil(9)=9 of 10, not 10
+
+    def test_nearest_rank_indexing(self):
+        assert ot._p90(list(range(1, 21))) == 18  # ceil(0.9*20)=18th of 20
+
+    def test_short_series_is_sorted_first(self):
+        assert ot._p90([10, 2, 7, 1, 9, 3, 8, 4, 6, 5]) == 9
+
+    def test_single_sample_and_empty(self):
+        assert ot._p90([]) is None
+        assert ot._p90([42]) == 42
+
+
+# ---------------------------------------------------------------------------
 # tier_record: field shape and normalisation
 # ---------------------------------------------------------------------------
 

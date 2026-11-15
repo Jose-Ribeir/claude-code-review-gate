@@ -55,6 +55,9 @@ def _repo(tmp_path, files):
 
 def _env(tmp_path, **kw):
     env = {k: v for k, v in os.environ.items() if not k.startswith(("OCR_", "STUB_"))}
+    # Kimchi port (D12): the gate and this test must share ONE external
+           # state store; conftest points it at a per-test temp dir.
+    env["OCR_STATE_DIR"] = os.environ["OCR_STATE_DIR"]
     env.update({"CLAUDE_PLUGIN_DATA": str(tmp_path / "gate-data"),
                 "OCR_REVIEWER_CMD": f'"{sys.executable}" "{_STUB}"',
                 "STUB_TRACE": str(tmp_path / "stub.trace"),

@@ -256,15 +256,25 @@ def _enforce_cap(bundle, max_chars, warnings):
             for i, entry in enumerate(entries)
             if id(entry) not in unshrinkable and entry.get("evidence")]
         candidates = [c for c in candidates if c[0] > 0]
-        if not candidates:
-            # No evidence left to cut: shrink note text, then elide nothing.
-            break
-        size, _, target = max(candidates, key=lambda t: t[0])
-        goal = max(600, size // 2)
-        if _shrink_evidence(target, goal):
-            pass
+        if candidates:
+            size, _, target = max(candidates, key=lambda t: t[0])
+            goal = max(600, size // 2)
+            if not _shrink_evidence(target, goal):
+                _elide_evidence(target)
         else:
-            _elide_evidence(target)
+            # No evidence left to cut: shrink note text (same longest-first
+            # discipline); stop only when there is nothing left that yields.
+            noted = [(len(e.get("note") or ""), i, e)
+                     for i, e in enumerate(entries)
+                     if id(e) not in unshrinkable
+                     and len(e.get("note") or "") > 160]
+            if not noted:
+                break
+            _, _, target = max(noted, key=lambda t: t[0])
+            note = target["note"]
+            keep = max(160, len(note) // 4)
+            target["note"] = (note[:keep]
+                              + (_TRUNC_SUFFIX % (len(note) - keep)))
         target["truncated"] = True
         bundle["truncated"] = True
         if id(target) not in warned:
@@ -551,17 +561,9 @@ def _event_couples_collector(*, repo_root, demands, warnings, **_):
 def _pointer_matches(demand_name, target):
     """Loose name match: basename (extension-insensitive) substring either way,
     so 'weekly-2026-11', 'weekly-2026-11.md' and 'out/weekly-2026-11.md' all
-    name the same utterance target."""
-    norm = demand_name.replace("\\", "/").strip().lower()
-    if not norm:
-        return False
-    dbase = norm.rsplit("/", 1)[-1]
-    dstem = os.path.splitext(dbase)[0]
-    tbase = target.replace("\\", "/").rsplit("/", 1)[-1].lower()
-    tstem = os.path.splitext(tbase)[0]
-    if not dstem or not tstem:
-        return False
-    return dbase in tbase or dstem in tstem or tstem in dstem
+    name the same utterance target. Shared with ocr_forge (single
+    implementation: ocr_impact.name_matches)."""
+    return ocr_impact.name_matches(demand_name, target)
 
 
 def _prose_pointers_collector(*, repo_root, demands, pointer_resolver, warnings, **_):

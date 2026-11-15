@@ -21,6 +21,7 @@ _STUB = os.path.join(_HERE, "stub_reviewer.py")
 
 sys.path.insert(0, _SCRIPTS)
 from hook_output import parse_pretooluse  # noqa: E402
+from conftest import scrub_git_trace  # noqa: E402
 _spec = importlib.util.spec_from_file_location("review_gate_rv", _GATE)
 review_gate = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(review_gate)
@@ -396,12 +397,12 @@ def test_classify_priors_suppresses_a_prior_carried_by_any_record(tmp_path):
     record = {"head_oid": fx.target_oid, "findings": [prior]}
     item = {"entry": entry, "mode": "carry", "record": record, "from_oid": fx.target_oid}
     to_resolve, auto, carried = review_gate._classify_priors(
-        [item], tip, str(fx.work), fx.common, FP, "r3")
+        [item], tip, str(fx.work), fx.common, FP)
     assert (to_resolve, auto, carried) == ([], [], [])
     # With the fix reverted it goes back to the resolver.
     tip2 = _commit(fx.work, {"x.py": f"x = 7\n{BAD}\n", "c.py": "# c, fix gone\n"})
     to_resolve, auto, carried = review_gate._classify_priors(
-        [item], tip2, str(fx.work), fx.common, FP, "r3")
+        [item], tip2, str(fx.work), fx.common, FP)
     assert [p["id"] for p in to_resolve] == [_FID]
 
 
@@ -438,11 +439,15 @@ def _tiny_repo(tmp_path, files):
 
 
 def _env(tmp_path, trace, **kw):
-    env = dict(os.environ)
+    env = scrub_git_trace(dict(os.environ))
     for k in list(env):
         if k.startswith(("OCR_", "STUB_")):
             env.pop(k)
     env["CLAUDE_PLUGIN_DATA"] = str(tmp_path / "gate-data")
+    # The gate's state store lives under OCR_STATE_DIR (D12): the subprocess
+    # must see the same private store the in-process _done polls. Scrubed above
+    # with the rest of OCR_*; put the conftest one back (b600804 medicine).
+    env["OCR_STATE_DIR"] = os.environ["OCR_STATE_DIR"]
     env["OCR_REVIEWER_CMD"] = f'"{sys.executable}" "{_STUB}"'
     env["STUB_TRACE"] = str(tmp_path / trace)
     env["OCR_INLINE_BUDGET"] = "30"

@@ -25,7 +25,6 @@ Verdict rules pinned here:
 The report text must distinguish intent findings from defect findings.
 """
 import importlib.util
-import json
 import os
 import sys
 
@@ -137,6 +136,18 @@ def test_self_check_failing_intent_finding_is_dropped_for_the_report():
     assert remaining == [good]
 
 
+def test_self_check_failures_drop_across_every_chunk_of_a_merge():
+    """Chunked-path behaviour unchanged: the filter runs on the merged
+    accumulator, so failures from ANY chunk vanish, keepers survive."""
+    merged = rg._merge_chunk_results([
+        _verdict([_self_check_failures()[0], _intent(severity="warning")]),
+        _verdict([_self_check_failures()[2], _intent(severity="blocking")]),
+    ])
+    kept = [f for f in merged["findings"]
+            if str(f.get("type")) == "intent_gap"]
+    assert [f["severity"] for f in kept] == ["warning", "blocking"]
+
+
 def test_defect_findings_are_not_dropped_by_the_intent_filter():
     merged = rg._merge_chunk_results(
         [_verdict([_defect()] + _self_check_failures())])
@@ -166,30 +177,34 @@ def test_blocking_intent_finding_alongside_a_defect_still_blocks_both_ways():
 # --------------------------------------------------------------------------
 
 def test_verdict_with_intent_gap_validates_as_contract_not_rescue():
-    """A verdict carrying intent_gap is a FIRST-CLASS valid verdict: the
-    Claude variant's extractor accepts it straight (it has no near-miss
-    rescue path to be routed through)."""
-    obj = _verdict([_intent()])
-    assert rg._is_valid_verdict(obj)
-    assert rg._extract_json(json.dumps(obj)) == obj
+    candidate = rg._verdict_candidate(_verdict([_intent()]))
+    assert candidate is not None
+    assert "rescued" not in candidate  # never routed through the rescue path
 
 
-def test_merge_preserves_intent_gap_shape_unmangled():
-    """The Claude variant has no findings normalizer (ADR 0001's near-miss
-    rescue is Kimchi-only); the merge passes an intent_gap finding through
-    untouched -- no content-harvesting, no severity aliasing."""
-    raw = {"type": "intent_gap", "claim": "fixes the overflow",
-           "against": {"path": "a.py", "lines": "1", "evidence": "x"},
-           "severity": "blocking", "confidence": 0.9,
-           "self_check": {"fix_safe": True, "rationale": "r"}}
-    merged = rg._merge_chunk_results([_verdict([raw])])
-    intent = [f for f in merged["findings"] if f.get("type") == "intent_gap"]
-    assert intent == [raw]
+def test_normalize_verdict_preserves_intent_gap_shape_unmangled():
+    near_miss = {"findings": [
+        {"type": "intent_gap", "claim": "fixes the overflow",
+         "against": {"path": "a.py", "lines": "1", "evidence": "x"},
+         "severity": "blocking", "confidence": 0.9,
+         "self_check": {"fix_safe": True, "rationale": "r"}},
+        {"file": "a.py", "line": 3, "severity": "major", "issue": "bug"},
+    ]}
+    out = rg._normalize_verdict(near_miss)
+    assert out is not None
+    intent = [f for f in out["findings"] if f.get("type") == "intent_gap"]
+    assert len(intent) == 1
+    # The family's contracted keys survive untouched -- no content-harvesting,
+    # no severity aliasing. The near-miss sibling is normalized as before.
+    assert intent[0]["severity"] == "blocking"
+    assert intent[0]["claim"] == "fixes the overflow"
     assert "content" not in intent[0]
+    defect = [f for f in out["findings"] if f.get("type") != "intent_gap"]
+    assert defect[0]["path"] == "a.py" and defect[0]["severity"] == "medium"
 
 
 def test_unrecognized_improvised_shape_still_rejected():
-    assert not rg._is_valid_verdict({"some_axis": {"count": 3}})
+    assert rg._verdict_candidate({"some_axis": {"count": 3}}) is None
 
 
 # --------------------------------------------------------------------------
@@ -237,12 +252,3 @@ def test_skill_states_the_source_precedence():
     section = text[text.find("intent context"):]
     assert section.find("requirement_background") < section.find("ticket")
     assert section.find("ticket") < section.find("commit messages")
-
-
-def test_self_check_drop_is_hoisted_once_over_completed_chunk_results():
-    """Regression: the drop used to run after every per-chunk extend; hoisted,
-    it runs once over the completed results with an identical outcome."""
-    bad = [_intent(claim="", fix_safe=False)]
-    good = [_defect()]
-    merged = rg._merge_chunk_results([_verdict(bad + good), _verdict(bad)])
-    assert merged["findings"] == good

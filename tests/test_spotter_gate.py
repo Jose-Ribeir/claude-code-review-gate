@@ -64,6 +64,9 @@ def _commit(work, files):
 
 def _env(tmp_path, **kw):
     env = {k: v for k, v in os.environ.items() if not k.startswith(("OCR_", "STUB_"))}
+    # Kimchi port (D12): the gate and this test must share ONE external
+           # state store; conftest points it at a per-test temp dir.
+    env["OCR_STATE_DIR"] = os.environ["OCR_STATE_DIR"]
     env.update({"CLAUDE_PLUGIN_DATA": str(tmp_path / "gate-data"),
                 "OCR_REVIEWER_CMD": f'"{sys.executable}" "{_STUB}"',
                 "STUB_TRACE": str(tmp_path / "stub.trace"), "OCR_INLINE_BUDGET": "30"})
@@ -161,6 +164,9 @@ class TestManifestPlumbing:
         command line: the spotter var must not force a manifest by itself."""
         work = _repo(tmp_path, {"lib.py": "def f():\n    return 1\n"})
         _commit(work, {"lib.py": "def f():\n    return 2\n"})
+        # commit_intent (intent.messages, default on) is itself manifest content.
+        (work / ".ocr").mkdir()
+        (work / ".ocr" / "config.json").write_text(json.dumps({"intent": {"messages": False}}))
         decision, reason = _push(work, _env(tmp_path, OCR_PRECOMPUTED_DIFFS="0",
                                             OCR_SPOTTER_MODEL="some-fast-model"))
         assert decision == "pass", reason

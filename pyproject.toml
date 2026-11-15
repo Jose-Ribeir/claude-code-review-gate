@@ -1,6 +1,6 @@
 # Tooling config only. This project is NOT a Python package -- it ships as a
-# Claude Code plugin, and sync-local-install.py's PAYLOAD is an allowlist, so
-# this file is deliberately not part of what gets installed.
+# Kimchi Studio gate (hooks + skill + scripts), so this file is deliberately
+# not part of what gets installed.
 #
 # It exists to pin what CI already enforces, so `ruff check` and `pytest` behave
 # the same locally as in the workflow. It is intentionally NOT stricter than the

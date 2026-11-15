@@ -257,6 +257,48 @@ class TestForgeTier:
         assert res["hits"] == [TARGET]
         assert "search" in trace.read_text()
 
+    def test_forge_hit_in_an_unrelated_repo_is_dropped(self, tmp_path, monkeypatch):
+        """`gh search code` is forge-WIDE: a hit in ANOTHER repository can
+        never back a `resolved` in this one; the fetched `repository` field
+        filters it and says so in a warning."""
+        cwd = self._repo_no_match(tmp_path)
+        _git_raw(["remote", "add", "origin", "git@github.com:org/repo.git"], cwd)
+        body = json.dumps([{"path": TARGET,
+                            "repository": {"nameWithOwner": "someone-else/other-repo"}}])
+        script = "#!/bin/sh\nprintf '%s\\n' '" + body + "'\n"
+        _path_with_only_git(tmp_path, monkeypatch, [("gh", script)])
+        res = _resolve(tmp_path)
+        assert res["status"] == "unresolved"
+        assert res["searched"] == ["registry", "grep", "branch", "forge"]
+        assert "unrelated" in res["warning"]
+        assert "someone-else/other-repo" in res["warning"]
+
+    def test_forge_hit_in_the_origin_repo_resolves(self, tmp_path, monkeypatch):
+        """A hit whose stated repository IS the origin resolves cleanly, no
+        unrelated-repo warning attached."""
+        cwd = self._repo_no_match(tmp_path)
+        _git_raw(["remote", "add", "origin", "git@github.com:org/repo.git"], cwd)
+        body = json.dumps([{"path": TARGET,
+                            "repository": {"nameWithOwner": "org/repo"}}])
+        script = "#!/bin/sh\nprintf '%s\\n' '" + body + "'\n"
+        _path_with_only_git(tmp_path, monkeypatch, [("gh", script)])
+        res = _resolve(tmp_path)
+        assert res["status"] == "resolved"
+        assert res["via"] == "forge"
+        assert res["hits"] == [TARGET]
+        assert "warning" not in res
+
+    def test_hit_without_a_repository_field_is_kept(self, tmp_path, monkeypatch):
+        """Providers that state no repository (glab blobs) keep their hits:
+        only a stated, mismatched slug filters."""
+        cwd = self._repo_no_match(tmp_path)
+        _git_raw(["remote", "add", "origin", "git@gitlab.example.com:org/repo.git"], cwd)
+        _path_with_only_git(tmp_path, monkeypatch,
+                            [("glab", _hit_script(str(tmp_path / "t"), TARGET))])
+        res = _resolve(tmp_path)
+        assert res["status"] == "resolved"
+        assert res["hits"] == [TARGET]
+
     def test_non_github_remote_uses_glab(self, tmp_path, monkeypatch):
         """gitlab.com and self-hosted GitLab both select glab."""
         cwd = self._repo_no_match(tmp_path)
@@ -396,6 +438,33 @@ class TestNegativeCache:
         res = _resolve(tmp_path)
         assert res["status"] == "resolved"
         assert res["via"] == "forge"
+
+
+class TestWarningsArePerTarget:
+    def test_a_warning_raised_for_one_target_never_reaches_another(self, tmp_path, monkeypatch):
+        """Regression: make_pointer_resolver shared ONE warnings list across
+        calls, so a degradation note raised while resolving target A landed
+        in target B's warning/warnings_tail."""
+        cwd = _init_repo(tmp_path)
+        _commit(cwd, {".ocr/artifacts.json": json.dumps({
+            "leaky.md": {"produced_by": "gen.py", "path": "out/leaky.md"},
+            "clean.md": {"produced_by": "gen.py", "path": "out/clean.md"},
+        })})
+        original = ocr_forge._registry_lookup
+
+        def noisy_for_leaky(repo_root, target, warnings):
+            if "leaky" in target:
+                warnings.append("forge: simulated degradation while resolving leaky.md")
+            return original(repo_root, target, warnings)
+
+        monkeypatch.setattr(ocr_forge, "_registry_lookup", noisy_for_leaky)
+        resolver = ocr_forge.make_pointer_resolver(str(tmp_path))
+        leaky = resolver("out/leaky.md")
+        assert leaky["status"] == "resolved"
+        assert "simulated degradation" in leaky["warning"]
+        clean = resolver("out/clean.md")
+        assert clean["status"] == "resolved"
+        assert "warning" not in clean  # nothing leaked from the earlier call
 
 
 import ocr_collectors as oc  # noqa: E402

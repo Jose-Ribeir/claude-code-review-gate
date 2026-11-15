@@ -477,6 +477,15 @@ def ensure_built(repo_root: str, is_allowed: Callable[[str], bool] = None) -> Di
                 "tool": "unknown", "warnings": warnings}
 
 
+def _norm_rel(path) -> str:
+    """Repo-relative normalize: forward slashes, one leading './' removed.
+
+    NOT str.lstrip('./'): that strips every leading '.' and '/', mangling
+    root-level dotfiles ('.eslintrc.js' -> 'eslintrc.js')."""
+    rel = str(path).replace("\\", "/")
+    return rel[2:] if rel.startswith("./") else rel
+
+
 def refresh(repo_root: str, changed_files, is_allowed: Callable[[str], bool] = None) -> Dict:
     """Incrementally re-extract the given repo-relative changed files.
 
@@ -499,8 +508,7 @@ def refresh(repo_root: str, changed_files, is_allowed: Callable[[str], bool] = N
         is_allowed = is_allowed or _default_is_allowed
         files = index.setdefault("files", {})
         refreshed, removed = [], []
-        for rel in sorted({str(p).replace("\\", "/").lstrip("./")
-                           for p in (changed_files or [])}):
+        for rel in sorted({_norm_rel(p) for p in (changed_files or [])}):
             if not rel:
                 continue
             full = os.path.join(repo_root, rel.replace("/", os.sep))
@@ -560,15 +568,20 @@ def query_symbol_refs(repo_root: str, name: str) -> Dict:
                             "kind": d.get("kind"),
                             "qualname": d.get("qualname"),
                         })
+            capped = False
             for path in sorted(index.get("files") or {}):
+                if capped:
+                    break
                 for line in (index["files"][path].get("refs") or {}).get(name, []):
                     if (path, line) in def_sites:
                         continue
                     if len(refs_out) >= _MAX_QUERY_RESULTS:
-                        warnings.append(
-                            f"ocr_index: ref cap {_MAX_QUERY_RESULTS} hit for {name}")
+                        capped = True
                         break
                     refs_out.append({"path": path, "line": line})
+            if capped:
+                warnings.append(
+                    f"ocr_index: ref cap {_MAX_QUERY_RESULTS} hit for {name}")
         return {"name": name, "defs": defs_out, "refs": refs_out,
                 "warnings": warnings}
     except Exception as exc:
@@ -590,6 +603,7 @@ def query_event_couples(repo_root: str, names) -> Dict:
         events_out: Dict[str, Dict] = {}
         couples, missing = [], []
         wanted = [n for n in (names or []) if n]
+        cap_warned = False  # one cap warning total, not one per name
         if index is not None:
             files = index.get("files") or {}
             for name in wanted:
@@ -610,15 +624,26 @@ def query_event_couples(repo_root: str, names) -> Dict:
                     continue
                 events_out[name] = {"producers": producers,
                                     "consumers": consumers}
+                capped = False
                 for p in producers:
+                    if len(couples) >= _MAX_QUERY_RESULTS:
+                        capped = True  # producer-level break used to warn nothing
+                        break
                     for c in consumers:
                         if len(couples) >= _MAX_QUERY_RESULTS:
+                            capped = True
                             break
                         couples.append({
                             "event": name,
                             "producer": {k: p[k] for k in ("path", "line", "kind")},
                             "consumer": {k: c[k] for k in ("path", "line", "kind")},
                         })
+                    if capped:
+                        break
+                if capped and not cap_warned:
+                    cap_warned = True
+                    warnings.append(
+                        f"ocr_index: couple cap {_MAX_QUERY_RESULTS} hit")
         return {"events": events_out, "couples": couples, "missing": missing,
                 "warnings": warnings}
     except Exception as exc:
@@ -636,11 +661,13 @@ def query_pointer_utterances(repo_root: str) -> Dict:
         index, warnings = _load_index(repo_root)
         pointers = []
         if index is not None:
+            capped = False
             for path in sorted(index.get("files") or {}):
+                if capped:
+                    break
                 for p in index["files"][path].get("pointers") or []:
                     if len(pointers) >= _MAX_QUERY_RESULTS:
-                        warnings.append(
-                            f"ocr_index: pointer cap {_MAX_QUERY_RESULTS} hit")
+                        capped = True
                         break
                     pointers.append({
                         "path": path,
@@ -648,6 +675,9 @@ def query_pointer_utterances(repo_root: str) -> Dict:
                         "target": p.get("target"),
                         "kind": p.get("kind"),
                     })
+            if capped:
+                warnings.append(
+                    f"ocr_index: pointer cap {_MAX_QUERY_RESULTS} hit")
         return {"pointers": pointers, "warnings": warnings}
     except Exception as exc:
         warnings.append(f"ocr_index: query_pointer_utterances failed: {exc}")

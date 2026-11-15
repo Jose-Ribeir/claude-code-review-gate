@@ -106,6 +106,18 @@ def test_token_budget_trims_before_the_commit_cap():
     assert len(extra["subject_only"]) == 6 - len(extra["commits"])
 
 
+def test_newest_commit_over_the_budget_still_sets_a_trim_notice():
+    # The newest message is verbatim even when it alone overflows the budget
+    # (~4000 tokens at 4 chars/token): keeping it must still be VISIBLE --
+    # spec story 3: truncation is never silent.
+    extra = review_gate._intent_extra(_mk(1, body_chars=20000), None, "A..B")
+    assert len(extra["commits"]) == 1 and "b" * 100 in extra["commits"][0]["body"]
+    assert extra["subject_only"] == []
+    assert extra["trim_notice"], "an over-budget newest commit must be marked"
+    assert "exceed" in extra["trim_notice"]
+    assert "kept anyway" in extra["trim_notice"] and "1" in extra["trim_notice"]
+
+
 def test_no_intent_when_there_are_no_commits():
     assert review_gate._intent_extra([], None, "A..B") is None
     assert review_gate._intent_extra(None, None, "A..B") is None
@@ -138,6 +150,19 @@ def test_a_zero_intersection_chunk_gets_subjects_only_background():
     extra = review_gate._intent_extra(_scoped_commits(), {"unrelated/z.py"}, "A..B")
     assert extra["commits"] == []
     assert sorted(_subjects(extra)) == ["core change", "docs change", "oldest"]
+
+
+def test_a_file_less_commit_counts_as_touching_every_chunk():
+    # Merge commits under plain `git log --name-only` carry an empty files
+    # list: without special-casing they would zero-intersect every chunk and
+    # land subjects-only everywhere, even when inside the verbatim budget.
+    commits = _mk_scoped([([], "merge branch 'feature'"), (["src/c.py"], "oldest")])
+    extra = review_gate._intent_extra(commits, {"unrelated/z.py"}, "A..B")
+    # The file-less commit is a verbatim candidate in EVERY chunk; the real
+    # zero-intersection commit still degrades to subjects-only background.
+    assert [c["subject"] for c in extra["commits"]] == ["merge branch 'feature'"]
+    assert extra["commits"][0]["body"] == "body of merge branch 'feature'"
+    assert _subjects(extra) == ["oldest"]
 
 
 def test_single_context_scoping_is_a_no_op_over_the_full_set():
@@ -253,27 +278,3 @@ def test_a_chunked_run_scopes_the_messages_to_each_chunks_files(tmp_path):
     assert _subjects(docs) == ["core: add mod0 and mod1"]
     # Both halves of the push are visible in full somewhere; bodies verbatim.
     assert core["commits"][0]["body"] == "core work"
-
-
-def test_newest_commit_alone_over_budget_is_marked_in_trim_notice():
-    # One commit whose message alone exceeds the ~4000-token budget: still
-    # verbatim (that is the contract), but the overflow is no longer silent.
-    extra = review_gate._intent_extra(_mk(1, body_chars=40000), None, "A..B")
-    assert len(extra["commits"]) == 1 and extra["commit_count"] == 1
-    assert extra["trimmed"] is True
-    assert "newest" in extra["trim_notice"].lower()
-    assert "kept verbatim" in extra["trim_notice"]
-    # No older commits were trimmed: the marker must not overclaim.
-    assert "older commit(s) trimmed" not in extra["trim_notice"]
-
-
-def test_a_file_less_commit_scopes_to_every_chunk():
-    # A merge commit touches no file: with no touched-file set to intersect,
-    # it is intent for EVERY chunk, never dropped to subject-only background.
-    commits = _mk_scoped([([], "merge branch 'x'"), (["src/a.py"], "core change")])
-    extra = review_gate._intent_extra(commits, {"unrelated/z.py"}, "A..B")
-    assert [c["subject"] for c in extra["commits"]] == ["merge branch 'x'"]
-    assert [c["subject"] for c in extra["subject_only"]] == ["core change"]
-    extra = review_gate._intent_extra(commits, {"src/a.py"}, "A..B")
-    assert sorted(c["subject"] for c in extra["commits"]) == [
-        "core change", "merge branch 'x'"]

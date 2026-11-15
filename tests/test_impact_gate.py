@@ -63,8 +63,17 @@ def _commit(work, files, amend=False):
 
 
 def _env(tmp_path, trace, **kw):
-    env = {k: v for k, v in os.environ.items() if not k.startswith(("OCR_", "STUB_"))}
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("OCR_", "STUB_", "GIT_TRACE"))}
     env.update({"CLAUDE_PLUGIN_DATA": str(tmp_path / "gate-data"),
+                # Kimchi port (plan D12): async run-state and verdicts live in
+                # the EXTERNAL store under OCR_STATE_DIR -- the OCR_* filter
+                # above would strip it, sending the gate subprocess to the
+                # developer's real ~/.local/state/review-gate while the
+                # in-process _state() poll (keyed by the conftest's private
+                # store) never sees the state file and waits out its whole
+                # deadline. Keep the conftest's private store on both sides.
+                "OCR_STATE_DIR": os.environ["OCR_STATE_DIR"],
                 "OCR_REVIEWER_CMD": f'"{sys.executable}" "{_STUB}"',
                 "STUB_TRACE": str(tmp_path / trace), "OCR_INLINE_BUDGET": "30"})
     env.update({k: str(v) for k, v in kw.items()})
@@ -126,8 +135,8 @@ def test_first_push_sends_callers_in_untouched_files(tmp_path):
 def test_no_callers_but_commit_intent_still_writes_a_manifest(tmp_path):
     """0.10.0 writes a manifest for every review (the diffs reach the reviewer
     through it); OCR_PRECOMPUTED_DIFFS=0 restores the bare 0.7.0 command line
-    only when nothing else rides the extras seam -- commit intent does, so
-    a flagged-off push with pushed commits still gets a manifest."""
+    only when nothing else rides the extras seam -- commit intent (t13) does,
+    so a flagged-off push with pushed commits still gets a manifest."""
     work = _repo(tmp_path, {"lib.py": _LIB_V1})
     _commit(work, {"lib.py": _LIB_V2})
     decision, _ = _push(work, _env(tmp_path, "t.trace", OCR_PRECOMPUTED_DIFFS="0"),

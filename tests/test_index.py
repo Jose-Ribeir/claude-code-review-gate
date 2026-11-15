@@ -213,6 +213,30 @@ class TestEventCouples:
         got = ocr_index.query_event_couples(root, ["no-such-event", "resurrect-entry"])
         assert got["missing"] == ["no-such-event"]
 
+    def test_couple_cap_warns_and_stops_the_producer_loop(self, tmp_path, monkeypatch):
+        """3 producers x 2 consumers = 6 couples; capped at 3 the inner loop
+        warns AND the outer producer loop stops early -- exactly one warning,
+        no couples beyond the cap, events/missing semantics unchanged."""
+        monkeypatch.setattr(ocr_index, "_MAX_QUERY_RESULTS", 3)
+        root = str(tmp_path)
+        for i in range(3):
+            _write(root, "fanout/prod%d.py" % i,
+                   "import events\n\n\ndef go():\n"
+                   "    events.emit('big-event', %d)\n" % i)
+        for i in range(2):
+            _write(root, "fanout/cons%d.py" % i,
+                   "import events\n\n\ndef arm():\n"
+                   "    events.on('big-event', handle)\n")
+        ocr_index.ensure_built(root)
+        got = ocr_index.query_event_couples(root, ["big-event"])
+        cap_warnings = [w for w in got["warnings"] if "couple cap" in w]
+        assert cap_warnings == ["ocr_index: couple cap 3 hit"]
+        assert len(got["couples"]) <= 3
+        assert len(_couple_pairs(got, "big-event")) == len(got["couples"])
+        assert got["missing"] == []
+        assert len(got["events"]["big-event"]["producers"]) == 3
+        assert len(got["events"]["big-event"]["consumers"]) == 2
+
 
 # ===========================================================================
 # Edge kinds 1 and 3: symbol defs/refs and pointer utterances

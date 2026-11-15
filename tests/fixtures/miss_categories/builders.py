@@ -8,16 +8,22 @@ binary lives on disk; the fixture sources are the constants below.
 Also the shared harness:
 
 * :func:`load_main_module` execs a ``scripts/<name>.py`` from the PROJECT's
-  ``main`` branch (``git show``), so a test can run the pre-v2 module side by
-  side with the v2 one against the same fixture. ``None`` means the module
-  did not exist pre-v2 -- the parametrized-abstraction half of the "old
-  misses -> v2 catches" assertion for the new v2 modules.
+  pre-v2 base branch (``git show main:...``; the Kimchi port's ``main``,
+  91744e9, is the same pre-v2 tree as upstream's: single-filter
+  ``find_references(is_allowed=...)``, ``per_symbol=5``, and none of the v2
+  modules), so a test can run the pre-v2 module side by side with the v2 one
+  against the same fixture. ``None`` means the module did not exist pre-v2 --
+  the parametrized-abstraction half of the "old misses -> v2 catches"
+  assertion for the new v2 modules.
 * :func:`review_path_filter` / :func:`context_path_filter` expose the gate's
   own t01 allowlist split (imported from the real review-gate.py, not
   reimplemented here).
 * :func:`push_fixture` runs a real ``git push`` through ``review-gate.py
   --mode hook`` with ``tests/stub_reviewer.py`` as the reviewer
-  (``OCR_REVIEWER_CMD``), mirroring tests/test_spotter_gate.py.
+  (``OCR_REVIEWER_CMD``), mirroring tests/test_deep_gate.py. Kimchi port
+  (D12): the gate's state store is EXTERNAL -- ``gate_env`` propagates the
+  per-test ``OCR_STATE_DIR`` conftest sets, so the hook-mode subprocess and
+  the test poll the same store.
 
 Python 3.9; tests import this module after putting
 ``tests/fixtures/miss_categories`` on ``sys.path``.
@@ -100,22 +106,29 @@ def commit(root, files, message="c"):
     return git(["rev-parse", "HEAD"], cwd=root).strip()
 
 
+# Frozen pre-v2 sources (`git show 4f1849b:scripts/<name>.py`, the last main
+# commit before the v2 merge). `main` can no longer stand in for "pre-v2" -- it
+# contains v2 -- and a shallow CI checkout has no history to show. Only modules
+# that existed pre-v2 are vendored; a module with no file here "did not exist".
+_PRE_V2 = os.path.join(_HERE, "pre_v2")
+
+
 def load_main_module(name):
-    """Exec ``scripts/<name>.py`` from the project's `main` branch as a fresh
-    module. Returns None when the module did not exist pre-v2.
+    """Exec the frozen pre-v2 ``scripts/<name>.py`` as a fresh module. Returns
+    None when the module did not exist pre-v2.
 
     Used for the old-misses half of the fixture assertions: run the actual
     pre-v2 machinery (or assert its absence) against the same fixture state.
     """
-    proc = subprocess.run(["git", "-C", _ROOT, "show", "main:scripts/%s.py" % name],
-                          capture_output=True, text=True)
-    if proc.returncode != 0:
+    path = os.path.join(_PRE_V2, "%s.py" % name)
+    if not os.path.isfile(path):
         return None
+    with open(path, encoding="utf-8") as fh:
+        source = fh.read()
     spec = importlib.util.spec_from_loader("main_%s" % name, loader=None,
-                                           origin="main:scripts/%s.py" % name)
+                                           origin="pre_v2/%s.py" % name)
     module = importlib.util.module_from_spec(spec)
-    exec(compile(proc.stdout, "main:scripts/%s.py" % name, "exec"),
-         module.__dict__)
+    exec(compile(source, path, "exec"), module.__dict__)
     return module
 
 
@@ -131,9 +144,16 @@ def context_path_filter(path):
 
 
 def gate_env(tmp_path, **overrides):
-    """Environment for an out-of-process gate run with the stub reviewer."""
+    """Environment for an out-of-process gate run with the stub reviewer.
+
+    Kimchi D12 adaptation: ``OCR_STATE_DIR`` is propagated explicitly -- the
+    strip of inherited ``OCR_*`` below must not drop it, or the hook-mode
+    subprocess would write into the developer's real external store and the
+    test would poll a private one (mirrors tests/test_deep_gate.py's _env).
+    """
     env = {k: v for k, v in os.environ.items()
            if not k.startswith(("OCR_", "STUB_"))}
+    env["OCR_STATE_DIR"] = os.environ["OCR_STATE_DIR"]
     env.update({"CLAUDE_PLUGIN_DATA": str(os.path.join(str(tmp_path), "gate-data")),
                 "OCR_REVIEWER_CMD": '"%s" "%s"' % (sys.executable, _STUB),
                 "STUB_TRACE": str(os.path.join(str(tmp_path), "stub.trace")),
@@ -144,7 +164,7 @@ def gate_env(tmp_path, **overrides):
 
 def push_fixture(work, env):
     """One `git push origin main` through the gate hook; returns the
-    (decision, reason) PreToolUse verdict."""
+    (decision, reason) hook verdict (Kimchi hook protocol via hook_output)."""
     payload = json.dumps({"session_id": "s1", "tool_name": "Bash",
                           "cwd": str(work),
                           "tool_input": {"command": "git push origin main"}})

@@ -42,6 +42,7 @@ _STUB = os.path.join(_HERE, "stub_reviewer.py")
 
 sys.path.insert(0, _SCRIPTS)
 from hook_output import parse_pretooluse  # noqa: E402
+from conftest import scrub_git_trace  # noqa: E402
 _spec = importlib.util.spec_from_file_location("review_gate_ls", _GATE)
 review_gate = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(review_gate)
@@ -91,7 +92,7 @@ def _commit(work, name="f", content="change\n"):
 
 
 def _env(tmp_path, **kw):
-    env = dict(os.environ)
+    env = scrub_git_trace(dict(os.environ))
     for k in ("OCR_IN_REVIEW", "OCR_FAIL_OPEN", "OCR_ADVISORY", "OCR_FORCE_REVIEW",
               "OCR_LEGACY_RANGE", "OCR_INLINE_BUDGET", "STUB_SLEEP",
               "STUB_VERDICT", "STUB_TRACE", "OCR_LEDGER", "STUB_FINDINGS_FOR",
@@ -358,7 +359,8 @@ def _plugin_copy(tmp_path):
     (root / "agents").mkdir()
     for rel in ("skills/review/SKILL.md", "skills/review/rubric.md",
                 "skills/review/rules/python.md", "agents/code-reviewer.md",
-                "agents/code-filter.md", "agents/code-resolver.md"):
+                "agents/code-filter.md", "agents/code-resolver.md",
+                "agents/docs-checker.md"):
         (root / rel).write_text(f"{rel} v1\n", encoding="utf-8")
     return root
 
@@ -381,7 +383,8 @@ def test_fingerprint_tracks_criteria_not_mechanics(tmp_path, monkeypatch):
     assert fp() == base, "mechanics must not invalidate the ledger"
 
     for rel in ("skills/review/rubric.md", "skills/review/rules/python.md",
-                "agents/code-reviewer.md", "agents/code-filter.md"):
+                "agents/code-reviewer.md", "agents/code-filter.md",
+                "agents/docs-checker.md"):
         before = fp()
         (root / rel).write_text(f"{rel} tightened\n", encoding="utf-8")
         assert fp() != before, f"{rel} is review criteria"
@@ -420,8 +423,11 @@ def test_scenario_10_deleted_target_auto_resolved(monkeypatch, tmp_path):
     # app/x.py has been deleted → blob returns "".
     monkeypatch.setattr(review_gate, "_blob_oids_at",
                         lambda root, tip, paths: {p: "" for p in paths})
+    # All-empty blobs now trigger _classify_priors' tip probe (fail-closed
+    # guard against a failed ls-tree); a readable tip means true deletions.
+    monkeypatch.setattr(review_gate, "_git", lambda args, cwd=None: ("", 0))
     to_resolve, auto_resolved, carried = review_gate._classify_priors(
-        plan_items, "tip", str(tmp_path), str(tmp_path), fp, "run2"
+        plan_items, "tip", str(tmp_path), str(tmp_path), fp
     )
     fid = finding.get("id") or review_gate._finding_id(finding)
     resolved_ids = [f.get("id") or review_gate._finding_id(f) for f in auto_resolved]
@@ -465,7 +471,7 @@ def test_identical_blob_prior_replays_without_the_resolver(monkeypatch, tmp_path
     monkeypatch.setattr(review_gate, "_blob_oids_at",
                         lambda root, tip, paths: {p: blob for p in paths})
     to_resolve, auto_resolved, carried = review_gate._classify_priors(
-        plan, "tip", str(tmp_path), str(tmp_path), fp, "run2")
+        plan, "tip", str(tmp_path), str(tmp_path), fp)
     assert to_resolve == [] and auto_resolved == []
     assert [f["provenance"] for f in carried] == ["carried"]
     assert carried[0]["content"] == finding["content"]
@@ -480,7 +486,7 @@ def test_a_prior_whose_file_changed_since_the_finding_still_goes_to_the_resolver
     monkeypatch.setattr(review_gate, "_blob_oids_at",
                         lambda root, tip, paths: {p: blob_now for p in paths})
     to_resolve, _, carried = review_gate._classify_priors(
-        plan, "tip", str(tmp_path), str(tmp_path), fp, "run2")
+        plan, "tip", str(tmp_path), str(tmp_path), fp)
     assert len(to_resolve) == 1 and carried == []
 
 
@@ -494,7 +500,7 @@ def test_a_prior_aimed_at_an_older_blob_is_rejudged_even_on_a_carry_record(
     monkeypatch.setattr(review_gate, "_blob_oids_at",
                         lambda root, tip, paths: {p: blob_now for p in paths})
     to_resolve, _, carried = review_gate._classify_priors(
-        plan, "tip", str(tmp_path), str(tmp_path), fp, "run2")
+        plan, "tip", str(tmp_path), str(tmp_path), fp)
     assert len(to_resolve) == 1 and carried == []
 
 
@@ -572,7 +578,7 @@ def test_cost_rule_reviews_the_whole_range_when_it_costs_about_the_same(tmp_path
     assert item["mode"] == "full" and item["miss_reason"] == "cost_rule"
     assert item["record"] is not None and item["from_oid"] == blob1
     to_resolve, _, _ = review_gate._classify_priors(
-        [item], tip, str(work), str(tmp_path / "common"), "c" * 64, "r2")
+        [item], tip, str(work), str(tmp_path / "common"), "c" * 64)
     assert [p["finding"]["content"] for p in to_resolve] == ["bad"]
 
 
@@ -824,7 +830,7 @@ def test_scenario_13_ocr_ledger_0_uses_manifest_no_ledger_dir(tmp_path):
     OCR_PRECOMPUTED_DIFFS=0: since 0.10.0 every review gets a manifest (the
     diffs reach the reviewer through it); the bare 0.7.0 argv is the rollback
     path -- reached only when nothing rides the extras seam. Commit intent
-    does, so this push still gets a manifest carrying commit_intent."""
+    (t13) does, so this push still gets a manifest carrying commit_intent."""
     work = _tiny_repo(tmp_path, {"x.py": "x = 1\n"})
     tip = _commit(work, "x.py", "x = 2\n")
     env = _env(tmp_path, OCR_LEDGER="0", OCR_PRECOMPUTED_DIFFS="0")
@@ -833,7 +839,7 @@ def test_scenario_13_ocr_ledger_0_uses_manifest_no_ledger_dir(tmp_path):
     _wait_state(work, tip, {"done"})
     calls = _trace(tmp_path)
     assert len(calls) == 1
-    # A manifest is used (--paths-file), carrying commit intent.
+    # A manifest is used (--paths-file), carrying commit intent (t13).
     assert calls[0]["paths_file"] is not None, "commit intent diverts the golden argv path"
     intent = calls[0]["manifest"]["commit_intent"]
     assert intent["commit_count"] == 1
@@ -1179,7 +1185,7 @@ def test_scenario_4_reviewer_overrides_resolver_no_resolution_written(monkeypatc
                         lambda root, tip, paths: {p: "some_oid" for p in paths})
 
     to_resolve, auto_resolved, carried = review_gate._classify_priors(
-        plan_items, "tip", str(tmp_path), str(tmp_path), fp, "run2"
+        plan_items, "tip", str(tmp_path), str(tmp_path), fp
     )
     fid = review_gate._finding_id(finding)
     assert any(p["id"] == fid for p in to_resolve), "high finding must go to resolver"
@@ -1330,6 +1336,23 @@ def test_the_skill_has_the_resolve_mode_the_gate_calls():
     skill = (Path(_GATE).parent.parent / "skills" / "review" / "SKILL.md").read_text(encoding="utf-8")
     assert "`--resolve <json>`" in skill and "## R. Resolve mode" in skill
     assert "code-resolver" in skill and '{"resolutions"' in skill
+
+
+def test_the_skill_mandates_the_formatter_for_chunk_sessions():
+    # SPEC-05: a chunk reviewer session (--paths-file) running with --json is
+    # required to spawn the formatter subagent and relay its output verbatim as
+    # its final message — the chunked path must not read as exempt from the §6
+    # verdict contract, or a long chunk session may compose its own object and
+    # drift off the verdict schema.
+    skill = (Path(_GATE).parent.parent / "skills" / "review" / "SKILL.md").read_text(encoding="utf-8")
+    # §6 names chunk sessions explicitly and forbids self-composing the verdict.
+    assert "--json`" in skill and "chunk session" in skill
+    assert "formatter subagent" in skill and "never compose" in skill.lower()
+    # The §1 --paths-file fast path points the chunked session at that same
+    # formatter rule, so it cannot be read as a §6-free path.
+    fast_path = skill[skill.index("**`--paths-file` fast path:**"):
+                     skill.index("**Determine the revision range**")]
+    assert "formatter subagent" in fast_path and "verbatim" in fast_path
 
 
 def test_resolver_manifest_carries_per_file_diff_specs(monkeypatch, tmp_path):

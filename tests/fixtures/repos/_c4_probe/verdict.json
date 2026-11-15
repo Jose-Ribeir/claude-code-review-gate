@@ -1,0 +1,50 @@
+{
+  "status": "success",
+  "verdict": "block",
+  "summary": {
+    "files_reviewed": 3,
+    "findings": 3,
+    "high": 0,
+    "medium": 2,
+    "low": 1
+  },
+  "findings": [
+    {
+      "path": "src/calc.ts",
+      "start_line": 18,
+      "end_line": 22,
+      "severity": "medium",
+      "confidence": 0.6,
+      "category": "correctness",
+      "content": "averageUnitPrice is an unweighted arithmetic mean of the per-line unit prices and ignores quantity entirely. Verified by executing the compiled code: cartTotal([{unitPrice:100,quantity:1},{unitPrice:1,quantity:100}]) returns averageUnitPrice 50.5, while the actual price paid per unit is subtotal/itemCount = 200/101 \u2248 1.98. In a cart-totaling context 'average unit price' most naturally means price paid per unit; the simple mean is misleading whenever quantities differ across lines. If the unweighted mean is intentional, it should be documented on the CartTotal interface.",
+      "suggestion_code": "averageUnitPrice: itemCount === 0 ? 0 : round2(subtotal / itemCount),",
+      "existing_code": "const unitPrices = lines.map((line) => line.unitPrice);\n  return {\n    itemCount,\n    subtotal: round2(subtotal),\n    averageUnitPrice: unitPrices.length === 0 ? 0 : round2(mean(unitPrices)),\n  };",
+      "evidence": "Compiled all three files with tsc and executed: mixed-cart case returned {\"itemCount\":101,\"subtotal\":200,\"averageUnitPrice\":50.5}; weighted average is ~1.98. Empty-cart case correctly returned averageUnitPrice 0 (mean's RangeError is guarded)."
+    },
+    {
+      "path": "src/index.ts",
+      "start_line": 10,
+      "end_line": 27,
+      "severity": "medium",
+      "confidence": 0.85,
+      "category": "test_coverage",
+      "content": "The change set adds all of the project's business logic (cartTotal rounding and empty-cart guard, buildCartReport formatting/pluralization, discountPercent clamp bounds) but the repo contains no tests at all: package.json has no test script and no *.test.ts/*.spec.ts files exist. Critical boundary paths are untested: empty lines array, mean/clamp RangeError paths, clamp floor/ceil application in discountPercent, and singular vs plural item count in the report title.",
+      "evidence": "find for **/*.{test,spec}.{ts,tsx,js} returned no files; package.json defines only a \"typecheck\" script. Typecheck (tsc --noEmit) passes but exercises no runtime behavior."
+    },
+    {
+      "path": "src/calc.ts",
+      "start_line": 26,
+      "end_line": 28,
+      "severity": "low",
+      "confidence": 0.5,
+      "category": "correctness",
+      "content": "round2 uses Math.round(value * 100) / 100, which mis-rounds classic floating-point half-cent cases for currency: e.g. round2(1.005) returns 1 (not 1.01) because 1.005 * 100 === 100.49999999999999 in IEEE-754. (2.675 was verified to round correctly to 2.68, so this affects only values whose binary representation lands just below the half.) For money math, prefer epsilon-adjusted rounding or integer-cents arithmetic.",
+      "suggestion_code": "function round2(value: number): number {\n  return Math.round((value + Number.EPSILON) * 100) / 100;\n}",
+      "evidence": "Read the full diff of src/calc.ts (new file); FP behavior is a well-known IEEE-754 property of the *100-then-round idiom; behaviorally verified the 2.675 case rounds correctly, leaving the 1.005-style cases as the residual risk."
+    }
+  ],
+  "warnings": [],
+  "cross_file_context_summary": {
+    "symbols": []
+  }
+}
