@@ -272,9 +272,13 @@ unexpected output is a **silent skip with a human-readable note** in the
 review record; the review proceeds on commit messages alone. Misses are never
 cached — a transient VPN outage is retried on the next push.
 
-### Jira (Kimchi variant only)
+### Jira
 
-A Jira-style key (`PROJ-123`) is fetched by a **side-fetch worker**: one tiny
+A Jira-style key (`PROJ-123`) is fetched by a **side-fetch worker** that rides
+the selected review backend. Under **claude** it is a headless
+`claude -p --strict-mcp-config --mcp-config <temp file>` run that enables only
+the first Atlassian/Jira entry of `~/.claude.json` (override with
+`OCR_JIRA_MCP_CONFIG`). Under **kimchi** (described below) it is one tiny
 separate headless `kimchi -p --no-session --mcp-config <temp file>` run whose
 temp config enables ONLY the persisted desktop Atlassian connector
 (`__kimchi-studio-connector__atlassian`, read verbatim from

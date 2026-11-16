@@ -1,4 +1,4 @@
-"""Jira side-fetch worker (t18, Kimchi variant only).
+"""Jira side-fetch worker (t18; rides the selected review backend).
 
 Jira tickets cannot ride gh/glab: they are fetched through the desktop
 app's EXISTING Atlassian login, so no token is ever stored in gate config
@@ -38,8 +38,6 @@ only the backend that slot delegates to.
 import json
 import os
 import tempfile
-
-import ocr_profile
 
 import ocr_profile
 

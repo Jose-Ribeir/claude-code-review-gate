@@ -827,11 +827,13 @@ verdict authority).
 **Model (v2) — tier-1 reviewer:** spawn the reviewer with
 `manifest.tier1_model` when a manifest was given; otherwise the environment
 variable `OCR_TIER1_MODEL`, defaulting to `kimi-k3`. The same model applies
-to every group subagent in the escalation path below. The gate validates the
-review-model variables at startup (provider guard, Python-side): a push
-configured with an anthropic/openai model is refused before any review work
-starts — if a review aborts with that refusal, surface it verbatim and do
-not work around it with a differently-spawned reviewer.
+to every group subagent in the escalation path below. Under the **kimchi**
+backend the gate validates the review-model variables at startup (provider
+guard, Python-side): a push configured with an anthropic/openai model is
+refused before any review work starts — if a review aborts with that refusal,
+surface it verbatim and do not work around it with a differently-spawned
+reviewer. Under the **claude** backend the guard stands down (the tiers are
+Anthropic models by design; see ADR 0005).
 
 **Default path (≤ 15 files):** spawn **one** reviewer subagent via the Agent
 tool, with:
