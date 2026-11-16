@@ -383,3 +383,19 @@ def test_mr_diff_facts_brace_form_with_braces_in_the_suffix(tmp_path):
     tip = _git(["rev-parse", "HEAD"], cwd=work)
     paths, _ = _rg._mr_diff_facts(str(work), base, tip)
     assert paths == ["web/a{1}.md"], paths
+
+
+
+def test_mr_diff_facts_survives_embedded_tab_in_path(tmp_path):
+    """Round-4 self-review: a legal POSIX tab inside a non-rename path must
+    not truncate it (split on the first two tabs only)."""
+    work = tmp_path / "work"
+    _git(["init", "-b", "main", str(work)], cwd=work)
+    _config(work)
+    (work / "docs").mkdir()
+    (work / "docs" / "a\tb.md").write_text("x\n")
+    _git(["add", "."], cwd=work)
+    _git(["commit", "-m", "add tab-named file"], cwd=work)
+    tip = _git(["rev-parse", "HEAD"], cwd=work)
+    paths, _ = _rg._mr_diff_facts(str(work), None, tip)
+    assert paths == ["docs/a\tb.md"], paths

@@ -1312,7 +1312,9 @@ def _mr_diff_facts(repo_root, base, tip):
     paths, lines = [], 0
     fields = iter([f for f in out.split("\0") if f != ""])
     for rec in fields:
-        cols = rec.split("\t")
+        # Split on the FIRST TWO tabs only: a path may legally contain a
+        # tab, and cols[2] must keep the whole name (round-4 self-review).
+        cols = rec.split("\t", 2)
         if len(cols) < 3:
             continue
         added, deleted, path = cols[0], cols[1], cols[2]
