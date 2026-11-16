@@ -76,6 +76,7 @@ import ocr_memory  # noqa: E402
 import ocr_segment  # noqa: E402
 import ocr_telemetry  # noqa: E402
 import ocr_profile  # noqa: E402  # backend (claude / kimchi) selection
+import ocr_cmdshim  # noqa: E402  # Windows .cmd shim -> native exe; one-line prompts
 import rg_store  # noqa: E402  # the Kimchi port's external verdict store + sandbox
 import rg_config  # noqa: E402  # t15: single settings read (intent.* switches)
 import rg_tickets  # noqa: E402  # t16: ticket key discovery
@@ -3740,7 +3741,9 @@ def _worker_invocation(default_args, missing_message, repo_root=None):
                 f"backend selection failed: backend "
                 f"{_backend_local.selection.name!r} has no launch description "
                 "in this build; refusing to review with a different backend.")
-    kimi = launch.find_cli()
+    # An npm .cmd shim is run by cmd.exe, which truncates an argument at its
+    # first newline; launch the native executable behind it instead.
+    kimi = ocr_cmdshim.unwrap(launch.find_cli())
     if not kimi and not stub:
         raise ReviewGateError(
             missing_message(launch) if callable(missing_message) else missing_message)
@@ -3829,7 +3832,7 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
                   if push_range else launch.prompt) + _reminder
     if partial:
         prompt += _PARTIAL_REVIEW_NOTE
-    cmd = [kimi, "-p", prompt] + args
+    cmd = [kimi, "-p", ocr_cmdshim.prompt_for(kimi, prompt)] + args
     if stub:
         # Range is always last so stub's sys.argv[-1] still gives the range.
         if resolve_file:
@@ -8456,7 +8459,8 @@ def _run_docs_summary_once(review_root, tip, doc_paths, repo_root=None):
         repo_root=repo_root)
     listing = "\n".join("- " + p for p in doc_paths)
     prompt = _PROMPT_DOCS_SUMMARY.format(docs=listing)
-    cmd = stub + ["--docs-summary", tip] if stub else [kimi, "-p", prompt] + args
+    cmd = (stub + ["--docs-summary", tip] if stub
+           else [kimi, "-p", ocr_cmdshim.prompt_for(kimi, prompt)] + args)
     # The generator worker runs under the review worker's spawn discipline
     # (docs-gate 09): registered so the supervisor's kill path
     # (_kill_active_children) can stop it in flight, and a timeout -- or any

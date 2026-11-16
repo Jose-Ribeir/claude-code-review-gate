@@ -37,8 +37,10 @@ only the backend that slot delegates to.
 """
 import json
 import os
+import shutil
 import tempfile
 
+import ocr_cmdshim
 import ocr_profile
 
 # The persisted Studio connector entry key in the harness mcp.json -- this
@@ -76,13 +78,15 @@ def harness_mcp_config_path():
 def _kimchi_bin():
     """The headless CLI for the side-fetch: KIMCHI_BIN, else `kimchi` on
     PATH -- the same convention the review worker uses."""
-    return os.environ.get("KIMCHI_BIN", "").strip() or "kimchi"
+    name = os.environ.get("KIMCHI_BIN", "").strip() or "kimchi"
+    return ocr_cmdshim.unwrap(shutil.which(name) or name)
 
 
 def _claude_bin():
     """The headless CLI for the side-fetch under the claude backend:
     OCR_CLAUDE_BIN, else `claude` on PATH."""
-    return os.environ.get("OCR_CLAUDE_BIN", "").strip() or "claude"
+    name = os.environ.get("OCR_CLAUDE_BIN", "").strip() or "claude"
+    return ocr_cmdshim.unwrap(shutil.which(name) or name)
 
 
 def _selected_backend(repo_root):
@@ -223,12 +227,16 @@ def fetch_issue(key, jira_settings, repo_root, runner):
                 # --allowedTools pre-approves only that server's tools, and no
                 # settings source is loaded (a repo's own settings could hold
                 # hooks).
-                argv = [_claude_bin(), "-p", _prompt(key, jira_settings),
+                binary = _claude_bin()
+                argv = [binary, "-p",
+                        ocr_cmdshim.prompt_for(binary, _prompt(key, jira_settings)),
                         "--strict-mcp-config", "--mcp-config", tmp_path,
                         "--allowedTools", f"mcp__{server_name}",
                         "--setting-sources", ""]
             else:
-                argv = [_kimchi_bin(), "-p", _prompt(key, jira_settings),
+                binary = _kimchi_bin()
+                argv = [binary, "-p",
+                        ocr_cmdshim.prompt_for(binary, _prompt(key, jira_settings)),
                         "--no-session", "--mcp-config", tmp_path]
             out, note = runner(argv, repo_root, _timeout(jira_settings))
         finally:
