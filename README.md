@@ -395,7 +395,11 @@ neither, no spawn and no cost.
 - **`adr-integrity`** (default OFF): every claim a changed ADR makes,
   verified end to end — referenced files, functions, and config keys exist
   and do what is claimed; cited ADRs actually say what the ADR says they
-  say. Existence facts are computed deterministically; the agent judges
+  say. Guilty until proven innocent, scoped to claims about present reality
+  (forward-looking intentions and predictions are not claims): a claim the
+  checker cannot verify — unreadable cited thing, indeterminable behavior,
+  unreachable external reference — is a blocking finding, never a silent
+  pass. Existence facts are computed deterministically; the agent judges
   truth. `sweep` (default off) widens evidence to the whole records root.
 
 **Docs-only pushes:** with an enabled quality duty and matching files in the
