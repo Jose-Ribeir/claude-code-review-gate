@@ -200,3 +200,251 @@ def test_unknown_top_level_keys_are_ignored_without_noise():
     settings = rg_config.load_settings()
     assert settings["intent"]["messages"] is True
     assert settings["notes"] == []
+
+
+# --- the checks surface (SPEC-14.1) --------------------------------------------
+
+# Built-in checks: docs-deslop on by default, the ADR duties off (they
+# presuppose ADR conventions a repo may not follow); everything blocks.
+
+
+def test_checks_defaults_resolve(tmp_path):
+    settings = rg_config.load_settings(tmp_path)
+    checks = settings["checks"]
+    assert checks["docs-deslop"]["enabled"] is True
+    assert checks["adr-wait-what"]["enabled"] is False
+    assert checks["adr-integrity"]["enabled"] is False
+    for name in ("docs-deslop", "adr-wait-what", "adr-integrity"):
+        assert checks[name]["mode"] == "block"
+    assert checks["docs-deslop"]["globs"] == ["**/*.md"]
+    assert checks["adr-wait-what"]["globs"] == ["docs/adr/**/*.md", "**/adr/*.md"]
+    assert checks["adr-integrity"]["globs"] == ["docs/adr/**/*.md", "**/adr/*.md"]
+    assert settings["notes"] == []
+
+
+def test_checks_settles_alongside_intent_and_jira():
+    settings = rg_config.load_settings()
+    assert {"intent", "jira", "checks", "notes"} <= set(settings)
+
+
+def test_checks_key_values_are_not_shared_between_calls(tmp_path):
+    first = rg_config.load_settings()["checks"]
+    first["docs-deslop"]["globs"].append("mutated.md")
+    first["docs-deslop"]["enabled"] = "mutated"
+    fresh = rg_config.load_settings(tmp_path)
+    assert fresh["checks"]["docs-deslop"]["globs"] == ["**/*.md"]
+    assert fresh["checks"]["docs-deslop"]["enabled"] is True
+
+
+def test_checks_global_file_applies(tmp_path):
+    _write(rg_config.global_config_path(), {
+        "checks": {
+            "docs-deslop": {"enabled": "off", "mode": "warn"},
+            "adr-wait-what": {"enabled": True},
+        },
+    })
+    checks = rg_config.load_settings()["checks"]
+    assert checks["docs-deslop"]["enabled"] is False
+    assert checks["docs-deslop"]["mode"] == "warn"
+    assert checks["docs-deslop"]["globs"] == ["**/*.md"]  # untouched key keeps default
+    assert checks["adr-wait-what"]["enabled"] is True
+    assert checks["adr-wait-what"]["mode"] == "block"      # untouched key keeps default
+    checks_notes = rg_config.load_settings()["notes"]
+    assert checks_notes == []
+
+
+def test_checks_repo_keys_win_over_global_key_by_key(tmp_path):
+    _write(rg_config.global_config_path(), {
+        "checks": {"docs-deslop": {"enabled": False, "mode": "warn",
+                                   "globs": ["global/*.md"]}},
+    })
+    _write(tmp_path / ".ocr" / "config.json", {
+        "checks": {"docs-deslop": {"enabled": True}},  # only this key overridden per repo
+    })
+    checks = rg_config.load_settings(tmp_path)["checks"]
+    assert checks["docs-deslop"]["enabled"] is True       # repo wins
+    assert checks["docs-deslop"]["mode"] == "warn"        # global still applies
+    assert checks["docs-deslop"]["globs"] == ["global/*.md"]
+
+
+def test_checks_invalid_repo_json_keeps_global_and_notes_it(tmp_path):
+    _write(rg_config.global_config_path(), {
+        "checks": {"adr-integrity": {"enabled": True}},
+    })
+    bad = tmp_path / ".ocr" / "config.json"
+    bad.parent.mkdir(parents=True, exist_ok=True)
+    bad.write_text("nope", encoding="utf-8")
+    settings = rg_config.load_settings(tmp_path)
+    assert settings["checks"]["adr-integrity"]["enabled"] is True
+    assert settings["notes"]
+
+
+def test_checks_block_must_be_an_object():
+    _write(rg_config.global_config_path(), {"checks": ["docs-deslop"]})
+    settings = rg_config.load_settings()
+    assert settings["checks"]["docs-deslop"]["enabled"] is True  # defaults kept
+    assert settings["notes"]
+
+
+def test_unknown_check_without_a_command_is_noted_and_ignored():
+    _write(rg_config.global_config_path(), {
+        "checks": {"docs-desolp": {"enabled": False}},  # a typo, not a check
+    })
+    settings = rg_config.load_settings()
+    assert "docs-desolp" not in settings["checks"]
+    assert any("docs-desolp" in n for n in settings["notes"])
+    assert settings["checks"]["docs-deslop"]["enabled"] is True  # default kept
+
+
+def test_a_command_check_registers_as_a_user_check():
+    _write(rg_config.global_config_path(), {
+        "checks": {"my-lint": {"command": "tools/lint.sh", "globs": ["**/*.py"],
+                               "mode": "warn"}},
+    })
+    settings = rg_config.load_settings()
+    check = settings["checks"]["my-lint"]
+    assert check["command"] == "tools/lint.sh"
+    assert check["globs"] == ["**/*.py"]
+    assert check["mode"] == "warn"
+    assert check["enabled"] is True  # a declared check defaults to on
+    assert settings["notes"] == []
+
+
+def test_an_unknown_check_with_an_invalid_command_is_noted_and_ignored():
+    _write(rg_config.global_config_path(), {
+        "checks": {"weird": {"command": ["tools/lint.sh"]}},
+    })
+    settings = rg_config.load_settings()
+    assert "weird" not in settings["checks"]
+    assert settings["notes"]
+
+
+def test_command_on_a_builtin_must_be_a_string():
+    _write(rg_config.global_config_path(), {
+        "checks": {"docs-deslop": {"command": 42}},
+    })
+    settings = rg_config.load_settings()
+    assert "command" not in settings["checks"]["docs-deslop"]
+    assert settings["notes"]
+
+
+def test_checks_invalid_enabled_value_is_noted_and_kept():
+    _write(rg_config.global_config_path(), {
+        "checks": {"docs-deslop": {"enabled": "banana", "mode": "warn"}},
+    })
+    settings = rg_config.load_settings()
+    assert settings["checks"]["docs-deslop"]["enabled"] is True  # default kept
+    assert settings["checks"]["docs-deslop"]["mode"] == "warn"    # valid sibling applies
+    assert settings["notes"]
+
+
+def test_checks_mode_must_be_block_or_warn():
+    _write(rg_config.global_config_path(), {
+        "checks": {"docs-deslop": {"mode": "scream"}},
+    })
+    settings = rg_config.load_settings()
+    assert settings["checks"]["docs-deslop"]["mode"] == "block"
+    assert settings["notes"]
+
+
+def test_checks_globs_must_be_a_list_of_strings():
+    _write(rg_config.global_config_path(), {
+        "checks": {"docs-deslop": {"globs": "**/*.md"}},
+    })
+    settings = rg_config.load_settings()
+    assert settings["checks"]["docs-deslop"]["globs"] == ["**/*.md"]  # kept
+    assert settings["notes"]
+
+
+def test_checks_globs_drop_non_string_entries_with_a_note():
+    _write(rg_config.global_config_path(), {
+        "checks": {"docs-deslop": {"globs": ["docs/*.md", 7, None]}},
+    })
+    settings = rg_config.load_settings()
+    assert settings["checks"]["docs-deslop"]["globs"] == ["docs/*.md"]
+    assert settings["notes"]
+
+
+def test_checks_options_pass_through_when_plausibly_typed():
+    _write(rg_config.global_config_path(), {
+        "checks": {"adr-wait-what": {
+            "enabled": True,
+            "sections": ["Status", "Date", "Context", "Decision", "Consequences"],
+            "template": "docs/adr/template.md",
+            "sentence_cap": 25,
+            "sweep": True,
+        }},
+    })
+    settings = rg_config.load_settings()
+    check = settings["checks"]["adr-wait-what"]
+    assert check["sections"] == ["Status", "Date", "Context", "Decision", "Consequences"]
+    assert check["template"] == "docs/adr/template.md"
+    assert check["sentence_cap"] == 25
+    assert check["sweep"] is True
+    assert settings["notes"] == []
+
+
+def test_checks_invalid_options_are_noted_and_kept():
+    _write(rg_config.global_config_path(), {
+        "checks": {"adr-integrity": {
+            "enabled": True,
+            "sections": "not a list",
+            "template": 7,
+            "sentence_cap": "25",
+            "sweep": "banana",
+        }},
+    })
+    settings = rg_config.load_settings()
+    check = settings["checks"]["adr-integrity"]
+    assert check["enabled"] is True  # the valid sibling applies
+    assert "sections" not in check
+    assert "template" not in check
+    assert "sentence_cap" not in check
+    assert "sweep" not in check
+    assert len(settings["notes"]) == 4
+
+
+# --- the v2 stubs (SPEC-14 story 24) -----------------------------------------
+
+# commit_messages and code_comments are the v2 deslop surfaces: recognized
+# keys shipping disabled and inert -- declaring one must not earn the
+# unknown-check typo note, and nothing executes for them in v1.
+
+def test_v2_stubs_ship_disabled_and_inert(tmp_path):
+    settings = rg_config.load_settings(tmp_path)
+    checks = settings["checks"]
+    for stub in ("commit_messages", "code_comments"):
+        assert checks[stub]["enabled"] is False
+        assert checks[stub]["mode"] == "block"
+        assert checks[stub]["globs"] == []
+    assert settings["notes"] == []
+
+
+def test_declaring_a_v2_stub_earns_no_typo_note(tmp_path):
+    _write(rg_config.repo_config_path(tmp_path), {
+        "checks": {"commit_messages": {"enabled": True},
+                   "code_comments": {"globs": ["**/*.py"],
+                                     "sentence_cap": 30}}})
+    settings = rg_config.load_settings(tmp_path)
+    checks = settings["checks"]
+    assert checks["commit_messages"]["enabled"] is True
+    assert checks["code_comments"]["globs"] == ["**/*.py"]
+    assert checks["code_comments"]["sentence_cap"] == 30
+    assert settings["notes"] == []
+
+
+def test_a_v2_stub_typo_is_still_a_typo(tmp_path):
+    _write(rg_config.repo_config_path(tmp_path), {
+        "checks": {"commit_message": {"enabled": True}}})
+    settings = rg_config.load_settings(tmp_path)
+    assert "commit_message" not in settings["checks"]
+    assert any("unknown check" in n for n in settings["notes"])
+
+
+def test_unknown_keys_inside_a_check_are_noted_and_ignored():
+    _write(rg_config.global_config_path(), {
+        "checks": {"docs-deslop": {"goblin": "gremlin"}},
+    })
+    settings = rg_config.load_settings()
+    assert "goblin" not in settings["checks"]["docs-deslop"]
+    assert any("goblin" in n for n in settings["notes"])

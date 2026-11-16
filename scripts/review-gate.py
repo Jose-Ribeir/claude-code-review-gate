@@ -70,7 +70,9 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ocr_verdict import (compute_verdict, drop_failed_intent_findings,  # noqa: E402
                          comment_kind, comment_quotes_missing,
-                         norm_severity, _INTENT_SEVERITIES, _is_intent_finding)
+                         norm_severity, _INTENT_SEVERITIES, _is_intent_finding,
+                         _SEVERITY_RANK)
+import ocr_docsquality  # noqa: E402  # SPEC-14: docs-quality evidence + demotion
 import ocr_impact  # noqa: E402
 import ocr_index  # noqa: E402
 import ocr_memory  # noqa: E402
@@ -4798,6 +4800,8 @@ def _supervise_run(state_path, run_id):
     chunks_new = 0   # chunks reviewed in this run
     progress = {"new": 0}
     plan_summary = ""
+    cmd_findings, cmd_warnings = [], []   # SPEC-14.4: command checks (see below)
+    dq_notes, dq_note_warnings = [], []   # SPEC-14 story 12: pre-pass notes
     diffs = None     # precomputed diffs (_build_diffs); None on the 0.9.x path
     verdict_intent_base = None  # t25: day-0 intent view for the verdict record
     intent_chunk_stats = None   # [] on the chunked path: per-chunk digests
@@ -4913,6 +4917,14 @@ def _supervise_run(state_path, run_id):
                     deep_flags = _arch_flags(review_root, base, tip, entries=_entries)
                     if deep_flags:
                         manifest["arch_flags"] = deep_flags
+                # SPEC-14.4: the quality payload is independent of the summary
+                # artifact -- deslop applies to any repo with markdown, so it
+                # rides the deep manifest whether docs_context exists or not.
+                deep_quality = _docs_quality_block(repo_root, review_root, base, tip,
+                                                   entries=_entries,
+                                                   run_dir=_run_dir(common_dir, run_id))
+                if deep_quality:
+                    manifest["docs_quality"] = deep_quality
                 manifest_path = str(_async_dir(common_dir) / f"manifest-{run_id}-deep.json")
                 _write_manifest_file(manifest_path, manifest, "deep-review manifest")
                 try:
@@ -4928,11 +4940,41 @@ def _supervise_run(state_path, run_id):
                     except Exception:
                         pass
             else:
-                result, ran, raw_name = _run_review_with_retry(
-                    lambda: _run_review(review_root, mode, git_dir, tip, review_range,
-                                        tier=ocr_telemetry.TIER_REVIEW,
-                                        common_dir=common_dir, partial=partial)
-                )
+                # SPEC-14.4: a docs-only push with an enabled quality duty
+                # still runs the documentation checker (the docs changer pays
+                # for the docs check, mirroring docs-gate 05's freshness cost
+                # rule): the single-context fallback gains a manifest carrying
+                # the docs_quality payload. No payload (all duties off, or no
+                # doc files matched): the 0.7.0 no-manifest path, unchanged.
+                docs_quality = _docs_quality_block(repo_root, review_root, base, tip,
+                                                   run_dir=_run_dir(common_dir, run_id))
+                if docs_quality is None:
+                    result, ran, raw_name = _run_review_with_retry(
+                        lambda: _run_review(review_root, mode, git_dir, tip, review_range,
+                                            tier=ocr_telemetry.TIER_REVIEW,
+                                            common_dir=common_dir, partial=partial)
+                    )
+                else:
+                    manifest_path = str(_async_dir(common_dir)
+                                        / f"manifest-{run_id}-docs.json")
+                    manifest = _build_review_manifest(
+                        _ManifestScope(common_dir, run_id), [], [], [], None, None,
+                        docs_quality=docs_quality)
+                    _write_manifest_file(manifest_path, manifest,
+                                         "docs-quality manifest")
+                    try:
+                        result, ran, raw_name = _run_review_with_retry(
+                            lambda: _run_review(review_root, mode, git_dir, tip,
+                                                review_range,
+                                                paths_file=manifest_path,
+                                                tier=ocr_telemetry.TIER_REVIEW,
+                                                common_dir=common_dir, partial=partial)
+                        )
+                    finally:
+                        try:
+                            Path(manifest_path).unlink(missing_ok=True)
+                        except Exception:
+                            pass
             chunks_new = 1 if ran else 0
             _mark_phase("review", chunks=chunks_new)
             if planner_warnings and isinstance(result, dict):
@@ -4945,6 +4987,11 @@ def _supervise_run(state_path, run_id):
             # context exists in this repo (no artifact = behavior is today).
             docs_context = _docs_context(review_root)
             arch_flags = _arch_flags(review_root, base, tip) if docs_context else None
+            # SPEC-14.4: the docs-quality payload (independent of the summary
+            # artifact): computed once here, injected into both the chunked
+            # and the single-context manifests.
+            docs_quality = _docs_quality_block(repo_root, review_root, base, tip,
+                                               run_dir=_run_dir(common_dir, run_id))
             # Part S: a flagged-truncated record of a file that CAN be reviewed in
             # units is no longer carried -- the file gets its proper review.
             seg = None
@@ -5214,7 +5261,7 @@ def _supervise_run(state_path, run_id):
                     fp=fp, carry_paths=carry_paths, chunk_extras=_review_extras,
                     timeout_marks=timeout_marks, diffs=diffs, seg=seg, impact=impact,
                     own_items=plan, push_ref=push_ref, arch_flags=arch_flags,
-                    review_range=review_range,
+                    docs_quality=docs_quality, review_range=review_range,
                 )
                 n_delta = sum(1 for p in active_items if p["mode"] == "delta")
                 n_full = len(active_items) - n_delta
@@ -5227,7 +5274,7 @@ def _supervise_run(state_path, run_id):
                 all_full = all(p["mode"] == "full" for p in active_items)
                 extras = _review_extras(0, [p["entry"]["path"] for p in active_items])
                 if diffs is None and all_full and not carry_items and not extras \
-                        and docs_context is None:
+                        and docs_context is None and docs_quality is None:
                     # Golden argv: byte-identical to 0.7.0 (no --paths-file).
                     # Only with OCR_PRECOMPUTED_DIFFS=0: otherwise a manifest is
                     # always written, since the diffs reach the reviewer through it.
@@ -5247,7 +5294,8 @@ def _supervise_run(state_path, run_id):
                     scope = _ManifestScope(common_dir, run_id)
                     manifest = _build_review_manifest(
                         scope, active_items, [], carry_paths,
-                        extras, diffs, docs_context=docs_context, arch_flags=arch_flags)
+                        extras, diffs, docs_context=docs_context, arch_flags=arch_flags,
+                        docs_quality=docs_quality)
                     _write_manifest_file(manifest_path, manifest,
                                          "single-context manifest")
                     try:
@@ -5362,6 +5410,17 @@ def _supervise_run(state_path, run_id):
 
         if plan is not None and plan_summary and isinstance(result, dict):
             result.setdefault("plan_summary", plan_summary)
+
+        # SPEC-14.4: command checks run against the tip CLONE, which the
+        # finally below removes as soon as the review ends -- the run must
+        # happen here, while review_root still exists. The findings join the
+        # stream at verdict-assembly time (with the deslop demotion pass),
+        # ahead of memory demotion and compute_verdict.
+        if isinstance(result, dict):
+            cmd_findings, cmd_warnings = _command_check_findings(
+                repo_root, review_root, base, tip)
+            dq_notes, dq_note_warnings = _docs_quality_scan_notes(
+                repo_root, review_root, base, tip)
     except _Fenced:
         stop.set()
         _remove_run_dir(common_dir, run_id)
@@ -5483,6 +5542,21 @@ def _supervise_run(state_path, run_id):
             "severity": "info", "path": "review-gate", "start_line": "-",
             "end_line": "-", "content": cwd_note,
         }] + list(result.get("findings") or [])
+    # SPEC-14.4, at T1 verdict-assembly time like memory demotion: docs-
+    # deslop findings pass the cluster-rule demotion and the per-duty
+    # warn-mode clamp; command-check findings and the deterministic pre-pass
+    # notes (both computed above, while the tip clone existed) merge into the
+    # same stream -- compute_verdict below stays the single verdict authority.
+    if isinstance(result, dict):
+        result = _apply_docs_quality_demotion(result, repo_root)
+        extra_findings = dq_notes + cmd_findings
+        if extra_findings:
+            result = dict(result, findings=list(result.get("findings") or [])
+                          + extra_findings)
+        extra_warnings = dq_note_warnings + cmd_warnings
+        if extra_warnings:
+            result = dict(result, warnings=list(result.get("warnings") or [])
+                          + extra_warnings)
     # Memory (t08): at T1 verdict-assembly time, before the verdict is
     # decided, a finding matching a dismissal recorded through the dismiss
     # command drops to low severity with a "previously dismissed" prefix and
@@ -8925,6 +8999,460 @@ def _arch_flags(root, base, tip, entries=None):
         return None
 
 
+# --- documentation-quality duties (SPEC-14.4): the docs_quality payload ------
+# The gate-side plumbing for the checker's three quality duty classes
+# (docs-deslop, adr-wait-what, adr-integrity): doc-diff detection against the
+# layered checks config, deterministic evidence from ocr_docsquality (called,
+# never reimplemented), the manifest payload the personality contract
+# (skills/review/SKILL.md §2 / agents/docs-checker.md) consumes verbatim, and
+# user-registered command checks. The personality runs a duty only when the
+# payload's enabled_duties flag is true, so the flag is the gate's spawn rule.
+
+_DOC_QUALITY_DUTIES = ("docs-deslop", "adr-wait-what", "adr-integrity")
+# The per-duty checks-config options that travel in the payload (SKILL.md's
+# contract). The v2 stub surfaces (commit_messages / code_comments) resolve
+# through rg_config as recognized, disabled, inert keys; they are not among
+# these duty options: v1 is markdown-only and they stay inert here.
+_DOC_QUALITY_OPTION_KEYS = ("sections", "template", "sentence_cap", "sweep")
+# Which of the helper's evidence classes feeds which duty (SKILL.md's contract).
+_DOC_QUALITY_EVIDENCE_KEYS = {
+    "docs-deslop": ("deslop",),
+    "adr-wait-what": ("ste",),
+    "adr-integrity": ("missing_paths", "dangling_links", "unresolved_adr_refs"),
+}
+# A doc-file diff inlines under this size; bigger ones go to a run-dir file the
+# checker reads itself (the manifest's {path, diff}|{path, diff_file} shape).
+_DOC_DIFF_INLINE_MAX_BYTES = 60 * 1024
+# A user-registered command check gets this long to answer; over it the run
+# degrades to a warning like every other check failure (never a stuck gate).
+_COMMAND_CHECK_TIMEOUT_S = 60
+# The warn-mode confidence clamp: under the default block bar, so a warn-mode
+# finding warns but never blocks. Mode only ever downgrades, never upgrades.
+_WARN_MODE_CONFIDENCE_CAP = 0.5
+# Cap on the tells one deterministic pre-pass note carries: the note points
+# a human at the pattern, it never retypes the file.
+_DETERMINISTIC_NOTE_TELLS_CAP = 10
+
+
+def _warn_mode_clamp(tagged):
+    """The warn-mode clamp, one finding, in place: severity at most medium,
+    confidence at most the cap. Downgrade-only -- a warn finding warns but
+    never blocks; compute_verdict stays the sole verdict authority. Every
+    checks-config mode consumer uses this one clamp (command checks, the
+    built-in quality duties)."""
+    rank = _SEVERITY_RANK.get(norm_severity(tagged.get("severity")), -1)
+    if rank > _SEVERITY_RANK["medium"]:
+        tagged["severity"] = "medium"
+    try:
+        conf = float(tagged.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        conf = 0.0
+    if conf > _WARN_MODE_CONFIDENCE_CAP:
+        tagged["confidence"] = _WARN_MODE_CONFIDENCE_CAP
+    return tagged
+
+
+def _changed_doc_paths(entries):
+    """Sorted doc-format paths of a diff-entry list: every changed *.md minus
+    the corpus filter's excluded basenames (changelogs; _DOC_BASENAME_EXCLUDED).
+    Deletions have no prose to judge and never match. The quality duties'
+    prose scope is exactly this corpus (story 8)."""
+    docs = set()
+    for e in entries or []:
+        if str(e.get("status") or "").startswith("D"):
+            continue
+        path = (e.get("path") or "").replace("\\", "/")
+        # The gate's own state (the summary artifact, the checks config) is
+        # never documentation under review -- the corpus filter rule.
+        if path.startswith(".ocr/") or path == ".ocr":
+            continue
+        base = path.rsplit("/", 1)[-1].lower()
+        if base.endswith(".md") and not base.startswith(_DOC_BASENAME_EXCLUDED):
+            docs.add(path)
+    return sorted(docs)
+
+
+def _check_glob_matches(path, globs):
+    """fnmatch-style repo-relative glob matching (the risk-glob semantics:
+    `*` spans separators, a leading `**/` is optional so it matches at the
+    root too)."""
+    return any(_risk_glob_match(path, glob) for glob in globs or [])
+
+
+def _doc_diff_payload_entry(directory, index, review_root, base, tip, path):
+    """One {path, diff}|{path, diff_file} payload entry. The diff is the
+    file's own base..tip text; bulky diffs go to a run-dir file the checker
+    reads itself (the manifest never retypes them into a prompt). Fail-soft:
+    a diff that cannot be produced degrades to a marker line, never a crash."""
+    out, rc = _git(["diff", "--no-color", "-M", f"{base}..{tip}", "--", path],
+                   cwd=review_root)
+    if rc != 0:
+        return {"path": path, "diff": "# diff unavailable (git diff failed)\n"}
+    data = out.encode("utf-8", errors="replace")
+    if directory is None or len(data) <= _DOC_DIFF_INLINE_MAX_BYTES:
+        return {"path": path, "diff": out}
+    # _write_diff_file names the file itself: a name derived from the
+    # reviewed tree is against its rule.
+    diff_file = _write_diff_file(directory, index, out)
+    if not diff_file:
+        return {"path": path, "diff": out}
+    return {"path": path, "diff_file": str(diff_file)}
+
+
+def _docs_quality_block(repo_root, review_root, base, tip, entries=None,
+                        run_dir=None):
+    """The manifest's docs_quality payload (SPEC-14, stories 4/5/8/20), or None.
+
+    Present only when at least one ENABLED built-in quality duty's globs
+    match doc files of the push diff; absent in every other case (no key, no
+    quality check, no cost). Contract (skills/review/SKILL.md §2):
+    {enabled_duties, options, files, evidence} -- enabled_duties flags one
+    duty true only when it is both enabled in config AND matched doc files;
+    options carries the duty's checks-config options (sections/template/
+    sentence_cap/sweep); files holds the doc-format entries of the change set
+    ONLY (documentation, never code); evidence is the helper's deterministic
+    scan, sliced to the class each duty consumes. An ADR duty's `sweep`
+    option (default off, story 20) widens its evidence targets to every ADR
+    under the records root -- the `files` list itself stays the change set.
+    Fail-soft: any failure here pays a warning, never the push's outcome.
+    """
+    try:
+        checks = rg_config.load_settings(repo_root)["checks"]
+        if entries is None:
+            entries, _warnings = _collect_diff_entries(
+                review_root, base or _EMPTY_TREE, tip)
+        doc_paths = _changed_doc_paths(entries)
+        if not doc_paths:
+            return None
+        diff_base = base or _EMPTY_TREE
+        enabled_duties, options, evidence, files = {}, {}, {}, []
+        for duty in _DOC_QUALITY_DUTIES:
+            check = checks.get(duty) or {}
+            if check.get("enabled") is not True:
+                enabled_duties[duty] = False
+                continue
+            matched = [p for p in doc_paths if _check_glob_matches(p, check.get("globs"))]
+            if not matched:
+                enabled_duties[duty] = False
+                continue
+            enabled_duties[duty] = True
+            options[duty] = {k: check[k] for k in _DOC_QUALITY_OPTION_KEYS
+                             if k in check}
+            targets = matched
+            if options[duty].get("sweep") is True and duty != "docs-deslop":
+                # Whole-corpus sweep (story 20), markdown-only in v1: every
+                # ADR under the records root, not just the pushed ones.
+                records_root = _records_root(review_root)
+                if records_root:
+                    try:
+                        sweep = [records_root + "/" + name
+                                 for name in sorted(os.listdir(
+                                     str(Path(review_root) / records_root)))
+                                 if name.lower().endswith(".md")]
+                    except OSError:
+                        sweep = []
+                    targets = sorted(set(matched) | set(sweep))
+            t0 = time.monotonic()
+            cap = options[duty].get("sentence_cap")
+            per = ocr_docsquality.compute_evidence(
+                str(review_root), targets,
+                sentence_cap=cap if isinstance(cap, int) and cap > 0
+                else ocr_docsquality.SENTENCE_CAP_DEFAULT)
+            keys = _DOC_QUALITY_EVIDENCE_KEYS[duty]
+            sliced = {}
+            for rel, full in (per.get("evidence") or {}).items():
+                entry = {}
+                for k in keys:
+                    # The scan classes feed the duty's evidence FLAT: deslop
+                    # and STE are each one class, existence facts are three.
+                    if k in ("deslop", "ste"):
+                        entry.update(full.get(k) or {})
+                    else:
+                        entry[k] = full.get(k) or []
+                sliced[rel] = entry
+            evidence[duty] = sliced
+            _TELE.setdefault("docs_quality", []).append({
+                "duty": duty, "files": len(targets), "sweep": len(targets) - len(matched),
+                "seconds": round(time.monotonic() - t0, 2),
+                "warnings": list(per.get("warnings") or [])})
+            files += matched
+        if not any(enabled_duties.values()):
+            return None
+        payload_files = []
+        for index, path in enumerate(sorted(set(files))):
+            payload_files.append(_doc_diff_payload_entry(
+                Path(run_dir) if run_dir else None, index,
+                review_root, diff_base, tip, path))
+        return {"enabled_duties": enabled_duties, "options": options,
+                "files": payload_files, "evidence": evidence}
+    except Exception as exc:  # noqa: BLE001 -- the payload must never break a review
+        _warn(f"[gate] docs-quality payload failed ({type(exc).__name__}: {exc}); "
+              "the push continues without it")
+        return None
+
+
+def _apply_docs_quality_demotion(result, repo_root=None):
+    """The pre-verdict quality-duty seam (stories 11 and 2).
+
+    Cluster rule (story 11): every docs-deslop finding -- the quality class
+    carrying `tells` -- passes through ocr_docsquality --validate, which
+    demotes anything under the cluster bar (fewer than 3 co-located tells,
+    no document_wide) to a note that can never block. Gate-side
+    deterministic pre-pass findings (deterministic: true) are already
+    notes and skip validation -- the cluster rule governs model findings.
+
+    Warn mode (story 2): a quality duty whose resolved checks-config mode
+    is "warn" gets the same downgrade-only clamp command checks get
+    (_warn_mode_clamp), so a warn-mode duty finding warns but never
+    blocks. All other findings -- including block-mode quality findings --
+    flow to compute_verdict UNALTERED (the doc-anchored exemption touches
+    anchoring, not fields; house rule: call the helper, never reimplement
+    the cluster rule).
+    """
+    findings = result.get("findings") or []
+    out = list(findings)
+    warnings = list(result.get("warnings") or [])
+    indexes = [i for i, f in enumerate(out)
+               if isinstance(f, dict)
+               and f.get("docs_quality_duty") == "docs-deslop"
+               and f.get("deterministic") is not True]
+    if indexes:
+        t0 = time.monotonic()
+        subset = [out[i] for i in indexes]
+        checked = ocr_docsquality.validate_findings(subset)
+        validated = checked.get("findings") or []
+        if len(validated) == len(indexes):  # the helper failed soft: keep as-is
+            for i, f in zip(indexes, validated):
+                out[i] = f
+            warnings += [{"file": None, "message": w}
+                         for w in (checked.get("warnings") or [])]
+            _TELE.setdefault("docs_quality", []).append({
+                "duty": "docs-deslop-validate", "findings": len(indexes),
+                "demotions": int(checked.get("demoted") or 0),
+                "seconds": round(time.monotonic() - t0, 2)})
+    modes = {}
+    if repo_root is not None:
+        try:
+            checks = rg_config.load_settings(repo_root)["checks"]
+            modes = {d: str((checks.get(d) or {}).get("mode") or "block")
+                     for d in _DOC_QUALITY_DUTIES}
+        except Exception as exc:  # noqa: BLE001 -- fail-soft and observable
+            warnings.append({
+                "file": None,
+                "message": ("quality-duty warn-mode clamp skipped: the "
+                            "checks config failed to load (%s)"
+                            % type(exc).__name__)})
+    warn_duties = {d for d, mode in modes.items() if mode == "warn"}
+    if warn_duties:
+        clamped = 0
+        for i, f in enumerate(out):
+            if isinstance(f, dict) and f.get("docs_quality_duty") in warn_duties:
+                out[i] = _warn_mode_clamp(dict(f))
+                clamped += 1
+        if clamped:
+            _TELE.setdefault("docs_quality", []).append({
+                "duty": "warn-mode-clamp", "duties": sorted(warn_duties),
+                "findings": clamped})
+    return dict(result, findings=out, warnings=warnings)
+
+
+def _docs_quality_scan_notes(repo_root, review_root, base, tip, entries=None):
+    """(findings, warnings): the deterministic pre-pass hits as NOTE
+    findings (story 12).
+
+    The same deslop scan that feeds the checker as manifest evidence also
+    leaves a trace the report carries: one note per matched doc file
+    aggregating that file's catalog and throat-clearing hits (the tells
+    list capped at _DETERMINISTIC_NOTE_TELLS_CAP), tagged
+    docs_quality_duty "docs-deslop" plus deterministic: true. A note
+    severity ranks below low in compute_verdict, so notes reach the report
+    and telemetry but never enter blocking math. Only when the duty is
+    enabled and its globs match changed doc files; fail-soft like every
+    gate-side piece -- a notes failure costs warnings, never the push.
+    The scan is re-run here rather than cached from the payload build: the
+    payload exists only when a checker spawns, and notes are owed either
+    way.
+    """
+    findings, warnings = [], []
+    try:
+        checks = rg_config.load_settings(repo_root)["checks"]
+    except Exception as exc:  # noqa: BLE001 -- fail-soft and observable
+        warnings.append({"file": None, "message":
+                         "docs-quality scan notes skipped: the checks config "
+                         "failed to load (%s)" % type(exc).__name__})
+        return findings, warnings
+    try:
+        check = checks.get("docs-deslop") or {}
+        if check.get("enabled") is not True:
+            return findings, warnings
+        if entries is None:
+            entries, _warnings = _collect_diff_entries(
+                review_root, base or _EMPTY_TREE, tip)
+        doc_paths = _changed_doc_paths(entries)
+        matched = [p for p in doc_paths
+                   if _check_glob_matches(p, check.get("globs"))]
+        if not matched:
+            return findings, warnings
+        per = ocr_docsquality.compute_evidence(str(review_root), matched)
+        warnings += [{"file": None, "message": w}
+                     for w in (per.get("warnings") or [])]
+        for rel in sorted(per.get("evidence") or {}):
+            deslop = (per["evidence"].get(rel) or {}).get("deslop") or {}
+            tells = []
+            for hit in (deslop.get("catalog_hits") or []):
+                tells.append({"phrase": hit.get("phrase"),
+                              "line": hit.get("line"),
+                              "category": hit.get("category")})
+            for hit in (deslop.get("throat_clearing") or []):
+                tells.append({"phrase": hit.get("phrase"),
+                              "line": hit.get("line"),
+                              "category": "throat_clearing"})
+            if not tells:
+                continue
+            total = len(tells)
+            tells = tells[:_DETERMINISTIC_NOTE_TELLS_CAP]
+            lines = [int(t["line"]) for t in tells
+                     if isinstance(t.get("line"), (int, float))]
+            phrases = ", ".join(
+                sorted({str(t.get("phrase") or "") for t in tells})[:3])
+            content = ("deterministic deslop pre-pass: %d catalog/"
+                       "throat-clearing hit(s) in this file (e.g. %s)"
+                       % (total, phrases))
+            n_skeleton = len(deslop.get("template_skeletons") or [])
+            if n_skeleton:
+                content += "; plus %d template-skeleton heading(s)" % n_skeleton
+            findings.append({
+                "severity": "note", "confidence": 0.0,
+                "path": rel,
+                "start_line": min(lines) if lines else 1,
+                "end_line": max(lines) if lines else 1,
+                "category": "documentation",
+                "content": content,
+                "docs_quality_duty": "docs-deslop",
+                "deterministic": True,
+                "tells": tells,
+            })
+    except Exception as exc:  # noqa: BLE001 -- notes never break a review
+        _warn(f"[gate] docs-quality scan notes failed ({type(exc).__name__}: "
+              f"{exc}); the push continues without them")
+        warnings.append({"file": None, "message":
+                         "docs-quality scan notes failed (%s); skipped"
+                         % type(exc).__name__})
+        return [], warnings
+    if findings:
+        _TELE.setdefault("docs_quality", []).append({
+            "duty": "docs-deslop-scan-notes", "files": len(matched),
+            "notes": len(findings)})
+    return findings, warnings
+
+
+# --- user-registered command checks (SPEC-14 story 4) -------------------------
+
+def _run_one_command_check(review_root, command, matched):
+    """(findings, error_note_or_None) for ONE command check over its matched
+    changed files: the repo-relative executable runs with cwd the review tree
+    root and the matched file list on stdin as a JSON array; stdout is the
+    findings contract. Nonzero exit, timeout, and malformed output degrade
+    to a note -- the check's findings are DISCARDED, never silently passed
+    (the note plus telemetry stay) and never a crash. The contract is a
+    REPO-RELATIVE executable: an absolute path or any ".." component is an
+    escape outside the reviewed tree and is rejected before anything runs."""
+    cmd_path = Path(command)
+    if cmd_path.is_absolute() or ".." in cmd_path.parts:
+        return [], ("command must name a repo-relative executable (no "
+                    "absolute paths, no '..' components): %s; findings discarded"
+                    % command)
+    exe = str(Path(review_root) / command)
+    if not (os.path.isfile(exe) and os.access(exe, os.X_OK)):
+        return [], f"command not executable or missing: {command}"
+    try:
+        proc = subprocess.run([exe], input=json.dumps(matched), text=True,
+                              cwd=str(review_root), capture_output=True,
+                              timeout=_COMMAND_CHECK_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        return [], f"timed out after {_COMMAND_CHECK_TIMEOUT_S}s; findings discarded"
+    except OSError as exc:
+        return [], f"could not execute: {exc}"
+    if proc.returncode != 0:
+        return [], f"exit code {proc.returncode}; findings discarded"
+    try:
+        data = json.loads(proc.stdout or "")
+    except ValueError:
+        return [], "malformed output (stdout is not JSON); findings discarded"
+    if isinstance(data, dict):
+        data = data.get("findings")
+    if not isinstance(data, list):
+        return [], "malformed output (no findings array); findings discarded"
+    return [f for f in data if isinstance(f, dict)], None
+
+
+def _command_check_findings(repo_root, review_root, base, tip, entries=None):
+    """(findings, warnings) of every enabled command check, merged for the
+    findings stream (story 4). Each finding is tagged with its check name
+    and clamped to the check's mode (block|warn; warn clamps severity AND
+    confidence below the block bar -- mode only downgrades at the verdict,
+    which stays compute_verdict's sole authority). A check whose globs match
+    nothing costs nothing."""
+    findings, warnings = [], []
+    try:
+        checks = rg_config.load_settings(repo_root)["checks"]
+    except Exception as exc:  # noqa: BLE001 -- fail-soft AND observable (ADR 0006)
+        note = ("command checks skipped: the checks config failed to load "
+                "(%s: %s)" % (type(exc).__name__, exc))
+        warnings.append({"file": None, "message": note})
+        _warn(f"[gate] {note}")
+        _TELE.setdefault("command_checks", []).append({
+            "name": None, "mode": "", "files": 0, "findings": 0,
+            "error": note, "seconds": 0.0})
+        return findings, warnings
+    command_checks = {n: c for n, c in sorted(checks.items())
+                      if isinstance(c, dict)
+                      and isinstance(c.get("command"), str)
+                      and c.get("enabled") is not False}
+    if not command_checks:
+        return findings, warnings
+    try:
+        if entries is None:
+            entries, _warnings = _collect_diff_entries(
+                review_root, base or _EMPTY_TREE, tip)
+        changed = sorted({(e["path"] or "").replace("\\", "/") for e in (entries or [])
+                          if not str(e.get("status") or "").startswith("D")})
+    except Exception as exc:
+        warnings.append({
+            "file": None,
+            "message": ("command checks skipped: could not enumerate the "
+                        "push's changed files (%s)" % type(exc).__name__),
+        })
+        return findings, warnings
+    for name, check in command_checks.items():
+        t0 = time.monotonic()
+        tele = {"name": name, "mode": str(check.get("mode") or "block"),
+                "files": 0, "findings": 0, "error": "", "seconds": 0.0}
+        _TELE.setdefault("command_checks", []).append(tele)
+        matched = [p for p in changed if _check_glob_matches(p, check.get("globs"))]
+        tele["files"] = len(matched)
+        if not matched:
+            tele["seconds"] = round(time.monotonic() - t0, 2)
+            continue
+        got, note = _run_one_command_check(review_root, check["command"], matched)
+        tele["seconds"] = round(time.monotonic() - t0, 2)
+        tele["findings"] = len(got)
+        if note:
+            tele["error"] = note
+            warnings.append({"file": None, "message":
+                             f"command check {name!r}: {note}"})
+            continue
+        warn_mode = tele["mode"] != "block"
+        for f in got:
+            tagged = dict(f)
+            tagged["check"] = name
+            tagged.setdefault("category", "custom")
+            if warn_mode:
+                tagged = _warn_mode_clamp(tagged)
+            findings.append(tagged)
+    return findings, warnings
+
+
 class _ManifestScope:
     """The identity every manifest shares: the run's storage dir and name,
     plus the chunk coordinates (k, total). k is None for the single-context
@@ -8942,7 +9470,7 @@ class _ManifestScope:
 
 def _build_review_manifest(scope, chunk_items, other_changed, carry_paths,
                            extras=None, diffs=None, docs_context=None,
-                           arch_flags=None):
+                           arch_flags=None, docs_quality=None):
     """The reviewer's manifest for one chunk (scope.k, scope.total) or the
     single-context review (scope.k None). The one builder for both.
 
@@ -9016,6 +9544,8 @@ def _build_review_manifest(scope, chunk_items, other_changed, carry_paths,
         manifest["docs_context"] = docs_context
     if arch_flags:
         manifest["arch_flags"] = arch_flags
+    if docs_quality:
+        manifest["docs_quality"] = docs_quality
     return manifest
 
 
@@ -10803,7 +11333,8 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
                  tip, push_range, active_items, planner_warnings, fenced,
                  progress=None, fp="", carry_paths=None, chunk_extras=None,
                  timeout_marks=None, diffs=None, seg=None, impact=None, own_items=None,
-                 push_ref="", arch_flags=None, partial=False, review_range=""):
+                 push_ref="", arch_flags=None, partial=False, review_range="",
+                 docs_quality=None):
     """Run per-chunk reviews with fencing, budget and retry.
 
     review_range (restack-b) overrides the range the reviewer is told for each
@@ -10914,7 +11445,8 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
         scope = _ManifestScope(common_dir, run_id, k, len(chunks))
         manifest = _build_review_manifest(
             scope, chunk_items, other_changed, carry_paths,
-            extras, diffs, docs_context=docs_context, arch_flags=arch_flags)
+            extras, diffs, docs_context=docs_context, arch_flags=arch_flags,
+            docs_quality=docs_quality)
         _write_manifest_file(manifest_path, manifest, f"chunk manifest for chunk {k}")
         return manifest, manifest_path
 

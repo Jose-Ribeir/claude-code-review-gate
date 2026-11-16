@@ -1,0 +1,286 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/Jose-Ribeir/claude-code-review-gate/schemas/docsquality.schema.json",
+  "title": "docs-quality evidence",
+  "description": "Deterministic documentation-quality evidence emitted by scripts/ocr_docsquality.py evidence mode (existence facts, deslop scan, STE surface stats). This schema is generated from that module; do not edit by hand.",
+  "type": "object",
+  "required": [
+    "evidence",
+    "warnings"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "evidence": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "missing_paths",
+          "unresolved_adr_refs",
+          "dangling_links",
+          "deslop",
+          "ste"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "missing_paths": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "path",
+                "line",
+                "kind"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "line": {
+                  "type": "integer"
+                },
+                "kind": {
+                  "enum": [
+                    "markdown_link",
+                    "inline_code"
+                  ]
+                }
+              }
+            }
+          },
+          "unresolved_adr_refs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "ref",
+                "line"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "ref": {
+                  "type": "string"
+                },
+                "line": {
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "dangling_links": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "path",
+                "line",
+                "kind"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "line": {
+                  "type": "integer"
+                },
+                "kind": {
+                  "enum": [
+                    "markdown_link",
+                    "inline_code"
+                  ]
+                }
+              }
+            }
+          },
+          "deslop": {
+            "type": "object",
+            "required": [
+              "catalog_hits",
+              "throat_clearing",
+              "em_dash_count",
+              "template_skeletons"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "catalog_hits": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "phrase",
+                    "category",
+                    "line"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "phrase": {
+                      "type": "string"
+                    },
+                    "category": {
+                      "type": "string"
+                    },
+                    "line": {
+                      "type": "integer"
+                    },
+                    "replacement": {
+                      "type": "string"
+                    }
+                  }
+                }
+              },
+              "throat_clearing": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "phrase",
+                    "line"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "phrase": {
+                      "type": "string"
+                    },
+                    "line": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              },
+              "em_dash_count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "template_skeletons": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "heading",
+                    "line"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "heading": {
+                      "type": "string"
+                    },
+                    "line": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "ste": {
+            "type": "object",
+            "required": [
+              "sentence_length",
+              "acronyms",
+              "passive_voice"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "sentence_length": {
+                "type": "object",
+                "required": [
+                  "cap",
+                  "over_cap"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "cap": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "over_cap": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "line",
+                        "words"
+                      ],
+                      "additionalProperties": false,
+                      "properties": {
+                        "line": {
+                          "type": "integer"
+                        },
+                        "words": {
+                          "type": "integer",
+                          "minimum": 0
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "acronyms": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "acronym",
+                    "defined",
+                    "first_line"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "acronym": {
+                      "type": "string"
+                    },
+                    "defined": {
+                      "type": "boolean"
+                    },
+                    "first_line": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              },
+              "passive_voice": {
+                "type": "object",
+                "required": [
+                  "count",
+                  "samples"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "count": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "samples": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "line"
+                      ],
+                      "additionalProperties": true,
+                      "properties": {
+                        "line": {
+                          "type": "integer"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

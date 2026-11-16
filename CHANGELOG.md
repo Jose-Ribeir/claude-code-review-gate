@@ -6,6 +6,38 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Custom checks and documentation-quality duties (`checks` config, ADR 0006).**
+  The settings gain a top-level `checks` object resolving through the usual
+  layering (built-in defaults, store-root `config.json`, per-repo
+  `.ocr/config.json`; invalid values degrade to load notes, never fatal).
+  Per check: `enabled`, `mode` (`block`/`warn`; warn clamps severity to at
+  most medium and confidence to at most 0.5 and never blocks), `globs`
+  (the check runs only when matching files are in the push diff), and the
+  duty options `sections`, `template`, `sentence_cap`, `sweep`. Three
+  built-in documentation-quality duties ride the existing
+  documentation-checker agent as new duty sections (one spawn, one cost),
+  driven by deterministic gate-side evidence
+  (`scripts/ocr_docsquality.py`, catalog `scripts/deslop_catalog.json`,
+  163 entries): **docs-deslop** (default ON, `**/*.md`) flags deslopped
+  prose, with a gate-side cluster rule — fewer than three co-located tells
+  without `document_wide: true` demotes a finding to a note that can never
+  block; **adr-wait-what** and **adr-integrity** (default OFF, ADR globs)
+  check changed ADRs against the repo's own structure/template (fallback
+  superset Status/Date/Context/Decision/Consequences), Context-first,
+  STE-style readability, glossary vocabulary, and end-to-end claim
+  verification. Quality findings anchor at the documentation file, ride the
+  normal falsify pass, and `compute_verdict` stays the sole verdict
+  authority. User command checks: declare a name with a string `command`
+  (default enabled, block, unscoped); the repo-relative executable runs at
+  the review tree root, gets the matched files as a JSON array on stdin,
+  answers with findings JSON on stdout within 60 s, and any error discards
+  its findings with a warning plus telemetry — never a silent pass, never a
+  crash. A docs-only push with an enabled quality duty now runs the
+  documentation checker; with no enabled duty the no-manifest path is
+  unchanged. The v2 stubs `commit_messages`/`code_comments` ship inert
+  (v1 covers markdown only).
+
 ### Fixed
 - **A fix in a different file now clears an old finding.** A carried-forward finding
   whose flagged code stays as it is, but whose fix lands elsewhere (a doc, an ADR),
