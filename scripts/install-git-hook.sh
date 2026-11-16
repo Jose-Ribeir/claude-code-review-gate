@@ -2,14 +2,36 @@
 #
 # Installs the "everywhere" push gate: sets a global core.hooksPath whose
 # pre-push hook runs review-gate on EVERY push (terminal, IDE, or Claude Code),
-# in every repo. This is OPTIONAL — the plugin already gates pushes made
-# through Claude Code without it.
+# in every repo. This is the DEFAULT surface of a gate install (pg6): running
+# this installer is how the universal gate is turned on.
+#
+#   --no-git-hook    opt OUT: install nothing (the legacy opt-in posture --
+#                    the global hook only ever existed for those who chose it).
+#   --chain-into X   print the chaining snippet for a repo with its OWN
+#                    repo-local core.hooksPath (see the block below).
+#
+# A pre-existing GLOBAL core.hooksPath is never clobbered: it is backed up to
+# reviewGate.prevHooksPath and CHAINED -- the gate hooks dir gets a wrapper
+# pre-push that runs the gate first and, only when the gate passes, the
+# previous hook afterwards (the previous hook's exit code is final).
 #
 # Revert with uninstall-git-hook.sh.
 set -euo pipefail
 
 SCR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOOKS_DIR="${SCR_HOOKS_DIR:-$HOME/.config/review-gate/hooks}"
+
+# --no-git-hook: preserve the legacy opt-in posture. Nothing is installed and
+# no config is touched; the harness hooks a caller installed still apply, and
+# the global surface stays absent exactly as before default-on.
+if [ "${1:-}" = "--no-git-hook" ]; then
+  cat <<EOF
+--no-git-hook: skipping the global pre-push gate; nothing was installed and
+no git config was touched. To adopt the global gate later, run:
+  bash $SCR_DIR/install-git-hook.sh
+EOF
+  exit 0
+fi
 
 # --chain-into <repo>: print the snippet that runs the gate from a repo which
 # sets its OWN core.hooksPath.
@@ -123,6 +145,17 @@ SNIPPET
   exit 0
 fi
 
+# pg6 isolation guard: a test context that has not redirected the global
+# gitconfig must never reach the writes below. Refuse loudly instead of
+# mutating the developer's real ~/.gitconfig.
+if [ -n "${OCR_INSTALLER_TEST:-}" ] && [ -z "${GIT_CONFIG_GLOBAL:-}" ]; then
+  echo "ERROR: OCR_INSTALLER_TEST is set but GIT_CONFIG_GLOBAL is not," >&2
+  echo "  so 'git config --global' below would target the REAL user gitconfig." >&2
+  echo "  Refusing to run. Point GIT_CONFIG_GLOBAL at a temp file (and HOME at" >&2
+  echo "  a temp dir) in the test fixture." >&2
+  exit 2
+fi
+
 # Stamped into the installed hook purely so /review-gate:doctor can report
 # version skew between this copy and the running plugin.
 SCR_VERSION="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
@@ -165,9 +198,57 @@ fi
 # contract is what made every pre-0.3.0 install silently fail open when the
 # plugin moved. The directory is kept as a last-resort hint, and the version is
 # only ever read back by /review-gate:doctor.
-sed -e "s|__SCR_DIR__|$SCR_DIR|g" -e "s|__SCR_VERSION__|$SCR_VERSION|g" \
-  "$SCR_DIR/pre-push" > "$HOOKS_DIR/pre-push"
-chmod +x "$HOOKS_DIR/pre-push"
+#
+# pg6: when a previous global hooksPath exists AND contains a pre-push, git can
+# only execute ONE file from our hooks dir, so the gate body goes to
+# pre-push.review-gate and <hooksPath>/pre-push becomes a CHAIN WRAPPER: gate
+# first, then (gate passed) the previous hook, whose exit code is final. The
+# wrapper reads the backup at runtime, so re-pointing the backup reroutes the
+# chain without a reinstall. The backup survives re-runs (the _canon guard
+# above), which is what keeps this idempotent.
+CHAIN=""
+BACKED_UP="$(git config --global --get reviewGate.prevHooksPath || true)"
+if [ -n "$BACKED_UP" ] && [ "$(_canon "$BACKED_UP")" != "$(_canon "$HOOKS_DIR")" ] \
+   && [ -x "$BACKED_UP/pre-push" ]; then
+  CHAIN="$BACKED_UP"
+fi
+
+if [ -n "$CHAIN" ]; then
+  sed -e "s|__SCR_DIR__|$SCR_DIR|g" -e "s|__SCR_VERSION__|$SCR_VERSION|g" \
+    "$SCR_DIR/pre-push" > "$HOOKS_DIR/pre-push.review-gate"
+  chmod +x "$HOOKS_DIR/pre-push.review-gate"
+
+  cat > "$HOOKS_DIR/pre-push" <<'WRAPPER'
+#!/bin/sh
+# review-gate chain wrapper, written by install-git-hook.sh (pg6).
+# core.hooksPath points at THIS directory. A previous global hooks setup was
+# backed up to reviewGate.prevHooksPath: when the gate PASSES, its pre-push
+# runs afterwards and its exit code is final; a gate block short-circuits it.
+set -u
+_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# git feeds pre-push the ref updates on stdin; both the gate and the chained
+# hook need them, so buffer and replay (mirroring scripts/pre-push).
+REFS="$(cat || true)"
+printf '%s\n' "$REFS" | "$_DIR/pre-push.review-gate" "$@" || exit $?
+
+_PREV="$(git config --global --get reviewGate.prevHooksPath 2>/dev/null || true)"
+if [ -n "$_PREV" ] && [ -x "$_PREV/pre-push" ] \
+   && ! [ "$_PREV/pre-push" -ef "$_DIR/pre-push" ] 2>/dev/null; then
+  printf '%s\n' "$REFS" | "$_PREV/pre-push" "$@" || exit $?
+fi
+exit 0
+WRAPPER
+  chmod +x "$HOOKS_DIR/pre-push"
+  echo "Chained previous global hooksPath: $CHAIN (runs after the gate passes)."
+else
+  # No prior setup to chain: the gate copy IS the hook, as before. Sweep a
+  # body copy left by an earlier CHAINED install whose chain target vanished.
+  rm -f "$HOOKS_DIR/pre-push.review-gate"
+  sed -e "s|__SCR_DIR__|$SCR_DIR|g" -e "s|__SCR_VERSION__|$SCR_VERSION|g" \
+    "$SCR_DIR/pre-push" > "$HOOKS_DIR/pre-push"
+  chmod +x "$HOOKS_DIR/pre-push"
+fi
 
 git config --global core.hooksPath "$HOOKS_DIR"
 
