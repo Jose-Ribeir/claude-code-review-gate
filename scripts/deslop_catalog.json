@@ -1,0 +1,685 @@
+{
+  "version": 1,
+  "source": "Snapshot of the kimchi deslop skill catalogs references/phrases.md + references/tropes.md, converted 2026-11-16 (refresh by re-running the documented conversion in scripts/ocr_docsquality.py's module docstring)",
+  "entries": [
+    {
+      "phrase": "Here's the thing:",
+      "category": "phrases/throat-clearing-openers"
+    },
+    {
+      "phrase": "Here's what [X]",
+      "category": "phrases/throat-clearing-openers"
+    },
+    {
+      "phrase": "Here's this [X]",
+      "category": "phrases/throat-clearing-openers"
+    },
+    {
+      "phrase": "Here's that [X]",
+      "category": "phrases/throat-clearing-openers"
+    },
+    {
+      "phrase": "Here's why [X]",
+      "category": "phrases/throat-clearing-openers"
+    },
+    {
+      "phrase": "Here's the kicker",
+      "category": "phrases/throat-clearing-openers"
+    },
+    {
+      "phrase": "Here's where it gets interesting",
+      "category": "phrases/throat-clearing-openers"
+    },
+    {
+      "phrase": "Here's what most people miss",
+      "category": "phrases/throat-clearing-openers"
+    },
+    {
+      "phrase": "Here's the deal",
+      "category": "phrases/throat-clearing-openers"
+    },
+    {
+      "phrase": "The uncomfortable truth is",
+      "category": "phrases/throat-clearing-openers"
+    },
+    {
+      "phrase": "It turns out",
+      "category": "phrases/throat-clearing-openers"
+    },
+    {
+      "phrase": "The real [X] is",
+      "category": "phrases/throat-clearing-openers"
+    },
+    {
+      "phrase": "Let me be clear",
+      "category": "phrases/throat-clearing-openers"
+    },
+    {
+      "phrase": "The truth is,",
+      "category": "phrases/throat-clearing-openers"
+    },
+    {
+      "phrase": "I'll say it again:",
+      "category": "phrases/throat-clearing-openers"
+    },
+    {
+      "phrase": "I'm going to be honest",
+      "category": "phrases/throat-clearing-openers"
+    },
+    {
+      "phrase": "Can we talk about",
+      "category": "phrases/throat-clearing-openers"
+    },
+    {
+      "phrase": "Here's what I find interesting",
+      "category": "phrases/throat-clearing-openers"
+    },
+    {
+      "phrase": "Here's the problem though",
+      "category": "phrases/throat-clearing-openers"
+    },
+    {
+      "phrase": "Full stop.",
+      "category": "phrases/emphasis-crutches"
+    },
+    {
+      "phrase": "Period.",
+      "category": "phrases/emphasis-crutches"
+    },
+    {
+      "phrase": "Let that sink in.",
+      "category": "phrases/emphasis-crutches"
+    },
+    {
+      "phrase": "This matters because",
+      "category": "phrases/emphasis-crutches"
+    },
+    {
+      "phrase": "Make no mistake",
+      "category": "phrases/emphasis-crutches"
+    },
+    {
+      "phrase": "Here's why that matters",
+      "category": "phrases/emphasis-crutches"
+    },
+    {
+      "phrase": "Let's break this down",
+      "category": "phrases/pedagogical-hand-holding"
+    },
+    {
+      "phrase": "Let's unpack this",
+      "category": "phrases/pedagogical-hand-holding"
+    },
+    {
+      "phrase": "Let's explore",
+      "category": "phrases/pedagogical-hand-holding"
+    },
+    {
+      "phrase": "Let's dive in",
+      "category": "phrases/pedagogical-hand-holding"
+    },
+    {
+      "phrase": "Let's delve into",
+      "category": "phrases/pedagogical-hand-holding"
+    },
+    {
+      "phrase": "Think of it as...",
+      "category": "phrases/pedagogical-hand-holding"
+    },
+    {
+      "phrase": "Think of it like...",
+      "category": "phrases/pedagogical-hand-holding"
+    },
+    {
+      "phrase": "Imagine a world where...",
+      "category": "phrases/pedagogical-hand-holding"
+    },
+    {
+      "phrase": "Navigate",
+      "category": "phrases/business-jargon",
+      "replacement": "Handle, address"
+    },
+    {
+      "phrase": "Unpack",
+      "category": "phrases/business-jargon",
+      "replacement": "Explain, examine"
+    },
+    {
+      "phrase": "Lean into",
+      "category": "phrases/business-jargon",
+      "replacement": "Accept, embrace"
+    },
+    {
+      "phrase": "Landscape",
+      "category": "phrases/business-jargon",
+      "replacement": "Situation, field"
+    },
+    {
+      "phrase": "Game-changer",
+      "category": "phrases/business-jargon",
+      "replacement": "Significant, important"
+    },
+    {
+      "phrase": "Double down",
+      "category": "phrases/business-jargon",
+      "replacement": "Commit, increase"
+    },
+    {
+      "phrase": "Deep dive",
+      "category": "phrases/business-jargon",
+      "replacement": "Analysis, examination"
+    },
+    {
+      "phrase": "Take a step back",
+      "category": "phrases/business-jargon",
+      "replacement": "Reconsider"
+    },
+    {
+      "phrase": "Moving forward",
+      "category": "phrases/business-jargon",
+      "replacement": "Next, from now"
+    },
+    {
+      "phrase": "Circle back",
+      "category": "phrases/business-jargon",
+      "replacement": "Return to, revisit"
+    },
+    {
+      "phrase": "On the same page",
+      "category": "phrases/business-jargon",
+      "replacement": "Aligned, agreed"
+    },
+    {
+      "phrase": "Leverage",
+      "category": "phrases/business-jargon",
+      "replacement": "Use"
+    },
+    {
+      "phrase": "Utilize",
+      "category": "phrases/business-jargon",
+      "replacement": "Use"
+    },
+    {
+      "phrase": "Robust",
+      "category": "phrases/business-jargon",
+      "replacement": "Strong, solid"
+    },
+    {
+      "phrase": "Streamline",
+      "category": "phrases/business-jargon",
+      "replacement": "Simplify"
+    },
+    {
+      "phrase": "Harness",
+      "category": "phrases/business-jargon",
+      "replacement": "Use, apply"
+    },
+    {
+      "phrase": "Paradigm",
+      "category": "phrases/business-jargon",
+      "replacement": "Model, approach"
+    },
+    {
+      "phrase": "Synergy",
+      "category": "phrases/business-jargon",
+      "replacement": "Cooperation, combined effect"
+    },
+    {
+      "phrase": "Ecosystem",
+      "category": "phrases/business-jargon",
+      "replacement": "System, field, community"
+    },
+    {
+      "phrase": "Framework",
+      "category": "phrases/business-jargon",
+      "replacement": "Structure, approach"
+    },
+    {
+      "phrase": "delve",
+      "category": "phrases/ai-vocabulary-tells",
+      "replacement": "examine, look at, explore"
+    },
+    {
+      "phrase": "tapestry",
+      "category": "phrases/ai-vocabulary-tells",
+      "replacement": "mix, combination, range"
+    },
+    {
+      "phrase": "certainly",
+      "category": "phrases/ai-vocabulary-tells"
+    },
+    {
+      "phrase": "field",
+      "category": "phrases/ai-vocabulary-tells"
+    },
+    {
+      "phrase": "situation",
+      "category": "phrases/ai-vocabulary-tells"
+    },
+    {
+      "phrase": "nuanced",
+      "category": "phrases/ai-vocabulary-tells",
+      "replacement": "complex, subtle, specific"
+    },
+    {
+      "phrase": "serves as",
+      "category": "phrases/the-serves-as-dodge",
+      "replacement": "is"
+    },
+    {
+      "phrase": "stands as",
+      "category": "phrases/the-serves-as-dodge",
+      "replacement": "is"
+    },
+    {
+      "phrase": "marks",
+      "category": "phrases/the-serves-as-dodge",
+      "replacement": "is"
+    },
+    {
+      "phrase": "represents",
+      "category": "phrases/the-serves-as-dodge",
+      "replacement": "is"
+    },
+    {
+      "phrase": "really",
+      "category": "phrases/adverbs"
+    },
+    {
+      "phrase": "just",
+      "category": "phrases/adverbs"
+    },
+    {
+      "phrase": "literally",
+      "category": "phrases/adverbs"
+    },
+    {
+      "phrase": "genuinely",
+      "category": "phrases/adverbs"
+    },
+    {
+      "phrase": "honestly",
+      "category": "phrases/adverbs"
+    },
+    {
+      "phrase": "simply",
+      "category": "phrases/adverbs"
+    },
+    {
+      "phrase": "actually",
+      "category": "phrases/adverbs"
+    },
+    {
+      "phrase": "deeply",
+      "category": "phrases/adverbs"
+    },
+    {
+      "phrase": "truly",
+      "category": "phrases/adverbs"
+    },
+    {
+      "phrase": "fundamentally",
+      "category": "phrases/adverbs"
+    },
+    {
+      "phrase": "inherently",
+      "category": "phrases/adverbs"
+    },
+    {
+      "phrase": "inevitably",
+      "category": "phrases/adverbs"
+    },
+    {
+      "phrase": "interestingly",
+      "category": "phrases/adverbs"
+    },
+    {
+      "phrase": "importantly",
+      "category": "phrases/adverbs"
+    },
+    {
+      "phrase": "crucially",
+      "category": "phrases/adverbs"
+    },
+    {
+      "phrase": "quietly",
+      "category": "phrases/adverbs"
+    },
+    {
+      "phrase": "remarkably",
+      "category": "phrases/adverbs"
+    },
+    {
+      "phrase": "arguably",
+      "category": "phrases/adverbs"
+    },
+    {
+      "phrase": "At its core",
+      "category": "phrases/adverbs"
+    },
+    {
+      "phrase": "In today's [X]",
+      "category": "phrases/adverbs"
+    },
+    {
+      "phrase": "It's worth noting",
+      "category": "phrases/adverbs"
+    },
+    {
+      "phrase": "It bears mentioning",
+      "category": "phrases/adverbs"
+    },
+    {
+      "phrase": "Notably",
+      "category": "phrases/adverbs"
+    },
+    {
+      "phrase": "At the end of the day",
+      "category": "phrases/adverbs"
+    },
+    {
+      "phrase": "When it comes to",
+      "category": "phrases/adverbs"
+    },
+    {
+      "phrase": "In a world where",
+      "category": "phrases/adverbs"
+    },
+    {
+      "phrase": "The reality is",
+      "category": "phrases/adverbs"
+    },
+    {
+      "phrase": "Hint:",
+      "category": "phrases/meta-commentary"
+    },
+    {
+      "phrase": "Plot twist:",
+      "category": "phrases/meta-commentary"
+    },
+    {
+      "phrase": "Spoiler:",
+      "category": "phrases/meta-commentary"
+    },
+    {
+      "phrase": "You already know this, but",
+      "category": "phrases/meta-commentary"
+    },
+    {
+      "phrase": "But that's another post",
+      "category": "phrases/meta-commentary"
+    },
+    {
+      "phrase": "X is a feature, not a bug",
+      "category": "phrases/meta-commentary"
+    },
+    {
+      "phrase": "Dressed up as",
+      "category": "phrases/meta-commentary"
+    },
+    {
+      "phrase": "The rest of this essay explains...",
+      "category": "phrases/meta-commentary"
+    },
+    {
+      "phrase": "Let me walk you through...",
+      "category": "phrases/meta-commentary"
+    },
+    {
+      "phrase": "In this section, we'll...",
+      "category": "phrases/meta-commentary"
+    },
+    {
+      "phrase": "As we'll see...",
+      "category": "phrases/meta-commentary"
+    },
+    {
+      "phrase": "I want to explore...",
+      "category": "phrases/meta-commentary"
+    },
+    {
+      "phrase": "In conclusion",
+      "category": "phrases/meta-commentary"
+    },
+    {
+      "phrase": "To sum up",
+      "category": "phrases/meta-commentary"
+    },
+    {
+      "phrase": "In summary",
+      "category": "phrases/meta-commentary"
+    },
+    {
+      "phrase": "As we've seen in this section...",
+      "category": "phrases/meta-commentary"
+    },
+    {
+      "phrase": "And so we return to where we began.",
+      "category": "phrases/meta-commentary"
+    },
+    {
+      "phrase": "creeps in",
+      "category": "phrases/performative-emphasis"
+    },
+    {
+      "phrase": "I promise",
+      "category": "phrases/performative-emphasis"
+    },
+    {
+      "phrase": "They exist, I promise",
+      "category": "phrases/performative-emphasis"
+    },
+    {
+      "phrase": "And yes, I'm openly...",
+      "category": "phrases/false-vulnerability"
+    },
+    {
+      "phrase": "And yes, since we're being honest...",
+      "category": "phrases/false-vulnerability"
+    },
+    {
+      "phrase": "This is not a rant; it's a diagnosis",
+      "category": "phrases/false-vulnerability"
+    },
+    {
+      "phrase": "This is genuinely hard",
+      "category": "phrases/telling-instead-of-showing"
+    },
+    {
+      "phrase": "This is what leadership actually looks like",
+      "category": "phrases/telling-instead-of-showing"
+    },
+    {
+      "phrase": "This is what X actually looks like",
+      "category": "phrases/telling-instead-of-showing"
+    },
+    {
+      "phrase": "actually matters",
+      "category": "phrases/telling-instead-of-showing"
+    },
+    {
+      "phrase": "The reality is simpler",
+      "category": "phrases/the-truth-is-simple"
+    },
+    {
+      "phrase": "History is unambiguous on this point",
+      "category": "phrases/the-truth-is-simple"
+    },
+    {
+      "phrase": "History is clear, the metrics are clear, the examples are clear",
+      "category": "phrases/the-truth-is-simple"
+    },
+    {
+      "phrase": "but none of them is the real story. The real story is...",
+      "category": "phrases/the-truth-is-simple"
+    },
+    {
+      "phrase": "The reasons are structural",
+      "category": "phrases/vague-declaratives"
+    },
+    {
+      "phrase": "The implications are significant",
+      "category": "phrases/vague-declaratives"
+    },
+    {
+      "phrase": "This is the deepest problem",
+      "category": "phrases/vague-declaratives"
+    },
+    {
+      "phrase": "The stakes are high",
+      "category": "phrases/vague-declaratives"
+    },
+    {
+      "phrase": "The consequences are real",
+      "category": "phrases/vague-declaratives"
+    },
+    {
+      "phrase": "Experts argue that...",
+      "category": "phrases/vague-attributions"
+    },
+    {
+      "phrase": "Industry reports suggest that...",
+      "category": "phrases/vague-attributions"
+    },
+    {
+      "phrase": "Observers have cited...",
+      "category": "phrases/vague-attributions"
+    },
+    {
+      "phrase": "Several publications have noted...",
+      "category": "phrases/vague-attributions"
+    },
+    {
+      "phrase": "This will fundamentally reshape how we think about everything.",
+      "category": "phrases/grandiose-stakes-inflation"
+    },
+    {
+      "phrase": "will define the next era of computing",
+      "category": "phrases/grandiose-stakes-inflation"
+    },
+    {
+      "phrase": "something entirely new",
+      "category": "phrases/grandiose-stakes-inflation"
+    },
+    {
+      "phrase": "is",
+      "category": "tropes/the-serves-as-dodge"
+    },
+    {
+      "phrase": "are",
+      "category": "tropes/the-serves-as-dodge"
+    },
+    {
+      "phrase": "It's not X -- it's Y",
+      "category": "tropes/negative-parallelism"
+    },
+    {
+      "phrase": "not because X, but because Y",
+      "category": "tropes/negative-parallelism"
+    },
+    {
+      "phrase": "X -- not Y",
+      "category": "tropes/negative-parallelism"
+    },
+    {
+      "phrase": "The question isn't X. The question is Y.",
+      "category": "tropes/negative-parallelism"
+    },
+    {
+      "phrase": "-ing",
+      "category": "tropes/superficial-analyses"
+    },
+    {
+      "phrase": "highlighting its importance",
+      "category": "tropes/superficial-analyses"
+    },
+    {
+      "phrase": "reflecting broader trends",
+      "category": "tropes/superficial-analyses"
+    },
+    {
+      "phrase": "contributing to the development of...",
+      "category": "tropes/superficial-analyses"
+    },
+    {
+      "phrase": "from X to Y",
+      "category": "tropes/false-ranges"
+    },
+    {
+      "phrase": "From innovation to cultural transformation",
+      "category": "tropes/false-ranges"
+    },
+    {
+      "phrase": "writing for readability",
+      "category": "tropes/short-punchy-fragments"
+    },
+    {
+      "phrase": "The first... The second... The third...",
+      "category": "tropes/listicle-in-a-trench-coat"
+    },
+    {
+      "phrase": "Here's the thing",
+      "category": "tropes/here-s-the-kicker"
+    },
+    {
+      "phrase": "Here's the starting point",
+      "category": "tropes/here-s-the-kicker"
+    },
+    {
+      "phrase": "It's like a...",
+      "category": "tropes/think-of-it-as"
+    },
+    {
+      "phrase": "Imagine",
+      "category": "tropes/imagine-a-world-where"
+    },
+    {
+      "phrase": "experts",
+      "category": "tropes/vague-attributions"
+    },
+    {
+      "phrase": "observers",
+      "category": "tropes/vague-attributions"
+    },
+    {
+      "phrase": "industry reports",
+      "category": "tropes/vague-attributions"
+    },
+    {
+      "phrase": "several publications",
+      "category": "tropes/vague-attributions"
+    },
+    {
+      "phrase": "several publications have cited",
+      "category": "tropes/vague-attributions"
+    },
+    {
+      "phrase": "supervision paradox",
+      "category": "tropes/invented-concept-labels"
+    },
+    {
+      "phrase": "acceleration trap",
+      "category": "tropes/invented-concept-labels"
+    },
+    {
+      "phrase": "workload creep",
+      "category": "tropes/invented-concept-labels"
+    },
+    {
+      "phrase": "What I'm going to tell you; what I'm telling you; what I just told you",
+      "category": "tropes/fractal-summaries"
+    },
+    {
+      "phrase": "comprehensive",
+      "category": "tropes/one-point-dilution"
+    },
+    {
+      "phrase": "Despite its [positive words], [subject] faces challenges...",
+      "category": "tropes/despite-its-challenges"
+    },
+    {
+      "phrase": "Despite these challenges, [optimistic conclusion].",
+      "category": "tropes/despite-its-challenges"
+    }
+  ]
+}
