@@ -81,6 +81,7 @@ import rg_store  # noqa: E402  # the Kimchi port's external verdict store + sand
 import rg_config  # noqa: E402  # t15: single settings read (intent.* switches)
 import rg_tickets  # noqa: E402  # t16: ticket key discovery
 import rg_ticket_fetch  # noqa: E402  # t17: gh/glab fetch + 24h cache, fail-open
+import rg_mr_consult  # noqa: E402  # pg5: open-MR discovery + consistency findings
 
 PROMPT = "/skill:review --unpushed --json"
 # With an explicit range the skill reviews exactly what the remote is about to
@@ -722,6 +723,7 @@ _FINGERPRINT_ENV_VARS = (
     "OCR_SPOTTER_MODEL", "OCR_TIER1_MODEL", "OCR_TIER2_MODEL",
     "OCR_CLAUDE_MODEL", "OCR_CLAUDE_SPOTTER_MODEL", "OCR_CLAUDE_TIER1_MODEL",
     "OCR_CLAUDE_TIER2_MODEL",
+    "OCR_REVIEW_DEPTH",          # pg5: a depth re-scopes the review criteria
 )
 # Agents whose prompts decide which findings exist. The resolver only judges
 # whether a known finding was fixed, so editing it keeps the ledger. The
@@ -1162,7 +1164,211 @@ def _base_v1():
 _SHA40 = re.compile(r"[0-9a-f]{40}")
 
 
-def resolve_review_base(remote, tip, remote_sha=None, repo_root=None):
+# --- pg5: the user-level run configuration (rg_config) -------------------------
+# One memoized read per process; config health NEVER gates (a malformed config
+# file is an advisory warning, not a verdict -- same discipline as the MR
+# consult). Key-by-key precedence env var > config file > built-in default is
+# rg_config.load_config()'s, documented in ADR 0006.
+_GATE_CONFIG = None
+_CONFIG_APPLIED = False
+
+
+def _gate_config():
+    """pg5 -- memoized rg_config.load_config(); never raises."""
+    global _GATE_CONFIG
+    if _GATE_CONFIG is None:
+        try:
+            _GATE_CONFIG = rg_config.load_config()
+        except Exception:
+            _GATE_CONFIG = rg_config.GateConfig(
+                depth="full", timeout_seconds=0, fail_open=False, warnings=[])
+    return _GATE_CONFIG
+
+
+def _apply_gate_config():
+    """pg5 -- one-time application of the run config at a gate entry point.
+
+    Called at the start of _main_inner and _mode_supervise. Honors:
+      review.depth          re-scopes the reviewer prompt (a thin switch, see
+                            _depth_prompt_note); announced as an advisory, and
+                            propagated to the supervisor via OCR_REVIEW_DEPTH.
+      review.timeoutSeconds the reviewer call's wall-clock cap (0 = uncapped
+                            -- the legacy OCR_TIMEOUT default of 1800s stands).
+                            Equivalent to setting OCR_TIMEOUT, so the env var
+                            keeps precedence and a timeout takes the existing
+                            fail-closed path with its bypass route.
+    Config warnings print once, as advisories.
+    review.failOpen feeds _fail_open_requested (pg4's audited bypass seam;
+    its ledger mechanism string is resolved by _fail_open_mechanism).
+    """
+    global TIMEOUT, _CONFIG_APPLIED
+    cfg = _gate_config()
+    if not _CONFIG_APPLIED:
+        for warning in cfg.warnings:
+            _warn("run config: " + str(warning))
+        if cfg.depth != "full":
+            _warn(f"review-gate: run config review.depth={cfg.depth!r} -- the "
+                  "reviewer is asked for a re-scoped review, not the full depth.")
+    _CONFIG_APPLIED = True
+    if cfg.depth != "full" and not os.environ.get("OCR_REVIEW_DEPTH", "").strip():
+        os.environ["OCR_REVIEW_DEPTH"] = cfg.depth  # supervisor/propagation
+    if (cfg.timeout_seconds > 0
+            and not os.environ.get("OCR_TIMEOUT", "").strip()):
+        # Env form so the detached supervisor (a fresh import of this module)
+        # enforces the same cap without re-reading the file.
+        os.environ["OCR_TIMEOUT"] = str(cfg.timeout_seconds)
+        TIMEOUT = cfg.timeout_seconds
+
+
+# pg5 -- the review depth's prompt note (full depth carries none). Depth is a
+# thin SCOPE switch over the same review: the skill, the verdict contract and
+# the fail posture are unchanged; only what the reviewer is asked to look at
+# differs. "full" needs no note (today's behavior, byte-identical).
+_DEPTH_NOTES = {
+    "structural": (
+        "\n\nCONTEXT: the user configured a STRUCTURAL review for this push. "
+        "Review the change's structure -- module boundaries, public API changes, "
+        "data/control flow across the changed files -- and call out structural "
+        "risks only. Do not go line-by-line; skip style and trivial-local issues."
+    ),
+    "large-diff-scoped": (
+        "\n\nCONTEXT: the user configured a LARGE-DIFF-SCOPED review for this "
+        "push. Triage first: review generated/vendored/trivial files by their "
+        "stats only and spend depth on the hand-written core of the diff. Do "
+        "not attempt exhaustive line-by-line coverage of every changed file."
+    ),
+}
+
+
+def _depth_prompt_note():
+    """pg5 -- "" for full depth, else the appended re-scoping note. Never raises."""
+    try:
+        return _DEPTH_NOTES.get(_gate_config().depth, "")
+    except Exception:
+        return ""
+
+
+# --- pg5: the MR/PR context consult (rg_mr_consult) ----------------------------
+# Above this many changed lines the cross-MR path-overlap tier also runs
+# (spec "MR/PR context consult": the overlap tier is thresholded -- below it
+# its extra CLI calls are not warranted).
+_LARGE_DIFF_LINES = 5000
+
+
+def _mr_consult(remote_id, branch):
+    """pg5 -- (MrContext | None, first_seen) for (remote, branch).
+
+    first_seen is consulted BEFORE find_open_mr: it needs the cache's PRIOR
+    baseline (a negative from an earlier push = the MR appeared on the web
+    meanwhile), which a find_open_mr write would overwrite. Each does at most
+    one live lookup and seeds the other through the 24h cache. Degradation is
+    (None, False): consult failure is never a block (story 25). Never raises.
+    """
+    if not remote_id or not branch:
+        return None, False
+    try:
+        first = rg_mr_consult.first_seen(remote_id, branch)
+        ctx = rg_mr_consult.find_open_mr(remote_id, branch)
+    except Exception:
+        return None, False
+    return ctx, bool(first)
+
+
+def _mr_diff_facts(repo_root, base, tip):
+    """pg5 -- (changed_paths, changed_lines) of base..tip via `git diff
+    --numstat`. The consult's only view of the pushed diff; git trouble
+    degrades to ([], 0) (no consistency findings), never a raise."""
+    rng = "%s..%s" % (base or _EMPTY_TREE, tip)
+    out, rc = _git(["diff", "--numstat", rng], cwd=repo_root)
+    if rc != 0:
+        return [], 0
+    paths, lines = [], 0
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        added, deleted, path = parts[0], parts[1], parts[-1]
+        if " => " in path:                       # rename: review the new path
+            path = path.split(" => ", 1)[-1]
+        if path:
+            paths.append(path)
+        if added.isdigit() and deleted.isdigit():  # "-" marks a binary file
+            lines += int(added) + int(deleted)
+    return paths, lines
+
+
+def _mr_consistency_findings(remote_id, ctx, repo_root, base, tip):
+    """pg5 -- the blocking gate findings the MR context yields for this push:
+    the three always-on declared-scope checks (rg_mr_consult.consistency_findings)
+    plus, above the large-diff threshold, the cross-MR path-overlap tier.
+    Never raises."""
+    paths, changed_lines = _mr_diff_facts(repo_root, base, tip)
+    findings = list(rg_mr_consult.consistency_findings(ctx, paths, changed_lines, tip))
+    if changed_lines > _LARGE_DIFF_LINES:
+        try:
+            overlap = rg_mr_consult.cross_mr_path_overlap(
+                remote_id, paths, exclude_iid=ctx.iid)
+        except Exception:
+            overlap = {}
+        if overlap:
+            detail = "; ".join(
+                "%s shares %d path(s): %s" % (url, len(shared), ", ".join(shared[:5]))
+                for url, shared in sorted(overlap.items()))
+            findings.append(
+                f"{rg_mr_consult.FINDING_PREFIX} this {changed_lines}-line diff "
+                "overlaps other open MR(s) -- a smuggled series is structurally "
+                f"visible: {detail}")
+    return findings
+
+
+def _mr_target_base(remote, tip, branch, repo_root):
+    """pg5 -- the MR-target step of the review-base resolution order (spec
+    "Review base resolution order": open MR/PR target branch -> the legacy
+    fast-forward/boundary fallbacks). Returns the merge-base of the pushed tip
+    with the target branch's remote-tracking ref, or "" to leave the legacy
+    chain byte-identical (no branch, no context, no local ref for the target
+    -- anything degraded answers ""). Never raises."""
+    if not branch:
+        return ""
+    try:
+        name = (remote or "").strip()
+        if not name:
+            return ""
+        remote_id = rg_store.remote_url(repo_root, name)
+        target = rg_mr_consult.target_branch(remote_id, branch) if remote_id else ""
+    except Exception:
+        return ""
+    if not target:
+        return ""
+    ref = "refs/remotes/%s/%s" % (name, target)
+    out, rc = _git(["rev-parse", "--verify", "--quiet", ref + "^{commit}"], cwd=repo_root)
+    if rc != 0 or not _SHA40.fullmatch(out or ""):
+        return ""
+    mb, rc = _git(["merge-base", out, tip], cwd=repo_root)
+    if rc != 0 or not _SHA40.fullmatch(mb or ""):
+        return ""
+    return mb
+
+
+def _mr_consistency_reason(mode, ctx, findings):
+    """pg5 -- the deny reason for a blocked MR-consistency push. The
+    MR-CONSISTENCY: prefix is preserved verbatim into the reason (ticket
+    requirement), and the fail-closed posture names its bypass route like
+    every other block this gate emits."""
+    rendered = "\n".join("  " + f for f in findings)
+    where = ctx.web_url or ("MR !%d" % ctx.iid if ctx.iid else "the open MR")
+    return (
+        "review-gate blocked this push: consistency check(s) against the open "
+        f"MR's declaration ({where}) found an objective contradiction with the "
+        "diff being pushed:\n"
+        + rendered +
+        "\n\nFix the contradiction -- correct the MR's declared scope, or split "
+        "the push into the MRs its contents belong to -- then push again. A "
+        "blocking review verdict is not the issue here, so neither a passing "
+        "nor an existing verdict exempts this push.\n" + _bypass_hint(mode))
+
+
+def resolve_review_base(remote, tip, remote_sha=None, repo_root=None, branch=None):
     """The commit a push is reviewed against: ReviewBase(base_sha, commits, reason).
 
     One answer for git mode, hook mode and the skill's --unpushed. The base is
@@ -1206,6 +1412,17 @@ def resolve_review_base(remote, tip, remote_sha=None, repo_root=None):
             out, rc = _git(["rev-list", "--count", f"{remote_ok}..{tip}"], cwd=repo_root)
             n = int(out) if rc == 0 and out.isdigit() else None
             return ReviewBase(remote_ok, n, "fast-forward of the remote ref")
+    # pg5 -- MR/PR-target step: for a pushed branch whose open MR targets a
+    # known target branch, the review covers only what the push adds on top of
+    # that target (a stacked piece branch is not re-reviewed on its upstream
+    # piece's content -- story 9). Any consult degradation leaves this "" and
+    # the fallbacks below are byte-identical. Fast-forward above still wins:
+    # the remote ref scopes the range exactly and nothing is re-reviewed.
+    mr_base = _mr_target_base(remote, tip, branch, repo_root)
+    if mr_base:
+        out, rc = _git(["rev-list", "--count", f"{mr_base}..{tip}"], cwd=repo_root)
+        n = int(out) if rc == 0 and out.isdigit() else None
+        return ReviewBase(mr_base, n, "open MR/PR target branch (pg5)")
     args = ["rev-list", tip, "--topo-order", "--reverse", "--boundary",
             "--not", "--remotes=" + (remote or "origin")]
     if remote_ok:
@@ -1311,8 +1528,11 @@ def _pushed_remote_arg(argv, repo_root=None):
     return name if rc == 0 else ""
 
 
-def _range_for_refs(refs, repo_root=None, remote="", extra=()):
+def _range_for_refs(refs, repo_root=None, remote="", extra=(), branch_by_sha=None):
     """The revision range actually being pushed, or "" when nothing is.
+
+    branch_by_sha (pg5) maps a local sha to the pushed BRANCH name, feeding the
+    resolver's MR-target step; absent, the resolver is byte-identical.
 
     `<base>..<local sha>` per ref update, where base comes from
     resolve_review_base: the remote sha for a fast-forward, otherwise the
@@ -1336,7 +1556,8 @@ def _range_for_refs(refs, repo_root=None, remote="", extra=()):
             if rng:
                 found.append(rng)
             continue
-        rb = resolve_review_base(remote, local_sha, remote_sha, repo_root)
+        rb = resolve_review_base(remote, local_sha, remote_sha, repo_root,
+                                 branch=(branch_by_sha or {}).get(local_sha))  # pg5
         if rb.has_commits:
             found.append(f"{rb.base_sha}..{local_sha}")
     # Tags and other non-branch refs: reviewed only for commits the pushed
@@ -2102,7 +2323,23 @@ def _gate_repo(payload):
 
 
 def _fail_open_requested():
-    return os.environ.get("OCR_FAIL_OPEN", "").strip().lower() in ("1", "true", "yes")
+    """True when a fail-open switch is set: OCR_FAIL_OPEN (the one-shot escape)
+    or, pg5, review.failOpen=true in the run config. Both feed the SAME audited
+    bypass plumbing -- the mechanism string below tells the ledger which one
+    was honored."""
+    if os.environ.get("OCR_FAIL_OPEN", "").strip().lower() in ("1", "true", "yes"):
+        return True
+    try:
+        return bool(_gate_config().fail_open)          # pg5
+    except Exception:
+        return False
+
+
+def _fail_open_mechanism():
+    """pg5: which fail-open switch opened the gate, for the bypass record."""
+    if os.environ.get("OCR_FAIL_OPEN", "").strip().lower() in ("1", "true", "yes"):
+        return "OCR_FAIL_OPEN"
+    return "review.failOpen"
 
 
 # `git push` at a COMMAND position rather than anywhere in the string. Kept
@@ -2586,7 +2823,8 @@ def _hook_target(repo_root, cmd):
         # for the remote sha git would have reported.
         tracked, rc = _git(["rev-parse", "--verify", "--quiet",
                             f"refs/remotes/{remote}/{dst}^{{commit}}"], cwd=repo_root)
-        rb = resolve_review_base(remote, tip, tracked if rc == 0 and tracked else None, repo_root)
+        rb = resolve_review_base(remote, tip, tracked if rc == 0 and tracked else None,
+                                 repo_root, branch=dst)  # pg5: dst IS the pushed branch
         base = rb.base_sha
         if rb.commits == 0:
             return "allow", {"why": "remote already has these commits"}
@@ -3331,13 +3569,14 @@ def _log_gate_skipped(why, mode="", repo_root="", push_range="",
         base=base or None, tip=tip or None,
     )
     if mode == "git" and _fail_open_requested():                     # pg4
+        mechanism = _fail_open_mechanism()                             # pg5
         try:
-            rg_store.record_bypass(remote_id, ref, tip, "OCR_FAIL_OPEN", why)
+            rg_store.record_bypass(remote_id, ref, tip, mechanism, why)
         except Exception:
             pass
         try:
             sys.stderr.write(
-                "review-gate: BYPASS RECORDED - OCR_FAIL_OPEN=1 let this push proceed "
+                f"review-gate: BYPASS RECORDED - {mechanism} let this push proceed "
                 f"without a passing review (why={why or '?'}, "
                 f"remote={remote_id or '?'}, ref={ref or '?'}, "
                 f"tip={(tip or '?')[:12]}); appended to the review-gate ledger.\n")
@@ -3911,6 +4150,8 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
                   if push_range else launch.prompt) + _reminder
     if partial:
         prompt += _PARTIAL_REVIEW_NOTE
+    prompt += _depth_prompt_note()   # pg5: "" at full depth; the run config's
+                                     # re-scoping note otherwise
     cmd = [kimi, "-p", ocr_cmdshim.prompt_for(kimi, prompt)] + args
     if stub:
         # Range is always last so stub's sys.argv[-1] still gives the range.
@@ -11320,6 +11561,7 @@ def _mode_supervise(argv):
         run_id = argv[j + 1]
     except (ValueError, IndexError):
         return 2
+    _apply_gate_config()   # pg5: honors the run config when spawned out-of-band
     return _supervise(state_path, run_id)
 
 
@@ -13259,6 +13501,7 @@ def main(argv):
 
 
 def _main_inner(argv, mode):
+    _apply_gate_config()   # pg5: user run config (advisories + depth + timeout cap)
     # Re-entry guard. _run_review passes -e <deny extension> to the child,
     # so this plugin's own push gate is registered inside the review session. Without
     # this, every Bash call the reviewer makes spawns a Python process, and a
@@ -13398,8 +13641,12 @@ def _main_inner(argv, mode):
         refs3, other_refs, n_deleted = _read_push_updates_ex(with_ref=True,
                                                              deleted_refs=deleted_refs)
         refs = [r[:2] for r in refs3]
+        # pg5: name each pushed sha's BRANCH for the resolver's MR-target step.
+        _branch_by_sha = {loc: ref[len("refs/heads/"):]
+                          for loc, _s, ref in refs3
+                          if str(ref).startswith("refs/heads/")}
         push_range = _range_for_refs(refs, repo_root, remote_name,
-                                     extra=other_refs)
+                                     extra=other_refs, branch_by_sha=_branch_by_sha)
         if push_range == _MULTI_REF:
             if _fail_open_requested():
                 _log_gate_skipped("multi_ref", mode, repo_root)
@@ -13517,6 +13764,37 @@ def _main_inner(argv, mode):
                               remote_id=remote_id, ref=push_ref)   # pg4 audit
             allow()
         _fail_closed(mode, _unbacked_reason("uncovered", mode))
+    # pg5 -- MR/PR context consult (spec stories 11-14): placed AFTER the
+    # store-backing vetoes (those fail closed regardless) and BEFORE every
+    # happy path (legacy marker, carry-forward, coverage join, fresh review),
+    # so a scope contradiction blocks even a tip that reuses an earlier
+    # verdict -- the retroactive-consult case, where the MR postdates the
+    # push that earned the verdict (story 11). Consult degradation is only an
+    # advisory here; it is never a block (story 25).
+    if push_range and ".." in push_range and branch:
+        mr_ctx, mr_first = _mr_consult(remote_id, branch)
+        if mr_ctx is None:
+            _warn(f"review-gate: no MR context for {branch} on "
+                  f"{remote_name or 'origin'} (no open MR, or the consult was "
+                  "unavailable) -- proceeding.")
+        else:
+            if mr_first:
+                _warn(f"review-gate: MR !{mr_ctx.iid} first seen for {branch} on "
+                      f"{remote_name or 'origin'} -- an MR created after earlier "
+                      "pushes is now discovered; consistency checks run against "
+                      "the existing tip too.")
+            mr_findings = _mr_consistency_findings(remote_id, mr_ctx, repo_root,
+                                                   base, tip)
+            if mr_findings:
+                if _is_advisory(repo_root):
+                    _warn("MR-consistency findings (advisory, blocking disabled):\n"
+                          + "\n".join("  " + f for f in mr_findings))
+                elif _fail_open_requested():
+                    _log_gate_skipped("mr_consistency", mode, repo_root, push_range,
+                                      remote_id=remote_id, ref=push_ref)  # pg4 audit
+                    allow()
+                _fail_closed(mode, _mr_consistency_reason(mode, mr_ctx, mr_findings))
+
     # The legacy pass marker: the other adapter, or an older gate, already
     # reviewed these exact commits and passed them within the TTL. Replay what
     # it found instead of allowing silently.
