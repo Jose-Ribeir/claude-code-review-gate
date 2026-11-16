@@ -41,10 +41,25 @@ Decide which host you are on from your own tool list, then apply the matching ru
     If a `review-gate:<persona>` type is not available, fall back to
     `subagent_type: "general-purpose"` with the Appendix P body pasted in front
     of the payload, exactly as the Kimchi path does.
-  - Ignore `model:`, `thinking:`, `isolated:`, `run_in_background:` and the
+  - Ignore `thinking:`, `isolated:`, `run_in_background:` and the
     `subagent_type: "Reviewer"` / `"General-Purpose"` names, and every
-    `kimchi-dev/...` or `kimi-k3` pin: they do not exist on this host. Subagents
-    inherit the session's model.
+    `kimchi-dev/...` or `kimi-k3` pin: they do not exist on this host.
+  - Models: the manifest already holds this host's model for each tier
+    (`manifest.spotter_model`, `manifest.tier1_model`, `manifest.tier2_model`
+    -- aliases such as `haiku` / `sonnet` / `opus`). Pass that value as the
+    `Task` tool's `model` for the matching persona (context-spotter,
+    code-reviewer, deep-reviewer). Personas with no manifest model inherit the
+    session's model.
+  - Helper scripts: when `manifest.helper_cmds` is present, run the
+    conventions resolver (§2a step 8) with EXACTLY
+    `manifest.helper_cmds.conventions` as the command prefix (then the usual
+    `--repo-root ... <files>` arguments), instead of the
+    `python3 "<skill_dir>/../../scripts/ocr_conventions.py"` form -- this
+    session can only run commands its allowlist names literally. The demands
+    validator (§2c step 3) cannot run on this host (the Bash tool refuses JSON
+    on a command line and a pipe is not allowlisted): skip the call and record
+    the stage's usual warning (`spotter: ... proceeding without demands`).
+    If the conventions command is refused, record its usual warning too.
   - `<skill_dir>` is `${CLAUDE_PLUGIN_ROOT}/skills/review`.
   - Everything else -- the manifest, the contracts, the verdict schema, the
     blocking rule -- is host-independent and applies unchanged.

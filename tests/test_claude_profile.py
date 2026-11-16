@@ -145,8 +145,15 @@ def test_claude_is_launched_with_its_own_sandbox_flags_and_no_kimchi_wiring(repo
     (launch,) = _launches(tmp_path)
     argv = launch["argv"]
     allowed = argv[argv.index("--allowedTools") + 1: argv.index("--disallowedTools")]
-    assert "Read" in allowed and all(a.startswith("Bash(git ") or a in ("Read", "Grep", "Glob", "Task")
-                                     for a in allowed)
+    # Read-only: git queries, the read tools, and EXACTLY the one helper
+    # script (the conventions resolver) by literal command prefix -- nothing
+    # else may be pre-approved.
+    helper_rules = {f"Bash({c} *)" for c in rg._helper_cmds().values()}
+    assert len(helper_rules) == 1
+    assert "Read" in allowed and all(
+        a.startswith("Bash(git ") or a in ("Read", "Grep", "Glob", "Task") or a in helper_rules
+        for a in allowed)
+    assert helper_rules <= set(allowed)
     denied = argv[argv.index("--disallowedTools") + 1: argv.index("--model")]
     assert {"Write", "Edit", "WebFetch"} <= set(denied)
     assert argv[argv.index("--model") + 1] == "sonnet"
@@ -380,14 +387,16 @@ def test_claude_extra_args_append_and_the_args_override_replaces_wholesale(clean
     monkeypatch.setattr(rg, "_find_claude", lambda: "/fake/claude")
     monkeypatch.setenv("OCR_CLAUDE_EXTRA_ARGS", "--max-turns 7")
     args = rg._worker_invocation("review", "missing")[2]
-    assert args[:len(rg.CLAUDE_WORKER_ARGS)] == rg.CLAUDE_WORKER_ARGS and args[-2:] == ["--max-turns", "7"]
+    # The base argv, plus the two helper-script rules, then the caller's extras.
+    assert set(rg.CLAUDE_WORKER_ARGS) <= set(args) and args[-2:] == ["--max-turns", "7"]
+    assert args[:-2] == rg._claude_review_args()[:-2]
     monkeypatch.setenv("OCR_CLAUDE_ARGS", "--print --bare")
     assert rg._worker_invocation("review", "missing")[2] == ["--print", "--bare"]
     # ...and the kimchi variables mean nothing to the claude launch.
     monkeypatch.delenv("OCR_CLAUDE_ARGS")
     monkeypatch.delenv("OCR_CLAUDE_EXTRA_ARGS")
     monkeypatch.setenv("OCR_KIMI_ARGS", "--mode json")
-    assert rg._worker_invocation("review", "missing")[2] == rg.CLAUDE_WORKER_ARGS
+    assert rg._worker_invocation("review", "missing")[2] == rg._claude_review_args()
 
 
 def test_claude_model_pins_per_role(clean, monkeypatch):
@@ -412,8 +421,10 @@ def test_the_claude_env_scrub_drops_the_session_bridge_and_marks_the_worker(clea
     env.update({"CLAUDECODE": "1", "CLAUDE_CODE_EXECPATH": "/x", "GIT_TRACE": "/gone"})
     removed = rg._CLAUDE_LAUNCH.scrub_env(env)
     assert set(rg._CLAUDE_SESSION_BRIDGE_ENV) <= set(removed) and "GIT_TRACE" in removed
-    assert env == {"CLAUDECODE": "1", "CLAUDE_CODE_EXECPATH": "/x",
-                   "CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1"}
+    # CLAUDECODE ("this is a Claude Code session") goes with the bridge; the
+    # exec path the gate itself reads stays.
+    assert "CLAUDECODE" in rg._CLAUDE_SESSION_BRIDGE_ENV
+    assert env == {"CLAUDE_CODE_EXECPATH": "/x", "CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1"}
     # The same OCR_UNSET_ENV policy knob as the kimchi scrub.
     env = {n: "v" for n in rg._CLAUDE_SESSION_BRIDGE_ENV}
     monkeypatch.setenv("OCR_UNSET_ENV", "none")
@@ -489,3 +500,113 @@ def test_hook_mode_hints_find_the_repo_pin_from_a_subdirectory(clean, tmp_path):
     clean.chdir(sub)
     clean.delattr(rg._backend_local, "selection", raising=False)
     assert "Claude Code" in rg._bypass_hint("hook")
+
+
+# --- post-merge hardening: helper rules, tier models, guard, env, telemetry -----
+
+_TIER_VARS = ("OCR_SPOTTER_MODEL", "OCR_TIER1_MODEL", "OCR_TIER2_MODEL",
+              "OCR_CLAUDE_SPOTTER_MODEL", "OCR_CLAUDE_TIER1_MODEL", "OCR_CLAUDE_TIER2_MODEL")
+
+
+@pytest.fixture
+def tiers(clean):
+    for k in _TIER_VARS:
+        clean.delenv(k, raising=False)
+    clean.delattr(rg._backend_local, "selection", raising=False)
+    return clean
+
+
+def test_helper_rule_is_exactly_the_conventions_script_and_only_for_the_review_worker(clean):
+    cmds = rg._helper_cmds()
+    # The demands validator is deliberately absent: the Bash tool refuses the
+    # JSON it would have to be given (checked against the real CLI).
+    assert set(cmds) == {"conventions"}
+    assert cmds["conventions"].endswith("/scripts/ocr_conventions.py")
+    assert "\\" not in cmds["conventions"]       # an allowlist rule is a literal string
+    review = rg._claude_review_args()
+    allowed = review[review.index("--allowedTools") + 1: review.index("--disallowedTools")]
+    assert {f"Bash({c} *)" for c in cmds.values()} <= set(allowed)
+    docs = rg._claude_docs_summary_args()
+    docs_allowed = docs[docs.index("--allowedTools") + 1: docs.index("--disallowedTools")]
+    assert not any("ocr_" in a for a in docs_allowed)    # the docs worker never runs them
+
+
+def test_helper_cmds_are_given_to_the_session_only_under_claude(tiers):
+    tiers.setenv("OCR_BACKEND", "claude")
+    assert set(rg._helper_cmds_field()["helper_cmds"]) == {"conventions"}
+    tiers.setenv("OCR_BACKEND", "kimchi")
+    assert rg._helper_cmds_field() == {}
+
+
+def test_tier_models_are_per_profile(tiers):
+    tiers.setenv("OCR_BACKEND", "kimchi")
+    assert [rg._tier_model(r) for r in ("spotter", "tier1", "tier2")] == [
+        "deepseek-v4-flash", "kimi-k3", "kimi-k3"]
+    tiers.setenv("OCR_BACKEND", "claude")
+    assert [rg._tier_model(r) for r in ("spotter", "tier1", "tier2")] == ["haiku", "sonnet", "opus"]
+
+
+def test_claude_tier_models_ignore_kimchi_ids_and_honour_claude_ones(tiers):
+    tiers.setenv("OCR_BACKEND", "claude")
+    tiers.setenv("OCR_TIER1_MODEL", "kimi-k3")               # not runnable by claude: ignored
+    assert rg._tier_model("tier1") == "sonnet"
+    tiers.setenv("OCR_TIER2_MODEL", " opus ")                 # shared var, an Anthropic model
+    assert rg._tier_model("tier2") == "opus"
+    tiers.setenv("OCR_CLAUDE_TIER1_MODEL", "claude-sonnet-4-5")   # role-specific wins
+    assert rg._tier_model("tier1") == "claude-sonnet-4-5"
+
+
+def test_the_provider_guard_still_blocks_anthropic_under_kimchi(tiers):
+    tiers.setenv("OCR_BACKEND", "kimchi")
+    tiers.setenv("OCR_TIER1_MODEL", "claude-sonnet-4-5")
+    with pytest.raises(rg.ReviewGateError):
+        rg._check_provider_guard()
+
+
+def test_the_provider_guard_stands_down_under_claude(tiers):
+    tiers.setenv("OCR_BACKEND", "claude")
+    tiers.setenv("OCR_TIER1_MODEL", "claude-sonnet-4-5")
+    rg._check_provider_guard()                                # must not raise
+
+
+def test_telemetry_records_carry_the_backend_only_when_known():
+    tele = rg.ocr_telemetry
+    assert tele.tier_record("tier1", model="m", backend="claude")["backend"] == "claude"
+    assert "backend" not in tele.tier_record("tier1", model="m")
+
+
+def test_claudecode_and_the_internal_handoffs_do_not_reach_the_reviewer(clean):
+    env = {"CLAUDECODE": "1", "OCR_HARNESS": "claude", rg.ocr_profile.SNIFFED_VAR: "claude", "KEEP": "1"}
+    rg._scrub_claude_worker_env(env)
+    assert "CLAUDECODE" not in env and env["KEEP"] == "1"
+    clean.setenv("CLAUDECODE", "1")
+    clean.setenv("OCR_HARNESS", "claude")
+    sup = rg._supervisor_env()
+    assert "CLAUDECODE" not in sup                            # scrubbed ...
+    assert sup["OCR_HARNESS"] == "claude"                     # ... the hint survives for selection
+    assert sup[rg.ocr_profile.SNIFFED_VAR] == "claude"        # and so does what was sniffed first
+
+
+def test_jira_side_fetch_rides_the_selected_backend(clean, tmp_path):
+    import rg_jira_fetch
+    conf = tmp_path / "mcp.json"
+    conf.write_text(json.dumps({"mcpServers": {
+        "atlassian-remote": {"command": "npx"},
+        "__kimchi-studio-connector__atlassian": {"command": "npx"}}}))
+    clean.setenv("OCR_JIRA_MCP_CONFIG", str(conf))
+    seen = []
+
+    def runner(argv, cwd, timeout):
+        seen.append(argv)
+        return "TITLE: t\nDESCRIPTION:\nbody", None
+
+    clean.setenv("OCR_BACKEND", "claude")
+    payload, note = rg_jira_fetch.fetch_issue("PROJ-1", {}, str(tmp_path), runner)
+    assert payload == {"title": "t", "body": "body"}, note
+    argv = seen[-1]
+    assert os.path.basename(argv[0]).lower().startswith("claude")
+    assert "--strict-mcp-config" in argv and argv[argv.index("--allowedTools") + 1] == "mcp__atlassian-remote"
+    clean.setenv("OCR_BACKEND", "kimchi")
+    payload, note = rg_jira_fetch.fetch_issue("PROJ-1", {}, str(tmp_path), runner)
+    assert payload == {"title": "t", "body": "body"}, note
+    assert os.path.basename(seen[-1][0]).lower().startswith("kimchi") and "--no-session" in seen[-1]

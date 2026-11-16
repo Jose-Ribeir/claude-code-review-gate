@@ -171,6 +171,43 @@ def _read_tier2_model():
 
 _TIER2_MODEL = _read_tier2_model()
 
+# Per-profile tier models. The three constants above are the KIMCHI tier
+# models (open models routed through kimchi); a claude worker cannot run
+# them, so each profile carries its own map and every consumer asks
+# _tier_model(role) for the model of the backend that will actually run.
+_TIER_READERS = {
+    "spotter": ("OCR_SPOTTER_MODEL", _read_spotter_model),
+    "tier1": ("OCR_TIER1_MODEL", _read_tier1_model),
+    "tier2": ("OCR_TIER2_MODEL", _read_tier2_model),
+}
+# claude aliases (not dated ids): the pin tracks the model family, like
+# _read_claude_model's `sonnet`. The spotter reads every push, so it stays cheap.
+_CLAUDE_TIER_DEFAULTS = {"spotter": "haiku", "tier1": "sonnet", "tier2": "opus"}
+
+
+def _read_claude_tier_model(role):
+    """The claude model for one review tier: OCR_CLAUDE_<ROLE>_MODEL, else the
+    shared OCR_<ROLE>_MODEL when it names an Anthropic model (a kimchi id such
+    as `kimi-k3` is not runnable by claude and is ignored, so one environment
+    can serve both profiles), else the tier's alias default."""
+    shared_var = _TIER_READERS[role][0]
+    for var in ("OCR_CLAUDE_" + role.upper() + "_MODEL", shared_var):
+        value = os.environ.get(var, "").strip()
+        if not value:
+            continue
+        if var.startswith("OCR_CLAUDE_") or _model_provider(value) == "anthropic":
+            return value
+    return _CLAUDE_TIER_DEFAULTS[role]
+
+
+def _tier_model(role):
+    """The model for a review tier ("spotter", "tier1", "tier2") under the
+    backend that reviews this push."""
+    if _current_launch().name == "claude":
+        return _read_claude_tier_model(role)
+    return _TIER_READERS[role][1]()
+
+
 # Provider guard (spec "Models"; story 18). The account's subscription terms
 # forbid routing the gate's automated review traffic to Anthropic or OpenAI
 # models (account-lock grounds), so the review models below are vetted after
@@ -220,7 +257,14 @@ def _model_provider(model):
 def _provider_guard_violations():
     """[(var, model, provider)] for every configured review model from a
     blocked provider. Reads the RESOLVED value of each guarded var (the
-    defaults are open models, so an unset var never trips)."""
+    defaults are open models, so an unset var never trips).
+
+    The guard protects the KIMCHI account: it keeps Anthropic/OpenAI models
+    off the kimchi-routed review tiers. Under the claude backend the worker IS
+    Anthropic (through Claude Code itself) and _read_claude_tier_model ignores
+    any non-Anthropic id, so there is nothing to guard and no violation."""
+    if _current_launch().name == "claude":
+        return []
     out = []
     for var, read in _GUARDED_MODEL_VARS:
         model = read()
@@ -273,9 +317,9 @@ DEFAULT_KIMI_ARGS = [
     # No MCP servers. A code review needs read/grep/find and nothing else.
     "--mcp-config", '{"mcpServers":{}}',
 ]
-# Legacy alias (upstream name, kept for diff parity of callers/tests). It is
-# the KIMCHI argv; the claude profile's argv is CLAUDE_WORKER_ARGS below.
-DEFAULT_CLAUDE_ARGS = DEFAULT_KIMI_ARGS
+# (The claude profile's argv is CLAUDE_WORKER_ARGS below. The old
+# DEFAULT_CLAUDE_ARGS alias pointed at THIS kimchi argv and misled readers, so
+# it is gone.)
 
 
 def _read_claude_model(*role_vars):
@@ -363,11 +407,47 @@ CLAUDE_WORKER_ARGS = [
 ]
 
 
-def _claude_review_args():
+def _helper_cmds():
+    """The exact command prefix of the one read-only helper script the review
+    skill can run in a claude session: the conventions resolver. {} when the
+    plugin path has a space (an allowlist rule cannot quote it), in which case
+    the stage degrades to a warning as before.
+
+    The claude allowlist matches the LITERAL command string, so the skill must
+    run this exact prefix (it gets it from manifest["helper_cmds"]) and the
+    matching rule is added to --allowedTools by _claude_review_args. The
+    resolver only reads and prints JSON. The demands validator is NOT here: it
+    takes the spotter's JSON on stdin, and the Bash tool refuses a heredoc or
+    quoted argument holding JSON ("brace with quote character", checked live
+    against the real CLI), so no allowlist rule could make it runnable; that
+    stage keeps degrading to a warning under claude."""
+    root = _PLUGIN_ROOT.replace("\\", "/")
+    if " " in root:
+        return {}
+    py = "python" if sys.platform == "win32" else "python3"
+    return {"conventions": f"{py} {root}/scripts/ocr_conventions.py"}
+
+
+def _helper_cmds_field():
+    """{"helper_cmds": {...}} for a manifest when the claude backend reviews
+    (its session can only run the exact allowlisted commands), else {}: under
+    kimchi the skill keeps running the helpers by their <skill_dir> path."""
+    if _current_launch().name != "claude":
+        return {}
+    cmds = _helper_cmds()
+    return {"helper_cmds": cmds} if cmds else {}
+
+
+def _claude_review_args(helpers=True):
     """The claude review worker's default argv with the caller's extras
     appended; only consulted without an OCR_CLAUDE_ARGS override (see
-    _worker_invocation)."""
+    _worker_invocation). `helpers` adds the two exact-path helper-script rules
+    (_helper_cmds) to the otherwise read-only allowlist; the docs-summary
+    worker never runs them and passes False."""
     args = list(CLAUDE_WORKER_ARGS)
+    if helpers:
+        at = args.index("--disallowedTools")
+        args[at:at] = [f"Bash({cmd} *)" for cmd in _helper_cmds().values()]
     args += shlex.split(os.environ.get("OCR_CLAUDE_EXTRA_ARGS", ""))
     return args
 
@@ -375,7 +455,7 @@ def _claude_review_args():
 def _claude_docs_summary_args():
     """_claude_review_args with the docs-summary role's model pin (the claude
     counterpart of _docs_summary_model_args)."""
-    args = _claude_review_args()
+    args = _claude_review_args(helpers=False)
     if "--model" in args and args.index("--model") + 1 < len(args):
         args[args.index("--model") + 1] = _CLAUDE_DOCS_SUMMARY_MODEL
     return args
@@ -639,6 +719,8 @@ _COST_RULE_RATIO = 1.5
 _FINGERPRINT_ENV_VARS = (
     "OCR_MODEL", "OCR_BLOCK_SEVERITY", "OCR_BLOCK_CONFIDENCE",
     "OCR_SPOTTER_MODEL", "OCR_TIER1_MODEL", "OCR_TIER2_MODEL",
+    "OCR_CLAUDE_MODEL", "OCR_CLAUDE_SPOTTER_MODEL", "OCR_CLAUDE_TIER1_MODEL",
+    "OCR_CLAUDE_TIER2_MODEL",
 )
 # Agents whose prompts decide which findings exist. The resolver only judges
 # whether a known finding was fixed, so editing it keeps the ledger. The
@@ -3208,9 +3290,8 @@ _WIN_FLAGS = (
 # OCR_UNSET_ENV) because the worst-case regression is a visible reviewer auth
 # error the gate already reports -- not a silent one -- which is a better
 # trade than leaving a live IPC channel and its token in a second process's
-# hands. Left inherited on purpose: CLAUDECODE (the CLI may use it to suppress
-# interactive behaviour, harmless to inherit; first thing to add via
-# OCR_UNSET_ENV if scrubbing this bundle alone doesn't stop the crash),
+# hands. (CLAUDECODE, the Claude Code marker, is scrubbed with the claude
+# bundle below.) Left inherited on purpose:
 # CLAUDE_CODE_EXECPATH (read directly by _find_claude, not identity), and the
 # per-feature flags (DISABLE_CRON, EAGER_FLUSH, etc.) which configure
 # behaviour rather than claim a session.
@@ -3233,11 +3314,15 @@ _SESSION_BRIDGE_ENV = (
 # Code Desktop session by a live OCR_DEBUG smoke test, 2026-09-11): together
 # they tell a CLI process "you are the desktop host's SDK child, on messaging
 # channel X, tracking session Y" -- state an independent reviewer must not
-# inherit. Left inherited on purpose: CLAUDECODE (harmless, and the harness
-# signal backend selection reads), CLAUDE_CODE_EXECPATH (read by _find_claude)
-# and the per-feature flags, which configure behaviour rather than claim a
-# session.
+# inherit. CLAUDECODE is scrubbed too: it is the marker that says "this process
+# is inside a Claude Code session", which an independent reviewer is not. The
+# backend selection that reads it as a harness signal runs BEFORE the scrub, in
+# the process that spawns the supervisor, and hands its verdict on through
+# OCR_SNIFFED (see _supervisor_env). Left inherited on purpose:
+# CLAUDE_CODE_EXECPATH (read by _find_claude) and the per-feature flags, which
+# configure behaviour rather than claim a session.
 _CLAUDE_SESSION_BRIDGE_ENV = (
+    "CLAUDECODE",
     "CLAUDE_CODE_MESSAGING_SOCKET",
     "CLAUDE_CODE_MESSAGING_TOKEN",
     "CLAUDE_CODE_SESSION_ID",
@@ -3362,12 +3447,14 @@ def _record_tier_call(common_dir, tier, seconds, stats=None):
     the CLI-reported cost when there is one. Best-effort -- record_tier_call
     never raises, and telemetry never affects a review's outcome.
     """
-    model = {ocr_telemetry.TIER_SPOTTER: _SPOTTER_MODEL,
-             ocr_telemetry.TIER_REVIEW: _TIER1_MODEL,
-             ocr_telemetry.TIER_DEEP: _TIER2_MODEL}.get(tier, "")
+    role = {ocr_telemetry.TIER_SPOTTER: "spotter",
+            ocr_telemetry.TIER_REVIEW: "tier1",
+            ocr_telemetry.TIER_DEEP: "tier2"}.get(tier)
+    model = _tier_model(role) if role else ""
     ocr_telemetry.record_tier_call(common_dir, tier, model=model,
                                    cost_usd=(stats or {}).get("cost_usd"),
-                                   seconds=seconds)
+                                   seconds=seconds,
+                                   backend=_current_launch().name)
 
 
 _PHASE_CLOCK = {"t": None}
@@ -3665,6 +3752,10 @@ def _worker_invocation(default_args, missing_message, repo_root=None):
         args = build()
     child_env = dict(os.environ)
     child_env["OCR_IN_REVIEW"] = "1"
+    # The adapter's harness hint and the spawner's sniff result are hand-offs
+    # to the supervisor's backend selection, not state for the reviewer.
+    for internal in ("OCR_HARNESS", ocr_profile.SNIFFED_VAR):
+        child_env.pop(internal, None)
     scrubbed = launch.scrub_env(child_env)
     if (not stub and launch.canary and not override and not _canary_state["probed"]
             and not os.environ.get("OCR_SKIP_CANARY", "").strip()):
@@ -4597,6 +4688,9 @@ def _write_telemetry(state_path, run_id):
         "verdict": st.get("verdict") or "", "blocked": bool(st.get("blocked")),
         "reason": st.get("reason") or "",
         "seconds": round(time.time() - rec.get("ts", time.time()), 1),
+        # Which backend reviewed this push (claude / kimchi), so the report
+        # can compare the two.
+        "backend": _current_launch().name,
     })
     ocr_telemetry.append(common_dir_of(Path(state_path)), rec)
 
@@ -8168,8 +8262,9 @@ def _build_deep_manifest(paths, reasons, threshold, renames=None):
         "deep_review": True,
         "deep_reasons": list(reasons or []),
         "risk_threshold": threshold,
-        "spotter_model": _SPOTTER_MODEL,
-        "tier2_model": _TIER2_MODEL,
+        "spotter_model": _tier_model("spotter"),
+        "tier2_model": _tier_model("tier2"),
+        **_helper_cmds_field(),
     }
 _DOCS_SUMMARY_PATH = ".ocr/docs-summary.md"
 
@@ -8874,10 +8969,11 @@ def _build_review_manifest(scope, chunk_items, other_changed, carry_paths,
     manifest.update(extras or {})
     # The headless review session's allowlist has no env-reading Bash, so the
     # skill learns which model to spawn the context spotter with from here.
-    manifest["spotter_model"] = _SPOTTER_MODEL
+    manifest["spotter_model"] = _tier_model("spotter")
     # Same channel for the tier-1 reviewer model (skills/review/SKILL.md step
     # 3 reads it to spawn the code-reviewer subagent).
-    manifest["tier1_model"] = _TIER1_MODEL
+    manifest["tier1_model"] = _tier_model("tier1")
+    manifest.update(_helper_cmds_field())
     if docs_context:
         manifest["docs_context"] = docs_context
     if arch_flags:

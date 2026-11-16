@@ -29,13 +29,13 @@ _PLACEHOLDER_RANGE = "A" * 40 + ".." + "B" * 40
 def _build_normalized_argv(push_range=_PLACEHOLDER_RANGE, model=None):
     """Build the non-stub argv _run_review would use and normalise machine parts."""
     prompt =review_gate.PROMPT_RANGE.format(rng=push_range)
-    # Rebuild DEFAULT_CLAUDE_ARGS with the requested model if overridden.
+    # Rebuild DEFAULT_KIMI_ARGS with the requested model if overridden.
     if model is not None and model != review_gate._MODEL:
-        args = list(review_gate.DEFAULT_CLAUDE_ARGS)
+        args = list(review_gate.DEFAULT_KIMI_ARGS)
         i = args.index("--model")
         args[i + 1] = model
     else:
-        args = list(review_gate.DEFAULT_CLAUDE_ARGS)
+        args = list(review_gate.DEFAULT_KIMI_ARGS)
     # The real claude path (non-stub) — normalised to '<claude>'.
     cmd = ["<real-claude>", "-p", prompt] + args
     # Normalise: plugin root, deny extension path, and range in prompt.
@@ -62,13 +62,13 @@ def _load_fixture():
 def test_golden_fixture_is_current():
     """The committed fixture must match what _run_review actually builds today.
 
-    If this test fails after a change to DEFAULT_CLAUDE_ARGS or PROMPT_RANGE,
+    If this test fails after a change to DEFAULT_KIMI_ARGS or PROMPT_RANGE,
     update tests/fixtures/argv_golden.json to reflect the new baseline.
     """
     built = _build_normalized_argv()
     fixture = _load_fixture()
     assert built == fixture, (
-        "argv_golden.json is out of sync with DEFAULT_CLAUDE_ARGS / PROMPT_RANGE.\n"
+        "argv_golden.json is out of sync with DEFAULT_KIMI_ARGS / PROMPT_RANGE.\n"
         f"  built:   {built}\n"
         f"  fixture: {fixture}"
     )

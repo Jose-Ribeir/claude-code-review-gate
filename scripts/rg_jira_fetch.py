@@ -39,6 +39,10 @@ import json
 import os
 import tempfile
 
+import ocr_profile
+
+import ocr_profile
+
 # The persisted Studio connector entry key in the harness mcp.json -- this
 # is the ONLY server the side-fetch --mcp-config may enable.
 CONNECTOR_KEY = "__kimchi-studio-connector__atlassian"
@@ -75,6 +79,55 @@ def _kimchi_bin():
     """The headless CLI for the side-fetch: KIMCHI_BIN, else `kimchi` on
     PATH -- the same convention the review worker uses."""
     return os.environ.get("KIMCHI_BIN", "").strip() or "kimchi"
+
+
+def _claude_bin():
+    """The headless CLI for the side-fetch under the claude backend:
+    OCR_CLAUDE_BIN, else `claude` on PATH."""
+    return os.environ.get("OCR_CLAUDE_BIN", "").strip() or "claude"
+
+
+def _selected_backend(repo_root):
+    """Which backend reviews this repo (ocr_profile's precedence). The
+    side-fetch rides the SAME backend as the review, so a claude-only machine
+    never needs kimchi installed. An unusable explicit choice falls back to
+    kimchi here: the review itself fails closed on it, and this module never
+    raises."""
+    try:
+        return ocr_profile.select_backend(repo_root=repo_root).name
+    except Exception:  # noqa: BLE001 -- fail-open invariant
+        return "kimchi"
+
+
+def claude_config_path():
+    """Where the claude variant looks for the Atlassian MCP server:
+    OCR_JIRA_MCP_CONFIG (shared override), else the user's ~/.claude.json."""
+    override = os.environ.get("OCR_JIRA_MCP_CONFIG", "").strip()
+    if override:
+        return override
+    return os.path.join(os.path.expanduser("~"), ".claude.json")
+
+
+def _claude_connector(config_path):
+    """(name, entry, note): the first MCP server in a claude config whose name
+    mentions atlassian or jira, read verbatim; (None, None, note) when the
+    file or the entry is absent/unusable. Never raises."""
+    try:
+        with open(config_path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return None, None, (f"no claude config at {config_path}; add the "
+                            "Atlassian MCP server with `claude mcp add`")
+    except (OSError, ValueError) as exc:
+        return None, None, f"claude config {config_path} unreadable ({exc})"
+    servers = data.get("mcpServers") if isinstance(data, dict) else None
+    if isinstance(servers, dict):
+        for name, entry in servers.items():
+            if isinstance(entry, dict) and any(
+                    w in str(name).lower() for w in ("atlassian", "jira")):
+                return name, entry, None
+    return None, None, (f"no Atlassian MCP server in {config_path}; add one "
+                        "with `claude mcp add`")
 
 
 def _connector_entry(config_path):
@@ -151,19 +204,34 @@ def fetch_issue(key, jira_settings, repo_root, runner):
     non-zero exit into (None, note). NEVER raises.
     """
     try:
-        entry, note = _connector_entry(harness_mcp_config_path())
+        claude = _selected_backend(repo_root) == "claude"
+        if claude:
+            server_name, entry, note = _claude_connector(claude_config_path())
+        else:
+            server_name = CONNECTOR_KEY
+            entry, note = _connector_entry(harness_mcp_config_path())
         if entry is None:
             return None, note
         # ONLY the Atlassian connector -- never the harness's other servers,
         # never the reviewer's zeroed config.
-        side_config = {"mcpServers": {CONNECTOR_KEY: entry}}
+        side_config = {"mcpServers": {server_name: entry}}
         fd, tmp_path = tempfile.mkstemp(prefix="ocr-jira-mcp-",
                                         suffix=".json")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 json.dump(side_config, fh)
-            argv = [_kimchi_bin(), "-p", _prompt(key, jira_settings),
-                    "--no-session", "--mcp-config", tmp_path]
+            if claude:
+                # --strict-mcp-config makes the one-entry config authoritative,
+                # --allowedTools pre-approves only that server's tools, and no
+                # settings source is loaded (a repo's own settings could hold
+                # hooks).
+                argv = [_claude_bin(), "-p", _prompt(key, jira_settings),
+                        "--strict-mcp-config", "--mcp-config", tmp_path,
+                        "--allowedTools", f"mcp__{server_name}",
+                        "--setting-sources", ""]
+            else:
+                argv = [_kimchi_bin(), "-p", _prompt(key, jira_settings),
+                        "--no-session", "--mcp-config", tmp_path]
             out, note = runner(argv, repo_root, _timeout(jira_settings))
         finally:
             try:

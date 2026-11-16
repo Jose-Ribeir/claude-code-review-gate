@@ -83,7 +83,7 @@ def _count(value):
 
 
 def tier_record(tier, *, model="", tokens_in=None, tokens_out=None,
-                token_estimate=None, cost_usd=None, seconds=None):
+                token_estimate=None, cost_usd=None, seconds=None, backend=""):
     """One per-tier cost record (review-gate v2). Raises no I/O errors but
     refuses an unknown tier -- a typo'd bucket would silently split the
     operator's report.
@@ -98,7 +98,7 @@ def tier_record(tier, *, model="", tokens_in=None, tokens_out=None,
     if tier not in TIER_NAMES:
         raise ValueError("unknown tier %r (expected one of %s)"
                          % (tier, ", ".join(TIER_NAMES)))
-    return {
+    rec = {
         "tier": tier,
         "model": str(model or ""),
         "tokens_in": _count(tokens_in),
@@ -107,11 +107,17 @@ def tier_record(tier, *, model="", tokens_in=None, tokens_out=None,
         "cost_usd": _num(cost_usd, 4),
         "seconds": _num(seconds, 2),
     }
+    if backend:
+        # Which review backend (claude / kimchi) ran the call, so the report
+        # can tell the two apart. Present only when known: older records and
+        # callers that do not pass it keep the exact shape they always had.
+        rec["backend"] = str(backend)
+    return rec
 
 
 def record_tier_call(common_dir, tier, *, model="", tokens_in=None,
                      tokens_out=None, token_estimate=None, cost_usd=None,
-                     seconds=None, ts=None):
+                     seconds=None, ts=None, backend=""):
     """Append one per-tier cost record (kind %r) to the local run log.
 
     Returns the record written, or None when telemetry is disabled, the write
@@ -121,7 +127,7 @@ def record_tier_call(common_dir, tier, *, model="", tokens_in=None,
     try:
         rec = tier_record(tier, model=model, tokens_in=tokens_in,
                           tokens_out=tokens_out, token_estimate=token_estimate,
-                          cost_usd=cost_usd, seconds=seconds)
+                          cost_usd=cost_usd, seconds=seconds, backend=backend)
     except ValueError:
         return None
     rec = dict(rec, kind=TIER_RECORD_KIND, ts=ts or time.time())

@@ -560,17 +560,19 @@ def test_in_review_is_false_when_unset_or_empty(monkeypatch):
 
 # --- the reviewer's tool allowlist is read-only -------------------------------
 
-@pytest.mark.xfail(strict=True, reason="Claude CLI argv: DEFAULT_CLAUDE_ARGS carried "
-             "--allowedTools/--disallowedTools. The Kimchi port's worker argv "
-             "(DEFAULT_KIMI_ARGS, pinned in test_argv_golden.py) grants no tools at "
-             "all -- the read-only sandbox is the review-gate-deny.ts extension "
-             "loaded with -e, plus the --no-hardlinks clone the reviewer runs in.")
+# (The claude worker's sandbox is its argv. The kimchi worker's is the
+# review-gate-deny.ts extension loaded with -e, so these two tests read the
+# claude argv, never DEFAULT_KIMI_ARGS.)
 def test_allowlist_grants_no_write_capable_tool():
-    args = review_gate.DEFAULT_CLAUDE_ARGS
+    args = review_gate._claude_review_args()
     allowed = args[args.index("--allowedTools") + 1 : args.index("--disallowedTools")]
     assert "Bash" not in allowed, "bare Bash would pre-approve arbitrary commands"
+    # Besides git, exactly the two helper scripts by literal command prefix.
+    helper_rules = {f"Bash({c} *)" for c in review_gate._helper_cmds().values()}
     for rule in allowed:
         if rule.startswith("Bash("):
+            if rule in helper_rules:
+                continue
             assert rule.startswith("Bash(git "), f"non-git shell rule pre-approved: {rule}"
             # A `param:value` rule against Bash's primary `command` field is
             # ignored by Claude Code (it would be bypassable by a compound
@@ -578,12 +580,8 @@ def test_allowlist_grants_no_write_capable_tool():
             assert ":" not in rule, f"colon form is ignored by Claude Code: {rule}"
 
 
-@pytest.mark.xfail(strict=True, reason="Claude CLI argv: --setting-sources is a Claude "
-             "Code flag with no Kimchi equivalent. The port does not load any "
-             "settings at all (no flag, and --mcp-config '{\"mcpServers\":{}}' pins "
-             "the extension/MCP surface); a hostile repo cannot inject hooks.")
 def test_settings_sources_are_empty_so_a_hostile_repo_cannot_inject_hooks():
-    args = review_gate.DEFAULT_CLAUDE_ARGS
+    args = review_gate.CLAUDE_WORKER_ARGS
     assert args[args.index("--setting-sources") + 1] == ""
 
 
@@ -609,10 +607,14 @@ def test_git_dir_is_absolute_inside_a_repo():
     assert got and os.path.isabs(got)
 
 
-def test_save_raw_output_creates_no_stray_git_dir(tmp_path):
+def test_save_raw_output_creates_no_stray_git_dir(tmp_path, monkeypatch):
+    # Run from an empty cwd, so a stray relative ".git" would show up there. (The
+    # old check looked at the process cwd, which is a linked worktree -- whose
+    # .git is a file -- on some checkouts.)
+    monkeypatch.chdir(tmp_path)
     _save_raw_output("", "some reviewer output")
     assert not (tmp_path / ".git").exists()
-    assert not os.path.exists(os.path.join(os.getcwd(), ".git")) or os.path.isdir(".git")
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_bytecode_writing_is_disabled():
@@ -3140,6 +3142,13 @@ def test_check_limit_false_for_normal_output():
 
 
 def test_parse_resets_at_parses_lisbon_time():
+    try:
+        from zoneinfo import ZoneInfo
+        ZoneInfo("Europe/Lisbon")
+    except Exception:
+        # Windows ships no IANA tz database; zoneinfo needs the `tzdata` package.
+        # The gate degrades to "no reset time" there (covered by the garbage test).
+        pytest.skip("no IANA time-zone database available (pip install tzdata)")
     text = "You've hit your session limit · resets 3:20pm (Europe/Lisbon)"
     epoch = _parse_resets_at(text)
     # Should return a future-ish timestamp (within 24 h).
