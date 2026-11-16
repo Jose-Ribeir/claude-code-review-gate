@@ -208,20 +208,23 @@ def test_no_artifact_means_no_docs_context_and_no_checker_finding(tmp_path):
     assert st.get("verdict") == "pass"
 
 
-def test_docs_only_push_keeps_todays_skipped_behavior(tmp_path):
-    """A push that changes only documents reviews no files: the worker runs
-    without any manifest (the 0.7.0 path), the artifact changes nothing, and
-    the push lands."""
+def test_docs_only_push_now_runs_the_checker_when_a_duty_is_on(tmp_path):
+    """deliberate behavior change (SPEC-14): a docs-only push with an
+    enabled quality duty reviews no CODE, but the documentation checker
+    still spawns on the docs_quality payload -- the docs changer pays for
+    the docs check. A finding from a class that needs docs_context (the
+    fallback manifest carries none) cannot appear, so the push lands. The
+    no-spawn behavior survives only with all duties off (the off-row test)."""
     work = _repo(tmp_path, {"app.py": _APP_V1, "README.md": "# project\n"})
-    _write_docs_summary(work)
     tip = _commit(work, {"README.md": "# project\n\nrewritten docs section\n"})
     env = _env(tmp_path, "t.trace",
                STUB_DOCS_FINDING=json.dumps({"content": _CONTRADICTION}))
     decision, reason = _push(work, env)
     assert decision == "pass", reason
-    assert all(c.get("paths_file") is None for c in _calls(tmp_path, "t.trace"))
+    payload = _docs_quality(tmp_path)
+    assert payload is not None, "docs-only push with deslop on spawns the checker"
     st = _state(work, tip)
-    assert st.get("state") == "done" and st.get("verdict") in ("skip", "skipped", "pass")
+    assert st.get("state") == "done" and st.get("verdict") == "pass"
 
 
 def test_checker_persona_is_fingerprinted(tmp_path):
@@ -959,3 +962,396 @@ def test_all_quality_duties_off_docs_only_push_stays_skipped(tmp_path):
         assert "docs_quality" not in (c.get("manifest") or {})
     st = _state(work, tip)
     assert st.get("state") == "done" and st.get("verdict") in ("skip", "skipped", "pass")
+
+
+# ---------------------------------------------------------------------------
+# SPEC-14.4: gate plumbing -- doc-diff trigger, the docs_quality manifest
+# payload, the docs-only fallback, doc-anchored finding exemption, and
+# command checks. Scenarios drive the real hook with the stub worker; the
+# assertions pin external behavior (did the checker spawn, what the payload
+# carried, did the push block) -- never internals.
+
+import ocr_telemetry as _ot  # noqa: E402
+
+
+def _docs_quality(tmp_path, trace="t.trace"):
+    """The docs_quality block of this run's review manifest, or None."""
+    return (_review_manifest(tmp_path, trace) or {}).get("docs_quality")
+
+
+def _tele_run_records(work):
+    """The runs' telemetry records (kind-less entries are the _TELE runs)."""
+    common = review_gate._git_common_dir(str(work))
+    return [r for r in _ot.load(common, days=1)]
+
+
+def _quality_spec(path, duty, **over):
+    """A quality-duty checker finding (the persona's classes 4-6 shape)."""
+    spec = {
+        "docs_quality_duty": duty,
+        "path": path, "start_line": 1, "end_line": 6,
+        "severity": "high", "confidence": 0.9,
+        "category": "documentation",
+        "existing_code": "## A robust, seamless solution",
+        "content": duty + ": the prose reads as generated slurry",
+    }
+    spec.update(over)
+    return spec
+
+
+_GUIDE = "# Guide\n\nHow the project fits together.\n"
+_ADR_RECORD_1 = "# ADR 0001: use git for reviews\n\nStatus: accepted\n\nContext: pushes.\n\nDecision: gate.\n"
+_ADR_RECORD_2 = "# ADR 0002: verdicts in Python\n\nStatus: accepted\n\nContext: models drift.\n\nDecision: compute.\n"
+
+
+# --- the doc-diff trigger: enable-mode x file-kind matrix --------------------
+
+def test_deslop_on_docs_only_push_spawns_checker_with_quality_payload(tmp_path):
+    """Docs-only push, deslop on (the default): the fallback path builds a
+    manifest carrying docs_quality, so the review session spawns the checker
+    and the quality duties run -- today this push built NO manifest at all."""
+    work = _repo(tmp_path, {"README.md": "# project\n"})
+    tip = _commit(work, {"README.md": "# project\n\nrewritten docs section\n"})
+    decision, reason = _push(work, _env(tmp_path, "t.trace"))
+    assert decision == "pass", reason
+    calls = _calls(tmp_path, "t.trace")
+    spawned = [c for c in calls if c.get("paths_file") and not c.get("resolve_file")]
+    assert spawned, "a docs-only push with an enabled duty must spawn the checker"
+    payload = _docs_quality(tmp_path)
+    assert payload is not None, "the manifest carries docs_quality"
+    assert payload["enabled_duties"] == {
+        "docs-deslop": True, "adr-wait-what": False, "adr-integrity": False}
+    files = payload["files"]
+    assert [f["path"] for f in files] == ["README.md"]
+    assert any("diff" in f or "diff_file" in f for f in files)
+    deslop_ev = payload["evidence"]["docs-deslop"]
+    assert sorted(deslop_ev) == ["README.md"]
+    for key in ("catalog_hits", "throat_clearing", "em_dash_count",
+                "template_skeletons"):
+        assert key in deslop_ev["README.md"], key
+    assert payload["options"]["docs-deslop"] == {}
+    st = _state(work, tip)
+    assert st.get("state") == "done" and st.get("verdict") == "pass"
+
+
+def test_code_only_push_carries_no_docs_quality_key(tmp_path):
+    """File-kind matrix, code-only row: nothing matching the duties' globs,
+    so no docs_quality block and no quality cost."""
+    work = _repo(tmp_path, {"app.py": _APP_V1})
+    _write_docs_summary(work)
+    tip = _commit(work, {"app.py": _APP_V2})
+    decision, reason = _push(work, _env(tmp_path, "t.trace",
+                                        STUB_DOCS_SUMMARY=DOCS_SUMMARY))
+    assert decision == "pass", reason
+    assert _docs_quality(tmp_path) is None
+    st = _state(work, tip)
+    assert st.get("verdict") == "pass"
+
+
+def test_planned_lane_mixed_push_carries_docs_quality_doc_files_only(tmp_path):
+    """Planned lane (a real review plan exists): the docs_quality block rides
+    the same manifest; its files hold the doc-format entries ONLY, never code."""
+    work = _repo(tmp_path, {"app.py": _APP_V1, "README.md": "# project\n"})
+    _write_docs_summary(work)
+    tip = _commit(work, {"app.py": _APP_V2, "README.md": "# project\n\nmore\n"})
+    decision, reason = _push(work, _env(tmp_path, "t.trace",
+                                        STUB_DOCS_SUMMARY=DOCS_SUMMARY))
+    assert decision == "pass", reason
+    payload = _docs_quality(tmp_path)
+    assert payload is not None, "mixed push: the quality payload rides the manifest"
+    assert [f["path"] for f in payload["files"]] == ["README.md"]
+    assert "app.py" not in [f["path"] for f in payload["files"]]
+    st = _state(work, tip)
+    assert st.get("verdict") == "pass"
+
+
+def test_adr_duty_flag_follows_the_adr_globs(tmp_path):
+    """adr-wait-what enabled: an ADR under docs/adr flips its flag and gets
+    STE evidence; the deslop flag stays true for the same doc file."""
+    work = _repo(tmp_path, {"docs/adr/0001-verdicts.md": _ADR_RECORD_1})
+    _write_checks_config(work, {"adr-wait-what": {"enabled": True}})
+    _commit(work, {"docs/adr/0001-verdicts.md": _ADR_RECORD_1 + "\nMore context.\n"})
+    decision, reason = _push(work, _env(tmp_path, "t.trace"))
+    assert decision == "pass", reason
+    payload = _docs_quality(tmp_path)
+    assert payload is not None
+    assert payload["enabled_duties"]["adr-wait-what"] is True
+    assert payload["enabled_duties"]["adr-integrity"] is False
+    ste = payload["evidence"]["adr-wait-what"]["docs/adr/0001-verdicts.md"]
+    for key in ("sentence_length", "acronyms", "passive_voice"):
+        assert key in ste, key
+
+
+def test_adr_duty_stays_off_for_non_adr_markdown(tmp_path):
+    """The same enabled ADR duty does not fire on a non-ADR markdown file;
+    the deslop default still does."""
+    work = _repo(tmp_path, {"docs/guide.md": _GUIDE})
+    _write_checks_config(work, {"adr-wait-what": {"enabled": True},
+                                "adr-integrity": {"enabled": True}})
+    _commit(work, {"docs/guide.md": _GUIDE + "\nMore prose.\n"})
+    decision, reason = _push(work, _env(tmp_path, "t.trace"))
+    assert decision == "pass", reason
+    payload = _docs_quality(tmp_path)
+    assert payload is not None
+    assert payload["enabled_duties"]["adr-wait-what"] is False
+    assert payload["enabled_duties"]["adr-integrity"] is False
+    assert "adr-wait-what" not in payload["evidence"]
+
+
+def test_deep_lane_manifest_carries_the_quality_payload(tmp_path):
+    """The deep lane feeds the checker too: a risky-path push escalates to
+    the deep manifest, and the docs_quality block is injected there."""
+    work = _repo(tmp_path, {"app/x.py": "x = 1\n", "README.md": "# project\n"})
+    tip = _commit(work, {
+        "app/x.py": "x = 2\n",
+        "README.md": "# project\n\nrewritten docs section\n",
+        ".ocr/rule.json": json.dumps({"risk_globs": ["app/**"],
+                                      "risk_threshold": 9}),
+    })
+    decision, reason = _push(work, _env(tmp_path, "t.trace"))
+    assert decision == "pass", reason
+    st = _state(work, tip)
+    assert st.get("tier") == "deep", "the risky push escalated"
+    manifest = _review_manifest(tmp_path, "t.trace")
+    payload = manifest.get("docs_quality")
+    assert payload is not None, "deep manifest carries docs_quality"
+    assert payload["enabled_duties"]["docs-deslop"] is True
+    assert [f["path"] for f in payload["files"]] == ["README.md"]
+
+
+# --- doc-anchored findings: the exemption ------------------------------------
+
+def test_deslop_cluster_finding_at_a_doc_path_blocks_end_to_end(tmp_path):
+    """Story 23's exemption, proven: a docs-deslop finding anchored at the
+    DOCUMENTATION file (never a review target) survives every findings
+    filter, reaches compute_verdict, and blocks -- the denial quotes it."""
+    work = _repo(tmp_path, {"README.md": "# project\n"})
+    tip = _commit(work, {"README.md": "# project\n\nmore docs\n"})
+    spec = _quality_spec("README.md", "docs-deslop", tells=[
+        {"phrase": "robust", "line": 2},
+        {"phrase": "seamless", "line": 3},
+        {"phrase": "—", "line": 4},
+    ])
+    decision, reason = _push(work, _env(tmp_path, "t.trace",
+                                        STUB_DOCS_FINDING=json.dumps(spec)))
+    assert decision == "deny", reason
+    assert "the prose reads as generated slurry" in reason, reason
+    assert "README.md" in reason, reason
+    st = _state(work, tip)
+    assert st.get("verdict") == "block", st
+
+
+def test_deslop_finding_below_the_cluster_rule_is_demoted_and_never_blocks(tmp_path):
+    """The gate-side demotion pass: a docs-deslop finding with a single tell
+    and no document_wide flag is demoted to note severity by the helper's
+    --validate, so it can never block even at high claimed severity."""
+    work = _repo(tmp_path, {"README.md": "# project\n"})
+    tip = _commit(work, {"README.md": "# project\n\nmore docs\n"})
+    spec = _quality_spec("README.md", "docs-deslop",
+                         tells=[{"phrase": "delve", "line": 3}])
+    decision, reason = _push(work, _env(tmp_path, "t.trace",
+                                        STUB_DOCS_FINDING=json.dumps(spec)))
+    assert decision == "pass", reason
+    st = _state(work, tip)
+    assert st.get("verdict") == "pass", st
+    # Demoted gate-side: the content stays visible in the verdict record,
+    # only as a note -- a confidence-0.9 high that reached compute_verdict
+    # UNALTERED would have blocked.
+    assert "[note]" in st.get("reasons", ""), st.get("reasons")
+
+
+def test_document_wide_deslop_finding_survives_the_cluster_rule(tmp_path):
+    """document_wide: true is the cluster rule's other path to blocking."""
+    work = _repo(tmp_path, {"README.md": "# project\n"})
+    _commit(work, {"README.md": "# project\n\nmore docs\n"})
+    spec = _quality_spec("README.md", "docs-deslop", document_wide=True,
+                         tells=[{"phrase": "delve", "line": 3}])
+    decision, reason = _push(work, _env(tmp_path, "t.trace",
+                                        STUB_DOCS_FINDING=json.dumps(spec)))
+    assert decision == "deny", reason
+
+
+def test_integrity_finding_without_tells_is_never_demoted(tmp_path):
+    """The cluster rule is the DESLOP contract: an adr-integrity finding
+    (which carries `reads`, not `tells`) must not be demoted by the
+    --validate pass and blocks at its own severity."""
+    work = _repo(tmp_path, {"docs/adr/0001-verdicts.md": _ADR_RECORD_1})
+    _write_checks_config(work, {"adr-integrity": {"enabled": True}})
+    tip = _commit(work, {"docs/adr/0001-verdicts.md": _ADR_RECORD_1 + "\nMore.\n"})
+    spec = _quality_spec("docs/adr/0001-verdicts.md", "adr-integrity",
+                         reads=["scripts/review-gate.py"])
+    decision, reason = _push(work, _env(tmp_path, "t.trace",
+                                        STUB_DOCS_FINDING=json.dumps(spec)))
+    assert decision == "deny", reason
+    st = _state(work, tip)
+    assert st.get("verdict") == "block", st
+
+
+# --- command checks (story 4) ------------------------------------------------
+
+_CHECK_BLOCK_SH = (
+    "#!/bin/sh\n"
+    "files=\"$(tr -d '[]\" ' </dev/stdin)\"\n"
+    "printf '{\"findings\": [{\"path\": \"app.py\", \"start_line\": 1, "
+    "\"end_line\": 1, \"severity\": \"high\", \"confidence\": 0.95, "
+    "\"category\": \"custom\", \"content\": \"dsl-check tripped on: %s\"}]}' \"$files\"\n"
+)
+
+
+def _repo_with_check(tmp_path, check_body, mode=None, globs=("**/*.py",)):
+    """A repo carrying an executable repo-relative command check, with the
+    check declared in .ocr/config.json (uncommitted override)."""
+    work = _repo(tmp_path, {"app.py": _APP_V1})
+    p = work / "scripts" / "dslcheck.sh"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(check_body, encoding="utf-8")
+    p.chmod(0o755)
+    _git(["add", "."], cwd=work)
+    _git(["commit", "-q", "-m", "add check"], cwd=work)
+    declaration = {"command": "scripts/dslcheck.sh", "globs": list(globs)}
+    if mode:
+        declaration["mode"] = mode
+    _write_checks_config(work, {"dsl-check": declaration})
+    return work
+
+
+def test_command_check_findings_block_and_are_tagged(tmp_path):
+    """A registered command check runs on its matching changed files
+    (repo-relative executable, cwd the repo root, changed-file list as stdin
+    JSON); its findings join the stream, tagged with the check name, and a
+    block-mode finding blocks -- default mode is block."""
+    work = _repo_with_check(tmp_path, _CHECK_BLOCK_SH)
+    tip = _commit(work, {"app.py": _APP_V2})
+    decision, reason = _push(work, _env(tmp_path, "t.trace"))
+    assert decision == "deny", reason
+    assert "dsl-check tripped" in reason, reason
+    assert "app.py" in reason, "the check saw the matching changed-file list"
+    st = _state(work, tip)
+    assert st.get("verdict") == "block", st
+    records = _tele_run_records(work)
+    assert any(r.get("command_checks") for r in records), records
+
+
+def test_command_check_warn_mode_never_blocks(tmp_path):
+    """mode: warn downgrades, never upgrades: the same blocking-shaped
+    finding is clamped below the block bar, so the push lands with a warn."""
+    work = _repo_with_check(tmp_path, _CHECK_BLOCK_SH, mode="warn")
+    tip = _commit(work, {"app.py": _APP_V2})
+    decision, reason = _push(work, _env(tmp_path, "t.trace"))
+    assert decision == "pass", reason
+    st = _state(work, tip)
+    assert st.get("verdict") == "warn", st
+    assert "dsl-check tripped" in st.get("reasons", "")
+
+
+def test_command_check_malformed_output_degrades_and_never_crashes(tmp_path):
+    """Unparseable check output: the check's findings are discarded, a
+    warning + telemetry record is kept, and the push lands -- never silently,
+    never crashing the gate."""
+    work = _repo_with_check(tmp_path, "#!/bin/sh\ncat >/dev/null\necho 'not json'\n")
+    tip = _commit(work, {"app.py": _APP_V2})
+    decision, reason = _push(work, _env(tmp_path, "t.trace"))
+    assert decision == "pass", reason
+    st = _state(work, tip)
+    assert st.get("state") == "done" and st.get("verdict") == "pass", st
+    records = [r for r in _tele_run_records(work) if r.get("command_checks")]
+    assert records, "a telemetry record per command-check run"
+    entry = records[-1]["command_checks"][0]
+    assert entry.get("error"), entry
+
+
+def test_command_check_nonzero_exit_degrades_and_never_crashes(tmp_path):
+    """A failing check (nonzero exit) is the same degrade path: warn +
+    telemetry, findings discarded, push lands."""
+    work = _repo_with_check(tmp_path, "#!/bin/sh\ncat >/dev/null\nexit 3\n")
+    tip = _commit(work, {"app.py": _APP_V2})
+    decision, reason = _push(work, _env(tmp_path, "t.trace"))
+    assert decision == "pass", reason
+    st = _state(work, tip)
+    assert st.get("verdict") == "pass", st
+    records = [r for r in _tele_run_records(work) if r.get("command_checks")]
+    assert records and records[-1]["command_checks"][0].get("error")
+
+
+def test_command_check_does_not_run_without_matching_files(tmp_path):
+    """Story 5: no push pays for a check it cannot trip. A check whose globs
+    match nothing in the push is skipped entirely -- its (blocking) output
+    can never appear."""
+    work = _repo_with_check(tmp_path, _CHECK_BLOCK_SH, globs=["**/*.sql"])
+    tip = _commit(work, {"app.py": _APP_V2})
+    decision, reason = _push(work, _env(tmp_path, "t.trace"))
+    assert decision == "pass", reason
+    assert "dsl-check tripped" not in (_state(work, tip).get("reasons", ""))
+
+
+def test_command_check_fails_soft_when_the_command_is_missing(tmp_path):
+    """A declared command that does not exist on disk degrades to warn +
+    telemetry, never a crash."""
+    work = _repo(tmp_path, {"app.py": _APP_V1})
+    _write_checks_config(work, {
+        "ghost": {"command": "scripts/does-not-exist.sh", "globs": ["**/*.py"]}})
+    tip = _commit(work, {"app.py": _APP_V2})
+    decision, reason = _push(work, _env(tmp_path, "t.trace"))
+    assert decision == "pass", reason
+    st = _state(work, tip)
+    assert st.get("verdict") == "pass", st
+    records = [r for r in _tele_run_records(work) if r.get("command_checks")]
+    assert records and records[-1]["command_checks"][0].get("error")
+
+
+# --- the sweep option (story 20) ----------------------------------------------
+
+def test_sweep_true_expands_integrity_evidence_to_the_whole_records_root(tmp_path):
+    """sweep: true on adr-integrity widens its evidence targets from the diff
+    to every ADR under the records root; the diff-file list itself stays the
+    change set, and the (non-sweeping) deslop evidence stays diff-scoped."""
+    work = _repo(tmp_path, {"docs/adr/0001-first.md": _ADR_RECORD_1,
+                            "docs/adr/0002-second.md": _ADR_RECORD_2})
+    _write_checks_config(work, {"adr-integrity": {"enabled": True, "sweep": True}})
+    _commit(work, {"docs/adr/0002-second.md": _ADR_RECORD_2 + "\nConsequences: ok.\n"})
+    decision, reason = _push(work, _env(tmp_path, "t.trace"))
+    assert decision == "pass", reason
+    payload = _docs_quality(tmp_path)
+    assert payload["enabled_duties"]["adr-integrity"] is True
+    assert [f["path"] for f in payload["files"]] == ["docs/adr/0002-second.md"]
+    integrity = payload["evidence"]["adr-integrity"]
+    assert sorted(integrity) == ["docs/adr/0001-first.md",
+                                 "docs/adr/0002-second.md"]
+    for facts in integrity.values():
+        for key in ("missing_paths", "dangling_links", "unresolved_adr_refs"):
+            assert key in facts, key
+    assert sorted(payload["evidence"]["docs-deslop"]) == ["docs/adr/0002-second.md"]
+
+
+def test_sweep_default_off_keeps_evidence_scoped_to_the_changed_adrs(tmp_path):
+    """Default off: an unchanged ADR is never a target, so push cost does not
+    grow with the corpus."""
+    work = _repo(tmp_path, {"docs/adr/0001-first.md": _ADR_RECORD_1,
+                            "docs/adr/0002-second.md": _ADR_RECORD_2})
+    _write_checks_config(work, {"adr-integrity": {"enabled": True}})
+    _commit(work, {"docs/adr/0002-second.md": _ADR_RECORD_2 + "\nConsequences: ok.\n"})
+    decision, reason = _push(work, _env(tmp_path, "t.trace"))
+    assert decision == "pass", reason
+    payload = _docs_quality(tmp_path)
+    assert sorted(payload["evidence"]["adr-integrity"]) == ["docs/adr/0002-second.md"]
+
+
+def test_duty_options_pass_through_and_sentence_cap_reaches_the_evidence(tmp_path):
+    """The repo's per-duty checks options travel in the payload, and the
+    sentence cap reaches the STE scan."""
+    work = _repo(tmp_path, {"docs/adr/0001-verdicts.md": _ADR_RECORD_1})
+    _write_checks_config(work, {
+        "adr-wait-what": {"enabled": True, "sentence_cap": 12,
+                          "sections": ["Status", "Context", "Decision"]},
+        "adr-integrity": {"enabled": True, "template": "docs/adr/template.md"},
+    })
+    _commit(work, {"docs/adr/0001-verdicts.md": _ADR_RECORD_1 + "\nMore.\n"})
+    decision, reason = _push(work, _env(tmp_path, "t.trace"))
+    assert decision == "pass", reason
+    payload = _docs_quality(tmp_path)
+    opts = payload["options"]
+    assert opts["adr-wait-what"]["sections"] == ["Status", "Context", "Decision"]
+    assert opts["adr-wait-what"]["sentence_cap"] == 12
+    assert opts["adr-integrity"]["template"] == "docs/adr/template.md"
+    ste = payload["evidence"]["adr-wait-what"]["docs/adr/0001-verdicts.md"]
+    assert ste["sentence_length"]["cap"] == 12
