@@ -343,3 +343,43 @@ def test_mr_diff_facts_parses_numstat_brace_renames(tmp_path):
     tip = _git(["rev-parse", "HEAD"], cwd=work)
     paths, _ = _rg._mr_diff_facts(str(work), base, tip)
     assert paths == ["docs/new-adrs.md"], paths
+
+
+
+def test_mr_diff_facts_keeps_literal_braces_in_long_form_names(tmp_path):
+    """Gate self-review round 2: 'vet/a{1}.md => web/b{2}.txt' (long form,
+    literal braces) must stay intact — the naive '{'-in-path detector
+    corrupted it to 'ab{2.txt'."""
+    work = tmp_path / "work"
+    for d in ("vet", "web"):
+        (work / d).mkdir(parents=True)
+    _git(["init", "-b", "main", str(work)], cwd=work)
+    _config(work)
+    (work / "vet" / "a{1}.md").write_text("x\n")
+    _git(["add", "."], cwd=work)
+    _git(["commit", "-m", "base"], cwd=work)
+    base = _git(["rev-parse", "HEAD"], cwd=work)
+    _git(["mv", "vet/a{1}.md", "web/b{2}.txt"], cwd=work)
+    _git(["commit", "-m", "rename"], cwd=work)
+    tip = _git(["rev-parse", "HEAD"], cwd=work)
+    paths, _ = _rg._mr_diff_facts(str(work), base, tip)
+    assert paths == ["web/b{2}.txt"], paths
+
+
+def test_mr_diff_facts_brace_form_with_braces_in_the_suffix(tmp_path):
+    """`{docs => web}/a{1}.md` (literal braces after the close) must resolve
+    to `web/a{1}.md`."""
+    work = tmp_path / "work"
+    for d in ("docs", "web"):
+        (work / d).mkdir(parents=True)
+    _git(["init", "-b", "main", str(work)], cwd=work)
+    _config(work)
+    (work / "docs" / "a{1}.md").write_text("x\n")
+    _git(["add", "."], cwd=work)
+    _git(["commit", "-m", "base"], cwd=work)
+    base = _git(["rev-parse", "HEAD"], cwd=work)
+    _git(["mv", "docs/a{1}.md", "web/a{1}.md"], cwd=work)
+    _git(["commit", "-m", "rename"], cwd=work)
+    tip = _git(["rev-parse", "HEAD"], cwd=work)
+    paths, _ = _rg._mr_diff_facts(str(work), base, tip)
+    assert paths == ["web/a{1}.md"], paths
