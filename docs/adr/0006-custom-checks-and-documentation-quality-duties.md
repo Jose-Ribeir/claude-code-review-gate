@@ -10,7 +10,8 @@
   `scripts/deslop_catalog.json` (SPEC-14.2, `6d40dec`); the docs-checker
   persona's quality-duty sections (SPEC-14.3, `9ac38dd`); the gate plumbing
   for the `docs_quality` payload, spawn rule, and command-check execution
-  (SPEC-14.4, `8f501d7`).
+  (SPEC-14.4, `8f501d7`); the guilty-until-proven-innocent hardening
+  of the adr-integrity duty (SPEC-14.6, this commit).
 
 ## Context
 
@@ -72,7 +73,18 @@ exactly the keys it shipped and nothing else.
    passive-voice estimate) for adr-wait-what; existence facts
    (`missing_paths`, `dangling_links`, `unresolved_adr_refs`) for
    adr-integrity — and emits it into the manifest's `docs_quality.evidence`
-   block in the established arch_flags pattern. Context-before-Decision is
+   block in the established arch_flags pattern. The integrity duty is
+   guilty-until-proven-innocent, scoped to claims about present reality
+   (what exists, what code does, what a document says; forward-looking
+   statements — intentions, predictions, expected consequences — are not
+   claims and never fail on unverifiability): a claim the checker cannot
+   verify — cited thing unreadable, behavior indeterminable from readable
+   code or docs, external or unreachable reference — is a blocking
+   finding quoting the claim verbatim, naming what could not be
+   verified, and listing the reads attempted, never a silent pass. The
+   rationale is the one-verdict-authority discipline: silently clearing
+   an unchecked claim is a verdict issued outside `compute_verdict`.
+   Context-before-Decision is
    enforced unconditionally; an ADR that opens with its conclusion failed
    its reader before line three. The ADR structure a duty checks against is
    the repository's own — a `sections` list or a `template` file — with the

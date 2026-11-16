@@ -1514,3 +1514,170 @@ def test_duty_options_pass_through_and_sentence_cap_reaches_the_evidence(tmp_pat
     assert opts["adr-integrity"]["template"] == "docs/adr/template.md"
     ste = payload["evidence"]["adr-wait-what"]["docs/adr/0001-verdicts.md"]
     assert ste["sentence_length"]["cap"] == 12
+
+
+# ---------------------------------------------------------------------------
+# SPEC-14.6: guilty-until-proven-innocent -- a claim a changed ADR makes
+# about PRESENT REALITY that the checker cannot verify is a BLOCKING
+# adr-integrity finding, never a silent skip (house rule ADR 0001). Two
+# persona-contract pins + the gate-side scenarios through the stub checker:
+# the stub emits the finding the persona's rule demands (or emits nothing --
+# the forward-looking row), and the gate behavior is what the tests pin.
+
+
+def _findings_log_last(work):
+    """The last verdict-history entry (append-only FINDINGS_LOG): its
+    findings are stored verbatim post normalization/verdict-assembly, so
+    this is where field-preservation through the seam is provable."""
+    common = review_gate._git_common_dir(str(work))
+    path = review_gate._findings_log_path(common)
+    lines = [x for x in path.read_text(encoding="utf-8").splitlines() if x.strip()]
+    assert lines, "a completed review must leave a findings-log entry"
+    return json.loads(lines[-1])
+
+
+_UNVERIFIABLE_CLAIM = "The gate retries a failed review three times."
+
+
+def _unverifiable_claim_spec():
+    """A quality-duty checker finding in the persona's SPEC-14.6 unverifiable
+    shape: doc-anchored at the ADR, duty adr-integrity, quoting the claim
+    verbatim (existing_code), naming what could not be verified (content),
+    listing the reads attempted, and carrying the verified-claim count."""
+    return _quality_spec(
+        "docs/adr/0001-verdicts.md", "adr-integrity",
+        existing_code=_UNVERIFIABLE_CLAIM,
+        content=("adr-integrity: the claim \"" + _UNVERIFIABLE_CLAIM + "\" "
+                 "could not be verified -- no gate code or doc at the tip "
+                 "settles the retry behavior; reads attempted: "
+                 "scripts/review-gate.py, README.md. The push unblocks by "
+                 "touching a code file that references the claim."),
+        reads=["scripts/review-gate.py", "README.md"],
+        verified_claims=2)
+
+
+def test_persona_integrity_unverifiable_claim_is_a_blocking_finding():
+    """The unverifiable-claim rule in the persona's duty 6 (the block is a
+    persona-contract change; the gate only needs findings to pass through
+    its existing seam): present-reality scoping, the quote/name/reads
+    discipline, blocking posture, never silent, and the house-rule
+    rationale pointing at the one verdict authority."""
+    body = _persona_body()
+    sec = body[body.index("ADR claim integrity"):]
+    assert "present reality" in sec.lower()
+    assert "unverifiable" in sec.lower()
+    assert "guilty until proven innocent" in sec.lower()
+    assert "BLOCKING" in sec
+    assert "never silent" in sec.lower() or "silently" in sec.lower()
+    assert "reads attempted" in sec.lower()
+    assert "quotes the claim" in sec.lower() and "verbatim" in sec.lower()
+    assert "verdict authority" in sec.lower()
+
+
+def test_persona_integrity_present_reality_scoping_guard():
+    """The scoping guard is explicit: forward-looking statements --
+    intentions, predictions, expected consequences -- are NOT claims and
+    never fail on unverifiability; they cannot go down with the rule."""
+    body = _persona_body()
+    sec = body[body.index("ADR claim integrity"):]
+    assert "forward-looking" in sec.lower()
+    assert "are NOT claims" in sec
+    assert "never fail on unverifiability" in sec
+    for anchor in ("intentions", "predictions", "consequences"):
+        assert anchor in sec, anchor
+
+
+def test_persona_integrity_records_the_verified_claim_count():
+    """Verified-claim accounting: every integrity finding carries a
+    `verified_claims` summary field -- the audit counterpart of the `reads`
+    trail -- telemetry only, never a gate (the deslop `score` discipline)."""
+    body = _persona_body()
+    assert "`verified_claims`" in body
+    assert "verified TRUE" in body
+    # The telemetry-only posture rides beside it, worded as telemetry.
+    assert "telemetry" in body
+    for anchor in ("never a gate", "never block"):
+        assert anchor in body.lower(), anchor
+
+
+def test_unverifiable_claim_finding_blocks_end_to_end(tmp_path):
+    """Story: an unverifiable-claim finding BLOCKS the push. The stub plays
+    the checker emitting it against an ADR push with the duty enabled; the
+    finding is doc-anchored, carries docs_quality_duty "adr-integrity", and
+    its denial quotes the claim verbatim."""
+    work = _repo(tmp_path, {"docs/adr/0001-verdicts.md": _ADR_RECORD_1})
+    _write_checks_config(work, {"adr-integrity": {"enabled": True}})
+    tip = _commit(work, {"docs/adr/0001-verdicts.md": _ADR_RECORD_1 + "\nMore.\n"})
+    decision, reason = _push(
+        work, _env(tmp_path, "t.trace",
+                   STUB_DOCS_FINDING=json.dumps(_unverifiable_claim_spec())))
+    assert decision == "deny", reason
+    assert _UNVERIFIABLE_CLAIM in reason, "the denial names the blocked claim"
+    st = _state(work, tip)
+    assert st.get("verdict") == "block", st
+
+
+def test_unverifiable_claim_finding_survives_verdict_assembly_unaltered(tmp_path):
+    """The same finding passes the falsify/normalization seam unaltered:
+    duty tag, claim quote, reads trail, and the verified_claims count all
+    reach the verbatim findings record intact."""
+    work = _repo(tmp_path, {"docs/adr/0001-verdicts.md": _ADR_RECORD_1})
+    _write_checks_config(work, {"adr-integrity": {"enabled": True}})
+    _commit(work, {"docs/adr/0001-verdicts.md": _ADR_RECORD_1 + "\nMore.\n"})
+    decision, _ = _push(
+        work, _env(tmp_path, "t.trace",
+                   STUB_DOCS_FINDING=json.dumps(_unverifiable_claim_spec())))
+    assert decision == "deny"
+    entry = _findings_log_last(work)
+    f = next(x for x in (entry.get("findings") or [])
+             if x.get("docs_quality_duty") == "adr-integrity")
+    assert f["path"] == "docs/adr/0001-verdicts.md"  # doc-anchored
+    assert f["category"] == "documentation"
+    assert f["existing_code"] == _UNVERIFIABLE_CLAIM  # the claim, verbatim
+    assert f["reads"] == ["scripts/review-gate.py", "README.md"]
+    assert f["verified_claims"] == 2
+    assert not f.get("tells"), "not a deslop finding: no cluster-rule bar"
+
+
+def test_warn_mode_clamp_applies_to_an_unverifiable_claim_finding(tmp_path):
+    """The new block is still a quality-duty finding: a warn-mode integrity
+    duty demotes it like any other quality finding (the clamp from the
+    review fixes) -- the push lands with a warn, never blocked bypassing
+    compute_verdict's rules."""
+    work = _repo(tmp_path, {"docs/adr/0001-verdicts.md": _ADR_RECORD_1})
+    _write_checks_config(work, {"adr-integrity": {"enabled": True, "mode": "warn"}})
+    tip = _commit(work, {"docs/adr/0001-verdicts.md": _ADR_RECORD_1 + "\nMore.\n"})
+    decision, _ = _push(
+        work, _env(tmp_path, "t.trace",
+                   STUB_DOCS_FINDING=json.dumps(_unverifiable_claim_spec())))
+    assert decision == "pass"
+    st = _state(work, tip)
+    assert st.get("verdict") == "warn", st
+    entry = _findings_log_last(work)
+    f = next(x for x in (entry.get("findings") or [])
+             if x.get("docs_quality_duty") == "adr-integrity")
+    assert f["severity"] != "high" or float(f["confidence"]) <= 0.5, f
+
+
+def test_forward_looking_statement_produces_no_integrity_finding(tmp_path):
+    """The scope guard through the stub path: only findings the checker
+    EMITS count. An ADR carrying only forward-looking claims pushes with
+    the duty enabled and no STUB_DOCS_FINDING (the checker's honest output
+    for a forward-looking-only change) -- the push lands clean, no
+    adr-integrity finding anywhere, the duty still enabled in the payload."""
+    work = _repo(tmp_path, {"docs/adr/0001-verdicts.md": _ADR_RECORD_1})
+    _write_checks_config(work, {"adr-integrity": {"enabled": True}})
+    forward_only = (
+        _ADR_RECORD_1
+        + "\nConsequences: this decision will make future pushes cleaner, "
+          "and the gate is expected to stay self-hosting.\n")
+    tip = _commit(work, {"docs/adr/0001-verdicts.md": forward_only})
+    decision, reason = _push(work, _env(tmp_path, "t.trace"))
+    assert decision == "pass", reason
+    st = _state(work, tip)
+    assert st.get("verdict") == "pass", st
+    payload = _docs_quality(tmp_path)
+    assert payload["enabled_duties"]["adr-integrity"] is True
+    entry = _findings_log_last(work)
+    assert not any(x.get("docs_quality_duty") == "adr-integrity"
+                   for x in (entry.get("findings") or []))

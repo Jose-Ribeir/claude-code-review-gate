@@ -48,7 +48,8 @@ unit_diff is `unit:<path>:<unit>:<part>` and a context item `context:<role>:<pat
                      doc_path?} -- a documentation-checker finding, only when the
                      manifest carries docs_context (docs-gate 01) or, for a spec with
                      docs_quality_duty set, a docs_quality payload (SPEC-14.4; the
-                     quality fields tells/document_wide/score/reads pass through). Contradiction
+                     quality fields tells/document_wide/score/reads/
+                     verified_claims pass through). Contradiction
                      class (docs-gate 03): dropped per the checker's contract when
                      either quote is missing or source_doc names a document outside
                      docs_context.corpus. Drift class (docs-gate 04): docs_kind/
@@ -514,7 +515,8 @@ if docs_finding and (_docs_ctx or _docs_quality):
             }
             for k in ("docs_kind", "stale_passage", "doc_path",
                       "docs_quality_duty", "tells", "document_wide",
-                      "score", "reads", "start_line", "end_line"):
+                      "score", "reads", "verified_claims",
+                      "start_line", "end_line"):
                 if k in spec:
                     f[k] = spec[k]
             findings.append(f)

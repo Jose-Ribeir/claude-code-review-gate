@@ -175,7 +175,11 @@ You may read any file at the tip for verification. You never modify anything.
      run; the absence of a glossary is never a finding.
 6. **ADR claim integrity — only when `docs_quality.enabled_duties["adr-integrity"]`
    is true.** Verify every claim a changed ADR in `docs_quality.files`
-   makes about reality:
+   makes about present reality — every statement asserting a present fact
+   about the repository, its code, or its documents (a file that exists,
+   what a function or config key does, what a cited ADR or document says).
+   Forward-looking statements — intentions, predictions, expected
+   consequences — are NOT claims: they never fail on unverifiability.
    - **Referenced files exist at the tip.**
      `docs_quality.evidence["adr-integrity"]` carries the deterministic
      existence facts per file: `missing_paths` (inline-code and
@@ -194,10 +198,23 @@ You may read any file at the tip for verification. You never modify anything.
      finding, and it quotes BOTH sides verbatim — the citing ADR's claim
      and the cited document's actual words — exactly the two-quote
      discipline of class 1.
+   - **Guilty until proven innocent: the unverifiable claim BLOCKS.** A
+     claim about present reality you cannot verify — the cited thing is
+     unreadable or missing, the claimed behavior is indeterminable from
+     the code or docs you can read, or the reference is external and
+     unreachable — is a BLOCKING integrity finding, never silence: an
+     unchecked claim that passes unchallenged silently clears a fact the
+     change depends on, and only `compute_verdict` may clear anything
+     (the one verdict authority; ADR 0001). The finding quotes the claim
+     verbatim, names exactly what could not be verified, and lists the
+     reads attempted. It rides the duty's normal path — doc-anchored,
+     subject to the duty's mode — no new verdict machinery.
    Verification is capped: only verify claims as far as a finding would
    require — a claim shown true costs no more reads. Record the read
    breadth for telemetry: every integrity finding carries a `reads` list of
-   the paths you read to verify it. When the duty option
+   the paths you read to verify it and a `verified_claims` count of the
+   claims you verified TRUE — telemetry only, a summary field like the
+   deslop `score`: never a gate, never blocks. When the duty option
    `options["adr-integrity"].sweep` is true the whole ADR corpus is in scope;
    otherwise only the changed ADRs — claims against unchanged files, code,
    or previously recorded ADRs are still verified against the tip.
@@ -216,8 +233,9 @@ Rules for every finding:
 - A finding without a verbatim quote of BOTH sides is not a finding: drop it.
   The two sides for quality findings are the ADR's claim and the cited
   document's actual words (mischaracterization); single-source quality
-  findings (a missing section, an over-cap sentence, a slop cluster) quote
-  the offending passage verbatim in `existing_code`.
+  findings (a missing section, an over-cap sentence, a slop cluster, an
+  unverifiable claim) quote the offending passage verbatim in
+  `existing_code` — for an unverifiable claim, the claimed text itself.
 - In `content`, state plainly how the push unblocks: a fix must touch a code
   file that references the record (that touch is how the gate recognizes the
   fix); a pure documentation fix re-blocks once and proceeds via a logged
@@ -254,7 +272,8 @@ A quality-duty finding (classes 4–6) additionally carries `docs_quality_duty`
 naming the duty (`"docs-deslop"`, `"adr-wait-what"`, or `"adr-integrity"`); a
 deslop finding carries `tells` (`[{"phrase", "line"}]`), `document_wide` when
 it applies, and `score` (the five dimensions, summary only); an integrity
-finding carries `reads` (the paths read to verify the claim). The `category`
+finding carries `reads` (the paths read to verify the claim) and
+`verified_claims` (claims verified TRUE; telemetry, never a gate). The `category`
 stays `"documentation"`: quality findings ride the same findings stream — the
 same normalization, falsify pass, and blocking rule as every other finding.
 
