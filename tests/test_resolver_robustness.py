@@ -444,9 +444,13 @@ def _two_file_history(tmp_path):
     return work, c0, _git(["rev-parse", "HEAD"], cwd=work)
 
 
-def _cross_prior(source_tip):
+def _cross_prior(work, source_tip, c0="", traced=True):
+    """The finding as the LATEST ledger record carries it: re-stamped with a
+    newer source_tip, but with the stable target_oid of the flagged blob."""
     prior = _prior(path="code.py", existing_code="def guard(): pass")
     prior["record"] = {"source_tip": source_tip}
+    if traced:
+        prior["target_oid"] = _git(["rev-parse", f"{c0}:code.py"], cwd=work)
     return prior
 
 
@@ -454,13 +458,15 @@ def test_guard_accepts_a_fix_added_in_another_file_since_the_finding(tmp_path):
     work, c0, c1 = _two_file_history(tmp_path)
     res = {"status": "resolved", "evidence_path": "doc.md",
            "evidence_quote": "Under claude the guard stands down."}
-    # doc.md is not in the plan and code.py never changed: still a fix.
+    # The record was re-stamped AFTER the fix (source_tip == c1), the way a
+    # carried finding's record is on every later review: the fix still counts.
+    prior = _cross_prior(work, c1, c0)
     assert review_gate._guard_resolution(res, [], f"{c0}..{c1}", str(work),
-                                         prior=_cross_prior(c0), tip=c1)
+                                         prior=prior, tip=c1)
     # ...and the judge, not just the guard, now calls it resolved even though
     # the flagged code is still verbatim at the tip.
-    assert review_gate._judge_resolution(
-        _cross_prior(c0), res, [], f"{c0}..{c1}", str(work), c1) == "resolved"
+    assert review_gate._judge_resolution(prior, res, [], f"{c0}..{c1}", str(work),
+                                         c1) == "resolved"
 
 
 def test_guard_rejects_cross_file_evidence_that_was_already_there(tmp_path):
@@ -468,10 +474,22 @@ def test_guard_rejects_cross_file_evidence_that_was_already_there(tmp_path):
     res = {"status": "resolved", "evidence_path": "doc.md",
            "evidence_quote": "The guard always applies."}   # present at c0
     assert not review_gate._guard_resolution(res, [], f"{c0}..{c1}", str(work),
-                                             prior=_cross_prior(c0), tip=c1)
+                                             prior=_cross_prior(work, c1, c0), tip=c1)
 
 
-def test_guard_cross_file_fails_closed_without_a_recorded_commit(tmp_path):
+def test_guard_cross_file_falls_back_to_the_recorded_commit(tmp_path):
+    work, c0, c1 = _two_file_history(tmp_path)
+    res = {"status": "resolved", "evidence_path": "doc.md",
+           "evidence_quote": "Under claude the guard stands down."}
+    # No traceable blob: the record's own source_tip is the base.
+    assert review_gate._guard_resolution(res, [], f"{c0}..{c1}", str(work),
+                                         prior=_cross_prior(work, c0, traced=False), tip=c1)
+    # ...but a source_tip stamped after the fix measures nothing new: rejected.
+    assert not review_gate._guard_resolution(res, [], f"{c0}..{c1}", str(work),
+                                             prior=_cross_prior(work, c1, traced=False), tip=c1)
+
+
+def test_guard_cross_file_fails_closed_without_any_base(tmp_path):
     work, c0, c1 = _two_file_history(tmp_path)
     res = {"status": "resolved", "evidence_path": "doc.md",
            "evidence_quote": "Under claude the guard stands down."}
@@ -486,7 +504,8 @@ def test_guard_cross_file_rejects_a_quote_that_is_not_in_the_diff(tmp_path):
     work, c0, c1 = _two_file_history(tmp_path)
     res = {"status": "resolved", "evidence_path": "doc.md",
            "evidence_quote": "A sentence nobody wrote."}
+    prior = _cross_prior(work, c1, c0)
     assert not review_gate._guard_resolution(res, [], f"{c0}..{c1}", str(work),
-                                             prior=_cross_prior(c0), tip=c1)
-    assert review_gate._judge_resolution(
-        _cross_prior(c0), res, [], f"{c0}..{c1}", str(work), c1) == "still_present"
+                                             prior=prior, tip=c1)
+    assert review_gate._judge_resolution(prior, res, [], f"{c0}..{c1}", str(work),
+                                         c1) == "still_present"

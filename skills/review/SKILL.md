@@ -1612,8 +1612,10 @@ This is a blocking gate. A false `resolved` ships a defect; a false
 ## Rules
 
 - `resolved`: the fix evidence must be on the **added** side (`+` lines) of
-  either a diff for a file in `{{ACTIVE_PATHS}}`, or the since-finding diff of
-  the finding's own file. `evidence_path` names that file.
+  a diff for a file in `{{ACTIVE_PATHS}}`, of the since-finding diff of the
+  finding's own file, or of the since-finding diff of any other file the fix
+  lives in (a doc, an ADR, a caller: the flagged code may rightly stay as it
+  is). `evidence_path` names that file.
 - `still_present`: `evidence_path` is the file (normally the finding's own
   `path`) and `evidence_quote` is a verbatim snippet of the offending code in
   that file **at the tip**. It is checked mechanically against the tip.

@@ -11,8 +11,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   whose flagged code stays as it is, but whose fix lands elsewhere (a doc, an ADR),
   stayed "still present" forever: the resolver's evidence was only accepted from
   files in the run's plan or from the finding's own file. The guard now also accepts
-  a quote that was ADDED to the evidence file since the commit the finding was
-  recorded at (`record.source_tip`); without a recorded commit it still fails closed.
+  a quote that was ADDED to the evidence file since the finding was first made
+  (the commit that introduced the flagged blob; a record's `source_tip` is only
+  the fallback, since every review re-stamps it); with no base it still fails closed.
 - **Windows: a multi-line prompt no longer breaks the claude launch.** An npm
   `claude.CMD` shim lets cmd.exe cut the command line at the first newline, so a
   partial re-review failed with "Unknown command". The gate launches the native

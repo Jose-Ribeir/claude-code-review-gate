@@ -7284,6 +7284,28 @@ def _quote_in_added_lines(diff_args, quote, review_root):
     return _norm_ws(quote) in _norm_ws(added)
 
 
+def _finding_origin_commit(review_root, tip, prior):
+    """The commit a prior finding was first made against, or "".
+
+    A finding is carried from review to review and every review re-stamps its
+    ledger record with a newer `source_tip`, so that field says where the
+    finding was last SEEN, not where it started -- a fix made in between would
+    fall before it. `target_oid` (the flagged file's blob when the finding was
+    made) is stable across carries: the oldest commit that introduced that
+    blob, reachable from the tip, is where the finding started. Falls back to
+    the record's own `source_tip` when the blob cannot be traced.
+    """
+    f = prior.get("finding") or {}
+    path = f.get("path") or ""
+    target_oid = prior.get("target_oid") or f.get("target_oid") or ""
+    if tip and path and target_oid:
+        out, rc = _git(["log", "--reverse", "--format=%H", f"--find-object={target_oid}",
+                        tip, "--", path], cwd=review_root)
+        if rc == 0 and out.strip():
+            return out.split()[0]
+    return str((prior.get("record") or {}).get("source_tip") or "")
+
+
 def _guard_resolution(resolution, active_plan_items, push_range, review_root,
                       prior=None, tip="", tip_cache=None, tip_oids=None):
     """True if a 'resolved' verdict passes the Python guard.
@@ -7295,8 +7317,7 @@ def _guard_resolution(resolution, active_plan_items, push_range, review_root,
       (its target blob -> its tip blob): a fix from an earlier push whose
       resolution was never recorded is still a fix, and still an addition;
     - with `prior` and `tip`, for a fix in ANOTHER file, the diff of that file
-      from the commit the finding was recorded at (record.source_tip) to the
-      tip.
+      from the commit the finding was first made against to the tip.
     """
     if not isinstance(resolution, dict) or resolution.get("status") != "resolved":
         return True  # still_present always passes
@@ -7326,14 +7347,12 @@ def _guard_resolution(resolution, active_plan_items, push_range, review_root,
         # ADR, a caller). That file need not be in this run's plan, and the
         # flagged code itself may rightly stay as it is, so judge it the same
         # way the finding's own file is judged: the quote must have been ADDED
-        # to the evidence file since the commit the finding was recorded at.
-        # Without a recorded commit there is nothing to measure "since"
-        # against: fail closed.
-        source_tip = str((prior.get("record") or {}).get("source_tip") or "")
-        if not source_tip:
-            return False
+        # to the evidence file since the finding was made.
+        base = _finding_origin_commit(review_root, tip, prior)
+        if not base:
+            return False   # nothing to measure "since" against: fail closed
         return _quote_in_added_lines(
-            ["diff", source_tip, tip, "--", evidence_path], evidence_quote, review_root)
+            ["diff", base, tip, "--", evidence_path], evidence_quote, review_root)
     target_oid = prior.get("target_oid") or ""
     if tip_oids is not None and evidence_path in tip_oids:
         tip_oid = tip_oids[evidence_path]  # the caller's batch result
