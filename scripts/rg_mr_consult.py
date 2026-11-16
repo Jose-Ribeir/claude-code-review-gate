@@ -101,6 +101,17 @@ def _provider(remote_url):
     return None
 
 
+def _cli_env_extra(provider, host):
+    """Extra env so the CLIs target self-hosted instances (GHE/GL). Without
+    GH_HOST a github.acme.corp slug would silently query public github.com.
+    """
+    if provider == "gitlab" and host != "gitlab.com":
+        return {"GITLAB_HOST": host}
+    if provider == "github" and host != "github.com":
+        return {"GH_HOST": host}
+    return {}
+
+
 # --- the CLI boundary -----------------------------------------------------------
 
 def _sh_on_windows():
@@ -213,9 +224,7 @@ def _live_lookup(remote_url, branch, runner, timeout):
     if parsed is None:
         return None, f"remote {remote_url!r} is neither GitHub nor GitLab"
     provider, host, slug = parsed
-    env_extra = {}
-    if provider == "gitlab" and host != "gitlab.com":
-        env_extra["GITLAB_HOST"] = host
+    env_extra = _cli_env_extra(provider, host)
     out, note = runner(_list_cmd(provider, slug, branch),
                        env_extra=env_extra, timeout=timeout)
     if out is None:
@@ -577,9 +586,7 @@ def cross_mr_path_overlap(remote_url, paths, exclude_iid=None, *, runner=None,
         wanted = {str(p).replace("\\", "/") for p in (paths or [])}
         if not wanted:
             return {}  # nothing to intersect: no fetches needed at all
-        env_extra = {}
-        if provider == "gitlab" and host != "gitlab.com":
-            env_extra["GITLAB_HOST"] = host
+        env_extra = _cli_env_extra(provider, host)
 
         out, note = runner(_list_all_cmd(provider, slug),
                            env_extra=env_extra, timeout=timeout)

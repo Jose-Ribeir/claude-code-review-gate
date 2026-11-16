@@ -86,8 +86,10 @@ natural way to disable the gate without uninstalling) — then it prints a
 warning (`WARNING: <dir>/pre-push exists and is not ours; leaving it in place
 and keeping <dir>/pre-push.user untouched.`), leaves that file in place, and
 leaves `pre-push.user` untouched.
-(`scripts/install-git-hook.sh` / `uninstall-git-hook.sh` are upstream
-holdovers that manage only the pre-push layer.)
+(`scripts/install-git-hook.sh` is the default-on installer for the universal
+pre-push layer — plain runs install the global hook with chaining, and
+`--no-git-hook` keeps the legacy opt-in; `uninstall-git-hook.sh` reverses it.
+See ADR 0006.)
 
 The explicit human escape is `git push --no-verify` (or `OCR_FAIL_OPEN=1`) —
 see the threat model above.

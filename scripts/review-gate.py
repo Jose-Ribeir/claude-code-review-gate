@@ -1312,7 +1312,12 @@ def _mr_diff_facts(repo_root, base, tip):
             continue
         added, deleted, path = parts[0], parts[1], parts[-1]
         if " => " in path:                       # rename: review the new path
-            path = path.split(" => ", 1)[-1]
+            if "{" in path and "}" in path:   # brace form: pre/{old => new}post
+                pre, rest = path.split("{", 1)
+                renamed, post = rest.split("}", 1)
+                path = pre + renamed.split(" => ", 1)[-1] + post
+            else:
+                path = path.split(" => ", 1)[-1]
         if path:
             paths.append(path)
         if added.isdigit() and deleted.isdigit():  # "-" marks a binary file

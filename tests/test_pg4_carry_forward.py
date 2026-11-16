@@ -316,3 +316,30 @@ def test_blocking_verdict_fail_open_is_recorded_and_loud(repo, tmp_path):
     assert entry["ref"] == "refs/heads/feat"
     assert entry["tip"] == tip
     assert "BYPASS" in proc.stderr.upper(), proc.stderr
+
+
+import importlib.util as _ilu  # pg8 fix-round: _mr_diff_facts brace-rename regression
+
+_rg_spec = _ilu.spec_from_file_location("review_gate_pg4fix", _GATE)
+_rg = _ilu.module_from_spec(_rg_spec)
+_rg_spec.loader.exec_module(_rg)
+
+
+def test_mr_diff_facts_parses_numstat_brace_renames(tmp_path):
+    """`docs/{old.md => new.md}` must resolve to `docs/new-adrs.md`-style new
+    paths; the brace form previously leaked a stray `}` suffix so a docs rename
+    misclassified as code could false-block a docs-only MR."""
+    work = tmp_path / "work"
+    _git(["init", "-b", "main", str(work)], cwd=tmp_path)
+    _config(work)
+    docs = work / "docs"
+    docs.mkdir()
+    (docs / "old-adrs.md").write_text("x\n")
+    _git(["add", "."], cwd=work)
+    _git(["commit", "-m", "base"], cwd=work)
+    base = _git(["rev-parse", "HEAD"], cwd=work)
+    _git(["mv", "docs/old-adrs.md", "docs/new-adrs.md"], cwd=work)
+    _git(["commit", "-m", "rename"], cwd=work)
+    tip = _git(["rev-parse", "HEAD"], cwd=work)
+    paths, _ = _rg._mr_diff_facts(str(work), base, tip)
+    assert paths == ["docs/new-adrs.md"], paths

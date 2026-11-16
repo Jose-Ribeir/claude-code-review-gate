@@ -668,3 +668,26 @@ def test_cross_overlap_list_times_out_to_empty(tmp_path, monkeypatch):
     _write_shim(tmp_path, monkeypatch, "gh", [("pr list", ("sleep", 5))])
     assert rg_mr_consult.cross_mr_path_overlap(
         GH_URL, ["app/impl.py"], exclude_iid=1, timeout=0.3) == {}
+
+
+# --- self-hosted GitHub Enterprise env targeting (review finding, GH_HOST) ---
+
+GHE_URL = "https://github.acme.corp/acme/proj.git"
+
+
+def test_cli_env_extra_targets_selfhosted_instances():
+    assert rg_mr_consult._cli_env_extra("github", "github.acme.corp") == \
+        {"GH_HOST": "github.acme.corp"}
+    assert rg_mr_consult._cli_env_extra("github", "github.com") == {}
+    assert rg_mr_consult._cli_env_extra("gitlab", "gitlab.example.com") == \
+        {"GITLAB_HOST": "gitlab.example.com"}
+    assert rg_mr_consult._cli_env_extra("gitlab", "gitlab.com") == {}
+
+
+def test_selfhosted_github_remote_classifies_as_github_and_uses_gh(tmp_path,
+                                                                   monkeypatch):
+    canned = _write_shim(tmp_path, monkeypatch, "gh", _gh_routes())
+    _serve(canned, "list_head", [GH_PR])
+    ctx = rg_mr_consult.find_open_mr(GHE_URL, BRANCH)
+    assert ctx is not None and ctx.iid == 42, "GHE host must drive gh, not GitLab"
+    assert _calls(canned), "the gh CLI must be invoked for a github.* host"
