@@ -52,6 +52,12 @@ unit_diff is `unit:<path>:<unit>:<part>` and a context item `context:<role>:<pat
                      docs_context.corpus. Drift class (docs-gate 04): docs_kind/
                      stale_passage/doc_path pass through verbatim when scripted; a
                      scripted confidence overrides the tier default.
+  STUB_COMMENT_FINDING JSON {content?, comment_kind?, path?, severity?,
+                     confidence?, start_line?, end_line?, existing_code?,
+                     evidence?} -- a deep-review comment-consistency finding
+                     (comment-gate). The tag and the quote fields pass through
+                     verbatim, so a test can script a proven finding (both
+                     quotes present) or an unproven one (either quote missing).
   STUB_MISSING_RECORD  truthy -- a missing-decision-record finding (docs-gate 02),
                      but only when the manifest carries docs_context AND non-empty
                      arch_flags (a flag must fire; flags without model agreement
@@ -502,6 +508,31 @@ if docs_finding and _docs_ctx:
                 if k in spec:
                     f[k] = spec[k]
             findings.append(f)
+    except Exception:
+        pass
+
+# comment-gate: a deep-review comment-consistency finding. comment_kind and
+# the quote fields pass through verbatim so the gate's verdict cap and the
+# report's unverified stamp can be exercised end to end.
+comment_finding = os.environ.get("STUB_COMMENT_FINDING", "")
+if comment_finding:
+    try:
+        cspec = json.loads(comment_finding)
+        csev = cspec.get("severity", "low")
+        cf = {
+            "path": cspec.get("path") or ((manifest or {}).get("paths") or ["?"])[0],
+            "start_line": int(cspec.get("start_line", 1)),
+            "end_line": int(cspec.get("end_line", 2)),
+            "confidence": _confidence(csev, cspec),
+            "category": cspec.get("category", "maintainability"),
+            "severity": csev,
+            "content": cspec.get("content", "stub comment-consistency finding"),
+            "comment_kind": cspec.get("comment_kind", "stale_tense"),
+        }
+        for k in ("existing_code", "evidence"):
+            if k in cspec:
+                cf[k] = cspec[k]
+        findings.append(cf)
     except Exception:
         pass
 

@@ -18,6 +18,8 @@
 # Tunables (env):
 #   OCR_BLOCK_SEVERITY    severity that can block        (default: high)
 #   OCR_BLOCK_CONFIDENCE   min confidence to block        (default: 0.7)
+# Non-blocking by construction (whatever the tunables): findings tagged
+#   comment_kind (comment-gate: deep-reviewer comment-consistency nits).
 import json
 import os
 import sys
@@ -147,6 +149,42 @@ def _is_actionable(f):
     return True
 
 
+# --- comment consistency (deep-reviewer nit class, comment-gate) ----------
+# A reviewer may tag a finding with comment_kind (see agents/deep-reviewer.md):
+# its claim is that a comment or docstring disagrees with the code it annotates
+# -- never that the code is wrong (code-wrong is an untagged Correctness
+# finding). The class is non-blocking BY CONSTRUCTION here, not by prompt
+# promise: a tagged finding never reaches the blocking check below, whatever
+# severity or confidence the reviewer claimed, and whatever OCR_BLOCK_SEVERITY
+# was tuned to. The tag is the machine's handle on the class: this cap and the
+# report's "unverified" stamp both key off it, exactly like docs_kind does for
+# documentation findings.
+_COMMENT_KINDS = ("false_citation", "stale_tense", "contract_divergence")
+
+
+def comment_kind(f):
+    """The contracted comment-consistency tag of a finding, or None.
+
+    Normalized (case-insensitive, hyphens tolerated): only the three contracted
+    values count. An improvised or misspelt tag is no tag at all, and the
+    finding keeps its full strictness -- the conservative direction.
+    """
+    if not isinstance(f, dict):
+        return None
+    k = str(f.get("comment_kind") or "").strip().lower().replace("-", "_")
+    return k if k in _COMMENT_KINDS else None
+
+
+def comment_quotes_missing(f):
+    """True when a tagged comment finding lacks its verbatim proof: the quoted
+    comment text (existing_code) or what it was checked against (evidence: the
+    contradicting code, the killing diff hunk, or the zero-hit search).
+    Field-emptiness only -- the same credibility bar the docs-drift class
+    already sets; the gate cannot verify quote truth."""
+    return (not str(f.get("existing_code") or "").strip()
+            or not str(f.get("evidence") or "").strip())
+
+
 def compute_verdict(data):
     """Return 'block' | 'warn' | 'pass' for a parsed review result.
 
@@ -173,6 +211,13 @@ def compute_verdict(data):
             if str(f.get("severity") or "").strip().lower() == "blocking":
                 return "block"
             has_warn = True
+            continue
+        if comment_kind(f) is not None:
+            # Comment-consistency finding: non-blocking by construction (the
+            # machine, not the prompt, enforces the class's "always low" cap).
+            # Skipping here is exactly a low finding's verdict behaviour: it
+            # never blocks and never even warns -- it is displayed, not acted
+            # on. This holds even under OCR_BLOCK_SEVERITY=low.
             continue
         rank = _SEVERITY_RANK.get(norm_severity(f.get("severity")), -1)
         try:

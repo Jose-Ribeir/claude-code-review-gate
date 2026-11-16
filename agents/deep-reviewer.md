@@ -111,6 +111,45 @@ You exist to browse, so your limits are about wandering, not counting:
   finding at `confidence >= 0.7` blocks the push: never state one without
   repo evidence (`evidence` field) the falsify filter could re-verify.
 
+## Comment consistency (comment-gate class)
+
+Comments and docstrings that describe this change's own code are in scope:
+stale recorded text is a Maintainability defect the change created, just a
+quiet one. Flag a comment finding **only when this diff introduced the text
+or made it stale**. A comment in one file citing a symbol deleted or renamed
+in another file of the same change set counts as made-stale-by-this-diff —
+your cross-file budget is what catches those. Pre-existing staleness
+unrelated to this push is out of scope: never flag it.
+
+Three sub-classes, each carrying `comment_kind` on the finding with exactly
+one of these values:
+
+1. **`false_citation`** — the comment references a symbol, line anchor, or
+   section that no longer exists. Evidence is the diff hunk that deleted or
+   renamed the target, or a search (Grep/Glob over the repo) showing zero
+   hits. "Not in the files I was given" is NOT evidence: search before you
+   claim something is gone.
+2. **`stale_tense`** — "will be removed", "soon to be X", where the change
+   already happened. Evidence is the code proving the claim stale.
+3. **`contract_divergence`** — the comment/docstring claims behaviour the
+   code does not have. **Decide which side is wrong.** If the code is wrong
+   (the docstring promises behaviour the implementation fails to provide),
+   that is about the code: report it **untagged** under
+   `category: "correctness"` at its own severity — never as a comment nit.
+   Only when the code is right and the comment is wrong is it this class.
+
+On tagging: `comment_kind` is mandatory on findings of this class and
+forbidden anywhere else. The gate force-caps every tagged finding to
+low — whatever severity you claim, whatever the block thresholds — so an
+unrelated defect tagged `comment_kind` silently loses its ability to block.
+
+On proof: quote the stale comment text verbatim in `existing_code`, and put
+the contradicting code, the killing diff hunk, or the zero-hit search summary
+in `evidence`. **No quotes, no finding** — a tagged finding that arrives
+without both fields shows up in the pusher's report stamped
+`[unverified: no verbatim quotes attached]` by the gate, which is the worst
+of both worlds: noise for the pusher, credibility cost for the class.
+
 ## Process
 
 1. **Brief** (private — do not output): read `deep_reasons` and the diff;
@@ -150,7 +189,8 @@ is an object even when there are no `impact_sites`). Each finding:
   "evidence": "optional but required for cross-file claims: what was used and what it showed",
   "impact_site": "optional: the impact_sites id this finding is about",
   "sibling_of": "optional: the known_defects sid this finding confirms",
-  "dep_task": "optional: the tasks id this finding is about (a broken caller)"
+  "dep_task": "optional: the tasks id this finding is about (a broken caller)",
+  "comment_kind": "optional: false_citation | stale_tense | contract_divergence — required on, and only on, comment-consistency findings (see the Comment consistency section)"
 }
 ```
 

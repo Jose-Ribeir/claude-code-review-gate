@@ -20,6 +20,29 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `claude.exe` behind the shim and flattens the prompt if it cannot.
 
 ### Added
+- **Comment-consistency findings in the deep lane (comment-gate).** The
+  deep-reviewer gains an opt-in nit class for comments/docstrings that
+  disagree with the code they annotate — three sub-classes carried on the
+  finding's new optional `comment_kind` field: `false_citation` (a comment
+  cites a symbol/anchor/section that no longer exists), `stale_tense`
+  ("will be removed" where the change already happened), and
+  `contract_divergence` (the comment claims behaviour the code lacks).
+  The class is **non-blocking by construction**: `compute_verdict` skips
+  every tagged finding whatever the claimed severity or confidence, even
+  under `OCR_BLOCK_SEVERITY=low`; the docs-drift ideal of "always low"
+  for such nits lives in the gate code, not the prompt. When the code —
+  not the comment — is the wrong side, the correct report is an untagged
+  Correctness finding at its own severity; the prompt says so explicitly.
+  Scope is diff-only (text this diff introduced or made stale, incl.
+  cross-file staleness the diff caused); pre-existing staleness is never
+  flagged. Nothing is ever dropped or capped: a tagged finding that
+  arrives without its verbatim proof (the quoted comment text in
+  `existing_code`, the contradicting code / killing diff hunk / zero-hit
+  search in `evidence`) is DISPLAYED with a machine-applied
+  `[unverified: no verbatim quotes attached]` stamp in the gate's report.
+  Only the three contracted tag values count — an improvised tag keeps
+  the finding's full strictness. The deep-reviewer prompt is
+  fingerprinted, so the ledger re-reviews once as scheduled.
 - **The `claude` backend can review a push (unified gate).** `OCR_BACKEND=claude`
   (or a repo pin, the `OCR_HARNESS` hint a hook adapter sets, a Claude Code
   session environment, or claude being the only backend CLI on PATH) now

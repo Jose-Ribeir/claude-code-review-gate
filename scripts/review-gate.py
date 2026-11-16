@@ -69,6 +69,7 @@ from pathlib import Path, PurePosixPath
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ocr_verdict import (compute_verdict, drop_failed_intent_findings,  # noqa: E402
+                         comment_kind, comment_quotes_missing,
                          norm_severity, _INTENT_SEVERITIES, _is_intent_finding)
 import ocr_impact  # noqa: E402
 import ocr_index  # noqa: E402
@@ -12038,7 +12039,14 @@ def _format_reasons(result, limit=20):
                       "flagged code is no longer at the tip - check by hand) ")
         else:
             prefix = ""
-        lines.append(f"  [{sev}] {prefix}{loc} - {content}")
+        # comment-gate: a tagged comment-consistency finding is displayed like
+        # any other finding; when it arrived without its verbatim proof the
+        # GATE (never the reviewer) stamps it, so the pusher sees which
+        # comment nits came with evidence.
+        stamp = (" [unverified: no verbatim quotes attached]"
+                 if comment_kind(f) is not None and comment_quotes_missing(f)
+                 else "")
+        lines.append(f"  [{sev}] {prefix}{loc} - {content}{stamp}")
     # limit=0 means "all of them" -- used by --history, which is read on demand
     # and has no context budget to protect, unlike the gate's own messages.
     out = "\n".join(lines if not limit else lines[:limit])
