@@ -1302,30 +1302,23 @@ def _mr_diff_facts(repo_root, base, tip):
     --numstat`. The consult's only view of the pushed diff; git trouble
     degrades to ([], 0) (no consistency findings), never a raise."""
     rng = "%s..%s" % (base or _EMPTY_TREE, tip)
-    out, rc = _git(["diff", "--numstat", rng], cwd=repo_root)
+    out, rc = _git(["diff", "--numstat", "-z", rng], cwd=repo_root)
     if rc != 0:
         return [], 0
+    # -z format: each record is "add<tab>del<tab>path" NUL-terminated; for
+    # renames the path column is empty and the OLD and NEW paths follow as
+    # the next two NUL records verbatim (no brace rewriting at all, so no
+    # adversarial filename can corrupt the parse).
     paths, lines = [], 0
-    for line in out.splitlines():
-        parts = line.split("\t")
-        if len(parts) < 3:
+    fields = iter([f for f in out.split("\0") if f != ""])
+    for rec in fields:
+        cols = rec.split("\t")
+        if len(cols) < 3:
             continue
-        added, deleted, path = parts[0], parts[1], parts[-1]
-        if " => " in path:                       # rename: review the new path
-            # Brace form `pre/{old => new}post` only when the ` => ` truly
-            # sits inside the ONE brace pair: the `{` must precede the
-            # separator and its matching close must be the FIRST `}` after
-            # it, past the separator. Anything else (literal braces in a
-            # long-form name, e.g. 'a{1}.md => b{2}.txt') falls through to
-            # the long-form split so names are never corrupted.
-            i = path.find("{")
-            sep = path.find(" => ")
-            close = path.find("}", sep + 4)
-            if (i != -1 and i < sep and close != -1
-                    and path.find("}", i) == close):
-                path = path[:i] + path[sep + 4:close] + path[close + 1:]
-            else:
-                path = path[sep + 4:]
+        added, deleted, path = cols[0], cols[1], cols[2]
+        if not path:  # rename: old, new follow as two NUL records
+            next(fields, None)  # old path: reviewed content is the new side
+            path = next(fields, "")
         if path:
             paths.append(path)
         if added.isdigit() and deleted.isdigit():  # "-" marks a binary file
