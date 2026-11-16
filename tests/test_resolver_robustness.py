@@ -417,3 +417,76 @@ def test_unchanged_flagged_code_still_blocks_as_still_present(tmp_path):
     assert "(still present)" in reason and "unverified" not in reason, reason
     # Python verified it against the tip; no second resolver call needed.
     assert len([c for c in _trace(tmp_path, "t2.trace") if c.get("resolve_file")]) == 1
+
+
+# ---------------------------------------------------------------------------
+# A fix in a DIFFERENT file than the flagged code
+# ---------------------------------------------------------------------------
+
+def _two_file_history(tmp_path):
+    """c0: code.py has the flagged line, doc.md is silent. c1: only doc.md
+    changes (the real fix); code.py is untouched. Returns (work, c0, c1)."""
+    work = tmp_path / "xf"
+    work.mkdir()
+    _git(["init", "-b", "main", str(work)], cwd=tmp_path)
+    _git(["config", "user.email", "t@t.com"], cwd=work)
+    _git(["config", "user.name", "t"], cwd=work)
+    _git(["config", "commit.gpgsign", "false"], cwd=work)
+    (work / "code.py").write_text("def guard(): pass\n")
+    (work / "doc.md").write_text("The guard always applies.\n")
+    _git(["add", "."], cwd=work)
+    _git(["commit", "-q", "-m", "c0"], cwd=work)
+    c0 = _git(["rev-parse", "HEAD"], cwd=work)
+    (work / "doc.md").write_text(
+        "The guard always applies.\nUnder claude the guard stands down.\n")
+    _git(["add", "."], cwd=work)
+    _git(["commit", "-q", "-m", "c1"], cwd=work)
+    return work, c0, _git(["rev-parse", "HEAD"], cwd=work)
+
+
+def _cross_prior(source_tip):
+    prior = _prior(path="code.py", existing_code="def guard(): pass")
+    prior["record"] = {"source_tip": source_tip}
+    return prior
+
+
+def test_guard_accepts_a_fix_added_in_another_file_since_the_finding(tmp_path):
+    work, c0, c1 = _two_file_history(tmp_path)
+    res = {"status": "resolved", "evidence_path": "doc.md",
+           "evidence_quote": "Under claude the guard stands down."}
+    # doc.md is not in the plan and code.py never changed: still a fix.
+    assert review_gate._guard_resolution(res, [], f"{c0}..{c1}", str(work),
+                                         prior=_cross_prior(c0), tip=c1)
+    # ...and the judge, not just the guard, now calls it resolved even though
+    # the flagged code is still verbatim at the tip.
+    assert review_gate._judge_resolution(
+        _cross_prior(c0), res, [], f"{c0}..{c1}", str(work), c1) == "resolved"
+
+
+def test_guard_rejects_cross_file_evidence_that_was_already_there(tmp_path):
+    work, c0, c1 = _two_file_history(tmp_path)
+    res = {"status": "resolved", "evidence_path": "doc.md",
+           "evidence_quote": "The guard always applies."}   # present at c0
+    assert not review_gate._guard_resolution(res, [], f"{c0}..{c1}", str(work),
+                                             prior=_cross_prior(c0), tip=c1)
+
+
+def test_guard_cross_file_fails_closed_without_a_recorded_commit(tmp_path):
+    work, c0, c1 = _two_file_history(tmp_path)
+    res = {"status": "resolved", "evidence_path": "doc.md",
+           "evidence_quote": "Under claude the guard stands down."}
+    for record in ({}, {"source_tip": ""}, {"source_tip": "0" * 40}):
+        prior = _prior(path="code.py", existing_code="def guard(): pass")
+        prior["record"] = record
+        assert not review_gate._guard_resolution(res, [], f"{c0}..{c1}", str(work),
+                                                 prior=prior, tip=c1)
+
+
+def test_guard_cross_file_rejects_a_quote_that_is_not_in_the_diff(tmp_path):
+    work, c0, c1 = _two_file_history(tmp_path)
+    res = {"status": "resolved", "evidence_path": "doc.md",
+           "evidence_quote": "A sentence nobody wrote."}
+    assert not review_gate._guard_resolution(res, [], f"{c0}..{c1}", str(work),
+                                             prior=_cross_prior(c0), tip=c1)
+    assert review_gate._judge_resolution(
+        _cross_prior(c0), res, [], f"{c0}..{c1}", str(work), c1) == "still_present"

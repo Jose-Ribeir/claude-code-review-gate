@@ -7293,7 +7293,10 @@ def _guard_resolution(resolution, active_plan_items, push_range, review_root,
     - the diff in this push of evidence_path, a delta/full file, or
     - with `prior` and `tip`, the since-finding diff of the finding's own file
       (its target blob -> its tip blob): a fix from an earlier push whose
-      resolution was never recorded is still a fix, and still an addition.
+      resolution was never recorded is still a fix, and still an addition;
+    - with `prior` and `tip`, for a fix in ANOTHER file, the diff of that file
+      from the commit the finding was recorded at (record.source_tip) to the
+      tip.
     """
     if not isinstance(resolution, dict) or resolution.get("status") != "resolved":
         return True  # still_present always passes
@@ -7319,7 +7322,18 @@ def _guard_resolution(resolution, active_plan_items, push_range, review_root,
     if prior is None or not tip:
         return False
     if evidence_path != (prior["finding"].get("path") or ""):
-        return False
+        # The fix lives in a DIFFERENT file than the flagged code (a doc, an
+        # ADR, a caller). That file need not be in this run's plan, and the
+        # flagged code itself may rightly stay as it is, so judge it the same
+        # way the finding's own file is judged: the quote must have been ADDED
+        # to the evidence file since the commit the finding was recorded at.
+        # Without a recorded commit there is nothing to measure "since"
+        # against: fail closed.
+        source_tip = str((prior.get("record") or {}).get("source_tip") or "")
+        if not source_tip:
+            return False
+        return _quote_in_added_lines(
+            ["diff", source_tip, tip, "--", evidence_path], evidence_quote, review_root)
     target_oid = prior.get("target_oid") or ""
     if tip_oids is not None and evidence_path in tip_oids:
         tip_oid = tip_oids[evidence_path]  # the caller's batch result
