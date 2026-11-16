@@ -16,6 +16,7 @@ TTL tests inject `now` instead of sleeping.
 """
 import json
 import os
+import subprocess
 import sys
 
 import pytest  # noqa: F401  (fixtures used via function args)
@@ -474,6 +475,86 @@ def test_head_mismatch_is_a_finding():
 def test_head_match_adds_no_finding():
     ctx = _ctx()
     assert rg_mr_consult.consistency_findings(ctx, ["a.py"], 10, HEAD) == []
+
+
+# --- recorded-head posture: rewritten history blocks, normal iteration advises ---
+
+def test_head_mismatch_with_ancestor_recorded_head_is_advisory_only():
+    """Story 13 asks for VISIBILITY, not a veto on iteration: when the MR
+    page's recorded head is an ancestor of the pushed tip (the MR simply trails
+    the branch, normal review-new-commits flow) the mismatch is advisory, never
+    a block. The advisory prefix keeps it out of the blocking finding set."""
+    ctx = _ctx()  # recorded head HEAD, pushed tip TIP
+    findings = rg_mr_consult.consistency_findings(
+        ctx, ["a.py"], 10, TIP, head_ancestor=True)
+    assert len(findings) == 1
+    assert findings[0].startswith(rg_mr_consult.ADVISORY_PREFIX)
+    assert not findings[0].startswith(rg_mr_consult.FINDING_PREFIX)
+    assert "ancestor" in findings[0]
+
+
+def test_head_mismatch_with_rewritten_or_unknown_head_stays_blocking():
+    """head_ancestor=False (rewritten history, or ancestry unknowable -- the
+    safe direction) keeps the mismatch a blocking MR-CONSISTENCY finding."""
+    ctx = _ctx()
+    for head_ancestor in (False, None):
+        findings = rg_mr_consult.consistency_findings(
+            ctx, ["a.py"], 10, TIP, head_ancestor=head_ancestor)
+        assert len(findings) == 1
+        assert findings[0].startswith(rg_mr_consult.FINDING_PREFIX)
+        assert not findings[0].startswith(rg_mr_consult.ADVISORY_PREFIX)
+
+
+def _git_repo_with_divergence(tmp_path):
+    """first -> second, then a divergent rewrite from first."""
+    repo = tmp_path / "repo"
+
+    def g(*args):
+        return subprocess.run(["git", "-C", str(repo), *args], check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    g("config", "user.email", "t@example.com")
+    g("config", "user.name", "t")
+    g("config", "commit.gpgsign", "false")
+    (repo / "a.txt").write_text("one\n")
+    g("add", ".")
+    g("commit", "-q", "-m", "base")
+    first = g("rev-parse", "HEAD")
+    (repo / "b.txt").write_text("two\n")
+    g("add", ".")
+    g("commit", "-q", "-m", "second")
+    second = g("rev-parse", "HEAD")
+    g("reset", "-q", "--hard", first)
+    (repo / "c.txt").write_text("three\n")
+    g("add", ".")
+    g("commit", "-q", "-m", "rewritten")
+    divergent = g("rev-parse", "HEAD")
+    return repo, first, second, divergent
+
+
+def test_head_is_ancestor_true_for_normal_iteration(tmp_path):
+    repo, first, second, _ = _git_repo_with_divergence(tmp_path)
+    assert rg_mr_consult.head_is_ancestor(first, second, repo_root=str(repo)) \
+        is True
+
+
+def test_head_is_ancestor_false_for_rewritten_history(tmp_path):
+    repo, _, second, divergent = _git_repo_with_divergence(tmp_path)
+    assert rg_mr_consult.head_is_ancestor(second, divergent,
+                                          repo_root=str(repo)) is False
+
+
+def test_head_is_ancestor_degrades_to_false_on_bad_input(tmp_path):
+    repo, _, second, _ = _git_repo_with_divergence(tmp_path)
+    assert rg_mr_consult.head_is_ancestor("0" * 40, second,
+                                          repo_root=str(repo)) is False
+    assert rg_mr_consult.head_is_ancestor("", second, repo_root=str(repo)) \
+        is False
+    assert rg_mr_consult.head_is_ancestor(second, second,
+                                          repo_root=str(repo)) is False
+    assert rg_mr_consult.head_is_ancestor(
+        second, second, repo_root=str(tmp_path / "not-a-repo")) is False
 
 
 def test_findings_never_raise_on_degenerate_input():

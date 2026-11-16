@@ -173,6 +173,39 @@ def test_identical_tree_amend_carries_the_verdict_forward(repo, tmp_path):
     assert carried["tip"] == new_tip
 
 
+def test_rebase_onto_advanced_upstream_carries_the_verdict(repo, tmp_path):
+    """A rebase of feat onto an ADVANCED upstream rewrites the SHAs AND the tip
+    tree (the upstream commits joined the tree), but the pushed range's patch
+    identity still equals the reviewed range's: the recorded pass carries
+    forward and the reviewer is NOT invoked again (spec story 7's first named
+    case -- the tip-tree fast path alone cannot vouch for this push)."""
+    tip = _reviewed_feat(repo, tmp_path, _env(tmp_path))
+
+    # Upstream advances: a new commit on main, really pushed so origin's
+    # tracking ref holds it, then feat is rebased on top.
+    _git(["switch", "-q", "main"], cwd=repo)
+    _commit(repo, "m2.txt")
+    _git(["push", "-q", "origin", "main"], cwd=repo)
+    _git(["switch", "-q", "feat"], cwd=repo)
+    _git(["rebase", "-q", "main"], cwd=repo)
+    new_tip = _sha(repo, "HEAD")
+    assert new_tip != tip
+    assert _sha(repo, "HEAD^{tree}") != _sha(repo, f"{tip}^{{tree}}"), \
+        "the rebase moved the tree -- tree equality cannot vouch for this push"
+
+    proc = _git_mode(repo, [f"refs/heads/feat {new_tip} refs/heads/feat {ZERO}"],
+                     _env(tmp_path))
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 0, out
+    assert len(_trace(tmp_path)) == 1, \
+        "a patch-identical rebase onto an advanced upstream was re-reviewed"
+    assert "carried forward (identical patch-ids)" in out, out
+    # Tip-bound: the carried verdict is re-recorded against the NEW tip.
+    carried = rg_store.load_verdict(_rid(repo), new_tip)
+    assert carried is not None and carried["verdict"] == "pass"
+    assert carried["tip"] == new_tip
+
+
 def test_content_changed_amend_runs_a_full_review(repo, tmp_path):
     """An amend whose tree differs -- the incident shape ("fixed the wording"
     sweeping in a feature) -- can never ride the old verdict: a fresh review."""

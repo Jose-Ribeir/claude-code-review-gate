@@ -1185,6 +1185,11 @@ def _gate_config():
     return _GATE_CONFIG
 
 
+# The hook harness's own timeout (hooks/hooks.json): past it the host kills
+# the hook process, and a killed hook is a silent fail-open.
+_HOOKS_JSON_TIMEOUT_SECONDS = 900
+
+
 def _apply_gate_config():
     """pg5 -- one-time application of the run config at a gate entry point.
 
@@ -1209,6 +1214,17 @@ def _apply_gate_config():
         if cfg.depth != "full":
             _warn(f"review-gate: run config review.depth={cfg.depth!r} -- the "
                   "reviewer is asked for a re-scoped review, not the full depth.")
+        if cfg.timeout_seconds > _HOOKS_JSON_TIMEOUT_SECONDS:
+            # Visibility, NOT a clamp: the operator may legitimately run the
+            # gate outside the 900s hook harness (hook-mode adapters kill the
+            # process; a killed hook is a silent fail-open). Silent is the bug.
+            _warn(f"review-gate: run config review.timeoutSeconds="
+                  f"{cfg.timeout_seconds} exceeds the hooks.json hook timeout "
+                  f"({_HOOKS_JSON_TIMEOUT_SECONDS}s): under the hook adapters "
+                  "the host kills the hook there, and a killed hook is a "
+                  "silent fail-open -- keep the cap under "
+                  f"{_HOOKS_JSON_TIMEOUT_SECONDS}s, or push outside the "
+                  "adapters deliberately.")
     _CONFIG_APPLIED = True
     if cfg.depth != "full" and not os.environ.get("OCR_REVIEW_DEPTH", "").strip():
         os.environ["OCR_REVIEW_DEPTH"] = cfg.depth  # supervisor/propagation
@@ -1218,6 +1234,13 @@ def _apply_gate_config():
         # enforces the same cap without re-reading the file.
         os.environ["OCR_TIMEOUT"] = str(cfg.timeout_seconds)
         TIMEOUT = cfg.timeout_seconds
+    # pg3 wiring (spec "Ledger hygiene", story 24): the 90-day verdict TTL is
+    # only real if a gate run fires it. One best-effort call per gate entry;
+    # maybe_prune self-throttles to once a day by marker.
+    try:
+        rg_store.maybe_prune()
+    except Exception as exc:
+        _warn(f"review-gate: lazy ledger prune skipped ({exc}); continuing.")
 
 
 # pg5 -- the review depth's prompt note (full depth carries none). Depth is a
@@ -1298,12 +1321,19 @@ def _mr_diff_facts(repo_root, base, tip):
 
 
 def _mr_consistency_findings(remote_id, ctx, repo_root, base, tip):
-    """pg5 -- the blocking gate findings the MR context yields for this push:
-    the three always-on declared-scope checks (rg_mr_consult.consistency_findings)
-    plus, above the large-diff threshold, the cross-MR path-overlap tier.
-    Never raises."""
+    """pg5 -- the gate findings the MR context yields for this push: the
+    three always-on declared-scope checks
+    (rg_mr_consult.consistency_findings) plus, above the large-diff
+    threshold, the cross-MR path-overlap tier. The recorded-head check takes
+    the ancestry verdict (rewritten history blocks; a normal iterative push
+    whose recorded head trails the tip is downgraded to an advisory). Mixed
+    MR-CONSISTENCY:/MR-CONSISTENCY-ADVISORY: entries; the caller separates
+    them. Never raises."""
     paths, changed_lines = _mr_diff_facts(repo_root, base, tip)
-    findings = list(rg_mr_consult.consistency_findings(ctx, paths, changed_lines, tip))
+    findings = list(rg_mr_consult.consistency_findings(
+        ctx, paths, changed_lines, tip,
+        head_ancestor=rg_mr_consult.head_is_ancestor(ctx.head_sha, tip,
+                                                     repo_root=repo_root)))
     if changed_lines > _LARGE_DIFF_LINES:
         try:
             overlap = rg_mr_consult.cross_mr_path_overlap(
@@ -2322,12 +2352,20 @@ def _gate_repo(payload):
     return "", True
 
 
+def _env_switch(name):
+    """True when the named env switch holds a truthy token (1/true/yes).
+
+    The ONE voter-roll of truthy tokens; the fail-open helpers (and anything
+    asking the same boolean-env question) share it."""
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes")
+
+
 def _fail_open_requested():
     """True when a fail-open switch is set: OCR_FAIL_OPEN (the one-shot escape)
     or, pg5, review.failOpen=true in the run config. Both feed the SAME audited
     bypass plumbing -- the mechanism string below tells the ledger which one
     was honored."""
-    if os.environ.get("OCR_FAIL_OPEN", "").strip().lower() in ("1", "true", "yes"):
+    if _env_switch("OCR_FAIL_OPEN"):
         return True
     try:
         return bool(_gate_config().fail_open)          # pg5
@@ -2337,7 +2375,7 @@ def _fail_open_requested():
 
 def _fail_open_mechanism():
     """pg5: which fail-open switch opened the gate, for the bypass record."""
-    if os.environ.get("OCR_FAIL_OPEN", "").strip().lower() in ("1", "true", "yes"):
+    if _env_switch("OCR_FAIL_OPEN"):
         return "OCR_FAIL_OPEN"
     return "review.failOpen"
 
@@ -2657,8 +2695,9 @@ def _invalidate_deleted_refs(repo_root, remote_name, deleted_refs):
 
     Records key the branch as written at review time (short name), while the
     ref arrives full (`refs/heads/x`) in git mode and short from the hook
-    parser: both forms are invalidated. Best-effort throughout -- the ledger
-    is an audit aid and must never block a deletion."""
+    parser: rg_store.invalidate_ref owns the short/full juggling and sweeps
+    both spellings per call. Best-effort throughout -- the ledger is an audit
+    aid and must never block a deletion."""
     if not deleted_refs:
         return
     try:
@@ -2670,10 +2709,6 @@ def _invalidate_deleted_refs(repo_root, remote_name, deleted_refs):
             if not ref:
                 continue
             removed = rg_store.invalidate_ref(remote_id, ref)
-            if ref.startswith("refs/heads/"):
-                removed += rg_store.invalidate_ref(remote_id, ref[len("refs/heads/"):])
-            else:
-                removed += rg_store.invalidate_ref(remote_id, "refs/heads/" + ref)
             lines.append(f"review-gate: {ref} deleted on {name or '?'} -- "
                          f"{removed} recorded verdict(s) invalidated.\n")
         if lines:
@@ -11781,6 +11816,13 @@ def compute_coverage_set(repo_root, base, tip):
                        patch_ids=patch_ids, sha_only=sha_only)
 
 
+def _same_remote(rec, remote):
+    """True when a verdict record names this destination remote -- the pin of
+    _join_records (pg4, spec story 17): no cross-remote fallback, a verdict
+    recorded against remote A can never satisfy a push to remote B."""
+    return str(rec.get("remote") or "") == str(remote or "")
+
+
 def _join_records(repo_root, remote, base, passes_only=True):
     """The verdict records a join may consult: passes, not blocked, whose
     reviewed range contains this push's (record base is an ancestor of the
@@ -11797,7 +11839,7 @@ def _join_records(repo_root, remote, base, passes_only=True):
         # scopes this scan; the explicit field equality is the pin that guarantees
         # no cross-remote fallback -- a verdict recorded against remote A can
         # never satisfy a push to remote B (spec story 17).
-        if str(rec.get("remote") or "") != str(remote or ""):
+        if not _same_remote(rec, remote):
             continue
         if passes_only and (str(rec.get("verdict") or "") != "pass" or rec.get("blocked")):
             continue
@@ -11906,8 +11948,15 @@ def _carry_forward_join(repo_root, remote_id, ref, tip, base, branch, git_dir=No
     identical (same tree oid -- an empty `git diff <recorded tip> <tip>`
     between the last-reviewed state and the new tip), so the recorded verdict
     carries forward: it is re-recorded against the new tip (a verdict blesses
-    exactly one tip per (remote, ref)) and the reviewer is NOT invoked. Any
-    tree difference falls through to the normal full review.
+    exactly one tip per (remote, ref)) and the reviewer is NOT invoked.
+
+    A second carry posture covers the rebase onto an ADVANCED upstream: the
+    tip tree then differs (the upstream commits joined it) while the pushed
+    range still carries the same patch-ids the reviewed range carried (the
+    existing CoverageSet/patch_ids machinery). Patch-identity equality, with
+    no SHA-only commit on either side, proves the same changes were reviewed,
+    so the verdict carries forward in the same way. Anything else falls
+    through to the normal review.
 
     Unlike _coverage_join's range-coverage join this is keyed on the REF: the
     last-reviewed state for the branch being pushed. Records holding sha_only
@@ -11931,13 +11980,14 @@ def _carry_forward_join(repo_root, remote_id, ref, tip, base, branch, git_dir=No
     if not short and ref.startswith("refs/heads/"):
         short = ref[len("refs/heads/"):]
     names = {n for n in (ref, short, ("refs/heads/" + short) if short else "") if n}
-    best, best_ts = None, -1.0
+    best, best_ts, best_kind = None, -1.0, ""
+    cs, cs_tried = None, False   # this push's CoverageSet, computed at most once
     try:
         records = rg_store.records_for_remote(remote_id)
     except Exception:
         return ""
     for rec in records:
-        if str(rec.get("remote") or "") != str(remote_id or ""):
+        if not _same_remote(rec, remote_id):
             continue          # no cross-remote fallback (the pin of _join_records)
         if str(rec.get("verdict") or "") != "pass" or rec.get("blocked"):
             continue          # only a recorded pass carries forward
@@ -11952,20 +12002,43 @@ def _carry_forward_join(repo_root, remote_id, ref, tip, base, branch, git_dir=No
         rbranch = str(rec.get("branch") or "")
         if names and rbranch not in names:
             continue          # carry-forward is bound to the pushed ref
+        kind = ""
         rtree = str(rec.get("tip_tree") or "")
         if not rtree:
             # A v1 record never keyed content: ask git for the recorded tip's
             # tree (best-effort -- the object may be gone; that record is
             # simply not carryable).
             rtree = _tip_tree(repo_root, str(rec.get("tip") or ""))
-        if not rtree or rtree != tree:
-            continue          # ANY content difference -> a fresh full review
+        if rtree and rtree == tree:
+            kind = "tree"
+        else:
+            # Patch-identity carry (rebase onto an advanced upstream): the
+            # pushed range must carry EXACTLY the reviewed range's patch-ids,
+            # with every pushed commit patch-keyed (a SHA-only commit proves
+            # nothing after a rewrite: it is the content that was reviewed).
+            rec_pids = set(rec.get("patch_ids") or [])
+            if rec_pids:
+                if not cs_tried:
+                    cs_tried = True
+                    try:
+                        cs = compute_coverage_set(repo_root, base, tip)
+                    except Exception:
+                        cs = None
+                if (cs is not None and not cs.sha_only and cs.patch_ids
+                        and len(cs.patch_ids) == len(cs.commits)
+                        and set(cs.patch_ids.values()) == rec_pids):
+                    kind = "patch"
+        if not kind:
+            continue            # ANY content difference -> a fresh full review
         try:
             ts = float(rec.get("recorded_at") or rec.get("ts") or 0)
         except (TypeError, ValueError):
             ts = 0.0
-        if ts > best_ts:
-            best, best_ts = rec, ts
+        # A tree-identical record outranks a patch-identical one; otherwise
+        # the most recently recorded pass wins.
+        if best is None or (kind == "tree" and best_kind != "tree") or \
+                (kind == best_kind and ts > best_ts):
+            best, best_ts, best_kind = rec, ts, kind
     if best is None:
         return ""
     try:
@@ -11982,6 +12055,13 @@ def _carry_forward_join(repo_root, remote_id, ref, tip, base, branch, git_dir=No
     except Exception:
         return ""
     _coverage_marker(git_dir, tip, base)
+    if best_kind == "patch":
+        return ("review-gate: already-reviewed - carried forward (identical "
+                f"patch-ids): the verdict recorded for {short or ref} at tip "
+                f"{str(best.get('tip') or '')[:12]} covers the same changes "
+                "this push carries (a rebase onto an advanced upstream moved "
+                "the tip tree without touching the range's patch content), so "
+                "the reviewer was not invoked again.")
     return ("review-gate: already-reviewed - carried forward (identical tree): the "
             f"verdict recorded for {short or ref} at tip "
             f"{str(best.get('tip') or '')[:12]} covers identical content, so the "
@@ -13785,15 +13865,26 @@ def _main_inner(argv, mode):
                       "the existing tip too.")
             mr_findings = _mr_consistency_findings(remote_id, mr_ctx, repo_root,
                                                    base, tip)
-            if mr_findings:
+            # Two channels (story 13): MR-CONSISTENCY-ADVISORY: findings are
+            # visibility only -- a normal iterative push whose recorded head
+            # trails the tip must never be blocked. MR-CONSISTENCY: findings
+            # block; the advisory escape routes below are unchanged.
+            mr_advisories = [f for f in mr_findings
+                             if f.startswith(rg_mr_consult.ADVISORY_PREFIX)]
+            mr_blocking = [f for f in mr_findings
+                           if not f.startswith(rg_mr_consult.ADVISORY_PREFIX)]
+            if mr_advisories:
+                _warn("MR-consistency advisories (non-blocking):\n"
+                      + "\n".join("  " + f for f in mr_advisories))
+            if mr_blocking:
                 if _is_advisory(repo_root):
                     _warn("MR-consistency findings (advisory, blocking disabled):\n"
-                          + "\n".join("  " + f for f in mr_findings))
+                          + "\n".join("  " + f for f in mr_blocking))
                 elif _fail_open_requested():
                     _log_gate_skipped("mr_consistency", mode, repo_root, push_range,
                                       remote_id=remote_id, ref=push_ref)  # pg4 audit
                     allow()
-                _fail_closed(mode, _mr_consistency_reason(mode, mr_ctx, mr_findings))
+                _fail_closed(mode, _mr_consistency_reason(mode, mr_ctx, mr_blocking))
 
     # The legacy pass marker: the other adapter, or an older gate, already
     # reviewed these exact commits and passed them within the TTL. Replay what

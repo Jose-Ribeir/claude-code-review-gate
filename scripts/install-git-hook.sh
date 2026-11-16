@@ -192,12 +192,18 @@ if [ -f "$STALE" ]; then
   fi
 fi
 
-# Materialize the pre-push. Both substitutions are ADVISORY ONLY -- the copy
-# resolves the reviewer at runtime (see _resolve_gate_dir there). That matters
-# because this file is written once and never updated: baking the path in as a
-# contract is what made every pre-0.3.0 install silently fail open when the
-# plugin moved. The directory is kept as a last-resort hint, and the version is
-# only ever read back by /review-gate:doctor.
+# Materialize one hook file from the pre-push template. Both substitutions
+# are ADVISORY ONLY -- the copy resolves the reviewer at runtime (see
+# _resolve_gate_dir there). That matters because this file is written once and
+# never updated: baking the path in as a contract is what made every pre-0.3.0
+# install silently fail open when the plugin moved. The directory is kept as a
+# last-resort hint, and the version is only ever read back by
+# /review-gate:doctor.
+install_hook_file() {
+  sed -e "s|__SCR_DIR__|$SCR_DIR|g" -e "s|__SCR_VERSION__|$SCR_VERSION|g" \
+    "$SCR_DIR/pre-push" > "$1"
+  chmod +x "$1"
+}
 #
 # pg6: when a previous global hooksPath exists AND contains a pre-push, git can
 # only execute ONE file from our hooks dir, so the gate body goes to
@@ -214,9 +220,7 @@ if [ -n "$BACKED_UP" ] && [ "$(_canon "$BACKED_UP")" != "$(_canon "$HOOKS_DIR")"
 fi
 
 if [ -n "$CHAIN" ]; then
-  sed -e "s|__SCR_DIR__|$SCR_DIR|g" -e "s|__SCR_VERSION__|$SCR_VERSION|g" \
-    "$SCR_DIR/pre-push" > "$HOOKS_DIR/pre-push.review-gate"
-  chmod +x "$HOOKS_DIR/pre-push.review-gate"
+  install_hook_file "$HOOKS_DIR/pre-push.review-gate"
 
   cat > "$HOOKS_DIR/pre-push" <<'WRAPPER'
 #!/bin/sh
@@ -233,8 +237,11 @@ REFS="$(cat || true)"
 printf '%s\n' "$REFS" | "$_DIR/pre-push.review-gate" "$@" || exit $?
 
 _PREV="$(git config --global --get reviewGate.prevHooksPath 2>/dev/null || true)"
+# Never chain into our own body: compare the canonical DIRECTORY paths
+# (`[ -ef ]` is not POSIX; cd+pwd is).
+_PREV_DIR="$(cd "$_PREV" 2>/dev/null && pwd || true)"
 if [ -n "$_PREV" ] && [ -x "$_PREV/pre-push" ] \
-   && ! [ "$_PREV/pre-push" -ef "$_DIR/pre-push" ] 2>/dev/null; then
+   && [ -n "$_PREV_DIR" ] && [ "$_PREV_DIR" != "$_DIR" ]; then
   printf '%s\n' "$REFS" | "$_PREV/pre-push" "$@" || exit $?
 fi
 exit 0
@@ -245,9 +252,7 @@ else
   # No prior setup to chain: the gate copy IS the hook, as before. Sweep a
   # body copy left by an earlier CHAINED install whose chain target vanished.
   rm -f "$HOOKS_DIR/pre-push.review-gate"
-  sed -e "s|__SCR_DIR__|$SCR_DIR|g" -e "s|__SCR_VERSION__|$SCR_VERSION|g" \
-    "$SCR_DIR/pre-push" > "$HOOKS_DIR/pre-push"
-  chmod +x "$HOOKS_DIR/pre-push"
+  install_hook_file "$HOOKS_DIR/pre-push"
 fi
 
 git config --global core.hooksPath "$HOOKS_DIR"

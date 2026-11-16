@@ -50,6 +50,10 @@ MR_TIMEOUT = 5          # per-CLI-call bound (<= the spec's 8s ceiling)
 MAX_LIST_MRS = 30       # bound for the cross-MR overlap tier's list call
 
 FINDING_PREFIX = "MR-CONSISTENCY:"
+# Advisory (visibility-only) findings: same channel, OUT of the blocking set.
+# The prefix deliberately does NOT share FINDING_PREFIX as a string prefix, so
+# a caller splitting on the blocking prefix never picks an advisory up.
+ADVISORY_PREFIX = "MR-CONSISTENCY-ADVISORY:"
 
 
 @dataclass
@@ -228,6 +232,27 @@ def _live_lookup(remote_url, branch, runner, timeout):
         return None, f"{provider} open-MR payload was unusable ({exc})"
 
 
+# --- the fetch environment (B5: one resolved bundle for the injected knobs) --------
+
+@dataclass
+class _FetchEnv:
+    """The injected knobs every lookup shares -- CLI boundary, cache root,
+    clock, per-call timeout -- resolved once so the four public lookups don't
+    each re-default the same (runner, cache_dir, now, timeout) pack."""
+    runner: object
+    cache_dir: object
+    now: float
+    timeout: float
+
+
+def _fetch_env(runner=None, cache_dir=None, now=None, timeout=None):
+    """A _FetchEnv with the production defaults applied to each knob."""
+    return _FetchEnv(runner=runner or _run_cli,
+                     cache_dir=cache_dir,
+                     now=time.time() if now is None else now,
+                     timeout=MR_TIMEOUT if timeout is None else timeout)
+
+
 # --- the 24h cache (positives AND negatives) ---------------------------------------
 
 def _cache_root(cache_dir=None):
@@ -298,22 +323,20 @@ def find_open_mr(remote_url, branch, *, runner=None, cache_dir=None, now=None,
     (hits and negatives). Never raises.
     """
     try:
-        runner = runner or _run_cli
-        now = time.time() if now is None else now
-        timeout = MR_TIMEOUT if timeout is None else timeout
-        path = _cache_path(_cache_root(cache_dir), remote_url, branch)
+        env = _fetch_env(runner, cache_dir, now, timeout)
+        path = _cache_path(_cache_root(env.cache_dir), remote_url, branch)
         entry = _read_entry(path)
-        if entry is not None and now - entry["fetched_at"] < MR_TTL:
+        if entry is not None and env.now - entry["fetched_at"] < MR_TTL:
             if entry["kind"] == "none":
                 return None
             ctx = _entry_context(entry)
             if ctx is not None:
                 return ctx
             # corrupt positive: fall through to a refetch
-        ctx, note = _live_lookup(remote_url, branch, runner, timeout)
+        ctx, note = _live_lookup(remote_url, branch, env.runner, env.timeout)
         if note is not None:
             return None
-        _write_entry(path, now, ctx)
+        _write_entry(path, env.now, ctx)
         return ctx
     except Exception:
         return None
@@ -340,19 +363,42 @@ def first_seen(remote_url, branch, *, runner=None, cache_dir=None, now=None,
     is False. Never raises.
     """
     try:
-        runner = runner or _run_cli
-        now = time.time() if now is None else now
-        timeout = MR_TIMEOUT if timeout is None else timeout
-        path = _cache_path(_cache_root(cache_dir), remote_url, branch)
+        env = _fetch_env(runner, cache_dir, now, timeout)
+        path = _cache_path(_cache_root(env.cache_dir), remote_url, branch)
         entry = _read_entry(path)
         if entry is not None and entry["kind"] == "mr":
             return False
         had_negative = entry is not None and entry["kind"] == "none"
-        ctx, note = _live_lookup(remote_url, branch, runner, timeout)
+        ctx, note = _live_lookup(remote_url, branch, env.runner, env.timeout)
         if note is not None:
             return False
-        _write_entry(path, now, ctx)
+        _write_entry(path, env.now, ctx)
         return had_negative and ctx is not None
+    except Exception:
+        return False
+
+
+def head_is_ancestor(head, tip, *, repo_root=None, git_run=None):
+    """True exactly when `git merge-base --is-ancestor <head> <tip>` succeeds.
+
+    The posture of the recorded-head check: the mismatch between the MR page's
+    recorded head and the pushed tip means REWRITTEN history only when the
+    recorded head is NOT an ancestor of the tip (a normal iterative push
+    leaves the recorded head behind, as an ancestor -- reviewers simply saw an
+    older state of the same line). Degradation answers False, the fail-safe
+    direction: unknown ancestry keeps the mismatch blocking. Never raises.
+    """
+    try:
+        head, tip = str(head or "").strip(), str(tip or "").strip()
+        if not head or not tip or head.lower() == tip.lower():
+            return False
+        if git_run is not None:
+            return bool(git_run(head, tip))
+        proc = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", head, tip],
+            cwd=repo_root or None, capture_output=True, text=True,
+            timeout=MR_TIMEOUT)
+        return proc.returncode == 0
     except Exception:
         return False
 
@@ -408,13 +454,20 @@ def _claimed_lines(text):
     return min(claimed) if claimed else None
 
 
-def consistency_findings(ctx, changed_paths, changed_lines, pushed_tip):
-    """Actionable one-liners (each prefixed MR-CONSISTENCY:) comparing the
-    MR's declaration to the pushed diff. Empty list = clean. Never raises.
+def consistency_findings(ctx, changed_paths, changed_lines, pushed_tip,
+                         *, head_ancestor=None):
+    """Actionable one-liners comparing the MR's declaration to the pushed
+    diff. Empty list = clean. Never raises.
 
     Checks: (1) declared docs-only scope vs a diff carrying non-docs paths;
     (2) claimed file/line counts vs actual; (3) the MR page's recorded head
     vs the tip being pushed (stale verdicts/comments cover the wrong SHA).
+
+    Blocking findings carry MR-CONSISTENCY:. For check 3 the caller passes
+    head_ancestor (head_is_ancestor's verdict); when the recorded head is an
+    ANCESTOR of the pushed tip -- the normal iterative push -- the finding is
+    downgraded to MR-CONSISTENCY-ADVISORY: visible, never a block. None (the
+    pure/no-repo default) keeps the legacy blocking posture, matching False.
     """
     try:
         findings = []
@@ -451,10 +504,17 @@ def consistency_findings(ctx, changed_paths, changed_lines, pushed_tip):
         head = (ctx.head_sha or "").strip().lower()
         tip = str(pushed_tip or "").strip().lower()
         if head and tip and head != tip:
-            findings.append(
-                f"{FINDING_PREFIX} {ref} recorded head {head[:12]} differs "
-                f"from the pushed tip {tip[:12]} -- verdicts and comments on "
-                f"the MR page do not cover the tip being pushed")
+            if head_ancestor is True:
+                findings.append(
+                    f"{ADVISORY_PREFIX} {ref} recorded head {head[:12]} trails "
+                    f"the pushed tip {tip[:12]} as an ancestor (a normal "
+                    "iterative push) -- verdicts and comments on the MR page "
+                    "cover an older state of this branch")
+            else:
+                findings.append(
+                    f"{FINDING_PREFIX} {ref} recorded head {head[:12]} differs "
+                    f"from the pushed tip {tip[:12]} -- verdicts and comments "
+                    f"on the MR page do not cover the tip being pushed")
         return findings
     except Exception:
         return []
@@ -512,8 +572,8 @@ def cross_mr_path_overlap(remote_url, paths, exclude_iid=None, *, runner=None,
         if parsed is None:
             return {}
         provider, host, slug = parsed
-        runner = runner or _run_cli
-        timeout = MR_TIMEOUT if timeout is None else timeout
+        env = _fetch_env(runner=runner, timeout=timeout)
+        runner, timeout = env.runner, env.timeout
         wanted = {str(p).replace("\\", "/") for p in (paths or [])}
         if not wanted:
             return {}  # nothing to intersect: no fetches needed at all

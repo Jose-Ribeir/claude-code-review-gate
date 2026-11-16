@@ -574,10 +574,16 @@ def invalidate_ref(remote, ref):
     matched on the `branch` field recorded at protocol_version 2; records
     without it vouch for nothing by ref and are left alone. Corrupt records
     are warnings, never exceptions, and are skipped (left in place DENYING).
-    """
+
+    The ref arrives in either spelling -- full (`refs/heads/x`, git mode) or
+    short (`x`, the hook parser) -- and both belong to the same ledger key
+    space, so the short/full juggling lives HERE: one call sweeps records
+    written under either spelling of the same branch."""
     removed = 0
     try:
         ref = str(ref or "")
+        short = ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ref
+        forms = {ref, short, "refs/heads/" + short} if short else {ref}
         prefix = _remote_key(remote) + "-"
         paths = sorted((store_root() / "verdicts").glob(prefix + "*.json"))
     except Exception as exc:
@@ -589,7 +595,7 @@ def invalidate_ref(remote, ref):
         except StoreError as exc:
             _warn(f"verdict record {path.name} skipped during ref invalidation ({exc})")
             continue
-        if rec is None or rec.get("branch") != ref:
+        if rec is None or rec.get("branch") not in forms:
             continue
         try:
             os.unlink(path)
@@ -602,9 +608,11 @@ def invalidate_ref(remote, ref):
 def record_bypass(remote, ref, tip, mechanism, reason):
     """Append one audited bypass record to bypasses.jsonl in the store root.
 
-    The escape hatches (mechanism is "OCR_FAIL_OPEN" or "no-verify") are
-    deliberate and loud by construction: this append-only log is the audit
-    trail that tells a bypass apart from an unnoticed hole. A write failure
+    The escape hatches (mechanism is "OCR_FAIL_OPEN" or "review.failOpen")
+    are deliberate and loud by construction: this append-only log is the
+    audit trail that tells a bypass apart from an unnoticed hole. (`git push
+    --no-verify` never invokes the hook at all -- it leaves no record here,
+    by design; the forge's own audit log is the only evidence of that one.) A write failure
     warns rather than raising -- it must never block the gate an env var
     already told to open -- and then the bypass is NOT silent: the warning
     itself names it.

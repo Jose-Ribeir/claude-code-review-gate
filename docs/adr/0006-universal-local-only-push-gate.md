@@ -42,10 +42,12 @@ only act is refusing the push.
 
 ### b) Tip-bound verdicts with tree-diff carry-forward
 A verdict blesses exactly one tip SHA per (destination remote, ref).
-Any push whose head differs re-reviews *unless* the pushed content's
-tree is identical to the previously reviewed state (rebase, reorder,
-content-identical amend) — the verdict is then carried forward without
-a reviewer call and announced. An amend that changes any content is a
+Any push whose head differs re-reviews *unless* the pushed content
+matches the previously reviewed state: either the tip tree is identical
+(rebase, reorder, content-identical amend), or the pushed range's
+patch-ids equal the reviewed range's (a rebase onto an ADVANCED
+upstream, where the tree moved but no reviewed change did) — the
+verdict is then carried forward without a reviewer call and announced. An amend that changes any content is a
 fresh review; this is the control that would have caught the incident
 (the "fix the ADR wording" amend that swept in the whole series would
 have produced a non-empty range and been reviewed — and blocked —
@@ -74,18 +76,24 @@ checks always run: (1) declared scope vs computed diff — a
 `documentation` label or docs-only prose contradicting non-`docs/**`
 paths in the push; (2) claimed counts vs actual file/line counts;
 (3) MR-recorded head vs the pushed tip. Findings block with an
-`MR-CONSISTENCY:` prefix. Above the large-diff threshold, a fourth
+`MR-CONSISTENCY:` prefix — except check (3) when the recorded head is
+an ancestor of the pushed tip (the normal iterative push), which is
+downgraded to a non-blocking `MR-CONSISTENCY-ADVISORY:` line; only
+rewritten history blocks. Above the large-diff threshold, a fourth
 check intersects changed paths with other open MRs (the "entire series
 in one MR" signature). The consult depends only on CLIs and caches the
 repo already patterns after `ocr_forge` and ticket-fetch.
 
 ### f) Fail posture and the audited bypass
 Fail-closed is the default on all surfaces, including reviewer crash,
-absent reviewer CLI, offline, and configured timeout. The single
-escape — `OCR_FAIL_OPEN=1` or `git push --no-verify` — is recorded in
-`bypasses.jsonl` (mechanism, remote, ref, tip, timestamp) and announced
-loudly. Bypasses are possible but always auditable after the fact;
-hook-mode and git-mode behaviour are aligned.
+absent reviewer CLI, offline, and configured timeout. The audited
+escape — `OCR_FAIL_OPEN=1` (env) or `review.failOpen=true` (config) —
+is recorded in `bypasses.jsonl` (mechanism, remote, ref, tip,
+timestamp) and announced loudly. `git push --no-verify` is NOT part of
+that record by design: git never invokes the hook for it, so a local
+hook can never observe it — the forge's own audit trail is the only
+evidence of a `--no-verify` bypass. Hook-mode and git-mode behaviour
+are aligned for the escapes the gate can see.
 
 ### g) Config surface
 User-level `~/.config/review-gate/config.json` (override

@@ -11,8 +11,6 @@ import os
 import sys
 import time
 
-import pytest
-
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SCRIPTS = os.path.join(os.path.dirname(_HERE), "scripts")
 sys.path.insert(0, _SCRIPTS)

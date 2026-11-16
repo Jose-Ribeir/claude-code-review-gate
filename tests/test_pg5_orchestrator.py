@@ -245,7 +245,9 @@ def test_claimed_file_count_vs_actual_is_blocked(repo, tmp_path):
 
 def test_mr_recorded_head_vs_pushed_tip_mismatch_is_blocked(repo, tmp_path):
     """(c) The MR page's recorded head names a different commit than the tip
-    being pushed: verdicts/comments there do not cover this push."""
+    being pushed and is NO ancestor of it -- history was rewritten since the MR
+    page reviewers looked: verdicts/comments there do not cover this push. An
+    unresolvable (unknown) recorded head counts as rewritten (fail-safe)."""
     bindir, canned = _write_gh_shim(tmp_path)
     tip = _feat_tip(repo)
     _github_ify(repo)
@@ -256,6 +258,26 @@ def test_mr_recorded_head_vs_pushed_tip_mismatch_is_blocked(repo, tmp_path):
     assert proc.returncode == 1, out
     assert "MR-CONSISTENCY:" in out and "recorded head" in out, out
     assert _trace(tmp_path) == []
+
+
+def test_mr_recorded_head_ancestor_of_the_push_is_advisory_only(repo, tmp_path):
+    """(c2) Normal iterative flow: reviewers looked at the MR's recorded head,
+    the push adds commits on top, so the recorded head is an ANCESTOR of the
+    pushed tip. Story 13 asks this mismatch to be visible, not to block: the
+    push and its review proceed with a non-blocking advisory."""
+    bindir, canned = _write_gh_shim(tmp_path)
+    _git(["switch", "-q", "-c", "feat"], cwd=repo)
+    old_tip = _commit(repo, "f1.txt")
+    tip = _commit(repo, "f2.txt")
+    _github_ify(repo)
+    _serve(canned, "list_head", _mr(old_tip))
+    proc = _git_mode(repo, [_line(tip)],
+                     _env(tmp_path, PATH=minimal_path(str(bindir))))
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 0, out
+    assert "MR-CONSISTENCY:" not in out, out        # nothing blocking
+    assert "recorded head" in out and "ancestor" in out, out   # still visible
+    assert len(_trace(tmp_path)) == 1, "an iterative push must not be blocked"
 
 
 def test_clean_consistency_lets_the_review_run_and_the_push_pass(repo, tmp_path):
@@ -351,6 +373,43 @@ def test_config_fail_open_feeds_the_audited_bypass(repo, tmp_path):
     entries = _bypasses()
     assert entries and entries[-1]["mechanism"] == "review.failOpen", entries
     assert entries[-1]["tip"] == tip
+
+
+def test_timeout_seconds_above_the_hook_timeout_warns(repo, tmp_path):
+    """(i) review.timeoutSeconds past hooks.json's 900s hook timeout turns
+    Claude Code hook pushes into silent fail-opens (a killed hook is
+    non-blocking). The gate does not clamp -- it makes the posture visible:
+    a loud warning naming both values, and a normal run."""
+    cfg = tmp_path / "gate-config.json"
+    cfg.write_text(json.dumps({"review": {"timeoutSeconds": 3600}}))
+    tip = _feat_tip(repo)
+    proc = _git_mode(repo, [_line(tip)], _env(tmp_path, OCR_CONFIG_FILE=str(cfg)))
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 0, out
+    assert "timeoutSeconds" in out and "900" in out, out
+
+
+# --- lazy ledger prune wired into the gate (story 24) -----------------------------
+
+def test_a_gate_run_triggers_the_lazy_verdict_prune(repo, tmp_path):
+    """(j) The 90-day verdict TTL must run in production, not just in tests:
+    one gate run invokes rg_store.maybe_prune -- its marker lands, and once the
+    marker is stale again an expired verdict is swept ON a gate run."""
+    tip = _feat_tip(repo)
+    proc = _git_mode(repo, [_line(tip)], _env(tmp_path))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    marker = rg_store.store_root() / ".last-prune"
+    assert marker.exists(), "the gate run never invoked the lazy ledger prune"
+    # Age the recorded verdict out and re-arm the prune marker.
+    stale = rg_store.verdict_path(_rid(repo), tip)
+    data = json.loads(stale.read_text(encoding="utf-8"))
+    data["recorded_at"] -= rg_store.VERDICT_TTL_SECONDS + 60
+    stale.write_text(json.dumps(data), encoding="utf-8")
+    marker.write_text("0", encoding="utf-8")
+    tip2 = _commit(repo, "f2.txt")
+    proc2 = _git_mode(repo, [_line(tip2)], _env(tmp_path))
+    assert proc2.returncode == 0, proc2.stdout + proc2.stderr
+    assert not stale.exists(), "an expired verdict survived a gate run"
 
 
 # --- retroactive discovery of a web-created MR (story 11) -------------------------

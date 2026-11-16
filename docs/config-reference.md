@@ -27,7 +27,7 @@ missing or malformed config file is not an error. Decision record: ADR
 | Key | Values | Default | Env override | Notes |
 |---|---|---|---|---|
 | `review.depth` | `full`, `structural`, `large-diff-scoped` | `full` | `OCR_REVIEW_DEPTH` | `full` is the operator default: always full-depth review. `structural` reviews per-file skeletons and hotspots; `large-diff-scoped` scopes very large diffs and names the files not deeply read. |
-| `review.timeoutSeconds` | integer ≥ 0 | `0` (uncapped) | `OCR_REVIEW_TIMEOUT_SECONDS` | Wall-clock cap for the reviewer call. On expiry the gate fails closed; the escape routes below apply. |
+| `review.timeoutSeconds` | integer ≥ 0 | `0` (uncapped) | `OCR_REVIEW_TIMEOUT_SECONDS` | Wall-clock cap for the reviewer call. On expiry the gate fails closed; the escape routes below apply. Values above the hook harness's own timeout (`hooks/hooks.json`, **900s**) trigger a loud gate warning: under the PreToolUse adapters the host kills the hook at 900s, and a killed hook is a silent fail-open. The value is warned about, never clamped. |
 | `review.failOpen` | boolean | `false` | `OCR_FAIL_OPEN` (`1`/`true`/`yes`) | When true, gate-internal failures allow the push after recording an audited bypass. Prefer the one-shot env usage; a persistent file setting silently weakens every push. |
 
 ## Related environment surface (pre-existing)
@@ -39,9 +39,11 @@ missing or malformed config file is not an error. Decision record: ADR
 | `OCR_FAIL_OPEN` | One-shot fail-open for a single invocation; every use is recorded in `bypasses.jsonl` and announced. |
 
 `git push --no-verify` skips git-hook enforcement entirely for that
-push; the gate records the bypass when the skipped decision is
-observable. All bypass records live in the state store with timestamp,
-mechanism, remote, ref, and tip.
+push. It never invokes the hook at all, so it is **unrecordable by
+design**: nothing lands in `bypasses.jsonl`, and the forge's own audit
+trail is the only evidence. The recorded bypass is the
+`OCR_FAIL_OPEN` / `review.failOpen` path. All bypass records live in
+the state store with timestamp, mechanism, remote, ref, and tip.
 
 ## Installer flags
 
