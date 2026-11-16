@@ -26,7 +26,7 @@ _GATE = os.path.join(_SCRIPTS, "review-gate.py")
 
 sys.path.insert(0, _SCRIPTS)
 from hook_output import parse_pretooluse  # noqa: E402
-from conftest import scrub_git_trace  # noqa: E402
+from conftest import minimal_path, scrub_git_trace  # noqa: E402
 _spec = importlib.util.spec_from_file_location("review_gate_skip", _GATE)
 review_gate = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(review_gate)
@@ -61,7 +61,7 @@ def repo(tmp_path):
 def _env(tmp_path, **kw):
     env = scrub_git_trace({k: v for k, v in os.environ.items()
                            if not k.startswith(("OCR_", "STUB_", "KIMCHI_"))})
-    env["PATH"] = "/usr/bin:/bin"  # no reviewer here: a review must fail
+    env["PATH"] = minimal_path()  # no reviewer here: a review must fail
     # The conftest's private store on BOTH sides: the subprocess writes run
     # state there, the in-process module reads it back.
     env["OCR_STATE_DIR"] = os.environ["OCR_STATE_DIR"]
@@ -131,7 +131,7 @@ def test_fail_open_bypass_of_a_failed_review_is_logged(repo, tmp_path):
     assert entry["via"] == "OCR_FAIL_OPEN"
     assert entry["mode"] == "hook"
     assert entry["repo"] == os.path.basename(str(repo))
-    assert entry["repo_id"] == review_gate._marker_digest(str(repo))
+    assert entry["repo_id"] == review_gate._marker_digest(_git(["rev-parse", "--show-toplevel"], cwd=repo))
     assert entry["base"] == base
     assert entry["tip"] == tip
 
@@ -161,7 +161,7 @@ def test_fail_open_multi_ref_push_is_logged_in_git_mode(repo, tmp_path):
     assert entry["via"] == "OCR_FAIL_OPEN"
     assert entry["mode"] == "git"
     assert entry["repo"] == os.path.basename(str(repo))
-    assert entry["repo_id"] == review_gate._marker_digest(str(repo))
+    assert entry["repo_id"] == review_gate._marker_digest(_git(["rev-parse", "--show-toplevel"], cwd=repo))
     assert "base" not in entry and "tip" not in entry
 
 

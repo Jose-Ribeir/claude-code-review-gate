@@ -148,6 +148,8 @@ def assert_repo_unchanged(before, after):
 
 def _is_local_path_url(url):
     """True when a git URL is a plain local path (no scheme, no scp syntax)."""
+    if re.match(r"^[a-zA-Z]:[\\/]", url):    # a Windows drive path, not scp syntax
+        return True
     return not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", url) and ":" not in url.split("/", 1)[0]
 
 

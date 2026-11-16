@@ -260,7 +260,8 @@ def test_a_chunked_run_logs_phases_chunks_and_calls_without_paths_or_code(tmp_pa
     tip = ag._git(["rev-parse", "HEAD"], cwd=repo)
     env = ag._chunk_env(tmp_path, STUB_STREAM=4, STUB_STREAM_AGENT_S=0.3)
 
-    decision, reason, _, _ = ag._hook(repo, "git push origin main", env, timeout=120)
+    decision, reason, _, _ = ag._hook_settled(repo, "git push origin main", env, tip,
+                                                timeout=120)
     assert decision == "pass", reason
     st = ag._wait_state(repo, tip, {"done"})
     assert st["verdict"] == "pass"

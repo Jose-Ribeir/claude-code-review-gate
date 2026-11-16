@@ -57,7 +57,8 @@ def test_recorded_verdicts_are_0600_and_keyed_remote_tip(tmp_path):
                             "pass", False, "", ["c1", "c2"])
     p = rg_store.verdict_path("https://example.com/repo.git", "tip1")
     assert p.exists()
-    assert p.stat().st_mode & 0o777 == 0o600
+    if sys.platform != "win32":   # Windows has no POSIX permission bits (every file reads 0o666)
+        assert p.stat().st_mode & 0o777 == 0o600
     assert str(rg_store.store_root()) in str(p)  # the private OCR_STATE_DIR
     rec = rg_store.load_verdict("https://example.com/repo.git", "tip1")
     assert rec["verdict"] == "pass" and rec["commits"] == ["c1", "c2"]
@@ -133,7 +134,9 @@ def test_the_sandbox_is_a_clone_with_scrubbed_tsconfig_and_symlinked_node_module
     assert "plugins" not in json.loads(Path(clone, "nested", "tsconfig.build.json").read_text())
     assert "plugins" in json.loads(Path(repo, "tsconfig.json").read_text())
     # node_modules is a SYMLINK to the real one (read surface, not write).
-    assert os.path.islink(os.path.join(clone, "node_modules"))
+    nm = os.path.join(clone, "node_modules")
+    # (Windows without the symlink privilege gets a directory junction instead.)
+    assert os.path.islink(nm) or getattr(os.path, "isjunction", lambda _p: False)(nm)
     # Teardown refuses paths that are not ours.
     rg_store.remove_review_clone(str(repo))
     assert os.path.isdir(clone)
@@ -260,6 +263,7 @@ def test_the_supervisor_flock_is_singleflight(repo, tmp_path, monkeypatch):
     assert (review_gate._read_state(path) or {}).get("state") == "done"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows reports every writable file as mode 0o666: there are no POSIX permission bits to assert")
 def test_state_files_are_written_0600(repo, tmp_path):
     tip = _git(["rev-parse", "HEAD"], cwd=repo)
     path = _state_path_for(repo, tip)

@@ -323,10 +323,19 @@ def make_review_clone(repo_root, tip, run_id):
 def _symlink_node_modules(repo_root, clone_path):
     """node_modules is the reviewer's read surface, never its write surface."""
     src = Path(repo_root) / "node_modules"
+    dst = Path(clone_path) / "node_modules"
     try:
-        if src.is_dir() and not (Path(clone_path) / "node_modules").exists():
-            (Path(clone_path) / "node_modules").symlink_to(src, target_is_directory=True)
-    except OSError:
+        if src.is_dir() and not dst.exists():
+            try:
+                dst.symlink_to(src, target_is_directory=True)
+            except OSError:
+                if os.name != "nt":
+                    raise
+                # Windows: a symlink needs a privilege most accounts lack; a
+                # directory junction needs none and is the same read surface.
+                import _winapi
+                _winapi.CreateJunction(str(src), str(dst))
+    except Exception:
         pass
 
 

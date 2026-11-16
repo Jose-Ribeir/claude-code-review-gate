@@ -10,6 +10,7 @@ every overrideable location pointed at tmp (the developer's real
 """
 import os
 import re
+import shutil
 import subprocess
 import sys
 
@@ -77,7 +78,10 @@ def _hook_env(tmp_path, trace):
 
 def _run_hook(hook, work, tip, env):
     """Invoke the installed pre-push directly, the way git would."""
-    return subprocess.run([str(hook), "origin"],
+    # Windows cannot execute a #! script: hand it to Git for Windows' sh, which is
+    # what git itself does for a hook there.
+    argv = [shutil.which("sh") or "sh", str(hook)] if sys.platform == "win32" else [str(hook)]
+    return subprocess.run(argv + ["origin"],
                           input=f"refs/heads/main {tip} refs/heads/main {ZERO}\n",
                           capture_output=True, text=True, cwd=str(work), env=env,
                           timeout=120)
@@ -257,6 +261,9 @@ def test_uninstall_leaves_no_stale_copy_anywhere(tmp_path):
 
 
 def test_install_into_an_unwritable_hooks_path_fails_loudly(tmp_path):
+    if sys.platform == "win32":
+        pytest.skip("Windows has no POSIX directory permission bits: a 0500 directory "
+                    "still accepts new files, so the failure cannot be reproduced")
     if os.geteuid() == 0:
         pytest.skip("running as root: permission-based failure cannot be reproduced")
     hooks = tmp_path / "locked"

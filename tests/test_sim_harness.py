@@ -7,7 +7,6 @@ FAKE pre-push hook script that plays the gate's "is still running" answer and
 then its block/allow verdicts, so no `kimchi` worker ever runs.
 """
 import os
-import shutil
 import subprocess
 import sys
 import time
@@ -18,6 +17,7 @@ import pytest
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 import sim_harness as sim  # noqa: E402
+from conftest import force_rmtree  # noqa: E402
 
 
 def _git(args, cwd, check=True):
@@ -75,8 +75,10 @@ def test_isolation_assertion_applies_url_rewrites(tmp_path):
     target = _toy_repo(tmp_path)
     scratch = sim.make_scratch(target, tmp_path / "scratch")
     env = sim.push_env(scratch, _SCRIPTS_DIR)
+    # Quoted, backslashes doubled: a bare Windows path is a bad config line.
+    origin = str(scratch.origin).replace("\\", "\\\\")
     scratch.gitconfig.write_text(
-        f"[url \"git@example.com:laundered.git\"]\n\tinsteadOf = {scratch.origin}\n")
+        f"[url \"git@example.com:laundered.git\"]\n\tinsteadOf = \"{origin}\"\n")
     with pytest.raises(sim.SimError, match="not a local path"):
         sim.assert_remote_isolation(scratch, env=env)
 
@@ -177,7 +179,7 @@ def _fake_gate_env(scratch, script, tmp_path):
     state = tmp_path / "fake-gate-state"
     state.mkdir(exist_ok=True)
     env = sim.push_env(scratch, _SCRIPTS_DIR)
-    cfg = f"[core]\n\thooksPath = {hookdir}\n"
+    cfg = f"[core]\n\thooksPath = {hookdir.as_posix()}\n"  # a "\" would need escaping
     scratch.gitconfig.write_text(cfg)
     env["FAKE_GATE_STATE"] = str(state)
     return env, state
@@ -223,7 +225,7 @@ def test_drive_push_transport_failure_is_a_harness_error_not_a_block(tmp_path):
     scratch = sim.make_scratch(target, tmp_path / "scratch")
     env, _ = _fake_gate_env(scratch, _FAKE_GATE_BLOCK, tmp_path)
     sim.apply_commit(scratch.work, sim.CommitSpec(message="c", write={"f.py": "z = 1\n"}))
-    shutil.rmtree(scratch.origin)  # the deleter: outside the harness
+    force_rmtree(scratch.origin)  # the deleter: outside the harness
     with pytest.raises(sim.SimError, match="not a gate verdict"):
         sim.drive_push(scratch, env, poll_s=0.05)
     try:
@@ -284,7 +286,7 @@ def test_run_scenario_propagates_transport_failures_as_harness_errors(tmp_path):
     target = _toy_repo(tmp_path)
     scratch = sim.make_scratch(target, tmp_path / "scratch")
     env, _ = _fake_gate_env(scratch, _FAKE_GATE_BLOCK, tmp_path)
-    shutil.rmtree(scratch.origin)
+    force_rmtree(scratch.origin)
     scenario = sim.Scenario(name="s", description="d", expect="block",
                             commits=[sim.CommitSpec(message="c", write={"f.py": "z = 1\n"})])
     with pytest.raises(sim.SimError, match="not a gate verdict"):

@@ -29,6 +29,9 @@ _SCRIPTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 sys.path.insert(0, _SCRIPTS)
 
 import ocr_forge  # noqa: E402
+from conftest import posix_path, write_fake_cli  # noqa: E402
+
+import pytest  # noqa: E402
 
 TARGET = "out/weekly-2026-11.md"
 
@@ -217,20 +220,24 @@ def _path_with_only_git(tmp_path, monkeypatch, fake_clis=()):
     bindir = tmp_path / "onlybin"
     bindir.mkdir(exist_ok=True)
     git = shutil.which("git")
-    link = bindir / "git"
-    if not link.exists():
-        os.symlink(git, str(link))
+    if sys.platform == "win32":
+        # No privilege-free symlink (and a copied git.exe loses its exec-path):
+        # git's own directory stands in for the one-entry bin dir.
+        path = os.pathsep.join([str(bindir), os.path.dirname(git)])
+    else:
+        link = bindir / "git"
+        if not link.exists():
+            os.symlink(git, str(link))
+        path = str(bindir)
     for name, body in fake_clis:
-        script = bindir / name
-        script.write_text(body, encoding="utf-8")
-        script.chmod(0o755)
-    monkeypatch.setenv("PATH", str(bindir))
+        write_fake_cli(bindir, name, body)
+    monkeypatch.setenv("PATH", path)
     return bindir
 
 
 def _hit_script(trace, path_hit):
     return ("#!/bin/sh\necho \"$@\" >> \"%s\"\n"
-            "printf '[{\"path\": \"%s\"}]\\n'\n" % (trace, path_hit))
+            "printf '[{\"path\": \"%s\"}]\\n'\n" % (posix_path(trace), path_hit))
 
 
 # ===========================================================================
@@ -350,6 +357,10 @@ class TestForgeTier:
         assert res["status"] == "unavailable"
         assert "rc=4" in res["warning"]
 
+    @pytest.mark.skipif(sys.platform == "win32", reason=(
+        "a fake CLI on Windows is a .cmd -> sh -> sleep chain, not one gh.exe; "
+        "after the timeout kill, subprocess.run still reads the pipes the "
+        "orphaned sleep holds open, so the 3 s bound cannot be observed with a shim"))
     def test_hung_cli_respects_hard_timeout(self, tmp_path, monkeypatch):
         """The 3s bound is real: a sleeping CLI is killed, wall time < 5s."""
         cwd = self._repo_no_match(tmp_path)
@@ -388,7 +399,7 @@ class TestNegativeCache:
         _commit(cwd, {"app.py": "x = 1\n"})
         _git_raw(["remote", "add", "origin", "git@github.com:org/repo.git"], cwd)
         trace = tmp_path / "calls.trace"
-        script = "#!/bin/sh\necho called >> \"%s\"\nexit 4\n" % trace
+        script = "#!/bin/sh\necho called >> \"%s\"\nexit 4\n" % posix_path(trace)
         _path_with_only_git(tmp_path, monkeypatch, [("gh", script)])
         return trace
 

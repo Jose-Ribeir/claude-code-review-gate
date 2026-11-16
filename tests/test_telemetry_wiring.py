@@ -74,7 +74,7 @@ def _commit(work, files):
 
 
 def _env(tmp_path, **kw):
-    env = {k: v for k, v in os.environ.items() if not k.startswith(("OCR_", "STUB_"))}
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("OCR_", "STUB_")) or k == "OCR_BACKEND"}
     # Kimchi port (D12): the gate and this test must share ONE external
     # state store; conftest points it at a per-test temp dir.
     env["OCR_STATE_DIR"] = os.environ["OCR_STATE_DIR"]
@@ -200,7 +200,7 @@ class TestDeepLaneE2E:
 
 class TestCollectorsCli:
     def _run_cli(self, repo, stdin_text, extra_env=None):
-        env = {k: v for k, v in os.environ.items() if not k.startswith(("OCR_", "STUB_"))}
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("OCR_", "STUB_")) or k == "OCR_BACKEND"}
         env["OCR_TELEMETRY"] = "1"
         env.update(extra_env or {})
         return subprocess.run([sys.executable, os.path.join(_SCRIPTS, "ocr_collectors.py"),
@@ -249,7 +249,7 @@ _VALID_DEMANDS = json.dumps({
 
 class TestDemandsCli:
     def _run_cli(self, repo, stdin_text, extra_env=None):
-        env = {k: v for k, v in os.environ.items() if not k.startswith(("OCR_", "STUB_"))}
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("OCR_", "STUB_")) or k == "OCR_BACKEND"}
         env["OCR_TELEMETRY"] = "1"
         env.update(extra_env or {})
         return subprocess.run([sys.executable, os.path.join(_SCRIPTS, "ocr_demands.py")],

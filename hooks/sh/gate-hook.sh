@@ -141,7 +141,7 @@ json_escape() {
   while [ -n "$s" ]; do
     ch="${s:0:1}"
     case "$ch" in
-      '\\') out+='\\\\' ;;
+      '\')  out+='\\' ;;
       '"')  out+='\"' ;;
       $'\n') out+='\n' ;;
       $'\t') out+='\t' ;;
@@ -152,6 +152,18 @@ json_escape() {
     s="${s:1}"
   done
   REPLY="$out"
+}
+
+# _posix_path <path>: a Windows drive path (C:\x or C:/x) as MSYS/Cygwin sees it
+# (/c/x) when cygpath exists; every other path (all of POSIX) passes unchanged.
+_posix_path() {
+  case "$1" in
+    [A-Za-z]:[/\\]*)
+      if command -v cygpath >/dev/null 2>&1; then
+        cygpath -u -- "$1" 2>/dev/null && return 0
+      fi ;;
+  esac
+  printf '%s' "$1"
 }
 
 # ---------------------------------------------------------------------------
@@ -172,6 +184,13 @@ _hook_gated() {
     f="${queue[$idx]}"
     idx=$((idx + 1))
     [ -f "$f" ] || continue
+    # A hook chain is a few short TEXT scripts. A token can also name a binary
+    # (the `#!/bin/sh` / `#!/usr/bin/env` interpreter on the first line is a
+    # path-looking token, and a binary's own strings resolve to more binaries):
+    # tokenizing executables stalls the guard for tens of seconds on Git for
+    # Windows, so only small text files are followed.
+    grep -Iq '' "$f" 2>/dev/null || continue
+    [ "$(wc -c < "$f" 2>/dev/null || echo 0)" -le 65536 ] || continue
     case " $seen " in *" $f "*) continue ;; esac
     seen="$seen $f"
     grep -q "review-gate" "$f" 2>/dev/null && return 0
@@ -616,8 +635,14 @@ push_shape "$PUSH_WORDS" || shape_rc=$?
 # a gate behind a husky shim counts as gated.
 json_get "$payload" "cwd" && hookcwd="$REPLY" || hookcwd=""
 [ -z "$hookcwd" ] && hookcwd="$PWD"
+# Git for Windows: the payload cwd is C:\... and git answers C:/...; the walk
+# below composes and tests POSIX paths, so the guard uses the MSYS form (/c/...)
+# and the native form is kept for the payload handed to review-gate.py.
+hookcwd_native="$hookcwd"
+hookcwd="$(_posix_path "$hookcwd")"
 hooksdir="$(git -C "$hookcwd" rev-parse --git-path hooks 2>/dev/null)" || _pass
 [ -n "$hooksdir" ] || _pass
+hooksdir="$(_posix_path "$hooksdir")"
 case "$hooksdir" in
   /*) ;;
   *) hooksdir="$hookcwd/$hooksdir" ;;
@@ -637,7 +662,7 @@ if [ ! -f "$GATE_DIR/review-gate.py" ]; then
 fi
 json_escape "$cmd"
 esc_cmd="$REPLY"
-json_escape "$hookcwd"
+json_escape "$hookcwd_native"
 esc_cwd="$REPLY"
 session=""
 json_get "$payload" "session_id" && session="$REPLY"

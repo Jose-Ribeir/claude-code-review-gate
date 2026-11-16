@@ -202,7 +202,7 @@ def _reviews(tmp_path):
 
 def _push(work, env):
     tip = _git(["rev-parse", "HEAD"], cwd=work)
-    decision, reason, _, _ = ag._hook(work, "git push origin main", env)
+    decision, reason, _, _ = ag._hook_settled(work, "git push origin main", env, tip)
     assert decision == "pass", reason
     ag._wait_state(work, tip, {"done"})
 

@@ -221,7 +221,11 @@ def emit(payload):
         return
 
     def stamp():
-        return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + ".%03dZ" % (int(time.time() * 1000) % 1000)
+        # ONE clock read: formatting the seconds and the milliseconds from two
+        # separate time.time() calls made the stamp jump a whole second backwards
+        # or forwards whenever a second boundary fell between them.
+        now = time.time()
+        return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(now)) + ".%03dZ" % (int(now * 1000) % 1000)
 
     def line(**ev):
         sys.stdout.write(json.dumps(ev) + "\n")

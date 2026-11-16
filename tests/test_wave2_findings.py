@@ -109,6 +109,7 @@ def test_park_pending_tmp_names_never_match_pending_glob(tmp_path):
         assert path.name.startswith(rg.PENDING_PREFIX)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows reports every writable file as mode 0o666: there are no POSIX permission bits to assert (and os.umask has no effect)")
 def test_park_pending_creates_note_0600_even_under_umask_022(monkeypatch):
     old_umask = os.umask(0o022)
     try:

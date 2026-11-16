@@ -156,7 +156,9 @@ def _find_ancestor_docs(repo_root, file_rel):
     nearest directory containing ``AGENTS.md`` and/or ``.ocr/conventions.md``
     wins. Both docs in that directory apply, ``AGENTS.md`` first.
     """
-    dir_abs = os.path.dirname(os.path.join(repo_root, file_rel))
+    # normpath: file_rel uses "/" while repo_root uses the OS separator, and the
+    # doc path is compared with the (normpath'd) explicit-mapping path to dedupe.
+    dir_abs = os.path.normpath(os.path.dirname(os.path.join(repo_root, file_rel)))
     root_abs = os.path.abspath(repo_root)
     while True:
         found = [os.path.join(dir_abs, rel) for rel in _ANCESTOR_DOC_RELPATHS

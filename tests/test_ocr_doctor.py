@@ -16,6 +16,9 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+from conftest import minimal_path
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts" / "ocr_doctor.py"
 
@@ -43,6 +46,11 @@ def _fake_kimchi(tmp_path, version_output, name="kimchi"):
     """A shim that answers `--version` like the real CLI (or fails to)."""
     p = tmp_path / name
     p.parent.mkdir(parents=True, exist_ok=True)
+    if sys.platform == "win32":
+        # PATHEXT finds kimchi.cmd: the batch form of the same one-line answer.
+        p = p.with_name(name + ".cmd")
+        p.write_bytes(f"@echo {version_output}\r\n".encode("ascii"))
+        return p
     p.write_text(f"#!/bin/sh\nprintf '%s\\n' {version_output!r}\n")
     p.chmod(0o755)
     return p
@@ -87,7 +95,7 @@ def test_python_and_git_ok(tmp_path):
 
 def test_missing_kimchi_fails(tmp_path):
     env = _base_env(tmp_path)
-    env["PATH"] = "/usr/bin:/bin"  # git, but no kimchi shim
+    env["PATH"] = minimal_path()  # git, but no kimchi shim
     env.pop("KIMCHI_BIN", None)
     checks = _by_name(ocr_doctor.run_checks(env=env))
     assert checks["kimchi"]["status"] == "fail"
@@ -95,7 +103,7 @@ def test_missing_kimchi_fails(tmp_path):
 
 def test_kimchi_bin_override_found(tmp_path):
     env = _base_env(tmp_path)
-    env["PATH"] = "/usr/bin:/bin"
+    env["PATH"] = minimal_path()
     env["KIMCHI_BIN"] = str(_fake_kimchi(tmp_path / "shim", "1.27.0"))
     checks = _by_name(ocr_doctor.run_checks(env=env))
     assert checks["kimchi"]["status"] == "ok"
@@ -216,6 +224,9 @@ def test_not_a_git_repo_fails(tmp_path):
     assert checks["pre-push-hook"]["status"] == "fail"
     assert "not a git repository" in checks["pre-push-hook"]["detail"]
 
+@pytest.mark.skipif(sys.platform == "win32", reason=(
+    "Windows has no POSIX directory permission bits: a read-only (0500) directory "
+    "still accepts new files, so an unwritable store cannot be seeded"))
 def test_unwritable_store_fails(tmp_path):
     env = _base_env(tmp_path)
     _seed_store(tmp_path / "store")
@@ -309,7 +320,7 @@ def test_canary_hint_present(tmp_path):
 
 def test_any_fail_makes_summary_exit_1(tmp_path):
     env = _base_env(tmp_path)
-    env["PATH"] = "/usr/bin:/bin"  # no kimchi shim
+    env["PATH"] = minimal_path()  # no kimchi shim
     checks = ocr_doctor.run_checks(env=env)
     assert any(c["status"] == "fail" for c in checks)
     assert ocr_doctor.main([]) in (0, 1)  # sanity: never raises
@@ -481,6 +492,12 @@ def test_no_gate_repo_reports_not_installed_at_effective_path(tmp_path):
 
 def _cli(env, *args):
     clean = {k: v for k, v in env.items() if not k.startswith("GIT_TRACE")}
+    if sys.platform == "win32":
+        # The tests' env carries only PATH/HOME/...; a Windows process also needs
+        # SystemRoot and COMSPEC (Python startup, and cmd.exe to run the .cmd shim).
+        for k in ("SYSTEMROOT", "SystemRoot", "COMSPEC", "PATHEXT", "TEMP", "TMP"):
+            if k in os.environ and k not in clean:
+                clean[k] = os.environ[k]
     return subprocess.run(
         [sys.executable, str(SCRIPT), *args],
         capture_output=True, text=True, env=clean, timeout=120)
@@ -495,7 +512,7 @@ def test_cli_healthy_exit_0(tmp_path):
 
 def test_cli_broken_kimchi_exit_1(tmp_path):
     env = _base_env(tmp_path)
-    env["PATH"] = "/usr/bin:/bin"
+    env["PATH"] = minimal_path()
     r = _cli(env)
     assert r.returncode == 1
     assert "[FAIL] kimchi:" in r.stdout

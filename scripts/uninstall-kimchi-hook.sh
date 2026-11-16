@@ -41,7 +41,7 @@ HOOKS_CFG="$(git -C "$REPO" config --get core.hooksPath 2>/dev/null || true)"
 if [ -n "$HOOKS_CFG" ]; then
   REPO_TOP="$(git -C "$REPO" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$REPO")"
   case "$HOOKS_CFG" in
-    /*) CFG_HOOKS_DIR="$HOOKS_CFG" ;;
+    /*|[A-Za-z]:[/\\]*) CFG_HOOKS_DIR="$HOOKS_CFG" ;;   # Git for Windows: C:/x or C:\x
     *)  CFG_HOOKS_DIR="$REPO_TOP/$HOOKS_CFG" ;;
   esac
 else

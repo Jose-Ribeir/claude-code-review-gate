@@ -112,6 +112,21 @@ def _hook(work, cmd, env, session="s1", timeout=120):
     return decision, reason, elapsed, proc.stderr
 
 
+def _hook_settled(work, cmd, env, tip, session="s1", timeout=120):
+    """_hook, then -- if the inline budget lost its wall-clock race -- the retry.
+
+    The 3 s inline budget is a race against process spawn cost: on Windows a
+    review that takes 1 s on Linux can miss it and the hook answers "still
+    running". That reply's own instructions are to re-run the same push once the
+    review settles, so do exactly that. Tests about WHAT the verdict is (not how
+    fast the inline path is) use this; tests about the inline path keep _hook."""
+    out = _hook(work, cmd, env, session=session, timeout=timeout)
+    if out[0] == "deny" and "still running" in out[1]:
+        _wait_state(work, tip, {"done", "failed"}, timeout=timeout)
+        out = _hook(work, cmd, env, session=session, timeout=timeout)
+    return out
+
+
 def _trace(tmp_path):
     p = tmp_path / "stub.trace"
     if not p.exists():
@@ -211,7 +226,10 @@ def test_a_missing_reviewer_denies_instead_of_failing_open(repo, tmp_path):
     env.pop("OCR_STUB_WORKER")
     # A PATH with git but no kimchi (the Kimchi app bundle is on the dev
     # machine's PATH; /usr/bin has no kimchi).
-    env["PATH"] = "/usr/bin:/bin"
+    # Windows has no /usr/bin: keep only the directory that holds git.
+    git_exe = shutil.which("git")
+    env["PATH"] = (os.path.dirname(git_exe) if sys.platform == "win32" and git_exe
+                   else "/usr/bin:/bin")
     decision, reason, _, _ = _hook(repo, "git push origin main", env)
     assert decision == "deny"
     assert "kimchi" in reason
@@ -271,6 +289,12 @@ def test_two_hooks_at_once_share_one_review(repo, tmp_path):
                               cwd=str(repo), env=env) for _ in range(2)]
     outs = [p.communicate(payload, timeout=120)[0] for p in procs]
     decisions = [parse_pretooluse(o)[0] for o in outs]
+    if decisions != ["pass", "pass"]:
+        # A slow spawn (Windows) can lose the 3 s inline race; the contract is
+        # then "re-run the push once the shared review settles" -> pass.
+        _wait_state(repo, tip, {"done"})
+        decisions = [d if d == "pass" else _hook_settled(repo, "git push origin main", env, tip)[0]
+                     for d in decisions]
     assert decisions == ["pass", "pass"]
     assert len(_trace(tmp_path)) == 1
     _wait_state(repo, tip, {"done"})
@@ -528,7 +552,10 @@ def _fresh_repo(tmp_path, commits=3):
                 + "M 644 inline f.txt\n"
                 + f"data {len(str(i)) + 1}\n{i}\n")
         proc = subprocess.run(["git", "fast-import", "--quiet"], cwd=str(work),
-                              input="".join(marks), capture_output=True, text=True)
+                              # bytes, not text=True: Windows text mode would turn
+                              # "\n" into "\r\n" and fast-import reads the ref as "main\r".
+                              input="".join(marks).encode("utf-8"),
+                              capture_output=True)
         assert proc.returncode == 0, proc.stderr
     return work
 
@@ -595,7 +622,9 @@ def test_an_unevaluable_history_count_refuses_instead_of_proceeding(tmp_path):
     # The tip itself still resolves, but its root-ancestor object is gone,
     # so `git rev-list --count <tip>` fails while the push flow proceeds.
     first = _git(["rev-list", "--max-parents=0", "HEAD"], cwd=work)
-    (Path(work) / ".git" / "objects" / first[:2] / first[2:]).unlink()
+    obj = Path(work) / ".git" / "objects" / first[:2] / first[2:]
+    os.chmod(obj, 0o666)  # git writes loose objects read-only; Windows refuses to unlink those
+    obj.unlink()
     decision, reason, _, _ = _hook(work, "git push origin main", _env(tmp_path))
     assert decision == "deny", reason
     assert "OCR_FULL_HISTORY_LIMIT" in reason
@@ -620,7 +649,8 @@ def _budget_of(work, tip, env, chunks_total, timeout=180):
     """Push through the hook, wait for the verdict, and return the state's
     budget seconds: deadline_ts is realigned with the run budget once the
     chunk plan is known, so deadline_ts - started_ts is the budget."""
-    decision, reason, _, stderr = _hook(work, "git push origin main", env, timeout=timeout)
+    decision, reason, _, stderr = _hook_settled(work, "git push origin main", env, tip,
+                                                timeout=timeout)
     assert decision == "pass", (reason, stderr)
     st = _wait_state(work, tip, {"done"}, timeout=timeout)
     assert st.get("verdict") == "pass", st

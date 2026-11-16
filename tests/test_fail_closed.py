@@ -15,6 +15,8 @@ import time
 
 import pytest
 
+from conftest import minimal_path  # noqa: E402
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SCRIPTS = os.path.join(os.path.dirname(_HERE), "scripts")
 _GATE = os.path.join(_SCRIPTS, "review-gate.py")
@@ -71,7 +73,7 @@ def _env(tmp_path, **kw):
     where `kimchi` is only what the test put there (or nothing)."""
     env = {k: v for k, v in os.environ.items()
            if not k.startswith(("OCR_", "STUB_", "KIMCHI_", "GIT_TRACE"))}
-    env["PATH"] = "/usr/bin:/bin"
+    env["PATH"] = minimal_path()
     # The conftest's private store on BOTH sides: the subprocess writes run
     # state / verdicts there, and the in-process _wait_terminal poll reads it.
     env.update({"OCR_STATE_DIR": os.environ["OCR_STATE_DIR"],
@@ -135,9 +137,14 @@ def test_garbage_worker_output_denies(repo, tmp_path):
     tip = _git(["rev-parse", "HEAD"], cwd=repo)
     shim = tmp_path / "bin"
     shim.mkdir()
-    (shim / "kimchi").write_text("#!/bin/sh\necho 'I could not review this.'\nexit 0\n")
-    (shim / "kimchi").chmod(0o755)
-    decision, _ = _push(repo, _env(tmp_path, PATH=f"{shim}:/usr/bin:/bin"))
+    if sys.platform == "win32":
+        # PATHEXT resolves kimchi.cmd: the same two-line script in batch form.
+        (shim / "kimchi.cmd").write_bytes(
+            b"@echo off\r\necho I could not review this.\r\nexit /b 0\r\n")
+    else:
+        (shim / "kimchi").write_text("#!/bin/sh\necho 'I could not review this.'\nexit 0\n")
+        (shim / "kimchi").chmod(0o755)
+    decision, _ = _push(repo, _env(tmp_path, PATH=minimal_path(shim)))
     assert decision == "deny"
     st = _wait_terminal(repo, tip)
     assert st.get("state") == "failed"
@@ -162,7 +169,7 @@ def test_a_hung_worker_is_tree_killed_and_denied(repo, tmp_path):
         f"echo $! > \"{pidfile}\"\n"
         "sleep 600\n")
     (shim / "kimchi").chmod(0o755)
-    decision, _ = _push(repo, _env(tmp_path, PATH=f"{shim}:/usr/bin:/bin", OCR_TIMEOUT="6"))
+    decision, _ = _push(repo, _env(tmp_path, PATH=minimal_path(shim), OCR_TIMEOUT="6"))
     assert decision == "deny"
     st = _wait_terminal(repo, tip)
     assert st.get("state") == "failed"

@@ -24,6 +24,112 @@ def scrub_git_trace(env):
     return {k: v for k, v in env.items() if not k.startswith("GIT_TRACE")}
 
 
+def minimal_path(*front):
+    """A PATH that holds git (and any `front` dirs) but no reviewer CLI.
+
+    The tests that need "no kimchi/claude on PATH" used the literal
+    "/usr/bin:/bin"; Windows has neither directory, and with them git itself
+    disappears (the gate then fails earlier, for the wrong reason). There the
+    base is the directory git.exe lives in."""
+    import shutil
+    import sys
+    base = "/usr/bin:/bin"
+    if sys.platform == "win32":
+        git = shutil.which("git")
+        base = os.path.dirname(git) if git else ""
+    return os.pathsep.join([str(p) for p in front] + [base]) if base else \
+        os.pathsep.join(str(p) for p in front)
+
+
+def _git_sh():
+    """Path of Git for Windows' own sh.exe (None when not found)."""
+    import shutil
+    for name in ("sh", "bash"):
+        found = shutil.which(name)
+        if found:
+            return found
+    git = shutil.which("git")
+    if git:
+        root = os.path.dirname(os.path.dirname(git))   # ...\\Git\\cmd|mingw64\\bin -> ...\\Git
+        for rel in (("usr", "bin", "sh.exe"), ("..", "usr", "bin", "sh.exe")):
+            cand = os.path.normpath(os.path.join(root, *rel))
+            if os.path.isfile(cand):
+                return cand
+    return None
+
+
+def write_fake_cli(bindir, name, sh_body):
+    """An executable named `name` in `bindir` that runs the POSIX-sh `sh_body`.
+
+    POSIX: the script itself (mode 0755). Windows has no shebangs and no
+    executable bit: the body goes to `name.sh` and an inert `name.cmd` marker
+    makes shutil.which(name) find it (PATHEXT). The marker is never executed:
+    cmd.exe would split an argument such as `search?scope=blobs&search=x` at the
+    `&`, and CreateProcess of a bare name finds only `.exe`; instead the
+    `_fake_cli_shims_on_windows` fixture below makes ocr_forge run the `.sh`
+    with Git for Windows' sh.exe. Returns the path made."""
+    import sys
+    os.makedirs(str(bindir), exist_ok=True)
+    if sys.platform != "win32":
+        path = os.path.join(str(bindir), name)
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(sh_body)
+        os.chmod(path, 0o755)
+        return path
+    with open(os.path.join(str(bindir), name + ".sh"), "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(sh_body.replace("/bin/sleep", "sleep"))
+    marker = os.path.join(str(bindir), name + ".cmd")
+    with open(marker, "w", encoding="ascii", newline="\r\n") as fh:
+        fh.write("@exit /b 0\n")
+    return marker
+
+
+def force_rmtree(path):
+    """shutil.rmtree that also removes git's read-only object files (Windows
+    refuses to unlink a read-only file, where POSIX only checks the directory)."""
+    import shutil
+    import stat
+
+    def _chmod_and_retry(func, target, exc):
+        os.chmod(target, stat.S_IWRITE)
+        func(target)
+
+    shutil.rmtree(str(path), onexc=_chmod_and_retry)
+
+
+def posix_path(path):
+    """`path` with forward slashes: safe to embed in a sh script on Windows."""
+    return str(path).replace("\\", "/")
+
+
+@pytest.fixture(autouse=True)
+def _fake_cli_shims_on_windows(monkeypatch):
+    """Windows only: let ocr_forge "run" the fake gh/glab that write_fake_cli
+    made. Its subprocess.run is wrapped (module attribute only; the real
+    subprocess module is untouched) so a bare `gh` that PATH resolves to
+    `gh.cmd` with a sibling `gh.sh` runs as `sh gh.sh args...`."""
+    import shutil
+    import subprocess
+    import sys
+    import types
+    forge = sys.modules.get("ocr_forge")
+    if sys.platform != "win32" or forge is None:
+        return
+    real = subprocess
+
+    def run(argv, *args, **kw):
+        if isinstance(argv, (list, tuple)) and argv and os.sep not in str(argv[0]):
+            exe = shutil.which(str(argv[0]))
+            if exe and exe.lower().endswith(".cmd") and os.path.isfile(exe[:-4] + ".sh"):
+                argv = [_git_sh() or "sh", exe[:-4] + ".sh"] + list(argv[1:])
+        return real.run(argv, *args, **kw)
+
+    proxy = types.SimpleNamespace(**{k: getattr(real, k) for k in dir(real)
+                                     if not k.startswith("__")})
+    proxy.run = run
+    monkeypatch.setattr(forge, "subprocess", proxy)
+
+
 @pytest.fixture(autouse=True)
 def _private_state_store(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("OCR_STATE_DIR", str(tmp_path_factory.mktemp("rg-state")))

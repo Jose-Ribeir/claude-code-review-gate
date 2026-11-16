@@ -205,11 +205,9 @@ def make_forge_cli(bin_dir, cli, stdout_text, rc=0):
     """A fake ``glab``/``gh`` CLI on ``bin_dir``: prints ``stdout_text`` and
     exits ``rc``. Returns a PATH dir list to prepend (the dir holding it)."""
     os.makedirs(str(bin_dir), exist_ok=True)
-    script = os.path.join(str(bin_dir), cli)
-    with open(script, "w", encoding="utf-8") as fh:
-        fh.write("#!/bin/sh\nprintf '%%s' '%s'\nexit %d\n"
-                 % (stdout_text.replace("'", "'\\''"), rc))
-    os.chmod(script, 0o755)
+    from conftest import write_fake_cli  # tests/ is on sys.path (rootdir conftest)
+    write_fake_cli(bin_dir, cli, "#!/bin/sh\nprintf '%%s' '%s'\nexit %d\n"
+                   % (stdout_text.replace("'", "'\\''"), rc))
     return str(bin_dir)
 
 
