@@ -743,3 +743,219 @@ def test_persona_carries_the_drift_finding_contract():
     assert "stale_passage" in body
     for field in ("doc_path", "existing_code"):
         assert field in body, field
+
+
+# ---------------------------------------------------------------------------
+# SPEC-14.3: documentation-quality duties -- persona duty sections plus the
+# review skill's spawn condition and docs_quality payload contract.
+#
+# The payload contract below is what the gate plumbing (SPEC-14.4) must
+# produce: it is pinned here textually on BOTH sides (the review SKILL.md the
+# orchestrator follows and the docs-checker persona that consumes the block)
+# so the two documents cannot drift apart. Through the stub worker, only the
+# enable-matrix off-row is observable gate-side in this ticket: every built-
+# in duty disabled in the repo's checks config => the manifest can never
+# carry a docs_quality key, and without the key the skill's spawn condition
+# cannot fire a quality check.
+
+_PERSONA = Path(_SCRIPTS).parent / "agents" / "docs-checker.md"
+_SKILL = Path(_SCRIPTS).parent / "skills" / "review" / "SKILL.md"
+
+# The payload contract (SPEC-14 working doc, chunk 3): exact key/duty names.
+_DUTY_NAMES = ("docs-deslop", "adr-wait-what", "adr-integrity")
+_DOCS_QUALITY_PAYLOAD_KEYS = ("docs_quality", "enabled_duties", "options",
+                              "files", "evidence")
+
+
+def _persona_body():
+    return _PERSONA.read_text(encoding="utf-8")
+
+
+def _skill_body():
+    return _SKILL.read_text(encoding="utf-8")
+
+
+def test_persona_documents_all_six_duty_classes_with_the_gating_flag():
+    """Six classes: the three legacy classes untouched in text, plus the
+    three quality classes, each gated on its flag in
+    docs_quality.enabled_duties."""
+    body = _persona_body()
+    # Legacy classes keep their anchors (text untouched by SPEC-14.3).
+    assert "missing decision record" in body
+    assert "stale_docs" in body
+    # The three quality duties, each named and each gated on the manifest flag.
+    for duty in _DUTY_NAMES:
+        assert duty in body, duty
+        gated = f"enabled_duties[\"{duty}\"]"
+        assert gated in body, f"{duty} must be gated on docs_quality.{gated}"
+    assert "docs_quality" in body
+
+
+def test_persona_deslop_cluster_rule_is_a_hard_output_rule():
+    """The deslop evidence rule as an OUTPUT contract: every deslop finding
+    carries a tells array (phrase + line); the finding needs 3+ co-located
+    tells or document_wide: true, anything weaker is a note, and the gate
+    demotes nonconforming findings -- matching what ocr_docsquality.py
+    --validate enforces gate-side."""
+    body = _persona_body()
+    for anchor in ("tells", '"phrase"', '"line"', "co-located",
+                   "document_wide: true", "HARD OUTPUT RULE"):
+        assert anchor in body, anchor
+    assert "3" in body  # the cluster threshold
+    # The demotion is stated as gate-enforced, so drifting above the bar is
+    # pointless and below it wasted.
+    assert "demote" in body.lower()
+
+
+def test_persona_deslop_score_is_a_summary_field_never_a_gate():
+    """Story 13: the 5-dimension score is telemetry signal only."""
+    body = _persona_body()
+    for dim in ("Concreteness", "Order", "Literalness", "Address", "Density"):
+        assert dim in body, dim
+    assert "score" in body
+    assert "never a gate" in body or "never blocks" in body.lower()
+
+
+def test_persona_wait_what_structure_contract():
+    """Stories 14-15: the repo's own sections/template first; the fallback
+    superset exactly (Status, Date, Context, Decision, Consequences);
+    Context-before-Decision unconditional."""
+    body = _persona_body()
+    assert "Status, Date, Context, Decision, Consequences" in body
+    for anchor in ("sections", "template", "fallback"):
+        assert anchor in body, anchor
+    assert "Context" in body and "Decision" in body
+    assert "unconditional" in body
+
+
+def test_persona_wait_what_ste_is_judged_from_scan_stats_not_regex():
+    """Story 16: STE readability judged from deterministic scan stats; the
+    persona must state plainly it never issues regex verdicts on prose."""
+    body = _persona_body()
+    for anchor in ("sentence", "acronym", "passive", "sentence_cap"):
+        assert anchor in body, anchor
+    assert "regex verdict" in body
+
+
+def test_persona_wait_what_glossary_variants_against_corpus_glossaries():
+    """Story 17: unapproved variants of canonical glossary terms flagged,
+    against docs_context.corpus.glossaries; no glossary, no check."""
+    body = _persona_body()
+    assert "glossaries" in body
+    assert "canonical" in body
+    assert "corpus" in body
+
+
+def test_persona_integrity_verifies_every_claim_class_with_evidence():
+    """Story 18-20: files via the provided existence evidence (no re-walk),
+    functions/modules/config keys by reading the named code, cited ADRs and
+    documents read and never mischaracterized; capped at claims that would
+    carry a finding, with the read breadth recorded."""
+    body = _persona_body()
+    for anchor in ("missing_paths", "unresolved_adr_refs", "dangling_links",
+                   "functions, modules, and config keys", "cited",
+                   "mischaracter", "reads"):
+        assert anchor in body, anchor
+
+
+def test_persona_integrity_misquotation_keeps_the_two_quote_discipline():
+    """A mischaracterization finding quotes BOTH sides verbatim -- the citing
+    ADR's claim and the cited document's actual words -- the same discipline
+    the contradiction class carries."""
+    body = _persona_body()
+    assert "BOTH sides verbatim" in body
+    for anchor in ("stale_passage", "existing_code"):
+        assert anchor in body, anchor  # the quote fields stay in the contract
+
+
+def test_persona_quality_findings_anchor_at_the_documentation_file():
+    """Story 23: a documented exception to the code-anchoring rule, for the
+    quality duties only -- the legacy anchoring sentence must survive."""
+    body = _persona_body()
+    assert "Anchor it at the **code file**" in body  # the legacy rule, intact
+    assert "exception" in body
+    assert "documentation file" in body
+
+
+def test_skill_spawn_condition_gains_the_docs_quality_block():
+    """The docs-checker step fires when the manifest has docs_context OR a
+    docs_quality block, and is skipped only when it has neither."""
+    skill = _skill_body()
+    assert "only when the manifest has `docs_context` or `docs_quality`" in skill
+    assert "neither `docs_context` nor `docs_quality`" in skill
+
+
+def test_skill_specs_the_docs_quality_payload_contract():
+    """The exact payload contract the gate plumbing (SPEC-14.4) must produce:
+    doc-format diffs only, per-duty evidence, enabled-section flags."""
+    skill = _skill_body()
+    for key in _DOCS_QUALITY_PAYLOAD_KEYS:
+        assert f"`{key}`" in skill or f'"{key}"' in skill, key
+    # Per-duty evidence mapping: which evidence class feeds which duty.
+    for anchor in ("enabled_duties", "deslop", "STE", "existence"):
+        assert anchor in skill, anchor
+
+
+def test_skill_quality_findings_merge_into_the_same_stream():
+    """Quality findings merge into the findings array and flow through
+    section 3a/3b/4 unchanged; doc anchoring is named the documented
+    exception."""
+    skill = _skill_body()
+    assert "docs_quality" in skill
+    assert "documented exception" in skill
+
+
+def test_skill_and_persona_carry_the_same_quality_contract():
+    """Cross-file consistency: every payload key and duty name the skill
+    specs, the persona consumes -- the skill is pasted with the persona into
+    one spawn, so they cannot disagree."""
+    skill = _skill_body()
+    persona = _persona_body()
+    for name in list(_DUTY_NAMES) + list(_DOCS_QUALITY_PAYLOAD_KEYS):
+        assert name in skill, f"skill must spec {name}"
+        assert name in persona, f"persona must consume {name}"
+
+
+def _write_checks_config(work, checks):
+    """The per-repo checks override, uncommitted (rg_config reads the file)."""
+    p = work / ".ocr" / "config.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"checks": checks}), encoding="utf-8")
+
+
+_ALL_DUTIES_OFF = {n: {"enabled": False} for n in _DUTY_NAMES}
+
+
+def test_all_quality_duties_off_means_no_docs_quality_key_end_to_end(tmp_path):
+    """Enable matrix, off-row, through the real hook: checks config with every
+    built-in duty disabled, a markdown file in the push -- the manifest can
+    carry no docs_quality key, so the skill's quality spawn condition cannot
+    fire. (This must stay true after SPEC-14.4 wires the payload.)"""
+    work = _repo(tmp_path, {"app.py": _APP_V1, "README.md": "# project\n"})
+    _write_docs_summary(work)
+    _write_checks_config(work, _ALL_DUTIES_OFF)
+    _commit(work, {"app.py": _APP_V2,
+                   "README.md": "# project\n\nrewritten docs section\n"})
+    decision, reason = _push(work, _env(tmp_path, "t.trace",
+                                        STUB_DOCS_SUMMARY=DOCS_SUMMARY))
+    assert decision == "pass", reason
+    manifest = _review_manifest(tmp_path, "t.trace")
+    assert "docs_context" in manifest, "the legacy docs context is untouched"
+    assert "docs_quality" not in manifest, manifest
+
+
+def test_all_quality_duties_off_docs_only_push_stays_skipped(tmp_path):
+    """Off-row for a docs-only push: with the duties disabled the push keeps
+    today's behavior -- no manifest, no spawn, no cost."""
+    work = _repo(tmp_path, {"app.py": _APP_V1, "README.md": "# project\n"})
+    _write_docs_summary(work)
+    _write_checks_config(work, _ALL_DUTIES_OFF)
+    tip = _commit(work, {"README.md": "# project\n\nrewritten docs section\n"})
+    env = _env(tmp_path, "t.trace",
+               STUB_DOCS_FINDING=json.dumps({"content": _CONTRADICTION}))
+    decision, reason = _push(work, env)
+    assert decision == "pass", reason
+    for c in _calls(tmp_path, "t.trace"):
+        assert "docs_quality" not in (c.get("manifest") or {})
+    st = _state(work, tip)
+    assert st.get("state") == "done" and st.get("verdict") in ("skip", "skipped", "pass")
