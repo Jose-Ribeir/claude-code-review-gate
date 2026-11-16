@@ -29,8 +29,10 @@ telemetry, generated schema. Two modes (SPEC-14 stories 11, 12, 13, 19):
   verbatim, except: a finding WITHOUT document_wide: true whose tells array
   carries fewer than 3 co-located entries is demoted -- severity becomes
   "note", and "demoted": true plus a "demotion_reason" are added. A tell is
-  co-located when its line is in the finding's start_line..end_line span (a
-  tell without a line, or a finding without line bounds, counts).
+  co-located only when its line is a number inside the finding's
+  start_line..end_line span: the contract is (phrase + line), so a tell
+  without a line never counts, and a finding without numeric line bounds
+  never satisfies co-location (only document_wide: true saves it).
 
 Fail-soft: public entry points never raise; garbage input degrades to empty
 results plus a warning. Telemetry is best-effort (collectors tier).
@@ -452,27 +454,29 @@ def compute_evidence(repo_root, files, *, sentence_cap=SENTENCE_CAP_DEFAULT):
 def _co_located_tells(finding):
     """How many of the finding's tells sit inside its own line span.
 
-    A tell without a numeric line, or a finding without numeric start/end
-    bounds, counts as co-located (its placement cannot be disproven).
+    The contract is (phrase + line): a tell counts only when it carries a
+    numeric line inside the finding's numeric start_line..end_line span. A
+    tell without a line never counts (a model must not dodge the cluster
+    rule by omitting line references), and a finding without line bounds
+    has no span to co-locate anything in -- only document_wide: true saves
+    such a finding from demotion.
     """
     tells = finding.get("tells")
     if not isinstance(tells, list):
         return 0
     start, end = finding.get("start_line"), finding.get("end_line")
-    bounds = None
-    if isinstance(start, (int, float)) and not isinstance(start, bool) \
-            and isinstance(end, (int, float)) and not isinstance(end, bool):
-        bounds = (int(start), int(end))
+    if not (isinstance(start, (int, float)) and not isinstance(start, bool)
+            and isinstance(end, (int, float)) and not isinstance(end, bool)):
+        return 0
+    bounds = (int(start), int(end))
     co_located = 0
     for tell in tells:
         if not isinstance(tell, dict):
             continue
         line = tell.get("line")
         if isinstance(line, (int, float)) and not isinstance(line, bool) \
-                and bounds is not None \
-                and not bounds[0] <= int(line) <= bounds[1]:
-            continue
-        co_located += 1
+                and bounds[0] <= int(line) <= bounds[1]:
+            co_located += 1
     return co_located
 
 

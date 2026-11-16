@@ -4800,6 +4800,7 @@ def _supervise_run(state_path, run_id):
     progress = {"new": 0}
     plan_summary = ""
     cmd_findings, cmd_warnings = [], []   # SPEC-14.4: command checks (see below)
+    dq_notes, dq_note_warnings = [], []   # SPEC-14 story 12: pre-pass notes
     diffs = None     # precomputed diffs (_build_diffs); None on the 0.9.x path
     verdict_intent_base = None  # t25: day-0 intent view for the verdict record
     intent_chunk_stats = None   # [] on the chunked path: per-chunk digests
@@ -5417,6 +5418,8 @@ def _supervise_run(state_path, run_id):
         if isinstance(result, dict):
             cmd_findings, cmd_warnings = _command_check_findings(
                 repo_root, review_root, base, tip)
+            dq_notes, dq_note_warnings = _docs_quality_scan_notes(
+                repo_root, review_root, base, tip)
     except _Fenced:
         stop.set()
         _remove_run_dir(common_dir, run_id)
@@ -5539,17 +5542,20 @@ def _supervise_run(state_path, run_id):
             "end_line": "-", "content": cwd_note,
         }] + list(result.get("findings") or [])
     # SPEC-14.4, at T1 verdict-assembly time like memory demotion: docs-
-    # deslop findings pass the cluster-rule demotion; command-check findings
-    # (computed above, while the tip clone existed) merge into the same
-    # stream -- compute_verdict below stays the single verdict authority.
+    # deslop findings pass the cluster-rule demotion and the per-duty
+    # warn-mode clamp; command-check findings and the deterministic pre-pass
+    # notes (both computed above, while the tip clone existed) merge into the
+    # same stream -- compute_verdict below stays the single verdict authority.
     if isinstance(result, dict):
-        result = _apply_docs_quality_demotion(result)
-        if cmd_findings:
+        result = _apply_docs_quality_demotion(result, repo_root)
+        extra_findings = dq_notes + cmd_findings
+        if extra_findings:
             result = dict(result, findings=list(result.get("findings") or [])
-                          + cmd_findings)
-        if cmd_warnings:
+                          + extra_findings)
+        extra_warnings = dq_note_warnings + cmd_warnings
+        if extra_warnings:
             result = dict(result, warnings=list(result.get("warnings") or [])
-                          + cmd_warnings)
+                          + extra_warnings)
     # Memory (t08): at T1 verdict-assembly time, before the verdict is
     # decided, a finding matching a dismissal recorded through the dismiss
     # command drops to low severity with a "previously dismissed" prefix and
@@ -9003,8 +9009,9 @@ def _arch_flags(root, base, tip, entries=None):
 
 _DOC_QUALITY_DUTIES = ("docs-deslop", "adr-wait-what", "adr-integrity")
 # The per-duty checks-config options that travel in the payload (SKILL.md's
-# contract). The v2 stub surfaces (commit_messages / code_comments) are not
-# among them: v1 is markdown-only and they stay inert here.
+# contract). The v2 stub surfaces (commit_messages / code_comments) resolve
+# through rg_config as recognized, disabled, inert keys; they are not among
+# these duty options: v1 is markdown-only and they stay inert here.
 _DOC_QUALITY_OPTION_KEYS = ("sections", "template", "sentence_cap", "sweep")
 # Which of the helper's evidence classes feeds which duty (SKILL.md's contract).
 _DOC_QUALITY_EVIDENCE_KEYS = {
@@ -9021,6 +9028,27 @@ _COMMAND_CHECK_TIMEOUT_S = 60
 # The warn-mode confidence clamp: under the default block bar, so a warn-mode
 # finding warns but never blocks. Mode only ever downgrades, never upgrades.
 _WARN_MODE_CONFIDENCE_CAP = 0.5
+# Cap on the tells one deterministic pre-pass note carries: the note points
+# a human at the pattern, it never retypes the file.
+_DETERMINISTIC_NOTE_TELLS_CAP = 10
+
+
+def _warn_mode_clamp(tagged):
+    """The warn-mode clamp, one finding, in place: severity at most medium,
+    confidence at most the cap. Downgrade-only -- a warn finding warns but
+    never blocks; compute_verdict stays the sole verdict authority. Every
+    checks-config mode consumer uses this one clamp (command checks, the
+    built-in quality duties)."""
+    rank = _SEVERITY_RANK.get(norm_severity(tagged.get("severity")), -1)
+    if rank > _SEVERITY_RANK["medium"]:
+        tagged["severity"] = "medium"
+    try:
+        conf = float(tagged.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        conf = 0.0
+    if conf > _WARN_MODE_CONFIDENCE_CAP:
+        tagged["confidence"] = _WARN_MODE_CONFIDENCE_CAP
+    return tagged
 
 
 def _changed_doc_paths(entries):
@@ -9162,38 +9190,159 @@ def _docs_quality_block(repo_root, review_root, base, tip, entries=None,
         return None
 
 
-def _apply_docs_quality_demotion(result):
-    """The deslop cluster rule, gate-side (story 11): every docs-deslop
-    finding -- the quality class carrying `tells` -- passes through
-    ocr_docsquality --validate, which demotes anything under the cluster bar
-    (fewer than 3 co-located tells, no document_wide) to a note that can
-    never block. All other findings -- including the other quality duties,
-    which carry no tells -- flow to compute_verdict UNALTERED (the
-    doc-anchored exemption touches anchoring, not fields; house rule: call
-    the helper, never reimplement the cluster rule)."""
+def _apply_docs_quality_demotion(result, repo_root=None):
+    """The pre-verdict quality-duty seam (stories 11 and 2).
+
+    Cluster rule (story 11): every docs-deslop finding -- the quality class
+    carrying `tells` -- passes through ocr_docsquality --validate, which
+    demotes anything under the cluster bar (fewer than 3 co-located tells,
+    no document_wide) to a note that can never block. Gate-side
+    deterministic pre-pass findings (deterministic: true) are already
+    notes and skip validation -- the cluster rule governs model findings.
+
+    Warn mode (story 2): a quality duty whose resolved checks-config mode
+    is "warn" gets the same downgrade-only clamp command checks get
+    (_warn_mode_clamp), so a warn-mode duty finding warns but never
+    blocks. All other findings -- including block-mode quality findings --
+    flow to compute_verdict UNALTERED (the doc-anchored exemption touches
+    anchoring, not fields; house rule: call the helper, never reimplement
+    the cluster rule).
+    """
     findings = result.get("findings") or []
-    indexes = [i for i, f in enumerate(findings)
-               if isinstance(f, dict)
-               and f.get("docs_quality_duty") == "docs-deslop"]
-    if not indexes:
-        return result
-    t0 = time.monotonic()
-    subset = [findings[i] for i in indexes]
-    checked = ocr_docsquality.validate_findings(subset)
-    validated = checked.get("findings") or []
-    if len(validated) != len(indexes):  # the helper failed soft: keep as-is
-        return result
     out = list(findings)
-    for i, f in zip(indexes, validated):
-        out[i] = f
     warnings = list(result.get("warnings") or [])
-    warnings += [{"file": None, "message": w}
-                 for w in (checked.get("warnings") or [])]
-    _TELE.setdefault("docs_quality", []).append({
-        "duty": "docs-deslop-validate", "findings": len(indexes),
-        "demotions": int(checked.get("demoted") or 0),
-        "seconds": round(time.monotonic() - t0, 2)})
+    indexes = [i for i, f in enumerate(out)
+               if isinstance(f, dict)
+               and f.get("docs_quality_duty") == "docs-deslop"
+               and f.get("deterministic") is not True]
+    if indexes:
+        t0 = time.monotonic()
+        subset = [out[i] for i in indexes]
+        checked = ocr_docsquality.validate_findings(subset)
+        validated = checked.get("findings") or []
+        if len(validated) == len(indexes):  # the helper failed soft: keep as-is
+            for i, f in zip(indexes, validated):
+                out[i] = f
+            warnings += [{"file": None, "message": w}
+                         for w in (checked.get("warnings") or [])]
+            _TELE.setdefault("docs_quality", []).append({
+                "duty": "docs-deslop-validate", "findings": len(indexes),
+                "demotions": int(checked.get("demoted") or 0),
+                "seconds": round(time.monotonic() - t0, 2)})
+    modes = {}
+    if repo_root is not None:
+        try:
+            checks = rg_config.load_settings(repo_root)["checks"]
+            modes = {d: str((checks.get(d) or {}).get("mode") or "block")
+                     for d in _DOC_QUALITY_DUTIES}
+        except Exception as exc:  # noqa: BLE001 -- fail-soft and observable
+            warnings.append({
+                "file": None,
+                "message": ("quality-duty warn-mode clamp skipped: the "
+                            "checks config failed to load (%s)"
+                            % type(exc).__name__)})
+    warn_duties = {d for d, mode in modes.items() if mode == "warn"}
+    if warn_duties:
+        clamped = 0
+        for i, f in enumerate(out):
+            if isinstance(f, dict) and f.get("docs_quality_duty") in warn_duties:
+                out[i] = _warn_mode_clamp(dict(f))
+                clamped += 1
+        if clamped:
+            _TELE.setdefault("docs_quality", []).append({
+                "duty": "warn-mode-clamp", "duties": sorted(warn_duties),
+                "findings": clamped})
     return dict(result, findings=out, warnings=warnings)
+
+
+def _docs_quality_scan_notes(repo_root, review_root, base, tip, entries=None):
+    """(findings, warnings): the deterministic pre-pass hits as NOTE
+    findings (story 12).
+
+    The same deslop scan that feeds the checker as manifest evidence also
+    leaves a trace the report carries: one note per matched doc file
+    aggregating that file's catalog and throat-clearing hits (the tells
+    list capped at _DETERMINISTIC_NOTE_TELLS_CAP), tagged
+    docs_quality_duty "docs-deslop" plus deterministic: true. A note
+    severity ranks below low in compute_verdict, so notes reach the report
+    and telemetry but never enter blocking math. Only when the duty is
+    enabled and its globs match changed doc files; fail-soft like every
+    gate-side piece -- a notes failure costs warnings, never the push.
+    The scan is re-run here rather than cached from the payload build: the
+    payload exists only when a checker spawns, and notes are owed either
+    way.
+    """
+    findings, warnings = [], []
+    try:
+        checks = rg_config.load_settings(repo_root)["checks"]
+    except Exception as exc:  # noqa: BLE001 -- fail-soft and observable
+        warnings.append({"file": None, "message":
+                         "docs-quality scan notes skipped: the checks config "
+                         "failed to load (%s)" % type(exc).__name__})
+        return findings, warnings
+    try:
+        check = checks.get("docs-deslop") or {}
+        if check.get("enabled") is not True:
+            return findings, warnings
+        if entries is None:
+            entries, _warnings = _collect_diff_entries(
+                review_root, base or _EMPTY_TREE, tip)
+        doc_paths = _changed_doc_paths(entries)
+        matched = [p for p in doc_paths
+                   if _check_glob_matches(p, check.get("globs"))]
+        if not matched:
+            return findings, warnings
+        per = ocr_docsquality.compute_evidence(str(review_root), matched)
+        warnings += [{"file": None, "message": w}
+                     for w in (per.get("warnings") or [])]
+        for rel in sorted(per.get("evidence") or {}):
+            deslop = (per["evidence"].get(rel) or {}).get("deslop") or {}
+            tells = []
+            for hit in (deslop.get("catalog_hits") or []):
+                tells.append({"phrase": hit.get("phrase"),
+                              "line": hit.get("line"),
+                              "category": hit.get("category")})
+            for hit in (deslop.get("throat_clearing") or []):
+                tells.append({"phrase": hit.get("phrase"),
+                              "line": hit.get("line"),
+                              "category": "throat_clearing"})
+            if not tells:
+                continue
+            total = len(tells)
+            tells = tells[:_DETERMINISTIC_NOTE_TELLS_CAP]
+            lines = [int(t["line"]) for t in tells
+                     if isinstance(t.get("line"), (int, float))]
+            phrases = ", ".join(
+                sorted({str(t.get("phrase") or "") for t in tells})[:3])
+            content = ("deterministic deslop pre-pass: %d catalog/"
+                       "throat-clearing hit(s) in this file (e.g. %s)"
+                       % (total, phrases))
+            n_skeleton = len(deslop.get("template_skeletons") or [])
+            if n_skeleton:
+                content += "; plus %d template-skeleton heading(s)" % n_skeleton
+            findings.append({
+                "severity": "note", "confidence": 0.0,
+                "path": rel,
+                "start_line": min(lines) if lines else 1,
+                "end_line": max(lines) if lines else 1,
+                "category": "documentation",
+                "content": content,
+                "docs_quality_duty": "docs-deslop",
+                "deterministic": True,
+                "tells": tells,
+            })
+    except Exception as exc:  # noqa: BLE001 -- notes never break a review
+        _warn(f"[gate] docs-quality scan notes failed ({type(exc).__name__}: "
+              f"{exc}); the push continues without them")
+        warnings.append({"file": None, "message":
+                         "docs-quality scan notes failed (%s); skipped"
+                         % type(exc).__name__})
+        return [], warnings
+    if findings:
+        _TELE.setdefault("docs_quality", []).append({
+            "duty": "docs-deslop-scan-notes", "files": len(matched),
+            "notes": len(findings)})
+    return findings, warnings
 
 
 # --- user-registered command checks (SPEC-14 story 4) -------------------------
@@ -9204,7 +9353,14 @@ def _run_one_command_check(review_root, command, matched):
     root and the matched file list on stdin as a JSON array; stdout is the
     findings contract. Nonzero exit, timeout, and malformed output degrade
     to a note -- the check's findings are DISCARDED, never silently passed
-    (the note plus telemetry stay) and never a crash."""
+    (the note plus telemetry stay) and never a crash. The contract is a
+    REPO-RELATIVE executable: an absolute path or any ".." component is an
+    escape outside the reviewed tree and is rejected before anything runs."""
+    cmd_path = Path(command)
+    if cmd_path.is_absolute() or ".." in cmd_path.parts:
+        return [], ("command must name a repo-relative executable (no "
+                    "absolute paths, no '..' components): %s; findings discarded"
+                    % command)
     exe = str(Path(review_root) / command)
     if not (os.path.isfile(exe) and os.access(exe, os.X_OK)):
         return [], f"command not executable or missing: {command}"
@@ -9239,7 +9395,14 @@ def _command_check_findings(repo_root, review_root, base, tip, entries=None):
     findings, warnings = [], []
     try:
         checks = rg_config.load_settings(repo_root)["checks"]
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 -- fail-soft AND observable (ADR 0006)
+        note = ("command checks skipped: the checks config failed to load "
+                "(%s: %s)" % (type(exc).__name__, exc))
+        warnings.append({"file": None, "message": note})
+        _warn(f"[gate] {note}")
+        _TELE.setdefault("command_checks", []).append({
+            "name": None, "mode": "", "files": 0, "findings": 0,
+            "error": note, "seconds": 0.0})
         return findings, warnings
     command_checks = {n: c for n, c in sorted(checks.items())
                       if isinstance(c, dict)
@@ -9284,15 +9447,7 @@ def _command_check_findings(repo_root, review_root, base, tip, entries=None):
             tagged["check"] = name
             tagged.setdefault("category", "custom")
             if warn_mode:
-                rank = _SEVERITY_RANK.get(norm_severity(tagged.get("severity")), -1)
-                if rank > _SEVERITY_RANK["medium"]:
-                    tagged["severity"] = "medium"
-                try:
-                    conf = float(tagged.get("confidence") or 0.0)
-                except (TypeError, ValueError):
-                    conf = 0.0
-                if conf > _WARN_MODE_CONFIDENCE_CAP:
-                    tagged["confidence"] = _WARN_MODE_CONFIDENCE_CAP
+                tagged = _warn_mode_clamp(tagged)
             findings.append(tagged)
     return findings, warnings
 

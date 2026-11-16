@@ -404,6 +404,43 @@ def test_checks_invalid_options_are_noted_and_kept():
     assert len(settings["notes"]) == 4
 
 
+# --- the v2 stubs (SPEC-14 story 24) -----------------------------------------
+
+# commit_messages and code_comments are the v2 deslop surfaces: recognized
+# keys shipping disabled and inert -- declaring one must not earn the
+# unknown-check typo note, and nothing executes for them in v1.
+
+def test_v2_stubs_ship_disabled_and_inert(tmp_path):
+    settings = rg_config.load_settings(tmp_path)
+    checks = settings["checks"]
+    for stub in ("commit_messages", "code_comments"):
+        assert checks[stub]["enabled"] is False
+        assert checks[stub]["mode"] == "block"
+        assert checks[stub]["globs"] == []
+    assert settings["notes"] == []
+
+
+def test_declaring_a_v2_stub_earns_no_typo_note(tmp_path):
+    _write(rg_config.repo_config_path(tmp_path), {
+        "checks": {"commit_messages": {"enabled": True},
+                   "code_comments": {"globs": ["**/*.py"],
+                                     "sentence_cap": 30}}})
+    settings = rg_config.load_settings(tmp_path)
+    checks = settings["checks"]
+    assert checks["commit_messages"]["enabled"] is True
+    assert checks["code_comments"]["globs"] == ["**/*.py"]
+    assert checks["code_comments"]["sentence_cap"] == 30
+    assert settings["notes"] == []
+
+
+def test_a_v2_stub_typo_is_still_a_typo(tmp_path):
+    _write(rg_config.repo_config_path(tmp_path), {
+        "checks": {"commit_message": {"enabled": True}}})
+    settings = rg_config.load_settings(tmp_path)
+    assert "commit_message" not in settings["checks"]
+    assert any("unknown check" in n for n in settings["notes"])
+
+
 def test_unknown_keys_inside_a_check_are_noted_and_ignored():
     _write(rg_config.global_config_path(), {
         "checks": {"docs-deslop": {"goblin": "gremlin"}},

@@ -416,7 +416,9 @@ Declare any executable in your repo as a push check:
 ```
 
 - The executable is repo-relative, must be executable, and runs with cwd at
-  the review tree root (the pushed tip).
+  the review tree root (the pushed tip). An absolute path or any `..`
+  component is rejected before anything runs — warning plus telemetry, the
+  check is skipped.
 - The matched changed files arrive on **stdin** as a JSON array of
   repo-relative paths.
 - Findings come back on **stdout** as a JSON array (bare or wrapped as

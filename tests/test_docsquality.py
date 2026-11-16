@@ -288,19 +288,41 @@ class TestClusterRule:
         assert out["demoted"] == 1
         assert out["findings"][0]["demoted"] is True
 
-    def test_unlined_tells_count(self):
-        """A tell without a line cannot be placed outside the span; it counts."""
+    def test_unlined_tells_never_count(self):
+        """The contract is (phrase + line): a tell without a line cannot be
+        placed inside the span either, so it never counts toward co-location
+        -- three line-less tells must not dodge the cluster rule."""
         f = _finding(tells=[_tell(), _tell(), _tell()])
+        out = dq.validate_findings([f])
+        assert out["demoted"] == 1
+        assert out["findings"][0]["severity"] == "note"
+        assert "0" in out["findings"][0]["demotion_reason"]
+
+    def test_unlined_tells_add_nothing_to_a_cluster(self):
+        """Two in-span tells plus any number of unlined ones: still two
+        co-located, so the finding demotes."""
+        f = _finding(tells=[_tell(12), _tell(15), _tell(), _tell()])
+        out = dq.validate_findings([f])
+        assert out["demoted"] == 1
+        assert out["findings"][0]["severity"] == "note"
+
+    def test_unlined_extra_tells_do_not_unseat_a_real_cluster(self):
+        """Three in-span tells pass untouched; unlined extras are ignored,
+        not subtracted."""
+        tells = [_tell(12), _tell(15), _tell(18), _tell(), _tell()]
+        f = _finding(tells=tells)
         out = dq.validate_findings([f])
         assert out["demoted"] == 0
         assert out["findings"][0] == f
 
-    def test_finding_without_line_bounds_uses_all_tells(self):
+    def test_finding_without_line_bounds_has_no_co_location(self):
+        """A finding without numeric line bounds can never satisfy
+        co-location -- lined tells included; only document_wide saves it."""
         f = _finding(tells=[_tell(1), _tell(50), _tell(90)])
         del f["start_line"], f["end_line"]
         out = dq.validate_findings([f])
-        assert out["demoted"] == 0
-        assert out["findings"][0] == f
+        assert out["demoted"] == 1
+        assert out["findings"][0]["severity"] == "note"
 
     def test_document_wide_bypasses_cluster_rule(self):
         for n_tells in (0, 1, 2):
