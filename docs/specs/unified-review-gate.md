@@ -101,6 +101,16 @@ The work happens on a new integration branch cut from the `kimchi` tree. The `ma
 - **Prior art:** the existing async-gate, fail-closed, verdict-coverage, state-machine and hook-passthrough tests, and the existing simulated-backend harness and fixture repos from the `kimchi` branch. Reuse and generalise these rather than adding a new harness.
 - **CI:** run the shared scenarios against both profiles on Linux, and add Windows if the PowerShell adapters are kept.
 
+## Pre-adoption check (real kimchi)
+
+The kimchi backend has only been exercised against a simulated `kimchi`
+(`tests/fake_backend.py`), because the real CLI was not installed where the
+unified gate was built. Before the kimchi profile is relied on, run
+`tests/live/live_matrix.py` and `tests/live/live_hook.py` on a machine with the
+real Kimchi CLI (see `tests/live/README.md`) and push a seeded-bug repo through
+it; both matrices must pass and the bug must be blocked. The claude backend was
+verified against the real CLI with `tests/live/smoke_claude.py`.
+
 ## Out of Scope
 
 - Merging the `main` and `kimchi` git histories.

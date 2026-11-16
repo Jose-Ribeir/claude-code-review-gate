@@ -22,10 +22,26 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Kimchi launches are unchanged. The two bash/PowerShell hook adapters export
   `OCR_HARNESS` so the core knows which harness fired it. `skills/review/SKILL.md`
   gains a host-detection section (§T0) so the Kimchi-dialect skill spawns the
-  plugin's `review-gate:<persona>` agents under Claude Code. Known limit: the
-  claude argv only pre-approves read-only `git` Bash, so the python helper
-  stages (conventions resolver, demands validator) cannot run there and the
-  review proceeds without them, with a warning in the verdict.
+  plugin's `review-gate:<persona>` agents under Claude Code.
+- **Claude backend hardening.** The claude allowlist now also pre-approves
+  EXACTLY the read-only conventions resolver by literal command prefix; the
+  gate hands the skill that exact command in `manifest.helper_cmds`, so the
+  conventions stage runs under claude (checked against the real CLI) instead
+  of degrading to a warning. Nothing else beyond read-only `git` is
+  pre-approved. The demands validator still cannot run under claude: it needs
+  the spotter's JSON on stdin and the Bash tool refuses JSON on a command
+  line, so that stage keeps its warning. Each profile now has its own tier models: under claude the
+  spotter/tier-1/tier-2 reviewers default to the `haiku`/`sonnet`/`opus`
+  aliases (override with `OCR_CLAUDE_SPOTTER_MODEL` / `_TIER1_MODEL` /
+  `_TIER2_MODEL`; a shared `OCR_*_MODEL` is honoured only if it names an
+  Anthropic model) and the provider guard, which protects the kimchi account,
+  stands down. The Jira side-fetch rides the selected backend (claude uses an
+  Atlassian MCP server from `~/.claude.json` or `OCR_JIRA_MCP_CONFIG`).
+  Telemetry records carry a `backend` field. `CLAUDECODE` is now scrubbed
+  from the supervisor and worker env, and `OCR_HARNESS`/`OCR_SNIFFED` no longer
+  reach the reviewer. The misleading `DEFAULT_CLAUDE_ARGS` alias is removed.
+  `tests/live/` holds the live matrix, hook and real-claude smoke scripts and
+  the pre-adoption check for real kimchi.
 - **Content-keyed review coverage (2026-11-13, spec `docs/plans/restack-content-keyed-coverage.md`).**
   The gate now identifies reviewed work by content instead of by SHA: verdict
   records (protocol v2) carry per-commit `patch_ids` (`git patch-id --stable`),
