@@ -1187,6 +1187,110 @@ def test_integrity_finding_without_tells_is_never_demoted(tmp_path):
     assert st.get("verdict") == "block", st
 
 
+# --- built-in duty modes (story 2) -------------------------------------------
+
+def test_warn_mode_deslop_cluster_never_blocks(tmp_path):
+    """Story 2: mode: warn is honored by the built-in duties, not only by
+    command checks -- the same 3-tell cluster that BLOCKS under the default
+    block mode is clamped below the block bar (severity at most medium,
+    confidence at most 0.5), so the push lands with a warn. Mode only ever
+    downgrades."""
+    work = _repo(tmp_path, {"README.md": "# project\n"})
+    _write_checks_config(work, {"docs-deslop": {"mode": "warn"}})
+    tip = _commit(work, {"README.md": "# project\n\nmore docs\n"})
+    spec = _quality_spec("README.md", "docs-deslop", tells=[
+        {"phrase": "robust", "line": 2},
+        {"phrase": "seamless", "line": 3},
+        {"phrase": "--", "line": 4},
+    ])
+    decision, reason = _push(work, _env(tmp_path, "t.trace",
+                                        STUB_DOCS_FINDING=json.dumps(spec)))
+    assert decision == "pass", reason
+    st = _state(work, tip)
+    assert st.get("verdict") == "warn", st
+    assert "the prose reads as generated slurry" in st.get("reasons", "")
+
+
+def test_warn_mode_adr_integrity_finding_never_blocks(tmp_path):
+    """The clamp keys on the resolved per-duty mode for every quality duty,
+    not only on the tell-carrying deslop class."""
+    work = _repo(tmp_path, {"docs/adr/0001-verdicts.md": _ADR_RECORD_1})
+    _write_checks_config(work, {"adr-integrity": {"enabled": True, "mode": "warn"}})
+    tip = _commit(work, {"docs/adr/0001-verdicts.md": _ADR_RECORD_1 + "\nMore.\n"})
+    spec = _quality_spec("docs/adr/0001-verdicts.md", "adr-integrity",
+                         reads=["scripts/review-gate.py"])
+    decision, reason = _push(work, _env(tmp_path, "t.trace",
+                                        STUB_DOCS_FINDING=json.dumps(spec)))
+    assert decision == "pass", reason
+    st = _state(work, tip)
+    assert st.get("verdict") == "warn", st
+
+
+# --- the deterministic pre-pass notes (story 12) -----------------------------
+
+_SLOPPY = ("# Notes\n\nLet's delve into the robust platform.\n"
+           "This PR leverages the new module.\n")
+
+
+def test_deterministic_scan_hits_emit_note_findings(tmp_path):
+    """Story 12: the deterministic pre-pass hits the checker consumes as
+    evidence also flow to the report -- as note-severity findings, tagged
+    deterministic, one per file. A note ranks below every blocking tier in
+    compute_verdict, so a note-only review PASSES (never even warns)."""
+    work = _repo(tmp_path, {"README.md": "# project\n"})
+    tip = _commit(work, {"README.md": "# project\n\n" + _SLOPPY})
+    decision, reason = _push(work, _env(tmp_path, "t.trace"))
+    assert decision == "pass", reason
+    st = _state(work, tip)
+    assert st.get("verdict") == "pass", st
+    reasons = st.get("reasons", "")
+    assert "[note]" in reasons, reasons
+    assert "README.md" in reasons, reasons
+    records = _tele_run_records(work)
+    tele_findings = [f for r in records for f in (r.get("findings") or [])]
+    notes = [f for f in tele_findings
+             if f.get("severity") == "note" and f.get("path") == "README.md"]
+    assert len(notes) == 1, "one aggregated note per file, not one per hit"
+
+
+def test_deterministic_notes_respect_the_enabled_switch(tmp_path):
+    """Only for enabled duties: with docs-deslop off, the same slop leaves
+    zero trace -- no notes, no cost."""
+    work = _repo(tmp_path, {"README.md": "# project\n"})
+    _write_checks_config(work, {"docs-deslop": {"enabled": False}})
+    tip = _commit(work, {"README.md": "# project\n\n" + _SLOPPY})
+    decision, reason = _push(work, _env(tmp_path, "t.trace"))
+    assert decision == "pass", reason
+    st = _state(work, tip)
+    assert st.get("verdict") == "pass", st
+    assert "[note]" not in st.get("reasons", ""), st.get("reasons")
+
+
+def test_scan_notes_aggregate_one_note_per_file(tmp_path):
+    """Unit seam: two sloppy files plus a clean one, fed as diff entries --
+    one capped-tells note per sloppy file, tagged, note-severity."""
+    _write(tmp_path, {
+        "docs/a.md": _SLOPPY,
+        "docs/b.md": "Let's delve into the robust module.\n",
+        "docs/c.md": "A plain sentence.\n",
+    })
+    entries = [{"path": p, "status": "M"}
+               for p in ("docs/a.md", "docs/b.md", "docs/c.md")]
+    notes, warnings = review_gate._docs_quality_scan_notes(
+        str(tmp_path), str(tmp_path), None, None, entries=entries)
+    assert warnings == []
+    assert [n["path"] for n in notes] == ["docs/a.md", "docs/b.md"]
+    for n in notes:
+        assert n["severity"] == "note"
+        assert n["docs_quality_duty"] == "docs-deslop"
+        assert n["deterministic"] is True
+        assert n["tells"], "the note carries the aggregated tells"
+        assert len(n["tells"]) <= review_gate._DETERMINISTIC_NOTE_TELLS_CAP
+    a = notes[0]
+    assert any(t.get("phrase") == "This PR" for t in a["tells"]), a["tells"]
+    assert any("delve" in str(t.get("phrase")) for t in a["tells"]), a["tells"]
+
+
 # --- command checks (story 4) ------------------------------------------------
 
 _CHECK_BLOCK_SH = (
@@ -1297,6 +1401,61 @@ def test_command_check_fails_soft_when_the_command_is_missing(tmp_path):
     assert st.get("verdict") == "pass", st
     records = [r for r in _tele_run_records(work) if r.get("command_checks")]
     assert records and records[-1]["command_checks"][0].get("error")
+
+
+def test_command_check_absolute_path_is_rejected(tmp_path):
+    """The contract is a REPO-RELATIVE executable: an absolute command path
+    is rejected with a warning plus telemetry before anything runs -- the
+    gate never executes a binary outside the reviewed repo."""
+    work = _repo(tmp_path, {"app.py": _APP_V1})
+    _write_checks_config(work, {
+        "abs-check": {"command": "/bin/echo", "globs": ["**/*.py"]}})
+    tip = _commit(work, {"app.py": _APP_V2})
+    decision, reason = _push(work, _env(tmp_path, "t.trace"))
+    assert decision == "pass", reason
+    st = _state(work, tip)
+    assert st.get("verdict") == "pass", st
+    records = [r for r in _tele_run_records(work) if r.get("command_checks")]
+    assert records, "a telemetry record for the skipped check"
+    error = records[-1]["command_checks"][0].get("error", "")
+    assert "repo-relative" in error, error
+
+
+def test_command_check_dotdot_escape_is_rejected(tmp_path):
+    """.. components are the same escape: a command pointing outside the
+    repo tree is rejected before execution, same degrade path."""
+    work = _repo(tmp_path, {"app.py": _APP_V1})
+    _write_checks_config(work, {
+        "escape": {"command": "../outside/run.sh", "globs": ["**/*.py"]}})
+    tip = _commit(work, {"app.py": _APP_V2})
+    decision, reason = _push(work, _env(tmp_path, "t.trace"))
+    assert decision == "pass", reason
+    st = _state(work, tip)
+    assert st.get("verdict") == "pass", st
+    records = [r for r in _tele_run_records(work) if r.get("command_checks")]
+    assert records
+    error = records[-1]["command_checks"][0].get("error", "")
+    assert "repo-relative" in error, error
+
+
+def test_command_check_config_load_failure_is_observed(monkeypatch, tmp_path, capsys):
+    """ADR 0006 (fail-soft AND observable): a checks-config load failure
+    inside the command-check pass must surface a warning and a telemetry
+    record before returning -- today the try/except returns silently."""
+    import rg_config
+
+    def boom(_repo_root=None):
+        raise RuntimeError("synthetic store failure")
+
+    monkeypatch.setattr(rg_config, "load_settings", boom)
+    review_gate._TELE.pop("command_checks", None)
+    findings, warnings = review_gate._command_check_findings(
+        str(tmp_path), str(tmp_path), None, None)
+    assert findings == []
+    assert any("checks config" in str(w.get("message", "")) for w in warnings), warnings
+    tele = review_gate._TELE.get("command_checks") or []
+    assert tele and "synthetic store failure" in str(tele[-1].get("error")), tele
+    assert "synthetic store failure" in capsys.readouterr().err
 
 
 # --- the sweep option (story 20) ----------------------------------------------

@@ -61,6 +61,12 @@ _BUILT_IN_CHECKS = {
                       "globs": list(_ADR_GLOBS)},
     "adr-integrity": {"enabled": False, "mode": "block",
                       "globs": list(_ADR_GLOBS)},
+    # The v2 deslop stubs (story 24), recognized and INERT in v1 (markdown
+    # only): declared disabled defaults so the toggle surface is ready for
+    # v2 without behavior change. Naming one never earns the unknown-check
+    # typo note; nothing in the gate reads or executes them in v1.
+    "commit_messages": {"enabled": False, "mode": "block", "globs": []},
+    "code_comments": {"enabled": False, "mode": "block", "globs": []},
 }
 # A user-declared command check defaults to on and empty-scoped: the
 # declaration itself is the enabling act, and how an empty glob list scopes a
