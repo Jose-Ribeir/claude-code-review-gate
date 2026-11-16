@@ -274,6 +274,12 @@ def test_the_selection_breadcrumb_is_per_thread(monkeypatch, tmp_path):
     import threading
     for k in ("OCR_STUB_WORKER", "OCR_REVIEWER_CMD", "OCR_BACKEND"):
         monkeypatch.delenv(k, raising=False)
+    # Ambient kimchi-session markers (KIMCHI_* / PI_*): the suite may run
+    # inside Kimchi, and an unscrubbed marker makes "plain" auto-detect the
+    # kimchi environment instead of falling to the default -- the same rule
+    # as test_claude_profile.py's clean fixture.
+    for k in [x for x in os.environ if x.startswith(("KIMCHI_", "PI_"))]:
+        monkeypatch.delenv(k, raising=False)
     monkeypatch.setattr(rg, "_find_kimi", lambda: None)   # stop right after selection
     # "plain" must fall to the default whatever this machine has installed.
     monkeypatch.delenv("CLAUDECODE", raising=False)
