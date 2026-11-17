@@ -75,10 +75,31 @@ class CommitSpec:
 class Scenario:
     name: str
     description: str
-    commits: list                    # [CommitSpec]
+    commits: list                    # [CommitSpec] (single-push form)
     expect: str                      # "block" | "pass"
     expect_message: list = field(default_factory=list)   # required substrings (ci)
     forbid_message: list = field(default_factory=list)   # forbidden substrings (ci)
+    steps: list = field(default_factory=list)  # [PushStep] (multi-push form)
+
+
+@dataclass
+class PushStep:
+    """One push inside a multi-push scenario (SPEC-15 acceptance: waiver
+    scenarios need a block push, an operator command, then another push).
+    Commits apply on top of the previous step's tip; `commands` run between
+    the commits and the push, in the work clone with the push environment --
+    gate operator commands (waive/unwaive/--list). argv tokens may use the
+    placeholders "{python}" (this interpreter), "{gate}" (the gate script
+    under test), and "{finding:<path>}" (the display id of the last recorded
+    verdict's finding on <path>, read from the append-only findings log --
+    the same id a pusher reads from --history)."""
+    label: str
+    commits: list = field(default_factory=list)            # [CommitSpec]
+    commands: list = field(default_factory=list)            # [argv tokens]
+    expect: str = "block"
+    expect_message: list = field(default_factory=list)
+    forbid_message: list = field(default_factory=list)
+
 
 
 @dataclass
@@ -175,10 +196,13 @@ def assert_remote_isolation(scratch, env=None):
                     raise SimError(f"remote {name!r} {kind} escapes the scratch root: {url!r}")
 
 
-def make_scratch(target, root, branch=None, seed_files=None):
+def make_scratch(target, root, branch=None, seed_files=None, seed_executables=None):
     """Clone `target` into root/work, seed an optional baseline commit, rewrite
     every remote to a local bare fake origin, and push the baseline with
-    --no-verify (before the gate hook is installed)."""
+    --no-verify (before the gate hook is installed). Paths listed in
+    `seed_executables` are chmod +x before the baseline commit so a seeded
+    command-check executor survives the clone with its exec bit (the gate's
+    command-check contract requires a repo-relative EXECUTABLE)."""
     target, root = Path(target).resolve(), Path(root).resolve()
     if not (target / ".git").exists():
         raise SimError(f"not a git repository: {target}")
@@ -190,6 +214,11 @@ def make_scratch(target, root, branch=None, seed_files=None):
             p = work / rel
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(text, encoding="utf-8")
+        for rel in seed_executables or []:
+            p = work / rel
+            if not p.is_file():
+                raise SimError(f"seeded executable missing from SEED_FILES: {rel}")
+            os.chmod(str(p), 0o755)
         _git(["add", "-A"], work)
         _git(["-c", "user.email=sim@harness.local", "-c", "user.name=sim-harness",
               "commit", "-q", "-m", "sim-harness seed: baseline decision record"], work)
@@ -364,28 +393,91 @@ def reset_to_origin(scratch):
     _git(["clean", "-fdq"], scratch.work)
 
 
-def run_scenario(scratch, env, scenario, timeout_s=5400):
+def _last_finding_id_for_path(scratch, path):
+    """The display id of the most recent recorded verdict's finding on
+    `path` -- read straight from the append-only findings log (the same
+    record `--history` replays), so a scenario can script `waive <id>` the
+    way a pusher would after reading the block output."""
+    log = scratch.work / ".git" / "review-gate-findings.jsonl"
+    try:
+        lines = [ln for ln in log.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    except OSError:
+        raise SimError(f"no findings log yet at {log}; nothing to waive")
+    for ln in reversed(lines):
+        try:
+            entry = json.loads(ln)
+        except ValueError:
+            continue
+        for f in entry.get("findings") or []:
+            if isinstance(f, dict) and f.get("path") == path and f.get("id"):
+                return str(f["id"])
+    raise SimError(f"no recorded finding on {path!r} in the findings log")
+
+
+def _run_gate_command(scratch, env, argv, gate_scripts):
+    """One operator command between pushes: placeholders resolved, run in
+    the work clone with the push env (the ledger and history the gate reads
+    are the same ones the pushes use). Returns (rc, output)."""
+    resolved = []
+    for tok in argv:
+        if tok == "{python}":
+            resolved.append(sys.executable)
+        elif tok == "{gate}":
+            resolved.append(os.path.join(str(gate_scripts), "review-gate.py"))
+        elif tok.startswith("{finding:") and tok.endswith("}"):
+            resolved.append(_last_finding_id_for_path(scratch, tok[len("{finding:"):-1]))
+        else:
+            resolved.append(tok)
+    proc = subprocess.run(resolved, cwd=str(scratch.work), env=env,
+                          capture_output=True, text=True)
+    return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+
+
+def run_scenario(scratch, env, scenario, timeout_s=5400, gate_scripts=None):
     t0 = time.monotonic()
-    failures, outcome, transcript, attempts = [], "error", "", []
+    failures, pushes, transcripts = [], 0, []
     reset_to_origin(scratch)
-    for spec in scenario.commits:
-        apply_commit(scratch.work, spec)
-    outcome, transcript, attempts = drive_push(scratch, env, timeout_s=timeout_s)
-    if outcome != scenario.expect:
-        failures.append(f"expected {scenario.expect!r}, got {outcome!r}")
-    if outcome == "block" and BLOCK_BANNER not in transcript:
-        failures.append(f"denial lacks the gate's block banner {BLOCK_BANNER!r}")
-    if outcome == "pass" and BLOCK_BANNER.lower() in transcript.lower():
-        failures.append("approval transcript contains the block banner")
-    low = transcript.lower()
-    for sub in scenario.expect_message:
-        if sub.lower() not in low:
-            failures.append(f"message missing required text: {sub!r}")
-    for sub in scenario.forbid_message:
-        if sub.lower() in low:
-            failures.append(f"message contains forbidden text: {sub!r}")
+    if scenario.steps:
+        steps = scenario.steps
+    else:
+        steps = [PushStep(label=scenario.name, commits=scenario.commits,
+                          expect=scenario.expect,
+                          expect_message=scenario.expect_message,
+                          forbid_message=scenario.forbid_message)]
+    outcome = "error"
+    for step in steps:
+        for spec in step.commits or []:
+            apply_commit(scratch.work, spec)
+        for argv in step.commands or []:
+            rc, out = _run_gate_command(scratch, env, argv, gate_scripts)
+            transcripts.append(f"$ {' '.join(argv)}\n{out}")
+            if rc != 0:
+                failures.append(f"command step {step.label!r} exited {rc}: "
+                                f"{argv}")
+        outcome, transcript, attempts = drive_push(scratch, env, timeout_s=timeout_s)
+        pushes += len(attempts)
+        transcripts.append(transcript)
+        if outcome != step.expect:
+            failures.append(f"step {step.label!r}: expected {step.expect!r}, "
+                            f"got {outcome!r}")
+        if outcome == "block" and BLOCK_BANNER not in transcript:
+            failures.append(f"step {step.label!r}: denial lacks the gate's "
+                            f"block banner {BLOCK_BANNER!r}")
+        if outcome == "pass" and BLOCK_BANNER.lower() in transcript.lower():
+            failures.append(f"step {step.label!r}: approval transcript contains "
+                            "the block banner")
+        low = transcript.lower()
+        for sub in step.expect_message:
+            if sub.lower() not in low:
+                failures.append(f"step {step.label!r}: message missing required "
+                                f"text: {sub!r}")
+        for sub in step.forbid_message:
+            if sub.lower() in low:
+                failures.append(f"step {step.label!r}: message contains forbidden "
+                                f"text: {sub!r}")
+    transcript = "\n".join(transcripts)
     return ScenarioResult(name=scenario.name, expect=scenario.expect, outcome=outcome,
-                          ok=not failures, pushes=len(attempts),
+                          ok=not failures, pushes=pushes,
                           elapsed_s=round(time.monotonic() - t0, 1),
                           transcript=transcript, failures=failures)
 
@@ -426,6 +518,8 @@ def main(argv=None):
                          "including an inline docs-summary regeneration (measured "
                          "~1100s combined on kimchi-studio, docs-gate 07)")
     ap.add_argument("--inline-budget", type=int, default=120, help="OCR_INLINE_BUDGET_GIT (s)")
+    ap.add_argument("--only", default="", help="comma-separated scenario names to run "
+                    "(default: all in the module)")
     args = ap.parse_args(argv)
     t_start = time.monotonic()
 
@@ -433,6 +527,13 @@ def main(argv=None):
     mod_path = Path(args.scenarios).resolve()
     mod, scenarios = load_scenario_module(str(mod_path))
     seed_files = getattr(mod, "SEED_FILES", None)
+    seed_executables = getattr(mod, "SEED_EXECUTABLES", None)
+    if args.only:
+        wanted = {n.strip() for n in args.only.split(",") if n.strip()}
+        missing = wanted - {s.name for s in scenarios}
+        if missing:
+            raise SimError(f"--only names unknown scenario(s): {sorted(missing)}")
+        scenarios = [s for s in scenarios if s.name in wanted]
     root = Path(args.workdir).resolve() if args.workdir else (
         Path.cwd() / f"sim-scratch-{time.strftime('%Y%m%d-%H%M%S')}")
 
@@ -444,7 +545,9 @@ def main(argv=None):
         print(f"[sim] seeded into the scratch baseline: {', '.join(sorted(seed_files))}")
 
     before = repo_snapshot(target)
-    scratch = make_scratch(target, root, branch=args.branch or None, seed_files=seed_files)
+    scratch = make_scratch(target, root, branch=args.branch or None,
+                           seed_files=seed_files,
+                           seed_executables=seed_executables)
     hook = install_gate_hook(scratch, args.gate_scripts)
     print(f"[sim] gate hook installed via the repo installer: {hook}")
     env = push_env(scratch, args.gate_scripts, inline_budget=args.inline_budget)
@@ -454,7 +557,8 @@ def main(argv=None):
         print(f"[sim] --- {scenario.name}: {scenario.description}")
         print(f"[sim]     expect: {scenario.expect}")
         try:
-            r = run_scenario(scratch, env, scenario, timeout_s=args.timeout)
+            r = run_scenario(scratch, env, scenario, timeout_s=args.timeout,
+                             gate_scripts=args.gate_scripts)
         except SimError as exc:
             killed = str(exc)
             r = ScenarioResult(name=scenario.name, expect=scenario.expect, outcome="error",

@@ -299,8 +299,9 @@ def test_waiver_anchor_distinguishes_same_signature_at_different_locations(tmp_p
 
 
 def test_waiver_anchor_fails_closed_without_path_sig_or_blob(tmp_path):
-    """No path, no signature line, or no blob at the tip: the anchor is "",
-    which never matches -- the gate never waives blind."""
+    """No path, no signature line findable at the tip location, or no blob
+    at the tip: the anchor is "", which never matches -- the gate never
+    waives blind."""
     work = _repo(tmp_path)
     _commit_files(work, DEFECT_FILES, "defects")
     tip = _git(["rev-parse", "HEAD"], cwd=work)
@@ -308,11 +309,49 @@ def test_waiver_anchor_fails_closed_without_path_sig_or_blob(tmp_path):
             "start_line": 2, "end_line": 2}
     assert review_gate._waiver_anchor(str(work), tip, good)
     assert review_gate._waiver_anchor(str(work), tip, dict(good, path="")) == ""
+    # Without existing_code the anchor falls back to the tip line AT THE
+    # FINDING'S LOCATION -- blank text there yields no signature at all.
+    blank = _git(["show", f"{tip}:app/x.py"], cwd=work)
+    assert blank  # precondition: the finding's file exists at the tip
+    _commit_files(work, {"blank.py": "\n\n\n"}, "a file with no signatureable line")
+    blank_tip = _git(["rev-parse", "HEAD"], cwd=work)
     assert review_gate._waiver_anchor(
-        str(work), tip, dict(good, existing_code="")) == ""
+        str(work), blank_tip,
+        {"path": "blank.py", "start_line": 1, "end_line": 1}) == ""
     assert review_gate._waiver_anchor(
         str(work), tip, dict(good, path="app/missing.py")) == ""
     assert review_gate._waiver_anchor(str(work), "", good) == ""
+
+
+def test_waiver_anchor_falls_back_to_tip_text_for_command_checks(tmp_path):
+    """Command checks (the SPEC-15 test executor) emit outputs, not diff
+    hunks: findings carry NO existing_code. Their anchor falls back to the
+    tip text at the finding's own location -- otherwise every command-check
+    finding would be permanently unwaivable, which spec story 23 forbids.
+    The fallback keeps the same window semantics: far-field edits never
+    lapse; an in-window edit does."""
+    work = _repo(tmp_path)
+    # Line 1 must satisfy ocr_impact.signature_line: a normalized line of
+    # >= 20 chars that is not "boring" (a bare `x = 1` or short `def` is not
+    # signable, so the finding's location must carry a distinctive line).
+    code = ("def feature_with_a_long_distinctive_name(argument):\n"
+            "    return 1\n" + "".join(
+        f"# filler {i}\n" for i in range(1, 31)))
+    _commit_files(work, {"app/check_target.py": code}, "executor target")
+    tip = _git(["rev-parse", "HEAD"], cwd=work)
+    finding = {"path": "app/check_target.py", "start_line": 1, "end_line": 1,
+               "content": "FAIL test_smoke: assert 2 == 3\n",
+               "evidence_source": "existing_test"}
+    a1 = review_gate._waiver_anchor(str(work), tip, finding)
+    assert a1, "a command-check finding without existing_code must anchor"
+    _commit_files(work, {"app/check_target.py": code.replace(
+        "# filler 30\n", "# filler 30 -- far-field edit\n")}, "far-field")
+    tip2 = _git(["rev-parse", "HEAD"], cwd=work)
+    assert review_gate._waiver_anchor(str(work), tip2, finding) == a1
+    _commit_files(work, {"app/check_target.py": code.replace(
+        "return 1\n", "return 2\n")}, "in-window")
+    tip3 = _git(["rev-parse", "HEAD"], cwd=work)
+    assert review_gate._waiver_anchor(str(work), tip3, finding) != a1
 
 
 def test_apply_waivers_ledger_read_failure_is_observed(monkeypatch, tmp_path):

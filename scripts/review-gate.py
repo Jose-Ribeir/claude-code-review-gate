@@ -6346,12 +6346,19 @@ def _waiver_anchor(git_root, tip, finding):
     anchors, so an unrelated unchanged finding can never ride another's
     waiver. Stale sids keyed to the old blob scheme simply stop matching
     (fail-closed fresh judgment) -- the ledger is machine-local, no
-    migration. No path, no signature line, or no blob at the tip: "", which
-    never matches -- the gate never waives blind."""
+    migration. Findings that carry no existing_code (command checks such as
+    the SPEC-15 test executor emit outputs, not diff hunks) anchor on the
+    tip text AT THE FINDING'S OWN LOCATION instead: an empty signature
+    there, not an absent one, is what still fails closed. Without that
+    fallback the anchor would be "" for every command-check finding,
+    making this class of finding unwaivable (spec story 23 demands the
+    opposite). No path, no signature line findable at the tip location, or
+    no blob at the tip: "", which never matches -- the gate never waives
+    blind."""
     path = str(finding.get("path") or "").strip()
-    sig = ocr_impact.signature_line(str(finding.get("existing_code") or ""))
-    if not path or not sig or not tip:
+    if not path or not tip:
         return ""
+    sig = ocr_impact.signature_line(str(finding.get("existing_code") or ""))
     out, rc = _git(["show", f"{tip}:{path}"], cwd=git_root)
     if rc != 0:
         return ""
@@ -6366,6 +6373,10 @@ def _waiver_anchor(git_root, tip, finding):
         end = start
     start = min(start, max(1, len(lines)))
     end = min(max(end, start), max(1, len(lines)))
+    if not sig:
+        sig = ocr_impact.signature_line("\n".join(lines[start - 1:end]))
+    if not sig:
+        return ""
     window = "\n".join(lines[max(1, start - 10) - 1:end + 10])
     raw = "\x00".join((path, sig, window))
     return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()[:16]

@@ -1,0 +1,88 @@
+# test-check — reference race & regression test executor
+
+A **reference command check** (ADR 0006 §7 + SPEC-15): per push, a cheap
+selector model reads the change under review and either picks **existing
+tests** to run (with the toolchain's race detector where available) or
+authors **ephemeral probes** — throwaway race/regression tests that live and
+die inside the gate's throwaway tip clone. Nothing is committed, presented,
+or left behind.
+
+Reproduced failures (each failure is re-run exactly once) become **blocking
+findings** quoting verbatim test output; coverage gaps, flakes, and
+unbuildable probes become **warnings**, never blocks. Findings and warnings
+ride the normal stream through the falsify pass into `compute_verdict`.
+
+## Install into a gated repository
+
+1. Copy the executor into your repo and commit it:
+
+   ```console
+   $ cp examples/test-check/test_check /path/to/repo/scripts/test_check
+   $ chmod +x /path/to/repo/scripts/test_check
+   ```
+
+2. Declare the command check in `/path/to/repo/.ocr/config.json`:
+
+   ```json
+   {
+     "checks": {
+       "race-regression": {
+         "command": "scripts/test_check",
+         "globs": ["**/*.go", "**/*.py", "**/*.js"],
+         "parallel": true,
+         "timeout": 600,
+         "mode": "block"
+       }
+     }
+   }
+   ```
+
+   - `parallel: true` runs the executor **concurrently with the review**
+     against its **own tip clone** (SPEC-15.3) — this is the supported
+     deployment; sequential mode also works but adds its runtime to every
+     push.
+   - `timeout` must cover selector call + selected tests + one re-run each
+     (600 s is a reasonable start; adjust to your suite). On timeout the
+     gate degrades to a warning and the push continues.
+   - `globs` should match the languages your team wants probed. A push with
+     no matching paths costs nothing.
+
+3. Commit the config. The next push runs the check.
+
+## Environment knobs
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `OCR_TEST_SEVERITY` | `high` | Severity of reproduced-failure findings |
+| `OCR_TEST_CONFIDENCE` | `0.9` | Confidence carried by those findings |
+| `OCR_TEST_SELECTOR_TIMEOUT` | `240` | Seconds the selector call may take |
+| `OCR_TEST_SELECTOR_CMD` | `kimchi -p … --model deepseek-v4.1-flash` | Override for the selector invocation (used by the test suite's stub; the command receives the manifest JSON on stdin) |
+
+## Contract (winds both ways)
+
+- **Convention for coverage warnings:** when a finding's evidence is an
+  ephemeral probe, the executor must also emit the canonical
+  no-permanent-coverage warning (matching the gate's negation-near-coverage
+  pattern). If it does not, the gate adds its own pairing note so the
+  blind spot is still loud. Example wording the executor uses:
+
+  > no permanent test coverage for `<paths>`; ephemeral probe was the only
+  > evidence — write a permanent test for this behavior.
+
+- **Selector output is strict JSON:**
+  `{"existing_tests": [paths], "probes": [{"name", "language", "source",
+  "run_cmd"}]}`. A malformed selector reply costs exactly one attempt and
+  one warning; no retry, no blocking.
+- **Probes** are materialized under `.test-check-probes/` inside the
+  executor's clone and deleted after the run. They never touch your working
+  tree and never appear in reviewer evidence.
+
+## Costs
+
+One cheap selector model call per matching push, plus the runtime of the
+selected tests/probes (and exactly one re-run per failure). A push whose
+selector comes back empty pays the model call only.
+
+Integration tests: `tests/test_executor_testcheck.py` (selector stubbed via
+`OCR_TEST_SELECTOR_CMD`; a real Go data-race probe runs when the Go
+toolchain is available, with a simulated fallback otherwise).

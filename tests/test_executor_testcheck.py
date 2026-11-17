@@ -316,11 +316,18 @@ def test_nothing_written_outside_the_probe_scratch(tmp_path):
         return out
 
     def outside_names():
+        # Scope: the fixture area MINUS the clone (checked separately by
+        # snapshot()) and minus the selector/ stub directory, which the test
+        # rig itself writes (calls/ log, selection.json) — this assertion
+        # guards against the EXECUTOR writing outside its clone, not against
+        # the stub's own bookkeeping.
+        selector_dir = os.path.join(str(tmp_path), "selector")
         names = []
         for root, dirs, files in os.walk(tmp_path):
             if root == str(tmp_path):
                 dirs[:] = [d for d in dirs
-                          if os.path.join(root, d) != str(work)]
+                          if os.path.join(root, d) not in
+                          (str(work), selector_dir)]
             for name in files:
                 names.append(os.path.relpath(os.path.join(root, name),
                                              tmp_path))
