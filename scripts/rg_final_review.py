@@ -1,15 +1,14 @@
-"""Standalone orchestration for explicit SPEC-16 final review.
+"""Standalone and stack orchestration for explicit SPEC-16 final review.
 
-This layer performs every mandatory independent static lens against the
-individual immutable tree. Verification, composition, and provider publication
-are later contract stages; successful workers therefore never become an
-official final pass.
+:func:`run_final_review` performs complete one-item individual+combined review:
+context/intent acquisition, independent lenses, required/dynamic tests, memory,
+freshness, and explicitly authorized publication. The earlier execution-only
+seam remains available as :func:`execute_final_review` for existing callers.
 
-The stable hand-off for later layers is :func:`run_final_review` and the JSON
-schemas below.  A worker receives one request file, can inspect the complete
-repository and merge-base diff, and returns a result object on stdout.  Model
-verdict fields are informational: ``ocr_verdict.compute_verdict`` alone decides
-the finding-based verdict from normalized findings.
+A worker receives one request file, can inspect the complete repository and
+merge-base diff, and returns a result object on stdout. Model verdict fields
+are informational: ``ocr_verdict.compute_verdict`` alone decides finding-based
+verdicts from normalized findings.
 """
 from __future__ import annotations
 
@@ -26,9 +25,13 @@ import sys
 import tempfile
 import ocr_profile
 from rg_final_compose import compose_stack
+from rg_final_context import collect_review_context
 from rg_final_graph import discover_linear_graph
 from rg_final_gitlab import GitLabProvider
 from rg_final_dynamic import run_dynamic_checks
+from rg_final_memory import carry_forward, rerun_context
+from rg_final_memory import refresh_run_freshness
+from rg_final_publish import FinalPublisher
 from rg_final_execution import (
     execute_unit,
     record_execution_tests,
@@ -63,6 +66,7 @@ STACK_MISSING_STAGES = [
 EXECUTION_STAGE = "S16-04B"
 EXECUTION_MISSING_STAGES = ["composition", "provider_publication"]
 EXECUTION_STACK_MISSING_STAGES = ["provider_publication"]
+COMPLETE_STAGE = "S16-07"
 
 
 class WorkerError(RuntimeError):
@@ -108,6 +112,9 @@ def _stack(item):
             "target_project": target["project_path"],
             "target_ref": target["branch"],
             "target_sha": target["sha"],
+            "base_sha": target.get("base_sha"),
+            "reference": item.get("url"),
+            "ancestors": list(item.get("ancestors") or ()),
             "provider_data": _provider_data(item),
         }],
     }
@@ -296,12 +303,13 @@ def _record_finding(store, unit_id, finding, key, diff):
         "evidence_fingerprint": _sha256(diff + "\0" + evidence_text),
         "details": {"path": finding.get("path"), "line": _line(finding)},
     }]
-    store.record_finding(
+    finding_id = store.record_finding(
         unit_id, key, str(finding.get("content") or ""),
         str(finding.get("severity") or ""), str(finding.get("confidence", 0.0)),
         lens=lens, path=finding.get("path"), line=_line(finding),
         anchors=anchors, evidence={"worker": raw, "lens": lens},
     )
+    return {"finding_id": finding_id, "content_anchor": anchors[0]["anchor"]}
 
 
 def _record_lens_aggregation(store, unit_id, aggregation, materialized=None):
@@ -321,6 +329,7 @@ def _record_lens_aggregation(store, unit_id, aggregation, materialized=None):
             "lfs_complete": materialized.lfs_complete,
         })
     used = set()
+    recorded_findings = []
     for outcome in aggregation.outcomes:
         evidence = {
             **common,
@@ -336,8 +345,9 @@ def _record_lens_aggregation(store, unit_id, aggregation, materialized=None):
         store.record_coverage(unit_id, f"lens:{outcome.name}", outcome.state,
                               outcome.summary, {"evidence": evidence})
         for finding in outcome.findings:
-            _record_finding(store, unit_id, finding, _finding_key(finding, used),
-                            materialized.diff if materialized is not None else "")
+            recorded_findings.append(_record_finding(
+                store, unit_id, finding, _finding_key(finding, used),
+                materialized.diff if materialized is not None else ""))
         for warning in outcome.warnings:
             details = dict(warning["details"])
             details["lens"] = warning["lens"]
@@ -353,6 +363,7 @@ def _record_lens_aggregation(store, unit_id, aggregation, materialized=None):
                               if outcome.state == "incomplete"],
         "aggregate_after_completion": True,
     })
+    return recorded_findings
 
 
 def _record_execution_evidence(store, unit_id, execution, diff="", affected_units=None,
@@ -440,9 +451,9 @@ def _write_reports(store, run_id, orchestration, completion_marker=None):
     return str(machine_path), str(human_path)
 
 
-def run_final_review(reference, *, repo_root=None, provider=None, store_path=None,
-                     worker=None, environ=None, execute_checks=False,
-                     required_runner=None, dynamic_runner=None, dynamic_kwargs=None):
+def _run_static_final_review(reference, *, repo_root=None, provider=None, store_path=None,
+                             worker=None, environ=None, execute_checks=False,
+                             required_runner=None, dynamic_runner=None, dynamic_kwargs=None):
     """Review one provider-pinned ref and return the versioned operator result.
 
     ``worker`` is an optional argv prefix (``{request}`` placeholder supported)
@@ -650,14 +661,433 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
         return result
 
 
-def execute_final_review(reference, **kwargs):
-    """Run C12 safe static/required/dynamic completion without publication.
+def _record_standalone_context(store, unit_ids, context):
+    """Persist context and intent acquisition without inventing requirements."""
+    completeness = context.get("completeness") or {}
+    context_complete = (
+        context.get("contract") == "final-review-context/v1"
+        and context.get("review_mode") == "complete-repository"
+        and completeness.get("complete") is True
+        and bool(context.get("search_roots"))
+    )
+    intent = context.get("intent") or {}
+    description = intent.get("description") or {}
+    has_description = bool(str(description.get("text") or "").strip())
+    tickets = intent.get("tickets") or []
+    intent_warnings = [str(warning) for warning in intent.get("warnings") or ()]
+    intent_complete = (has_description or bool(tickets)) and not intent_warnings
+    for unit_id in unit_ids:
+        store.record_coverage(
+            unit_id, "review_context", "complete" if context_complete else "incomplete",
+            "Complete pinned-tree context and required content were acquired"
+            if context_complete else "Complete pinned-tree context is unavailable",
+            {"contract": context.get("contract"),
+             "completeness": deepcopy(completeness)},
+        )
+        store.record_coverage(
+            unit_id, "intent", "complete" if intent_complete else "incomplete",
+            "Provider/linked intent acquisition completed" if intent_complete
+            else "Intent or a required linked-intent acquisition is unavailable",
+            {"description_available": has_description,
+             "ticket_count": len(tickets), "warnings": intent_warnings},
+        )
+        for warning in context.get("warnings") or ():
+            if isinstance(warning, dict):
+                store.record_warning(
+                    unit_id, warning.get("code", "review-context"),
+                    warning.get("message", "Review context warning"),
+                    warning.get("scope", "review-context"),
+                    {key: deepcopy(value) for key, value in warning.items()
+                     if key not in ("code", "message", "scope")},
+                )
+            else:
+                store.record_warning(unit_id, "review-context", str(warning), "review-context")
+        for warning in intent_warnings:
+            store.record_warning(unit_id, "intent-acquisition", warning, "intent")
+    return context_complete, intent_complete
 
-    C13/C14 consume the returned execution/stop/skip evidence. Composition and
-    official provider mutation remain separate trusted supervisor stages.
+
+def _complete_checks(execution):
+    """Require completed declared verification and non-degraded dynamic evidence."""
+    if execution is None or not execution.aggregation.complete or execution.stop is not None:
+        return False
+    required = execution.required or {}
+    dynamic = execution.dynamic or {}
+    required_done = required.get("status") in ("pass", "absent", "block")
+    dynamic_done = (
+        dynamic.get("complete") is True
+        and dynamic.get("state") in ("passed", "not_applicable", "findings")
+        and (dynamic.get("coverage") or {}).get("status") not in (
+            None, "unknown", "uncovered", "incomplete", "error",
+        )
+    )
+    return required_done and dynamic_done
+
+
+def _carry_observed_findings(store, run_id, unit_id, prior, observations):
+    """Turn same-defect current observations into explicit memory carries."""
+    threads = {finding["content_anchor"]: finding for finding in prior.get("findings", [])}
+    for observed in observations:
+        pending = threads.get(observed["content_anchor"])
+        if pending is None:
+            continue
+        try:
+            carry_forward(
+                store, run_id, unit_id, pending["thread_id"],
+                finding_id=observed["finding_id"],
+                evidence={"revalidation": "current independent lens observed the same defect"},
+            )
+        except Exception as exc:
+            # A failed carry remains pending and blocks finalization.
+            store.record_warning(
+                unit_id, "finding-carry-forward", str(exc), "finding-memory",
+                {"thread_id": pending["thread_id"], "finding_id": observed["finding_id"]},
+            )
+
+
+def run_final_review(reference, *, repo_root=None, provider=None, store_path=None,
+                     worker=None, environ=None, execute_checks=False,
+                     required_runner=None, dynamic_runner=None, dynamic_kwargs=None,
+                     context_kwargs=None, publish=False, publication_runner=None,
+                     report_url=None, local_waivers=()):
+    """Run one complete standalone individual+combined final review.
+
+    Freshness, finding memory, and publication remain store-owned authorities.
+    ``publish=True`` explicitly authorizes the trusted status seam; permission
+    failures preserve complete local-only evidence. Multi-ref behavior is
+    delegated unchanged to the existing stack entry point.
     """
+    if isinstance(reference, (list, tuple)):
+        return run_final_stack(
+            reference, repo_root=repo_root, provider=provider, store_path=store_path,
+            worker=worker, environ=environ, execute_checks=execute_checks,
+            required_runner=required_runner, dynamic_runner=dynamic_runner,
+            dynamic_kwargs=dynamic_kwargs,
+        )
+    environ = os.environ if environ is None else environ
+    repo_root = str(repo_root or os.getcwd())
+    provider = provider or GitLabProvider()
+    item = provider.read(reference, repo_root=repo_root)
+    revisions = list(revision_tuple(item))
+    source = item["source"]
+    target = item["target"]
+    with FinalStore(store_path) as store:
+        identity = store.start_run(_stack(item), metadata={
+            "stage": COMPLETE_STAGE, "complete": True, "missing_stages": [],
+            "standalone": True,
+        })
+        run_id = identity["run_id"]
+        unit_id = identity["unit_ids"]["individual:1"]
+        combined_id = identity["unit_ids"]["combined"]
+        unit_ids = (unit_id, combined_id)
+        prior = rerun_context(store, run_id)
+        executions = {unit_id: None, combined_id: None}
+        aggregations = {}
+        context_complete = intent_complete = False
+        merge_base = None
+        try:
+            source_repository = source.get("http_url") or source["url"]
+            target_repository = target.get("http_url") or target["url"]
+            with materialize_review(
+                source_repository, target["sha"], source["sha"],
+                target_repository=(target_repository
+                                   if target_repository != source_repository else None),
+                require_lfs=True,
+                lfs_irrelevance=(context_kwargs or {}).get("binary_irrelevance"),
+            ) as materialized:
+                merge_base = materialized.merge_base_sha
+                options = dict(context_kwargs or {})
+                options.pop("binary_irrelevance", None)
+                review_context = collect_review_context(
+                    materialized, description=item.get("description"),
+                    linked_intent=item.get("linked_intent"),
+                    commit_messages=item.get("commit_messages", ()),
+                    branch=source.get("branch"),
+                    binary_irrelevance=(context_kwargs or {}).get("binary_irrelevance"),
+                    **options,
+                )
+                required_context = {
+                    "contract", "review_mode", "search_roots", "diff", "documents",
+                    "files", "intent", "completeness", "warnings",
+                }
+                if not isinstance(review_context, dict) or \
+                        not required_context <= set(review_context):
+                    raise ValueError("review context did not satisfy final-review-context/v1")
+                context_complete, intent_complete = _record_standalone_context(
+                    store, unit_ids, review_context)
+                for current_id in unit_ids:
+                    store.record_coverage(
+                        current_id, "repository", "complete",
+                        "Complete immutable checkout available",
+                        {"submodules": list(materialized.submodules),
+                         "lfs_files": list(materialized.lfs_files),
+                         "lfs_complete": materialized.lfs_complete},
+                    )
+                    store.record_coverage(
+                        current_id, "diff", "complete",
+                        "Complete binary-capable merge-base diff",
+                        {"merge_base_sha": merge_base, "sha256": _sha256(materialized.diff)},
+                    )
+                store.record_coverage(
+                    unit_id, "composition", "not_applicable",
+                    "The individual unit uses its provider-pinned tree",
+                )
+                store.record_coverage(
+                    combined_id, "composition", "complete",
+                    "A one-item combined unit uses the same immutable pinned tree",
+                    {"standalone": True, "source_unit_id": unit_id},
+                )
+
+                for current_id, unit_key in ((unit_id, "individual:1"), (combined_id, "combined")):
+                    if executions[unit_id] is not None and executions[unit_id].stop is not None:
+                        executions[current_id] = skipped_execution(
+                            executions[unit_id].stop, unit_id=current_id, run_tests=True)
+                        continue
+                    unit_prior = {
+                        **deepcopy(prior),
+                        "findings": [deepcopy(finding) for finding in prior["findings"]
+                                     if finding.get("unit_key") == unit_key],
+                    }
+                    unit_prior["required"] = bool(unit_prior["findings"])
+                    public_item = _public_item(item)
+                    if unit_key == "combined":
+                        public_item.update({
+                            "id": "combined", "title": "Standalone combined review",
+                            "description": "Review the complete one-item integration behavior.",
+                        })
+                    request = {
+                        "schema": WORKER_REQUEST_SCHEMA, "stage": COMPLETE_STAGE,
+                        "run_id": run_id, "unit_id": current_id, "unit_key": unit_key,
+                        "store_instance_id": identity["store_instance_id"],
+                        "contract_version": identity["contract_version"],
+                        "revision_tuple": revisions, "item": public_item,
+                        "repository": {
+                            "path": str(materialized.path), "access": "full_tree",
+                            "head_sha": materialized.head_sha,
+                            "target_sha": materialized.target_sha,
+                            "merge_base_sha": merge_base,
+                            "submodules": list(materialized.submodules),
+                            "lfs_files": list(materialized.lfs_files),
+                            "lfs_complete": materialized.lfs_complete,
+                        },
+                        "diff": materialized.diff,
+                        "review_context": deepcopy(review_context),
+                        "finding_memory": unit_prior,
+                    }
+
+                    def isolated_worker(lens_request, unit_key=unit_key):
+                        if unit_key == "combined":
+                            lens_request["capabilities"] = list(dict.fromkeys(
+                                [*lens_request.get("capabilities", ()),
+                                 CROSS_ITEM_CONTRACTS, INTEGRATION_BEHAVIOR]))
+                            lens_request["review_duty"] += (
+                                " Review cross-item contracts and actual integration behavior."
+                            )
+                        return invoke_worker(
+                            lens_request, command=worker, repo_root=repo_root,
+                            environ=environ,
+                            timeout=float(environ.get("RG_FINAL_WORKER_TIMEOUT", "900")),
+                        )
+
+                    executions[current_id] = execute_unit(
+                        request, isolated_worker, unit_id=current_id,
+                        required_runner=required_runner or run_required_verification,
+                        dynamic_runner=dynamic_runner or run_dynamic_checks,
+                        dynamic_kwargs=dynamic_kwargs,
+                    )
+                    aggregations[current_id] = executions[current_id].aggregation
+                    observations = _record_lens_aggregation(
+                        store, current_id, executions[current_id].aggregation, materialized)
+                    _carry_observed_findings(
+                        store, run_id, current_id, unit_prior, observations)
+
+                individual_execution = executions[unit_id]
+                combined_execution = executions[combined_id]
+                if individual_execution.stop is not None:
+                    individual_execution.skipped_work.extend(deepcopy(
+                        combined_execution.skipped_work))
+                    individual_execution.stop_id = _record_execution_evidence(
+                        store, unit_id, individual_execution, materialized.diff,
+                        affected_units=unit_ids)
+                    record_execution_tests(store, combined_id, combined_execution)
+                    aggregations[combined_id] = combined_execution.aggregation
+                    _record_lens_aggregation(
+                        store, combined_id, combined_execution.aggregation, materialized)
+                else:
+                    _record_execution_evidence(
+                        store, unit_id, individual_execution, materialized.diff)
+                    combined_execution.stop_id = _record_execution_evidence(
+                        store, combined_id, combined_execution, materialized.diff)
+        except Exception as exc:
+            for current_id in unit_ids:
+                if current_id not in aggregations:
+                    aggregations[current_id] = failed_lens_aggregation(exc)
+                    _record_lens_aggregation(store, current_id, aggregations[current_id])
+                store.record_coverage(
+                    current_id, "repository", "incomplete",
+                    "Immutable full-tree review did not complete", {"error": str(exc)})
+                store.record_warning(current_id, "materialization", str(exc), "repository")
+                if executions[current_id] is None:
+                    for kind in ("required_tests", "dynamic_tests"):
+                        store.record_coverage(
+                            current_id, kind, "incomplete",
+                            "Mandatory test evidence did not execute", {"error": str(exc)})
+            store.record_coverage(
+                combined_id, "composition", "incomplete",
+                "No complete standalone combined review is available", {"error": str(exc)})
+
+        freshness = None
+        try:
+            freshness = refresh_run_freshness(
+                store, run_id, provider, references=[reference], repo_root=repo_root)
+        except Exception as exc:
+            for current_id in unit_ids:
+                store.record_warning(current_id, "freshness-check", str(exc), "freshness")
+
+        execution_list = [executions[unit_id], executions[combined_id]]
+        stopped = any(execution and execution.stop for execution in execution_list)
+        lenses_complete = len(aggregations) == 2 and all(
+            aggregation.complete for aggregation in aggregations.values())
+        finding_verdict = (store.publication_decision(
+            run_id, unit_id=unit_id, local_waivers=local_waivers,
+        )["finding_verdict"] if lenses_complete and not stopped else None)
+        checks_complete = (
+            context_complete and intent_complete and not stopped
+            and all(_complete_checks(execution) for execution in execution_list)
+        )
+        memory_status = store.memory_status(run_id)
+        fresh = bool(freshness and freshness.get("fresh"))
+        complete = bool(checks_complete and fresh and memory_status["complete_for_finalization"])
+        if freshness and freshness["state"] == "stale":
+            state = "stale"
+        elif not complete:
+            state = "incomplete"
+        elif finding_verdict == "block":
+            state = "findings"
+        elif finding_verdict == "pass" and memory_status["clear_allowed"]:
+            state = "pass"
+        else:
+            state = "incomplete"
+            complete = False
+
+        if fresh:
+            for current_id, execution in ((unit_id, executions[unit_id]),
+                                          (combined_id, executions[combined_id])):
+                unit_verdict = execution.finding_verdict if execution else None
+                unit_complete = bool(
+                    complete and execution and execution.stop is None
+                    and _complete_checks(execution))
+                unit_state = (
+                    "findings" if unit_complete and unit_verdict == "block"
+                    else "pass" if unit_complete and unit_verdict == "pass" and state in (
+                        "pass", "findings") else "incomplete"
+                )
+                store.set_unit_state(
+                    current_id, unit_state,
+                    "Complete review evidence is available" if unit_complete
+                    else "Mandatory review, memory, or test evidence is incomplete",
+                )
+
+        publishable_pass = (
+            publish and state == "pass" and complete
+            and not identity["trust"].get("independent"))
+        trust = store.finish_run(run_id, state, trust={
+            "local_only": not publishable_pass,
+            "enforced": bool(publishable_pass),
+            "official": bool(publishable_pass),
+            "trusted_orchestrator": bool(publish),
+            "stage_incomplete": False, "missing_stages": [],
+            "static_lenses_complete": all(
+                aggregation.complete for aggregation in aggregations.values()),
+            "stopped": stopped,
+            "reason": "Complete standalone evidence; publication remains explicitly guarded",
+        })
+        publication = None
+        if publish and state == "pass" and complete:
+            publisher = FinalPublisher(
+                store, runner=publication_runner, trusted_orchestrator=True,
+                repo_root=repo_root,
+            )
+            publication = publisher.publish_individual(
+                run_id, unit_id, report_url=report_url, local_waivers=local_waivers)
+            trust = store.machine_report(run_id)["trust"]
+
+        static_complete = lenses_complete
+        exit_code = (3 if state == "stale" else 1 if state == "findings"
+                     else 0 if state == "pass" else 2)
+        report_units = store.machine_report(run_id)["units"]
+        unit_outputs = []
+        for current_id, unit_key in ((unit_id, "individual:1"), (combined_id, "combined")):
+            execution = executions[current_id]
+            aggregation = aggregations.get(current_id)
+            unit_outputs.append({
+                "unit_id": current_id, "unit_key": unit_key,
+                "kind": "individual" if current_id == unit_id else "combined",
+                "state": next(unit["state"] for unit in report_units
+                              if unit["unit_id"] == current_id),
+                "static_lenses_complete": bool(aggregation and aggregation.complete),
+                "lenses": [{"name": outcome.name, "state": outcome.state,
+                            "summary": outcome.summary,
+                            "capabilities": list(outcome.capabilities)}
+                           for outcome in (aggregation.outcomes if aggregation else ())],
+                "required_verification": deepcopy(execution.required) if execution else None,
+                "dynamic_checks": deepcopy(execution.dynamic) if execution else None,
+                **_execution_result_fields(execution),
+            })
+        result = {
+            "schema": RESULT_SCHEMA, "stage": COMPLETE_STAGE,
+            "complete": complete, "missing_stages": [], "state": state,
+            "exit_code": exit_code, "finding_verdict": finding_verdict,
+            "static_lenses_complete": static_complete,
+            "context_complete": context_complete, "intent_complete": intent_complete,
+            "lenses": unit_outputs[0]["lenses"], "units": unit_outputs,
+            "store_instance_id": identity["store_instance_id"],
+            "store_path": str(store.path), "run_id": run_id,
+            "run_seq": identity["run_seq"], "stack_key": identity["stack_key"],
+            "unit_id": unit_id, "unit_key": "individual:1",
+            "combined_unit_id": combined_id,
+            "contract_version": identity["contract_version"],
+            "acceptance_version": identity["acceptance_version"],
+            "revision_tuple": revisions,
+            "revisions": {"source_sha": source["sha"], "target_sha": target["sha"],
+                          "provider_base_sha": target["base_sha"],
+                          "merge_base_sha": merge_base},
+            "trust": trust, "freshness": deepcopy(freshness),
+            "finding_memory": deepcopy(store.memory_status(run_id)),
+            "execution_complete": checks_complete,
+            "stops": [stop for output in unit_outputs for stop in output["stops"]],
+            "rejected_stops": [entry for output in unit_outputs
+                               for entry in output["rejected_stops"]],
+            "skipped_work": [entry for output in unit_outputs
+                             for entry in output["skipped_work"]],
+            "required_verification": deepcopy(executions[unit_id].required)
+            if executions[unit_id] else None,
+            "dynamic_checks": deepcopy(executions[unit_id].dynamic)
+            if executions[unit_id] else None,
+            "publication": publication,
+        }
+        marker = (f"\nStage: {COMPLETE_STAGE}\n" + (
+            "Completion: COMPLETE - final state and provider trust are reported separately.\n"
+            if complete else
+            "Completion: INCOMPLETE - mandatory evidence, freshness, memory, or a stop prevents "
+            "a complete final result.\n"))
+        machine_path, human_path = _write_reports(store, run_id, {
+            "schema": RESULT_SCHEMA, "stage": COMPLETE_STAGE, "complete": complete,
+            "missing_stages": [], "state": state, "exit_code": exit_code,
+            "finding_verdict": finding_verdict, "unit_id": unit_id,
+            "combined_unit_id": combined_id, "static_lenses_complete": static_complete,
+            "context_complete": context_complete, "intent_complete": intent_complete,
+            "publication": publication,
+        }, completion_marker=marker)
+        result["machine_report_path"] = machine_path
+        result["human_report_path"] = human_path
+        return result
+
+
+def execute_final_review(reference, **kwargs):
+    """Retain the safe C12 execution-only seam used by prior integrations."""
     kwargs["execute_checks"] = True
-    return run_final_review(reference, **kwargs)
+    return _run_static_final_review(reference, **kwargs)
 
 
 def _graph_stack(graph):
@@ -1233,13 +1663,14 @@ def main(argv=None):
         )
         return 2
     try:
-        result = run_final_review(args[0] if len(args) == 1 else args)
+        result = run_final_review(args[0] if len(args) == 1 else args, publish=True)
     except Exception as exc:
         sys.stderr.write(f"review-gate final-review failed: {exc}\n")
         return 2
     sys.stdout.write(json.dumps(result, sort_keys=True, ensure_ascii=False) + "\n")
+    completion = "complete" if result["complete"] else "incomplete"
     sys.stderr.write(
-        f"review-gate final-review: {result['state']}; stage {result['stage']} is incomplete; "
+        f"review-gate final-review: {result['state']}; stage {result['stage']} is {completion}; "
         f"finding verdict: {result['finding_verdict'] or 'unavailable'}; "
         f"run {result['run_id']}\n"
     )
