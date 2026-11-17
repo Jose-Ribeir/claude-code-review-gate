@@ -12,6 +12,17 @@ findings** quoting verbatim test output; coverage gaps, flakes, and
 unbuildable probes become **warnings**, never blocks. Findings and warnings
 ride the normal stream through the falsify pass into `compute_verdict`.
 
+**Deterministic coverage rule:** the selector picks existing tests OR
+authors probes — never both in one check run. When the selection names any
+existing test, the executor runs those and *discards* the reply's probes
+(never authored, never run, no probe scratch); probes execute only when the
+selection names no existing test. The rule is what makes waiver acceptance
+stable: a re-push of a known defect must reproduce the *same* existing-test
+finding a waiver was granted for — it must never mint a semantically new
+ephemeral probe (new output, new anchor) on every push, which no waiver
+could ever match. Genuinely new problems still block: a different finding on
+the next push gets a different content anchor and is judged fresh.
+
 ## Install into a gated repository
 
 1. Copy the executor into your repo and commit it:
@@ -80,10 +91,13 @@ knobs and defaults above.
 - **Selector output is strict JSON:**
   `{"existing_tests": [paths], "probes": [{"name", "language", "source",
   "run_cmd"}]}`. A malformed selector reply costs exactly one attempt and
-  one warning; no retry, no blocking. Each probe may also carry an optional
-  `path` — the repo-relative file whose behavior the probe targets — which
-  anchors the finding when it fails; when absent, the finding anchors on
-  the first matched file (the default).
+  one warning; no retry, no blocking. The executor enforces the
+  deterministic coverage rule above on the reply: any probe returned
+  alongside a non-empty `existing_tests` is dropped unauthored and unrun
+  (telemetry reports `probes_authored: 0`). Each probe may also carry an
+  optional `path` — the repo-relative file whose behavior the probe targets —
+  which anchors the finding when it fails; when absent, the finding anchors
+  on the first matched file (the default).
 - **Probes** are materialized under `.test-check-probes/` inside the
   executor's clone and deleted after the run. They never touch your working
   tree and never appear in reviewer evidence.

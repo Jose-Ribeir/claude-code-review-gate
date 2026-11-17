@@ -6,6 +6,8 @@ applier, and the async two-step push driver -- the last exercised against a
 FAKE pre-push hook script that plays the gate's "is still running" answer and
 then its block/allow verdicts, so no `kimchi` worker ever runs.
 """
+import hashlib
+import json
 import os
 import subprocess
 import sys
@@ -354,6 +356,71 @@ def test_reset_to_origin_discards_a_blocked_commit_but_keeps_gitignored_cache(tm
     assert _git(["rev-parse", "HEAD"], scratch.work) == tip0
     assert not (scratch.work / "f.py").exists()
     assert cache.is_file(), "a gitignored docs summary must survive the reset"
+
+
+# --------------------------------------------------------------------------
+# Finding-id placeholders (operator-command argv expansion)
+# --------------------------------------------------------------------------
+
+def _write_findings_log(scratch, entries):
+    """Fabricate the append-only findings log the placeholders read: one
+    JSON verdict entry per line, oldest first (the gate's _record_review
+    shape -- head plus a findings list)."""
+    log = scratch.work / ".git" / "review-gate-findings.jsonl"
+    with log.open("w", encoding="utf-8") as fh:
+        for e in entries:
+            fh.write(json.dumps(e) + "\n")
+
+
+def test_placeholders_expand_singular_and_plural_ids(tmp_path):
+    """{finding:<path>} stays the FIRST id recorded on the path; the plural
+    {findings:<path>} expands to EVERY accepted display id on that path in
+    the LATEST verdict -- reviewer ids verbatim, else the gate's stable
+    sha256(path, existing_code, content)[:12] -- one argv token each, in
+    recorded order. A stale id from an OLDER verdict is never resurrected:
+    the latest verdict is what the gate's waive resolves against."""
+    target = _toy_repo(tmp_path)
+    scratch = sim.make_scratch(target, tmp_path / "scratch")
+    older = {"head": "old", "findings": [
+        {"path": "app.py", "id": "stale-1", "content": "old"}]}
+    latest = {"head": "new", "findings": [
+        {"path": "app.py", "id": "rev-42", "content": "c1"},
+        {"path": "other.py", "id": "rev-9", "content": "c2"},
+        {"path": "app.py", "existing_code": "print('v1')",
+         "content": "boom"},
+    ]}
+    _write_findings_log(scratch, [older, latest])
+    sha = hashlib.sha256(
+        "\x00".join(("app.py", "print('v1')", "boom")).encode("utf-8")
+    ).hexdigest()[:12]
+    argv = ["{python}", "-c",
+            "import json,sys;print(json.dumps(sys.argv[1:]))",
+            "{finding:app.py}", "{findings:app.py}", "{finding:other.py}"]
+    rc, out = sim._run_gate_command(
+        scratch, {"PATH": os.environ.get("PATH", "")}, argv, _SCRIPTS_DIR)
+    assert rc == 0, out
+    assert json.loads(out.strip().splitlines()[-1]) == [
+        "rev-42",              # singular: first match only
+        "rev-42", sha,         # plural: every match, in recorded order
+        "rev-9"]
+
+
+def test_plural_placeholder_omits_unmatched_paths_and_raises_when_empty(tmp_path):
+    """A path the latest verdict says nothing about resolves to nothing,
+    and an empty log is a harness error -- a scenario that waives a finding
+    nothing recorded is broken, not silently passing."""
+    target = _toy_repo(tmp_path)
+    scratch = sim.make_scratch(target, tmp_path / "scratch")
+    _write_findings_log(scratch, [{"head": "new", "findings": [
+        {"path": "other.py", "id": "rev-9", "content": "c"}]}])
+    with pytest.raises(sim.SimError, match="no recorded finding"):
+        sim._finding_ids_for_path(scratch, "app.py")
+    with pytest.raises(sim.SimError, match="no recorded finding"):
+        sim._last_finding_id_for_path(scratch, "app.py")
+    (scratch.work / ".git" / "review-gate-findings.jsonl").unlink(missing_ok=True)
+    assert sim._read_findings_log(scratch) == []
+    with pytest.raises(sim.SimError, match="no recorded finding"):
+        sim._finding_ids_for_path(scratch, "other.py")
 
 
 # --------------------------------------------------------------------------

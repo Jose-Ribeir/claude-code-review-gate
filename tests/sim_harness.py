@@ -91,16 +91,18 @@ class PushStep:
     the commits and the push, in the work clone with the push environment --
     gate operator commands (waive/unwaive/--list). argv tokens may use the
     placeholders "{python}" (this interpreter), "{gate}" (the gate script
-    under test), and "{finding:<path>}" (the display id of the last recorded
+    under test), "{finding:<path>}" (the display id of the last recorded
     verdict's finding on <path>, read from the append-only findings log --
-    the same id a pusher reads from --history)."""
+    the same id a pusher reads from --history), and "{findings:<path>}"
+    (the PLURAL: EVERY accepted display id on <path> in the latest recorded
+    verdict, one argv token each, in recorded order -- a waiver scenario
+    pre-waives all the expected findings on a path, not just the first)."""
     label: str
     commits: list = field(default_factory=list)            # [CommitSpec]
     commands: list = field(default_factory=list)            # [argv tokens]
     expect: str = "block"
     expect_message: list = field(default_factory=list)
     forbid_message: list = field(default_factory=list)
-
 
 
 @dataclass
@@ -394,28 +396,61 @@ def reset_to_origin(scratch):
     _git(["clean", "-fdq"], scratch.work)
 
 
-def _last_finding_id_for_path(scratch, path):
-    """The display id accepted by the gate for the finding on `path`.
-    Command checks (no reviewer-assigned id) use the gate's own fallback:
-    sha256(path, existing_code, content) truncated to twelve characters."""
+def _display_id(f):
+    """The id the gate shows, waives, and unwaives by (review-gate.py
+    _waiver_display_id over _finding_id): the reviewer-assigned id verbatim,
+    else the stable sha256(path, existing_code, content) truncated to 12
+    characters -- the fallback command checks (no reviewer id) get."""
+    sid = f.get("id")
+    if sid:
+        return str(sid)
+    raw = "\x00".join(str(v) for v in (
+        f.get("path") or "", f.get("existing_code") or "",
+        f.get("content") or ""))
+    return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()[:12]
+
+
+def _read_findings_log(scratch):
+    """The append-only findings log's entries, oldest first; [] when the
+    log does not exist yet (nothing has been recorded to waive from)."""
     log = scratch.work / ".git" / "review-gate-findings.jsonl"
     try:
         lines = [ln for ln in log.read_text(encoding="utf-8").splitlines() if ln.strip()]
     except OSError:
-        raise SimError(f"no findings log yet at {log}; nothing to waive")
-    for ln in reversed(lines):
+        return []
+    entries = []
+    for ln in lines:
         try:
-            entry = json.loads(ln)
+            entries.append(json.loads(ln))
         except ValueError:
             continue
+    return entries
+
+
+def _last_finding_id_for_path(scratch, path):
+    """The display id accepted by the gate for the finding on `path`
+    (reviewer id verbatim, else the stable sha fallback)."""
+    for entry in reversed(_read_findings_log(scratch)):
         for f in entry.get("findings") or []:
             if isinstance(f, dict) and f.get("path") == path:
-                if f.get("id"):
-                    return str(f["id"])
-                raw = "\x00".join(str(v) for v in (
-                    f.get("path") or "", f.get("existing_code") or "",
-                    f.get("content") or ""))
-                return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()[:12]
+                return _display_id(f)
+    raise SimError(f"no recorded finding on {path!r} in the findings log")
+
+
+def _finding_ids_for_path(scratch, path):
+    """EVERY accepted display id on `path` in the latest recorded verdict,
+    in recorded order (the singular picks only the first). A blocking push
+    can record SEVERAL findings on one path -- a reviewer correctness
+    finding, an existing-test reproduction, an ephemeral probe of any
+    shape -- and a waiver scenario must pre-waive them all or the ones
+    left out keep blocking. Still surgical per content anchor: a finding
+    that appears differently on the next push gets a different stable id,
+    misses the waived ledger entry, and blocks."""
+    for entry in reversed(_read_findings_log(scratch)):
+        ids = [_display_id(f) for f in entry.get("findings") or []
+               if isinstance(f, dict) and f.get("path") == path]
+        if ids:
+            return ids
     raise SimError(f"no recorded finding on {path!r} in the findings log")
 
 
@@ -429,6 +464,10 @@ def _run_gate_command(scratch, env, argv, gate_scripts):
             resolved.append(sys.executable)
         elif tok == "{gate}":
             resolved.append(os.path.join(str(gate_scripts), "review-gate.py"))
+        elif tok.startswith("{findings:") and tok.endswith("}"):
+            # The PLURAL: every accepted id on that path, one token each.
+            resolved.extend(
+                _finding_ids_for_path(scratch, tok[len("{findings:"):-1]))
         elif tok.startswith("{finding:") and tok.endswith("}"):
             resolved.append(_last_finding_id_for_path(scratch, tok[len("{finding:"):-1]))
         else:

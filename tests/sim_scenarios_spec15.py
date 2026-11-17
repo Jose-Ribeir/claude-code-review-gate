@@ -40,9 +40,14 @@ baseline commit (before the hook is installed):
 
 Scenarios (spec seam 2): A race caught by a probe blocks; B a regression in
 a long-standing feature blocks via a selected existing test; C the same
-blocking push, its finding waived, passes with the waiver loudly listed;
-D the finding's code altered, the waiver lapses, it blocks again; E a
-coverage-gapped push passes with warnings; F a clean push passes.
+blocking push, every expected finding on its paths waived (the PLURAL
+placeholder), passes with the waiver loudly listed -- and because the
+executor's deterministic coverage rule re-selects the existing test rather
+than authoring a fresh ephemeral probe, the re-push reproduces the same
+waived finding instead of minting a new one; D every expected finding
+waived, then the finding's code altered, the waiver lapses, it blocks
+again; E a coverage-gapped push passes with warnings; F a clean push
+passes.
 """
 import json
 from pathlib import Path
@@ -260,8 +265,9 @@ SCENARIOS = [
     ),
     Scenario(
         name="C-waived-repush-passes",
-        description="the same blocking push, re-pushed after its finding is "
-                    "waived, passes with the waiver loudly listed",
+        description="the same blocking push, re-pushed after every expected "
+                    "finding on its paths is waived, passes with the waiver "
+                    "loudly listed",
         commits=[],    # the steps carry everything (expect = final step)
         expect="pass",
         steps=[
@@ -277,9 +283,21 @@ SCENARIOS = [
                 expect_message=["reproduced failure of existing test"],
             ),
             PushStep(
-                label="waive the finding, then re-push on a new tip",
+                label="waive every expected finding, then re-push on a new tip",
+                # The PLURAL placeholder waives EVERY accepted finding the
+                # blocked verdict recorded on those paths -- the reviewer
+                # correctness finding on simlib/feature.py, the existing-test
+                # reproduction on tests/test_feature.py, and any ephemeral
+                # probe of any shape anchored on either. Waiving only the
+                # existing test (the singular) left the others blocking:
+                # the acceptance failure this scenario exists to catch. It
+                # stays surgical per content anchor: a finding that appears
+                # differently on the next push gets a different stable id,
+                # misses the waived ledger entry, and blocks -- genuinely new
+                # problems are never waved through.
                 commands=[["{python}", "{gate}", "waive",
-                           "{finding:tests/test_feature.py}"]],
+                           "{findings:simlib/feature.py}",
+                           "{findings:tests/test_feature.py}"]],
                 commits=[CommitSpec(
                     message="sim C: unrelated housekeeping doc",
                     write={"docs/sim-unrelated.md": _UNRELATED_DOC},
@@ -315,9 +333,16 @@ SCENARIOS = [
                 expect_message=["reproduced failure of existing test"],
             ),
             PushStep(
-                label="waive, then strengthen the finding's contract test",
+                label="waive every expected finding, then strengthen the "
+                      "finding's contract test",
+                # Plural waivers (see scenario C): every finding the block
+                # recorded on the two paths is waived -- and none of it may
+                # save the strengthened-test re-push. The strengthened
+                # test changes the finding's anchor window, so the waiver
+                # lapses and the still-failing boundary is judged fresh.
                 commands=[["{python}", "{gate}", "waive",
-                           "{finding:tests/test_feature.py}"]],
+                           "{findings:simlib/feature.py}",
+                           "{findings:tests/test_feature.py}"]],
                 commits=[CommitSpec(
                     message="sim D: strengthen the boundary contract test",
                     write={"tests/test_feature.py": _TEST_FEATURE_STRENGTHENED},

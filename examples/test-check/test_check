@@ -44,7 +44,13 @@ Four phases:
    (``go test -race`` for ``*_test.go``, pytest/plain python for test
    ``*.py``, ``node --test`` for ``*.test.js``, ``sh`` for ``*.sh``); an
    uninferrable runner is a warning, never a guess.
-3. RUN probes -- write each probe's source into a scratch subdir of cwd
+3. RUN probes -- ONLY when step 2 selected no existing test (the
+   deterministic coverage rule: existing tests OR probes, never both).
+   When the selection names any existing test, the reply's probes are
+   discarded unauthored and unrun -- a re-push of a known defect must
+   reproduce the SAME finding a waiver was granted for, never mint a
+   semantically new ephemeral probe (new output, new anchor) every push.
+   Otherwise: write each probe's source into a scratch subdir of cwd
    (``.test-check-probes/<nn>-<slug>/``, the executor's clone only: NEVER the
    user's tree, never committed), execute its ``run_cmd`` there, then remove
    the scratch dir.
@@ -169,9 +175,14 @@ placeholder {{probe_file}} in run_cmd is replaced with the written file's
 name. Example probe: a Go test file exercising the changed behavior with the
 race detector, run_cmd "go test -race -count=1 ." (the probe directory lives
 inside the repo's module, so repo packages can be imported).
-Prefer existing_tests whenever real coverage exists; author probes only for
-changed behavior no existing test covers. Return empty arrays when nothing is
-worth running."""
+Deterministic coverage rule, enforced by the executor: existing_tests OR
+probes, NEVER both. When existing_tests is non-empty, every probe in this
+reply is DISCARDED unauthored and unrun; probes execute only when
+existing_tests is empty. So prefer existing_tests whenever real coverage
+exists -- a partial existing test beats a probe: list it and drop the probe.
+Author a probe ONLY for changed behavior no existing test covers, and return
+an empty existing_tests array with it. Return both arrays empty when nothing
+is worth running."""
 
 
 def _note(message):
@@ -558,6 +569,20 @@ def run(matched):
         if path not in seen:
             seen.add(path)
             ordered.append(path)
+    # DETERMINISTIC COVERAGE RULE (SPEC-15): existing tests OR probes, never
+    # both. When the selection names any existing test, the executor runs
+    # those and DISCARDS the reply's probes -- they are never authored or
+    # run; probes run only when no existing test was selected. Without this
+    # rule every re-push of a known defect could mint a semantically new
+    # ephemeral finding (a fresh probe, fresh output, fresh anchor) that no
+    # waiver ever matches, so waiver acceptance could never stabilize; with
+    # it the re-push reproduces the same existing-test finding the waiver
+    # was granted for.
+    if ordered and probes:
+        _note("existing test(s) selected; discarding %d selector probe(s) "
+              "(probes run only when no existing test was selected)"
+              % len(probes))
+        probes = []
     counts["tests_selected"] = len(ordered)
     counts["probes_authored"] = len(probes)
     if not ordered and not probes:

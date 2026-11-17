@@ -283,12 +283,47 @@ def test_unbuildable_probe_degrades_to_warning(tmp_path):
     assert not (work / PROBE_ROOT).exists()
 
 
+def test_existing_tests_selected_discards_probes_deterministically(tmp_path):
+    """SPEC-15 deterministic coverage rule: existing tests OR probes, never
+    both. The selector returns BOTH an existing test and a probe that would
+    fail loudly (a blocking finding if it ran); the executor runs the
+    existing test, never materializes or runs the probe, leaves no probe
+    scratch, and reports the probes as unauthored. Without this rule every
+    re-push of a known defect could mint a semantically new ephemeral
+    finding (fresh output, fresh anchor) that no waiver ever matches, so
+    waiver acceptance could never stabilize."""
+    work = _repo(tmp_path, [
+        {"dsl.py": _DSL_OK, "tests/test_dsl.py": _DSL_TEST},
+        {"dsl.py": _DSL_BROKEN},
+    ])
+    loud = "selector-probe-would-have-blocked"
+    cmd, _count = _stub_selector(tmp_path, {
+        "existing_tests": ["tests/test_dsl.py"],
+        "probes": [{"name": "loud", "language": "python",
+                    "source": 'import sys\nprint("%s")\nsys.exit(1)\n' % loud,
+                    "run_cmd": '"%s" {probe_file}' % _PY,
+                    "path": "dsl.py"}]})
+    proc = _run_executor(work, ["dsl.py"], _env(OCR_TEST_SELECTOR_CMD=cmd))
+    data = _answer(proc)
+    assert data["warnings"] == [], data["warnings"]
+    (finding,) = data["findings"]
+    assert finding["evidence_source"] == "existing_test"
+    assert finding["path"] == "tests/test_dsl.py"
+    assert "regression: verdict broken" in finding["content"], finding
+    assert loud not in finding["content"], "the probe must never have run"
+    assert data["telemetry"]["tests_selected"] == 1
+    assert data["telemetry"]["probes_authored"] == 0
+    assert not (work / PROBE_ROOT).exists(), "no probe scratch left"
+
+
 def test_nothing_written_outside_the_probe_scratch(tmp_path):
-    """Isolation, asserted: a full run (existing test + probe) leaves the
-    clone's file tree byte-identical and adds nothing anywhere else in the
-    fixture area -- probes live only inside the executor's scratch dir,
-    which is removed afterwards. The probe is a shell one so no bytecode
-    or cache side effects exist even without the executor's own hygiene."""
+    """Isolation, asserted: a probe-only run (an existing test in the same
+    selection would deterministically DROP the probe -- the coverage rule
+    above) leaves the clone's file tree byte-identical and adds nothing
+    anywhere else in the fixture area -- probes live only inside the
+    executor's scratch dir, which is removed afterwards. The probe is a
+    shell one so no bytecode or cache side effects exist even without the
+    executor's own hygiene."""
     passing = ("import os, sys\n"
                "sys.path.insert(0, os.path.dirname(os.path.dirname("
                "os.path.abspath(__file__))))\n"
@@ -300,7 +335,7 @@ def test_nothing_written_outside_the_probe_scratch(tmp_path):
     work = _repo(tmp_path, [{"app.py": "x = 1\n",
                              "tests/test_app.py": passing}])
     cmd, _count = _stub_selector(tmp_path, {
-        "existing_tests": ["tests/test_app.py"],
+        "existing_tests": [],
         "probes": [{"name": "smoke", "language": "shell",
                     "source": "echo probe-ran\n",
                     "run_cmd": "sh {probe_file}", "path": "app.py"}]})
