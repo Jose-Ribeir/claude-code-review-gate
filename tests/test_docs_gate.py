@@ -1601,38 +1601,85 @@ def test_command_check_unknown_evidence_source_degrades_tag_not_finding(tmp_path
     assert any("evidence_source" in m for m in run_warnings), run_warnings
 
 
-def test_command_check_ephemeral_pairing_note_fires_without_coverage_warning(tmp_path):
+def test_command_check_ephemeral_pairing_warning_lands_in_warnings_not_findings(tmp_path):
     """Provenance pairing (SPEC-15.4): an ephemeral_test finding without the
-    check's no-permanent-coverage warning produces a gate-side NOTE -- never
+    check's no-permanent-coverage warning produces a gate-side WARNING on
+    the same channel as the check's own degradations -- never a finding
+    (findings counts stay honest, the note is not itself waivable), never
     a verdict change, never fatal. With the coverage warning present, no
-    note fires."""
+    pairing warning fires."""
     findings, warnings, note = _run_check(
         tmp_path, _evidence_body(evidence_source="ephemeral_test"))
     assert note is None
-    notes = [f for f in findings if f.get("severity") == "note"]
-    assert notes and "no-permanent-coverage" in notes[0]["content"], findings
-    assert review_gate.compute_verdict({"findings": [notes[0]]}) != "block"
+    # Only the real finding rides the findings stream.
+    assert [f.get("content") for f in findings] == ["race check tripped"], findings
+    msgs = [str(w.get("message")) for w in warnings]
+    assert any("no-permanent-coverage" in m for m in msgs), msgs
     findings, warnings, note = _run_check(
         tmp_path, _evidence_body(evidence_source="ephemeral_test",
                                  warnings=["no permanent coverage for the probe"]))
     assert note is None
-    assert not [f for f in findings if f.get("severity") == "note"], findings
+    assert not [w for w in warnings
+                if "no-permanent-coverage" in str(w.get("message"))], warnings
 
 
-def test_command_check_ephemeral_pairing_note_reaches_telemetry(tmp_path):
-    """The pairing note rides the findings stream end to end: a push whose
-    ephemeral finding lacks the coverage warning lands the note in telemetry
-    alongside the finding (and never changes the verdict on its own)."""
+def test_command_check_coverage_pairing_needs_a_negation_not_a_mention(tmp_path):
+    """The pairing heuristic matches the no-permanent-coverage SEMANTIC only:
+    a warning that states the lack ("missing test coverage") pairs, one that
+    merely MENTIONS coverage ("coverage is 82%") does not -- the reference
+    executor (SPEC-15.5) must word its warning as a stated lack."""
+    findings, warnings, note = _run_check(
+        tmp_path, _evidence_body(evidence_source="ephemeral_test",
+                                 warnings=["coverage is 82% on this branch"]))
+    assert note is None
+    msgs = [str(w.get("message")) for w in warnings]
+    assert any("no-permanent-coverage" in m for m in msgs), msgs
+    findings, warnings, note = _run_check(
+        tmp_path, _evidence_body(evidence_source="ephemeral_test",
+                                 warnings=["missing test coverage for the probe"]))
+    assert note is None
+    assert not [w for w in warnings
+                if "no-permanent-coverage" in str(w.get("message"))], warnings
+
+
+def test_command_check_ephemeral_pairing_warning_reaches_telemetry(tmp_path):
+    """The pairing warning rides the warnings channel end to end: a push whose
+    ephemeral finding lacks the coverage warning lands the pairing message in
+    telemetry warnings (never in the findings list, never a verdict change
+    on its own)."""
     work = _repo_with_check(
         tmp_path, _evidence_body(evidence_source="ephemeral_test"))
     tip = _commit(work, {"app.py": _APP_V2})
     decision, reason = _push(work, _env(tmp_path, "t.trace"))
-    assert decision == "deny", reason  # the high finding blocks, not the note
+    assert decision == "deny", reason  # the high finding blocks, not the warning
     records = [r for r in _tele_run_records(work) if r.get("command_checks")]
     assert records
-    notes = [f for f in records[-1].get("findings") or []
-             if f.get("severity") == "note"]
-    assert notes and "no-permanent-coverage" in str(notes[0].get("content")), notes
+    rec = records[-1]
+    assert not [f for f in rec.get("findings") or []
+                if f.get("severity") == "note"], rec.get("findings")
+    run_warnings = [str(w.get("message")) for w in rec.get("warnings") or []]
+    assert any("no-permanent-coverage" in m for m in run_warnings), run_warnings
+
+
+def test_command_check_per_check_timeout_degrades_with_its_own_message(tmp_path):
+    """SPEC-15.1: a check's `timeout` config is consumed -- a check with
+    timeout: 1 whose command sleeps 2 degrades with the per-check timeout
+    message ("timed out after 1s"), findings discarded, warning plus
+    telemetry, never a stuck gate."""
+    body = ("#!/bin/sh\ncat >/dev/null\nsleep 2\n"
+            "printf '[]'\n")
+    work = _repo_with_check(tmp_path, body)
+    _write_checks_config(work, {
+        "slow": {"command": "scripts/dslcheck.sh", "globs": ["**/*.py"],
+                 "timeout": 1}})
+    tip = _commit(work, {"app.py": _APP_V2})
+    decision, reason = _push(work, _env(tmp_path, "t.trace"))
+    assert decision == "pass", reason
+    records = [r for r in _tele_run_records(work) if r.get("command_checks")]
+    assert records
+    error = str(records[-1]["command_checks"][0].get("error") or "")
+    assert "timed out after 1s" in error, error
+    assert "findings discarded" in error, error
 
 
 # --- the sweep option (story 20) ----------------------------------------------

@@ -6309,22 +6309,42 @@ def _dismiss_finding(argv):
 def _waiver_anchor(git_root, tip, finding):
     """The finding's content anchor (`sid`), or "" when it cannot be computed.
 
-    The same anchoring _known_defects uses for re-detection, applied
-    inversely: the finding's path, the signature_line() of its code (the
-    distinctive code line ocr_impact's sibling sweep anchors on), and the
-    file's blob at `tip`. The blob is the "code changed since the waiver"
-    axis -- any change to the file makes the anchor miss, so an altered
-    finding can never ride an old waiver (it is judged fresh and blocks
-    again). No path, no signature line, or no blob at the tip: "", which
+    Content-anchored over a LOCAL window: the finding's path, the
+    signature_line() of its code (the distinctive code line ocr_impact's
+    sibling sweep anchors on -- the same anchoring _known_defects uses), and
+    the file's text at `tip` restricted to a context window around the
+    finding's location (start_line..end_line plus ~10 lines each side,
+    clamped to the file length). Both divergence directions of the earlier
+    whole-file-blob scheme are fixed: a far-field edit elsewhere in the
+    file no longer lapses the waiver (the window is unchanged), while any
+    edit inside the window still does (the finding is judged fresh and
+    blocks again). The window carries the uniqueness the blob oid used to:
+    two findings sharing path+signature at different locations keep distinct
+    anchors, so an unrelated unchanged finding can never ride another's
+    waiver. Stale sids keyed to the old blob scheme simply stop matching
+    (fail-closed fresh judgment) -- the ledger is machine-local, no
+    migration. No path, no signature line, or no blob at the tip: "", which
     never matches -- the gate never waives blind."""
     path = str(finding.get("path") or "").strip()
     sig = ocr_impact.signature_line(str(finding.get("existing_code") or ""))
     if not path or not sig or not tip:
         return ""
-    out, rc = _git(["rev-parse", f"{tip}:{path}"], cwd=git_root)
+    out, rc = _git(["show", f"{tip}:{path}"], cwd=git_root)
     if rc != 0:
         return ""
-    raw = "\x00".join((path, sig, out.strip()))
+    lines = out.splitlines()
+    try:
+        start = max(1, int(finding.get("start_line") or 1))
+    except (TypeError, ValueError):
+        start = 1
+    try:
+        end = int(finding.get("end_line") or start)
+    except (TypeError, ValueError):
+        end = start
+    start = min(start, max(1, len(lines)))
+    end = min(max(end, start), max(1, len(lines)))
+    window = "\n".join(lines[max(1, start - 10) - 1:end + 10])
+    raw = "\x00".join((path, sig, window))
     return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()[:16]
 
 
@@ -6351,8 +6371,16 @@ def _apply_waivers(repo_root, tip, result, common_dir):
         return result
     try:
         ledger = rg_store.read_waivers(common_dir)
-    except Exception:
-        return result
+    except Exception as exc:  # noqa: BLE001 -- fail-soft AND observable (ADR 0006)
+        # rg_store.read_waivers already swallows store errors; this wrapper
+        # survives only because THIS path must note the miss.
+        result["warnings"] = list(result.get("warnings") or []) + [
+            {"file": None,
+             "message": ("waiver ledger could not be read (%s: %s); no "
+                         "finding waived this run" % (type(exc).__name__, exc))}]
+        _TELE.setdefault("waiver_errors", []).append(
+            "apply_waivers: %s: %s" % (type(exc).__name__, _sanitize(str(exc), 200)))
+        return result  # fail-soft: the verdict path itself is unchanged
     sids = {str(e.get("sid") or "") for e in ledger if e.get("sid")}
     if not sids:
         return result
@@ -6376,33 +6404,52 @@ def _apply_waivers(repo_root, tip, result, common_dir):
     return result
 
 
+def _match_waiver_ids(records, fid, ids_of):
+    """The records <fid> resolves to, --dismiss style (the one id-resolution
+    rule for both waive and unwaive): every record whose id set contains
+    <fid> exactly, else -- only when nothing matched exactly -- every record
+    with an id prefixed by <fid> (a >=6-char prefix, the --dismiss
+    precedent). [] when nothing matches. Callers requiring unique
+    identification (waive) take len(hits) == 1; unwaive clears them all (a
+    re-waived finding holds several ledger entries under one finding_id)."""
+    exact = [r for r in records if fid in ids_of(r)]
+    if exact:
+        return exact
+    if len(fid) < 6:
+        return []
+    return [r for r in records if any(s.startswith(fid) for s in ids_of(r))]
+
+
 def _resolve_waiver_finding(findings, fid):
     """Resolve <fid> against the last verdict's findings, --dismiss style:
-    reviewer ids verbatim, else the gate's stable _finding_id sha. An exact
-    match wins; otherwise a >=6-char prefix that identifies exactly one
-    finding. None when nothing (or nothing unique) matches."""
-    candidates = []
-    for f in findings:
+    reviewer ids verbatim, else the gate's stable _finding_id sha. Exactly
+    one match (exact, or a >=6-char prefix when nothing matched exactly);
+    None when nothing (or nothing unique) matches."""
+    def ids_of(f):
         ids = {str(i) for i in [f.get("id")] if i}
         ids.add(_finding_id(f))
-        candidates.append((f, ids))
-    exact = [f for f, ids in candidates if fid in ids]
-    if len(exact) == 1:
-        return exact[0]
-    prefix = [f for f, ids in candidates
-              if len(fid) >= 6 and any(s.startswith(fid) for s in ids)]
-    if len(exact) == 0 and len(prefix) == 1:
-        return prefix[0]
-    return None
+        return ids
+    hits = _match_waiver_ids(findings, fid, ids_of)
+    return hits[0] if len(hits) == 1 else None
+
+
+def _last_verdict(git_dir):
+    """(head, findings, at) of the most recently recorded verdict -- the
+    shared tail the waive/unwaive/--list commands all judge the ledger
+    against. ("", [], "?") when nothing is recorded yet."""
+    entries = _read_history(git_dir, 1) if git_dir else []
+    if not entries:
+        return "", [], "?"
+    entry = entries[-1]
+    findings = [f for f in entry.get("findings") or [] if isinstance(f, dict)]
+    return (str(entry.get("head") or ""), findings,
+            str(entry.get("at") or "?"))
 
 
 def _waiver_counts(repo_root, common_dir, head, findings):
     """(active, suppressed): waivers in the ledger vs findings of the last
     recorded verdict their anchors currently suppress."""
-    try:
-        ledger = rg_store.read_waivers(common_dir)
-    except Exception:
-        ledger = []
+    ledger = rg_store.read_waivers(common_dir)  # fail-soft: [] on any miss
     sids = {str(e.get("sid") or "") for e in ledger if e.get("sid")}
     suppressed = 0
     if sids and findings:
@@ -6415,10 +6462,7 @@ def _waiver_counts(repo_root, common_dir, head, findings):
 def _waiver_list(repo_root, common_dir):
     """`review-gate.py waive --list`: the ledger, or a note for an empty one.
     Never a failure."""
-    try:
-        ledger = rg_store.read_waivers(common_dir)
-    except Exception:
-        ledger = []
+    ledger = rg_store.read_waivers(common_dir)  # fail-soft: [] on any miss
     if not ledger:
         sys.stdout.write("no waivers recorded for this repository.\n")
         return 0
@@ -6434,9 +6478,7 @@ def _waiver_list(repo_root, common_dir):
             f"  {_sanitize(str(e.get('sid') or '?'), 16)}  "
             f"{_sanitize(str(e.get('finding_id') or '?'), 80)}  waived {when}{note}\n")
     git_dir = _git_dir(repo_root)
-    entries = _read_history(git_dir, 1) if git_dir else []
-    head = str(entries[-1].get("head") or "") if entries else ""
-    findings = (entries[-1].get("findings") or []) if entries else []
+    head, findings, _at = _last_verdict(git_dir)
     active, suppressed = _waiver_counts(repo_root, common_dir, head, findings)
     sys.stdout.write(
         f"{active} active waiver(s), {suppressed} finding(s) suppressed in the last "
@@ -6483,25 +6525,20 @@ def _waiver_command(argv):
         _warn("usage: review-gate.py waive <finding-id> [<finding-id>...] "
               "[--note TEXT]  (or: review-gate.py waive --list)")
         return 1
-    entries = _read_history(git_dir, 1)
-    if not entries:
+    entries = _last_verdict(git_dir)
+    head, findings, at = entries
+    if not head and not findings:
         _warn(f"no recorded verdicts yet ({_findings_log_path(git_dir)}) - "
               "nothing to waive.")
         return 0  # nothing recorded: a note, never a failure
-    entry = entries[-1]
-    findings = [f for f in entry.get("findings") or [] if isinstance(f, dict)]
-    head = str(entry.get("head") or "")
-    try:
-        ledger = rg_store.read_waivers(common_dir)
-    except Exception:
-        ledger = []
+    ledger = rg_store.read_waivers(common_dir)  # fail-soft: [] on any miss
     added, skipped = [], []
     for fid in fids:
         f = _resolve_waiver_finding(findings, fid)
         if f is None:
             skipped.append(fid)
             _warn(f"waive: unknown finding '{_sanitize(fid, 80)}' in the last "
-                  f"recorded verdict ({entry.get('at', '?')}) - not waived.")
+                  f"recorded verdict ({at}) - not waived.")
             continue
         sid = _waiver_anchor(repo_root, head, f)
         disp = _waiver_display_id(f)
@@ -6542,8 +6579,9 @@ def _waiver_command(argv):
 
 def _unwaive_command(argv):
     """`review-gate.py unwaive <finding-id> [<finding-id>...]`: remove ledger
-    entries by finding_id (exact, else a >=4-char unique prefix). An unknown
-    id or an empty ledger degrades with a note, never a failure."""
+    entries by finding_id (exact, else a >=6-char unique prefix, --dismiss
+    style). An unknown id or an empty ledger degrades with a note, never a
+    failure."""
     fids = [a for a in argv[2:] if not a.startswith("--")]  # argv[1] == "unwaive"
     if not fids:
         _warn("usage: review-gate.py unwaive <finding-id> [<finding-id>...]")
@@ -6554,21 +6592,15 @@ def _unwaive_command(argv):
         _warn("not inside a git repository - no waiver ledger here.")
         return 1
     common_dir = _git_common_dir(repo_root) or git_dir
-    try:
-        ledger = rg_store.read_waivers(common_dir)
-    except Exception:
-        ledger = []
+    ledger = rg_store.read_waivers(common_dir)  # fail-soft: [] on any miss
     if not ledger:
         sys.stdout.write("no waivers recorded for this repository - nothing to "
                          "unwaive.\n")
         return 0
     removed = 0
     for fid in fids:
-        exact = [e for e in ledger if str(e.get("finding_id") or "") == fid]
-        prefix = ([e for e in ledger
-                   if len(fid) >= 4 and str(e.get("finding_id") or "").startswith(fid)]
-                  if not exact else [])
-        hits = exact or prefix
+        hits = _match_waiver_ids(
+            ledger, fid, lambda e: {str(e.get("finding_id") or "")})
         if not hits:
             _warn(f"unwaive: no waiver for '{_sanitize(fid, 80)}' - the ledger is "
                   "unchanged.")
@@ -6585,9 +6617,7 @@ def _unwaive_command(argv):
         except Exception as exc:
             _warn(f"waiver ledger could not be written: {_sanitize(str(exc), 200)}")
             return 1
-    entries = _read_history(git_dir, 1)
-    head = str(entries[-1].get("head") or "") if entries else ""
-    findings = (entries[-1].get("findings") or []) if entries else []
+    head, findings, _at = _last_verdict(git_dir)
     active, suppressed = _waiver_counts(repo_root, common_dir, head, findings)
     sys.stdout.write(f"ledger: {active} active waiver(s), {suppressed} finding(s) "
                      "suppressed in the last recorded verdict.\n")
@@ -9342,8 +9372,10 @@ _DOC_QUALITY_EVIDENCE_KEYS = {
 # A doc-file diff inlines under this size; bigger ones go to a run-dir file the
 # checker reads itself (the manifest's {path, diff}|{path, diff_file} shape).
 _DOC_DIFF_INLINE_MAX_BYTES = 60 * 1024
-# A user-registered command check gets this long to answer; over it the run
-# degrades to a warning like every other check failure (never a stuck gate).
+# A user-registered command check gets this long to answer by default; a
+# per-check `timeout` (SPEC-15.1, rg_config) overrides it, clamped to
+# 1..3600 s in _run_one_command_check. Over it the run degrades to a warning
+# like every other check failure (never a stuck gate).
 _COMMAND_CHECK_TIMEOUT_S = 60
 # The warn-mode confidence clamp: under the default block bar, so a warn-mode
 # finding warns but never blocks. Mode only ever downgrades, never upgrades.
@@ -9681,28 +9713,21 @@ def _docs_quality_scan_notes(repo_root, review_root, base, tip, entries=None):
 # --- user-registered command checks (SPEC-14 story 4) -------------------------
 
 # SPEC-15.4: the evidence_source tag a command-check finding may carry, and
-# the substring that marks a check warning as the no-permanent-coverage
-# warning an ephemeral_test finding should be paired with.
+# the pattern that marks a check warning as the no-permanent-coverage warning
+# an ephemeral_test finding should be paired with. CONVENTION the reference
+# executor (SPEC-15.5) must follow: the warning must STATE the lack -- a
+# negation (no / without / missing / lack(s)) within a short span of
+# "permanent test" or "coverage", e.g. "no permanent coverage for the race
+# probe: tests/dsl.py missing". A warning that merely MENTIONS coverage
+# ("coverage is 82%") does not pair.
 _EVIDENCE_SOURCES = frozenset(("existing_test", "ephemeral_test"))
-_COVERAGE_WARNING_RE = re.compile(r"coverage", re.IGNORECASE)
+_COVERAGE_WARNING_RE = re.compile(
+    r"(no|without|missing|lacks?)\w*\s+.{0,40}(permanent\s+)?(test|coverage)",
+    re.IGNORECASE)
 
 
-def _evidence_pairing_note(f):
-    """The gate-side note (SPEC-15.4 provenance pairing): a finding whose
-    evidence_source is ephemeral_test should come with the check's
-    no-permanent-coverage warning; its absence produces THIS -- a severity-\n    "note" finding that can never block, never a verdict change, never fatal."""
-    return {
-        "path": f.get("path"), "start_line": f.get("start_line") or 0,
-        "end_line": f.get("end_line") or 0, "severity": "note",
-        "confidence": 1.0, "category": "custom",
-        "content": ("ephemeral_test evidence without the check's "
-                    "no-permanent-coverage warning: the finding stands on "
-                    "ephemeral evidence alone"),
-        "deterministic": True,
-    }
-
-
-def _run_one_command_check(review_root, command, matched):
+def _run_one_command_check(review_root, command, matched,
+                           timeout=_COMMAND_CHECK_TIMEOUT_S):
     """(findings, warnings, error_note_or_None) for ONE command check over
     its matched changed files: the repo-relative executable runs with cwd the
     review tree root and the matched file list on stdin as a JSON array;
@@ -9713,7 +9738,11 @@ def _run_one_command_check(review_root, command, matched):
     failure). Findings may carry evidence_source "existing_test" or
     "ephemeral_test"; an unknown value degrades the tag with a note while
     the finding survives. An ephemeral_test finding without the check's
-    no-permanent-coverage warning gains a gate-side pairing note. Nonzero
+    findings. An ephemeral_test finding without the check's
+    no-permanent-coverage warning gains a gate-side warning on the same
+    channel as the check's own -- never a finding, never a verdict change.
+    The answer budget defaults to 60 s and is clamped to 1..3600 s
+    (SPEC-15.1 per-check `timeout`). Nonzero
     exit, timeout, and malformed output degrade to a note -- the check's
     findings are DISCARDED, never silently passed (the note plus telemetry
     stay) and never a crash. The contract is a REPO-RELATIVE executable: an
@@ -9727,12 +9756,20 @@ def _run_one_command_check(review_root, command, matched):
     exe = str(Path(review_root) / command)
     if not (os.path.isfile(exe) and os.access(exe, os.X_OK)):
         return [], [], f"command not executable or missing: {command}"
+    # SPEC-15.1: the check's per-check answer budget, clamped to a sane
+    # guard (1..3600 s). rg_config already floors positive values at 1, so
+    # the ceiling is the only clamp needed here; an unusable value keeps
+    # the default budget.
+    try:
+        budget = min(max(float(timeout), 1.0), 3600.0)
+    except (TypeError, ValueError):
+        budget = float(_COMMAND_CHECK_TIMEOUT_S)
     try:
         proc = subprocess.run([exe], input=json.dumps(matched), text=True,
                               cwd=str(review_root), capture_output=True,
-                              timeout=_COMMAND_CHECK_TIMEOUT_S)
+                              timeout=budget)
     except subprocess.TimeoutExpired:
-        return [], [], f"timed out after {_COMMAND_CHECK_TIMEOUT_S}s; findings discarded"
+        return [], [], f"timed out after {budget:g}s; findings discarded"
     except OSError as exc:
         return [], [], f"could not execute: {exc}"
     if proc.returncode != 0:
@@ -9777,7 +9814,11 @@ def _run_one_command_check(review_root, command, matched):
                                      "existing_test or ephemeral_test); tag "
                                      "dropped, finding kept" % (src,))})
         if src == "ephemeral_test" and not covered:
-            findings.append(_evidence_pairing_note(f))
+            notes.append({
+                "file": f.get("path"),
+                "message": ("ephemeral_test evidence without the check's "
+                            "no-permanent-coverage warning: the finding "
+                            "stands on ephemeral evidence alone")})
         findings.append(f)
     return findings, notes + check_warnings, None
 
@@ -9831,7 +9872,8 @@ def _command_check_findings(repo_root, review_root, base, tip, entries=None):
             tele["seconds"] = round(time.monotonic() - t0, 2)
             continue
         got, check_warnings, note = _run_one_command_check(
-            review_root, check["command"], matched)
+            review_root, check["command"], matched,
+            timeout=check.get("timeout"))
         tele["seconds"] = round(time.monotonic() - t0, 2)
         tele["findings"] = len(got)
         if note:

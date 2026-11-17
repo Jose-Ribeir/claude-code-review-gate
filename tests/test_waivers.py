@@ -8,9 +8,11 @@ from the record.
 
 Harness modelled on tests/test_memory_gate.py. Key mechanics: push 1 is denied
 so the remote stays at base, which means push 2's range still contains the
-defect commit and re-reviews the (unchanged) finding files -- identical blobs
-keep the waiver active, while any change to a finding's file moves its blob
-oid and lapses the waiver (the documented, conservative design decision).
+defect commit and re-reviews the (unchanged) finding files -- the waiver
+anchor is content-anchored over a LOCAL window (the finding's location
++/-10 lines at the tip), so an edit inside that window lapses the waiver
+while a far-field edit elsewhere in the file does not (the documented,
+conservative design decision).
 """
 import importlib.util
 import json
@@ -219,9 +221,10 @@ def test_waiver_lapses_when_the_finding_code_changes(tmp_path):
     proc = _gate_cmd(work, env, "waive", idx, idy)
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
-    # ANY change to the finding's file (a touch below the finding's own line)
-    # moves the blob oid, so x's anchor no longer matches: the waiver lapsed
-    # and the finding is judged fresh. y.py is untouched and stays waived.
+    # A change INSIDE the finding's local window (the touch lands a line
+    # below the finding, well inside its +/-10-line context) changes the
+    # window text, so x's anchor no longer matches: the waiver lapsed and
+    # the finding is judged fresh. y.py is untouched and stays waived.
     _commit_files(work, {"app/x.py": DEFECT_FILES["app/x.py"] + "# touched\n",
                          "README.md": "v2\n"}, "touch the finding's file")
     decision, reason = _push(work, env)
@@ -234,6 +237,108 @@ def test_waiver_lapses_when_the_finding_code_changes(tmp_path):
     # The deny reason lists the still-waived y only, never the lapsed x.
     assert idy in reason and "waived: [" in reason
     assert idx not in reason, reason
+
+
+# ---------------------------------------------------------------------------
+# the anchor's window semantics: far-field edits survive, local ones lapse
+# ---------------------------------------------------------------------------
+
+def test_waiver_survives_a_far_field_edit(tmp_path):
+    """A change far from the finding's local window (its location +/-10
+    lines) does NOT lapse the waiver: the window text at the tip is
+    unchanged, so the anchor still matches and the push passes -- the
+    whole-file-blob scheme's over-lapping is gone."""
+    finding_only = {"app/x.py": {"severity": "high", "content": CONTENT_X,
+                                 "existing_code": SIG_X}}
+    env = _env(tmp_path, STUB_FINDINGS_FOR=json.dumps(finding_only))
+    long_defect = {"app/x.py": ("def handle(user):\n    " + SIG_X + "\n    pass\n"
+                                + "".join(f"# filler {i}\n"
+                                           for i in range(1, 31)))}
+    work = _repo(tmp_path)
+    _commit_files(work, long_defect, "add the quota defect plus filler")
+    decision, reason = _push(work, env)
+    assert decision == "deny", reason
+    fx = _by_path(_recorded_findings(work), "app/x.py")
+    idx = _display_id(fx)
+
+    proc = _gate_cmd(work, env, "waive", idx)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    # The far-field edit: 20+ lines below the finding (its window is lines
+    # 1..12), inside the same file. The whole-file blob would have moved;
+    # the window does not.
+    _commit_files(work, {"app/x.py": long_defect["app/x.py"].replace(
+        "# filler 30\n", "# filler 30 -- edited far from the finding\n")},
+        "edit the file far from the finding")
+    decision, reason = _push(work, env)
+    assert decision == "pass", reason
+    entry = _last_record(work)
+    assert entry["verdict"] == "pass"
+    assert {w["path"] for w in entry.get("waived") or []} == {"app/x.py"}
+
+
+def test_waiver_anchor_distinguishes_same_signature_at_different_locations(tmp_path):
+    """Two findings sharing path+signature at different locations keep
+    DISTINCT anchors: the location window carries the uniqueness the old
+    blob oid provided, so an unrelated unchanged finding can never ride
+    another's waiver."""
+    work = _repo(tmp_path)
+    code = ("def a():\n    " + SIG_X + "\n    pass\n"
+            + "".join(f"# filler {i}\n" for i in range(1, 25))
+            + "\ndef b():\n    " + SIG_X + "\n    pass\n")
+    _commit_files(work, {"app/x.py": code}, "same signature, two locations")
+    tip = _git(["rev-parse", "HEAD"], cwd=work)
+    f1 = {"path": "app/x.py", "existing_code": SIG_X,
+          "start_line": 2, "end_line": 2}
+    f2 = {"path": "app/x.py", "existing_code": SIG_X,
+          "start_line": 30, "end_line": 30}
+    a1 = review_gate._waiver_anchor(str(work), tip, f1)
+    a2 = review_gate._waiver_anchor(str(work), tip, f2)
+    assert a1 and a2, (a1, a2)
+    assert a1 != a2
+
+
+def test_waiver_anchor_fails_closed_without_path_sig_or_blob(tmp_path):
+    """No path, no signature line, or no blob at the tip: the anchor is "",
+    which never matches -- the gate never waives blind."""
+    work = _repo(tmp_path)
+    _commit_files(work, DEFECT_FILES, "defects")
+    tip = _git(["rev-parse", "HEAD"], cwd=work)
+    good = {"path": "app/x.py", "existing_code": SIG_X,
+            "start_line": 2, "end_line": 2}
+    assert review_gate._waiver_anchor(str(work), tip, good)
+    assert review_gate._waiver_anchor(str(work), tip, dict(good, path="")) == ""
+    assert review_gate._waiver_anchor(
+        str(work), tip, dict(good, existing_code="")) == ""
+    assert review_gate._waiver_anchor(
+        str(work), tip, dict(good, path="app/missing.py")) == ""
+    assert review_gate._waiver_anchor(str(work), "", good) == ""
+
+
+def test_apply_waivers_ledger_read_failure_is_observed(monkeypatch, tmp_path):
+    """ADR 0006 (fail-soft AND observable): a waiver-ledger read failure
+    inside _apply_waivers changes no verdict path (findings unchanged,
+    nothing waived) AND leaves a house warning plus a waiver_errors
+    telemetry note -- never silent."""
+    work = _repo(tmp_path)
+
+    def boom(_common_dir):
+        raise RuntimeError("synthetic ledger failure")
+
+    monkeypatch.setattr(review_gate.rg_store, "read_waivers", boom)
+    review_gate._TELE.pop("waiver_errors", None)
+    result = {"findings": [{"path": "app/x.py", "severity": "high",
+                            "content": CONTENT_X, "existing_code": SIG_X}],
+              "warnings": [{"message": "pre-existing warning"}]}
+    out = review_gate._apply_waivers(str(work), "deadbeef" * 4, result, str(work))
+    # Fail-soft: the findings are unchanged, nothing is waived.
+    assert [f.get("content") for f in out["findings"]] == [CONTENT_X]
+    assert not out.get("waived")
+    # AND observable: a house warning plus a waiver_errors telemetry note.
+    msgs = [str(w.get("message")) for w in out["warnings"]]
+    assert any("waiver ledger could not be read" in m for m in msgs), msgs
+    errs = review_gate._TELE.get("waiver_errors") or []
+    assert errs and "synthetic ledger failure" in errs[-1], errs
 
 
 # ---------------------------------------------------------------------------

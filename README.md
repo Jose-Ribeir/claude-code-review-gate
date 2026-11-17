@@ -322,6 +322,8 @@ object; switches accept booleans, `0`/`1`, and on/off-style words):
 | `checks.<name>.template` | — | path to an ADR template file for `adr-wait-what` |
 | `checks.<name>.sentence_cap` | — | positive integer; STE sentence-length cap for `adr-wait-what` |
 | `checks.<name>.sweep` | `false` | widen ADR-duty evidence to every `*.md` under the records root; the findings scope stays the change set |
+| `checks.<name>.parallel` | `false` | command checks only: declares the executor may run the check concurrently against its own tip clone (SPEC-15.1) — parsed but currently inert until SPEC-15.3 lands the scheduling |
+| `checks.<name>.timeout` | `60` | command checks only: the check's answer budget in seconds, clamped to 1–3600 (SPEC-15.1; the default matches the 60 s budget every check already got) |
 
 The `checks` object resolves through the same layering as everything else —
 built-in defaults, then the store-root `config.json`, then the per-repo
@@ -437,12 +439,16 @@ Declare any executable in your repo as a push check:
   that enumeration: absent is fine (non-test checks), an unknown value
   drops the tag with a note while the finding survives. A finding tagged
   `ephemeral_test` should come with the check's no-permanent-coverage
-  warning; its absence produces a gate-side note — never a verdict change.
-  The tag flows into the verdict output and telemetry untouched by
-  demotion passes.
-- The check gets **60 seconds**. Nonzero exit, timeout, or malformed output
-  discards that check's findings and records a warning plus telemetry —
-  never a silent pass, never a gate crash.
+  warning — wording that states the lack (a negation near "permanent
+  test"/"coverage", e.g. "no permanent coverage for the race probe");
+  its absence surfaces a gate-side warning naming no-permanent-coverage,
+  never a verdict change. A warning that merely mentions coverage does
+  not pair. The tag flows into the verdict output and telemetry untouched
+  by demotion passes.
+- The check gets **60 seconds by default**, configurable per check via
+  `timeout` (SPEC-15.1; clamped to 1–3600 s). Nonzero exit, timeout, or
+  malformed output discards that check's findings and records a warning
+  plus telemetry — never a silent pass, never a gate crash.
 - `mode: "warn"` clamps severity to at most medium and confidence to at most
   0.5; mode only downgrades, and `compute_verdict` stays the sole verdict
   authority.
