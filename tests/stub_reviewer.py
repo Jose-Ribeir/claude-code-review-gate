@@ -5,6 +5,8 @@ which only honours a script under this directory. Behaviour is driven by
 environment variables so one command line serves every scenario:
 
   STUB_SLEEP         seconds to wait before answering (default 0)
+  STUB_TOUCH         a file to touch after the sleep, right before answering
+                     (optional; an event-join seam for overlap tests)
   STUB_VERDICT       pass | warn | block | exit1 | garbage | limit  (default pass)
   STUB_TRACE         a file to append one line per invocation to (optional)
   STUB_FAIL_ON_CALL  N — exit1 on the Nth call (1-based, counted via STUB_TRACE)
@@ -203,6 +205,17 @@ if spawn_child:
     with open(spawn_child, "w", encoding="utf-8") as fh:
         fh.write(str(_child.pid))
 time.sleep(float(os.environ.get("STUB_SLEEP", "0") or 0))
+# STUB_TOUCH: a file to touch after the sleep, right before answering -- an
+# event-join seam for overlap tests (the touch is observable while the
+# caller is still waiting on this process).
+_stub_touch = os.environ.get("STUB_TOUCH", "")
+if _stub_touch:
+    try:
+        with open(_stub_touch, "a", encoding="utf-8"):
+            pass
+        os.utime(_stub_touch, None)
+    except OSError:
+        pass
 sleep_for = os.environ.get("STUB_SLEEP_FOR", "")
 if sleep_for and sleep_for in ((manifest or {}).get("paths") or []):
     time.sleep(float(os.environ.get("STUB_SLEEP_FOR_SECS", "30") or 30))

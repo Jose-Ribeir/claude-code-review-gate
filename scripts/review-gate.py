@@ -4814,6 +4814,7 @@ def _supervise_run(state_path, run_id):
     plan_summary = ""
     cmd_findings, cmd_warnings = [], []   # SPEC-14.4: command checks (see below)
     dq_notes, dq_note_warnings = [], []   # SPEC-14 story 12: pre-pass notes
+    parallel_checks = None    # SPEC-15.3: the parallel subset's runner (below)
     diffs = None     # precomputed diffs (_build_diffs); None on the 0.9.x path
     verdict_intent_base = None  # t25: day-0 intent view for the verdict record
     intent_chunk_stats = None   # [] on the chunked path: per-chunk digests
@@ -4839,6 +4840,14 @@ def _supervise_run(state_path, run_id):
                 "were during the review rather than at the pushed commit."
             )
         _mark_phase("worktree", ok=bool(worktree))
+
+        # SPEC-15.3: the parallel command-check subset starts NOW -- before
+        # the review session spawn, which is the whole point -- against its
+        # own throwaway tip clone (never review_root; see
+        # _ParallelCommandChecks). Joined at the verdict-assembly point
+        # below; the finally removes the clone on every exit path.
+        parallel_checks = _ParallelCommandChecks(
+            repo_root, state_path, run_id, base, tip).start()
 
         _TELE["tier"] = tier
         force_review = os.environ.get("OCR_FORCE_REVIEW", "").strip().lower() in ("1", "true", "yes")
@@ -5429,8 +5438,20 @@ def _supervise_run(state_path, run_id):
         # stream at verdict-assembly time (with the deslop demotion pass),
         # ahead of memory demotion and compute_verdict.
         if isinstance(result, dict):
-            cmd_findings, cmd_warnings = _command_check_findings(
-                repo_root, review_root, base, tip)
+            # SPEC-15.3: the SEQUENTIAL subset keeps today's exact semantics
+            # -- post-review, against review_root. The parallel subset
+            # (started above, before the review spawn) is joined HERE, so
+            # both finish or fail-soft before anything downstream. Both
+            # merge through the one extra_findings/extra_warnings path,
+            # sequential findings first then parallel ones (the documented
+            # order), leaving every downstream pass -- docs-quality
+            # demotion, memory demotion, waivers, compute_verdict --
+            # untouched; compute_verdict stays the sole verdict authority.
+            seq_findings, seq_warnings = _command_check_findings(
+                repo_root, review_root, base, tip, parallel=False)
+            par_findings, par_warnings = parallel_checks.join()
+            cmd_findings = seq_findings + par_findings
+            cmd_warnings = seq_warnings + par_warnings
             dq_notes, dq_note_warnings = _docs_quality_scan_notes(
                 repo_root, review_root, base, tip)
     except _Fenced:
@@ -5476,6 +5497,8 @@ def _supervise_run(state_path, run_id):
         _remove_run_dir(common_dir, run_id)
         if worktree:
             _remove_worktree(repo_root, worktree)
+        if parallel_checks is not None:
+            parallel_checks.cleanup()   # SPEC-15.3: the isolated tip clone
 
     st = _read_state(state_path) or st
     if st.get("run_id") != run_id or fenced["hit"]:
@@ -9823,14 +9846,26 @@ def _run_one_command_check(review_root, command, matched,
     return findings, notes + check_warnings, None
 
 
-def _command_check_findings(repo_root, review_root, base, tip, entries=None):
+def _command_check_findings(repo_root, review_root, base, tip, entries=None,
+                            parallel=None, tele_sink=None):
     """(findings, warnings) of every enabled command check, merged for the
     findings stream (story 4). Each finding is tagged with its check name
     and clamped to the check's mode (block|warn; warn clamps severity AND
     confidence below the block bar -- mode only downgrades at the verdict,
     which stays compute_verdict's sole authority). A check whose globs match
-    nothing costs nothing."""
+    nothing costs nothing.
+
+    SPEC-15.3: `parallel` selects the subset -- None runs every check (the
+    pre-15.3 unit surface), False only the checks WITHOUT `parallel: true`
+    (the supervisor's post-review pass against review_root, today's exact
+    semantics), True only the parallel subset (run against the worker's own
+    tip clone, never review_root). `tele_sink` (the background worker) collects
+    the per-check telemetry entries into the given list instead of writing
+    _TELE: shared-dict writes stay on the main thread, which merges the
+    entries back at join time."""
     findings, warnings = [], []
+    tele_list = (tele_sink if tele_sink is not None
+                 else _TELE.setdefault("command_checks", []))
     try:
         checks = rg_config.load_settings(repo_root)["checks"]
     except Exception as exc:  # noqa: BLE001 -- fail-soft AND observable (ADR 0006)
@@ -9838,14 +9873,15 @@ def _command_check_findings(repo_root, review_root, base, tip, entries=None):
                 "(%s: %s)" % (type(exc).__name__, exc))
         warnings.append({"file": None, "message": note})
         _warn(f"[gate] {note}")
-        _TELE.setdefault("command_checks", []).append({
+        tele_list.append({
             "name": None, "mode": "", "files": 0, "findings": 0,
             "error": note, "seconds": 0.0})
         return findings, warnings
     command_checks = {n: c for n, c in sorted(checks.items())
                       if isinstance(c, dict)
                       and isinstance(c.get("command"), str)
-                      and c.get("enabled") is not False}
+                      and c.get("enabled") is not False
+                      and (parallel is None or bool(c.get("parallel")) is parallel)}
     if not command_checks:
         return findings, warnings
     try:
@@ -9865,7 +9901,7 @@ def _command_check_findings(repo_root, review_root, base, tip, entries=None):
         t0 = time.monotonic()
         tele = {"name": name, "mode": str(check.get("mode") or "block"),
                 "files": 0, "findings": 0, "error": "", "seconds": 0.0}
-        _TELE.setdefault("command_checks", []).append(tele)
+        tele_list.append(tele)
         matched = [p for p in changed if _check_glob_matches(p, check.get("globs"))]
         tele["files"] = len(matched)
         if not matched:
@@ -9898,6 +9934,126 @@ def _command_check_findings(repo_root, review_root, base, tip, entries=None):
                 tagged = _warn_mode_clamp(tagged)
             findings.append(tagged)
     return findings, warnings
+
+
+class _ParallelCommandChecks:
+    """SPEC-15.3: the `parallel: true` command checks run concurrently with
+    the review session spawn, against a DEDICATED throwaway clone of the tip
+    (never review_root -- reviewer greps and reads can never observe
+    executor-written probe files, and a race probe writing into review_root
+    would contaminate the reviewer's evidence). One clone serves the run's
+    whole parallel subset; it is registered in the run's state under the
+    `worktrees` list the async reaper already honors, so a reaper cannot
+    sweep it mid-run, and it is removed by cleanup() on every exit path.
+
+    The worker thread RETURNS its results (findings, warnings, telemetry
+    entries); the MAIN thread writes _TELE and merges the findings at join
+    time -- no shared-dict writes off-main. Every failure degrades to a
+    warning plus telemetry, and isolation is never traded for throughput:
+    a clone-creation failure SKIPS the parallel checks outright (they never
+    fall back to review_root)."""
+
+    def __init__(self, repo_root, state_path, run_id, base, tip, _clone=None):
+        self.repo_root, self.state_path = repo_root, state_path
+        self.run_id, self.base, self.tip = run_id, base, tip
+        self._make_clone = _clone or rg_store.make_review_clone
+        self.clone = ""
+        self.thread = None
+        # (findings, warnings, tele_entries) -- filled by the worker thread,
+        # or by a degrade path on the main thread before any thread exists.
+        self.result = ([], [], [])
+
+    def start(self):
+        """Create the isolated clone and spawn the worker, unless the repo
+        declares no parallel check (then this is a no-op) or the checks
+        config cannot be read (the sequential pass reports that failure
+        exactly as today). Raises _Fenced only when the clone's state
+        registration loses the tip to a newer run."""
+        try:
+            checks = rg_config.load_settings(self.repo_root)["checks"]
+        except Exception:
+            return self  # the post-review sequential pass emits this degrade
+        names = [n for n, c in sorted(checks.items())
+                 if isinstance(c, dict)
+                 and isinstance(c.get("command"), str)
+                 and c.get("enabled") is not False
+                 and bool(c.get("parallel"))]
+        if not names:
+            return self
+        # A run_id suffix keeps the parallel clone's directory distinct from
+        # the reviewer clone's (make_review_clone names dirs tip12-run_id).
+        self.clone = self._make_clone(
+            self.repo_root, self.tip, self.run_id + "-par")
+        if not self.clone:
+            note = ("parallel command checks skipped: could not create the "
+                    "isolated tip clone for %s; the checks did NOT run "
+                    "against the review tree" % ", ".join(names))
+            self.result = (
+                [], [{"file": None, "message": note}],
+                [{"name": n, "mode": "", "files": 0, "findings": 0,
+                   "error": "isolated tip clone creation failed; check skipped",
+                   "seconds": 0.0} for n in names])
+            _warn(f"[gate] {note}")
+            return self
+        try:
+            # Reaper protection: registered under `worktrees` (the list the
+            # async reaper already skips for live runs) -- never `worktree`,
+            # which names the reviewer clone this run's finally removes.
+            _update_state_owned(self.state_path, self.run_id,
+                                worktrees=[self.clone])
+        except _Fenced:
+            _remove_worktree(self.repo_root, self.clone)
+            self.clone = ""
+            raise
+        except Exception:
+            pass  # best-effort protection; the run itself still owns cleanup
+        self.thread = threading.Thread(
+            target=self._work, name="ocr-parallel-checks", daemon=True)
+        self.thread.start()
+        return self
+
+    def _work(self):
+        """Worker body: runs the parallel subset against the isolated clone.
+        Never raises, never writes _TELE (the sink list is handed back to the
+        main thread at join); the per-check timeouts bound the run."""
+        findings, warnings, tele = [], [], []
+        try:
+            findings, warnings = _command_check_findings(
+                self.repo_root, self.clone, self.base, self.tip,
+                parallel=True, tele_sink=tele)
+        except BaseException as exc:  # noqa: BLE001 -- fail-soft, observable
+            findings, warnings = [], [{
+                "file": None,
+                "message": ("parallel command checks failed (%s: %s); "
+                            "findings discarded" % (type(exc).__name__, exc))}]
+            tele.append({"name": None, "mode": "", "files": 0, "findings": 0,
+                         "error": "worker crashed: %s: %s"
+                                  % (type(exc).__name__, exc),
+                         "seconds": 0.0})
+        self.result = (findings, warnings, tele)
+
+    def join(self):
+        """(findings, warnings): the worker's results, with its telemetry
+        entries written to _TELE here on the main thread. Never raises; a
+        worker that never started returns its degrade result."""
+        if self.thread is not None:
+            self.thread.join()
+        findings, warnings, tele = self.result
+        if tele:
+            _TELE.setdefault("command_checks", []).extend(tele)
+        return findings, warnings
+
+    def cleanup(self):
+        """Remove the parallel clone on every exit path (the supervisor's
+        finally, exceptions included). Joins the worker first -- bounded by
+        each check's own timeout -- so the clone never disappears under a
+        live executor."""
+        if self.thread is not None:
+            self.thread.join()
+            self.thread = None
+        if self.clone:
+            _remove_worktree(self.repo_root, self.clone)
+            self.clone = ""
 
 
 class _ManifestScope:

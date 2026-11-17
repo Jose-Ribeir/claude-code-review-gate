@@ -322,7 +322,7 @@ object; switches accept booleans, `0`/`1`, and on/off-style words):
 | `checks.<name>.template` | — | path to an ADR template file for `adr-wait-what` |
 | `checks.<name>.sentence_cap` | — | positive integer; STE sentence-length cap for `adr-wait-what` |
 | `checks.<name>.sweep` | `false` | widen ADR-duty evidence to every `*.md` under the records root; the findings scope stays the change set |
-| `checks.<name>.parallel` | `false` | command checks only: declares the executor may run the check concurrently against its own tip clone (SPEC-15.1) — parsed but currently inert until SPEC-15.3 lands the scheduling |
+| `checks.<name>.parallel` | `false` | command checks only: declares the check runs concurrently with the review session, against its own throwaway tip clone (SPEC-15.3) — the clone is removed with the run's other temporaries; if it cannot be created the check is skipped with a warning (isolation is never traded for throughput). Non-parallel checks stay sequential, post-review, against the review tree |
 | `checks.<name>.timeout` | `60` | command checks only: the check's answer budget in seconds, clamped to 1–3600 (SPEC-15.1; the default matches the 60 s budget every check already got) |
 
 The `checks` object resolves through the same layering as everything else —
