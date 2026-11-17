@@ -6338,7 +6338,7 @@ def _evidence_fingerprint(content):
     missing path or signature."""
     lines = [" ".join(line.split())
               for line in str(content or "").splitlines()]
-    lines = [l for l in lines if l]
+    lines = [line for line in lines if line]
     if not lines:
         return ""
     return hashlib.sha256("\n".join(lines)
