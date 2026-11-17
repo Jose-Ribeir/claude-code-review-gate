@@ -31,6 +31,8 @@ class MaterializedReview:
     submodules: tuple = ()
     lfs_files: tuple = ()
     lfs_complete: bool = True
+    warnings: tuple = ()
+    lfs_irrelevance: tuple = ()
 
 
 def _git(repo, *args, input_bytes=None):
@@ -81,26 +83,85 @@ def _lfs_files_in(repo):
     return tuple(files)
 
 
-def _materialize_lfs(path, submodules, required):
+def _lfs_pointer(path):
+    try:
+        content = path.read_bytes()
+    except OSError as exc:
+        raise MaterializationError(f"cannot read required Git LFS file {path}: {exc}") from exc
+    return (content.startswith(b"version https://git-lfs.github.com/spec/v1\n")
+            and b"\noid sha256:" in content)
+
+
+def _lfs_warning(name, evidence, detail):
+    return {
+        "code": "LFS_CONTENT_UNAVAILABLE",
+        "path": name,
+        "message": f"Git LFS content for {name} is unavailable: {detail}",
+        "evidence": evidence,
+    }
+
+
+def _materialize_lfs(path, submodules, required, irrelevance=None):
     roots = [("", path)] + [(relative, path / relative) for relative in submodules]
+    evidence = dict(irrelevance or {})
+    discovered = []
     all_files = []
     for prefix, root in roots:
         files = _lfs_files_in(root)
-        if required and files:
-            _git(root, "lfs", "pull")
-            unresolved = []
-            for relative in files:
-                content = (root / relative).read_bytes()
-                if (content.startswith(b"version https://git-lfs.github.com/spec/v1\n")
-                        and b"\noid sha256:" in content):
-                    unresolved.append(relative)
-            if unresolved:
-                raise MaterializationError(
-                    "required Git LFS content is still unresolved: "
-                    + ", ".join(unresolved)
-                )
+        discovered.append((prefix, root, files))
         all_files.extend(f"{prefix}/{name}" if prefix else name for name in files)
-    return tuple(all_files), bool(required or not all_files)
+    unknown = sorted(set(evidence) - set(all_files))
+    if unknown:
+        raise MaterializationError(
+            "LFS irrelevance evidence names non-LFS paths: " + ", ".join(unknown)
+        )
+    for name, reason in evidence.items():
+        if not isinstance(reason, str) or not reason.strip():
+            raise MaterializationError(
+                f"LFS irrelevance evidence for {name} must be explicit and non-empty"
+            )
+
+    warnings = {}
+    complete = True
+    for prefix, root, files in discovered:
+        qualified = {name: f"{prefix}/{name}" if prefix else name for name in files}
+        if required and files:
+            if not evidence:
+                # Preserve the original all-at-once transport and errors for
+                # every existing caller that supplies no exemptions.
+                _git(root, "lfs", "pull")
+            else:
+                # Isolate optional transport failures so they cannot hide an
+                # unavailable required asset in the same repository.
+                for relative, name in qualified.items():
+                    try:
+                        _git(root, "lfs", "pull", "--include", relative)
+                    except MaterializationError as exc:
+                        if name not in evidence:
+                            raise MaterializationError(
+                                f"required Git LFS content {name} could not be materialized: {exc}"
+                            ) from exc
+                        warnings[name] = _lfs_warning(
+                            name, evidence[name].strip(), str(exc))
+            unresolved = []
+            for relative, name in qualified.items():
+                if _lfs_pointer(root / relative):
+                    unresolved.append(name)
+            missing = [name for name in unresolved if name not in evidence]
+            if missing:
+                raise MaterializationError(
+                    "required Git LFS content is still unresolved: " + ", ".join(missing)
+                )
+            for name in unresolved:
+                complete = False
+                if name not in warnings:
+                    warnings[name] = _lfs_warning(
+                        name, evidence[name].strip(),
+                        "the Git LFS pointer remains after the read-only pull",
+                    )
+        elif files:
+            complete = False
+    return tuple(all_files), bool(complete or not all_files and required), tuple(warnings.values())
 
 
 def _pinned_sha(value, label):
@@ -112,7 +173,7 @@ def _pinned_sha(value, label):
 
 @contextmanager
 def materialize_review(repository, target_sha, head_sha, *, target_repository=None,
-                       require_lfs=False):
+                       require_lfs=False, lfs_irrelevance=None):
     """Yield a clean detached clone at ``head_sha`` and its complete patch.
 
     ``target_sha`` and ``head_sha`` must be full commit IDs. ``diff`` is a
@@ -121,7 +182,10 @@ def materialize_review(repository, target_sha, head_sha, *, target_repository=No
     ``target_repository`` when its target object is absent from the source.
     LFS paths are always disclosed. Set ``require_lfs`` to fetch their content
     recursively or receive ``MaterializationError`` rather than a pointer-only
-    tree. ``lfs_complete`` records whether required LFS retrieval was requested.
+    tree. ``lfs_irrelevance`` may map specific LFS paths to explicit evidence
+    that their binary content is irrelevant to the reviewed change. Only those
+    paths can degrade to structured warnings; every other missing LFS object
+    remains fatal. The default no-exemption behavior is unchanged.
     """
     target = _pinned_sha(target_sha, "target_sha")
     head = _pinned_sha(head_sha, "head_sha")
@@ -149,7 +213,8 @@ def materialize_review(repository, target_sha, head_sha, *, target_repository=No
         if target_repository is not None:
             _git(path, "fetch", "--no-tags", "--quiet", str(target_repository), target)
         submodules = _recursive_submodules(path)
-        lfs_files, lfs_complete = _materialize_lfs(path, submodules, require_lfs)
+        lfs_files, lfs_complete, lfs_warnings = _materialize_lfs(
+            path, submodules, require_lfs, lfs_irrelevance)
         merge_base = _git(path, "merge-base", target, head).decode("ascii").strip()
         patch = _git(
             path, "diff", "--no-ext-diff", "--no-textconv", "--full-index",
@@ -158,6 +223,8 @@ def materialize_review(repository, target_sha, head_sha, *, target_repository=No
         review = MaterializedReview(
             path, target, head, merge_base, patch, submodules=submodules,
             lfs_files=lfs_files, lfs_complete=lfs_complete,
+            warnings=lfs_warnings,
+            lfs_irrelevance=tuple(sorted((lfs_irrelevance or {}).items())),
         )
     except Exception:
         rg_store.remove_review_clone(str(clone_path))
