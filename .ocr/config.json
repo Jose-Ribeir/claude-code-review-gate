@@ -1,0 +1,6 @@
+{
+  "checks": {
+    "adr-wait-what": {"enabled": true, "mode": "block"},
+    "adr-integrity": {"enabled": true, "mode": "block"}
+  }
+}

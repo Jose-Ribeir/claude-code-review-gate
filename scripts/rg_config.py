@@ -3,7 +3,7 @@
 Single read API for gate settings:
 
     load_settings(repo_root=None) -> {"intent": {...}, "jira": {...},
-                                      "notes": [...]}
+                                      "checks": {...}, "notes": [...]}
 
 Resolution order -- later wins, key by key:
 
@@ -12,8 +12,8 @@ Resolution order -- later wins, key by key:
          same root rg_store.store_root() derives: $OCR_STATE_DIR or
          ~/.local/state/review-gate)
       <- a PER-REPO override file (<repo_root>/.ocr/config.json -- the file
-         the gate already honors for `blocking`; only its "intent" and "jira"
-         top-level keys are read here).
+         the gate already honors for `blocking`; only its "intent", "jira",
+         and "checks" top-level keys are read here).
 
     intent.messages : commit-message injection into the review  (default ON)
     intent.tickets  : linked-ticket fetching                    (default OFF)
@@ -23,6 +23,18 @@ Resolution order -- later wins, key by key:
     intent.tracker_order : tracker backends tried, in order
     jira            : Jira server coordinates block (e.g. {"server": ...,
                       "project": ...}); the Kimchi variant's ticket backend
+    checks          : the custom-checks surface (SPEC-14). Per check: an
+                      "enabled" switch, a "mode" of "block" or "warn", a
+                      "globs" list of repo-relative globs the check runs
+                      over, and pass-through options ("sections",
+                      "template", "sentence_cap", "sweep"). A "command"
+                      string names a repo-relative executable (run in a later
+                      ticket); a command check also takes "parallel"
+                      (default False -- its executor may run concurrently
+                      against its own tip clone; SPEC-15.1) and "timeout"
+                      (seconds, default 60 -- its answer budget). Command
+                      checks may define new check names; other unknown names
+                      are typos and are ignored.
 
 Missing files degrade to defaults silently -- that is the normal state for
 most installs. Unreadable/invalid files, and invalid VALUES for known keys,
@@ -42,6 +54,34 @@ _KNOWN_TRACKERS = ("github", "gitlab", "jira")
 _ON_WORDS = {"1", "true", "yes", "on"}
 _OFF_WORDS = {"0", "false", "no", "off"}
 
+# The checks surface (SPEC-14). Built-in defaults: docs-deslop on (it applies
+# to any repo with markdown), the ADR duties off (they presuppose ADR
+# conventions a repo may not follow); everything blocks by default. Globs are
+# repo-relative; the ADR duties watch the common ADR locations.
+_ADR_GLOBS = ["docs/adr/**/*.md", "**/adr/*.md"]
+_BUILT_IN_CHECKS = {
+    "docs-deslop": {"enabled": True, "mode": "block", "globs": ["**/*.md"]},
+    "adr-wait-what": {"enabled": False, "mode": "block",
+                      "globs": list(_ADR_GLOBS)},
+    "adr-integrity": {"enabled": False, "mode": "block",
+                      "globs": list(_ADR_GLOBS)},
+    # The v2 deslop stubs (story 24), recognized and INERT in v1 (markdown
+    # only): declared disabled defaults so the toggle surface is ready for
+    # v2 without behavior change. Naming one never earns the unknown-check
+    # typo note; nothing in the gate reads or executes them in v1.
+    "commit_messages": {"enabled": False, "mode": "block", "globs": []},
+    "code_comments": {"enabled": False, "mode": "block", "globs": []},
+}
+# A user-declared command check defaults to on and empty-scoped: the
+# declaration itself is the enabling act, and how an empty glob list scopes a
+# run is the execution ticket's call (SPEC-14.4). A command check also
+# declares its execution posture (SPEC-15.1): "parallel" says its executor
+# may run concurrently against its own tip clone (scheduling lands in
+# SPEC-15.3), and "timeout" pins its answer budget -- 60 s, the budget the
+# gate already gives every command check (_COMMAND_CHECK_TIMEOUT_S).
+_COMMAND_CHECK_DEFAULTS = {"enabled": True, "mode": "block", "globs": [],
+                            "parallel": False, "timeout": 60}
+
 
 def _defaults():
     return {
@@ -52,6 +92,10 @@ def _defaults():
             "tracker_order": list(_KNOWN_TRACKERS),
         },
         "jira": {},
+        # Deep-copied per call: the checks maps are mutable and a returned
+        # map may be mutated by a caller.
+        "checks": {name: dict(check) | {"globs": list(check["globs"])}
+                   for name, check in _BUILT_IN_CHECKS.items()},
     }
 
 
@@ -84,7 +128,20 @@ def load_settings(repo_root=None):
     _merge_file(resolved, notes, global_config_path(), "global")
     if repo_root:
         _merge_file(resolved, notes, repo_config_path(repo_root), "repo")
-    return {"intent": resolved["intent"], "jira": resolved["jira"], "notes": notes}
+    _note_globless_command_checks(resolved["checks"], notes)
+    return {"intent": resolved["intent"], "jira": resolved["jira"],
+            "checks": resolved["checks"], "notes": notes}
+
+
+def _note_globless_command_checks(checks, notes):
+    """One note per resolved command check with no globs. An empty glob list
+    matches no changed file, so the check silently never runs -- a declared
+    check must never be invisible (ADR 0006: fail-soft AND observable)."""
+    for name, check in checks.items():
+        if isinstance(check, dict) and isinstance(check.get("command"), str) \
+                and check.get("enabled") and not check.get("globs"):
+            notes.append(f"check \"{name}\" declares a command but no globs; "
+                         "it matches no changed file and will never run")
 
 
 def _merge_file(resolved, notes, path, label):
@@ -105,6 +162,7 @@ def _merge_file(resolved, notes, path, label):
         return
     _merge_intent(resolved["intent"], notes, path, label, data.get("intent"))
     _merge_jira(resolved["jira"], notes, path, label, data.get("jira"))
+    _merge_checks(resolved["checks"], notes, path, label, data.get("checks"))
 
 
 def _merge_intent(resolved, notes, path, label, intent):
@@ -166,6 +224,129 @@ def _merge_jira(resolved, notes, path, label, jira):
         else:
             notes.append(f"{label} config {path}: jira.{key} must be a string "
                          "or a number; ignored")
+
+
+def _merge_checks(resolved, notes, path, label, checks):
+    if checks is None:
+        return
+    if not isinstance(checks, dict):
+        notes.append(f"{label} config {path}: \"checks\" must be an object of "
+                     "per-check objects; ignored")
+        return
+    for name, declaration in checks.items():
+        _merge_check(resolved, notes, path, label, str(name), declaration)
+
+
+def _merge_check(resolved, notes, path, label, name, declaration):
+    if not isinstance(declaration, dict):
+        notes.append(f"{label} config {path}: check \"{name}\" must be an "
+                     "object; ignored")
+        return
+    if name not in resolved:
+        # A new name is a user command check only when it names an executable
+        # to run; without a "command" it reads as a typo of a built-in name
+        # and is ignored (an unknown check can never break the gate).
+        command = declaration.get("command")
+        if isinstance(command, str):
+            resolved[name] = dict(_COMMAND_CHECK_DEFAULTS,
+                                  globs=list(_COMMAND_CHECK_DEFAULTS["globs"]))
+        else:
+            notes.append(f"{label} config {path}: unknown check \"{name}\" "
+                         "(a user check must name a \"command\"); ignored")
+            return
+    _merge_check_entry(resolved[name], notes, path, label, name, declaration)
+
+
+def _merge_check_entry(resolved, notes, path, label, name, declaration):
+    for key, value in declaration.items():
+        ok, parsed = _as_check_value(key, value, notes, path, label, name)
+        if ok:
+            resolved[key] = parsed
+
+
+def _as_check_value(key, value, notes, path, label, name):
+    """(ok, value) for one key of one check. Anything invalid degrades to a
+    note and keeps the check's current value; an unknown key is noted and
+    ignored. Command checks carry their options here too -- the same
+    pass-through options a built-in may carry."""
+    note = f"{label} config {path}: "
+    if key == "enabled":
+        ok, parsed = _as_switch(value)
+        if ok:
+            return True, parsed
+        notes.append(f"{note}invalid checks.{name}.enabled value {value!r}; "
+                     "current value kept")
+        return False, None
+    if key == "mode":
+        if value in ("block", "warn"):
+            return True, value
+        notes.append(f"{note}checks.{name}.mode must be \"block\" or \"warn\"; "
+                     "current value kept")
+        return False, None
+    if key == "globs":
+        if not isinstance(value, list):
+            notes.append(f"{note}checks.{name}.globs must be a list of "
+                         "repo-relative globs; current value kept")
+            return False, None
+        globs = [g for g in value if isinstance(g, str)]
+        if len(globs) != len(value):
+            notes.append(f"{note}non-string entries in checks.{name}.globs "
+                         "ignored")
+        return True, globs
+    if key == "sections":
+        if isinstance(value, list) and all(isinstance(s, str) for s in value):
+            return True, list(value)
+        notes.append(f"{note}checks.{name}.sections must be a list of "
+                     "strings; current value kept")
+        return False, None
+    if key == "template":
+        if isinstance(value, str):
+            return True, value
+        notes.append(f"{note}checks.{name}.template must be a string; "
+                     "current value kept")
+        return False, None
+    if key == "sentence_cap":
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return True, value
+        notes.append(f"{note}checks.{name}.sentence_cap must be a positive "
+                     "integer; current value kept")
+        return False, None
+    if key == "sweep":
+        ok, parsed = _as_switch(value)
+        if ok:
+            return True, parsed
+        notes.append(f"{note}invalid checks.{name}.sweep value {value!r}; "
+                     "current value kept")
+        return False, None
+    if key == "parallel":
+        ok, parsed = _as_switch(value)
+        if ok:
+            return True, parsed
+        notes.append(f"{note}invalid checks.{name}.parallel value {value!r}; "
+                     "current value kept")
+        return False, None
+    if key == "timeout":
+        # Command-check answer budget in seconds (SPEC-15.1). Numeric and
+        # positive; a positive value under one second is floored to one the
+        # same way the env-int timeouts floor (max(floor, val)) -- a budget
+        # under a second is a disallow, which no positive config value means.
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            notes.append(f"{note}checks.{name}.timeout must be a number of "
+                         "seconds; current value kept")
+            return False, None
+        if value <= 0:
+            notes.append(f"{note}checks.{name}.timeout must be a positive "
+                         "number of seconds; current value kept")
+            return False, None
+        return True, max(1, value)
+    if key == "command":
+        if isinstance(value, str):
+            return True, value
+        notes.append(f"{note}checks.{name}.command must be a string naming a "
+                     "repo-relative executable; current value kept")
+        return False, None
+    notes.append(f"{note}unknown checks.{name} key \"{key}\" ignored")
+    return False, None
 
 
 def _as_switch(value):

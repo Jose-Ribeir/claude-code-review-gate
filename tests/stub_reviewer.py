@@ -5,6 +5,8 @@ which only honours a script under this directory. Behaviour is driven by
 environment variables so one command line serves every scenario:
 
   STUB_SLEEP         seconds to wait before answering (default 0)
+  STUB_TOUCH         a file to touch after the sleep, right before answering
+                     (optional; an event-join seam for overlap tests)
   STUB_VERDICT       pass | warn | block | exit1 | garbage | limit  (default pass)
   STUB_TRACE         a file to append one line per invocation to (optional)
   STUB_FAIL_ON_CALL  N — exit1 on the Nth call (1-based, counted via STUB_TRACE)
@@ -46,7 +48,10 @@ unit_diff is `unit:<path>:<unit>:<part>` and a context item `context:<role>:<pat
   STUB_DOCS_FINDING  JSON {content, severity?, path?, category?, existing_code?,
                      source_doc?, confidence?, docs_kind?, stale_passage?,
                      doc_path?} -- a documentation-checker finding, only when the
-                     manifest carries docs_context (docs-gate 01). Contradiction
+                     manifest carries docs_context (docs-gate 01) or, for a spec with
+                     docs_quality_duty set, a docs_quality payload (SPEC-14.4; the
+                     quality fields tells/document_wide/score/reads/
+                     verified_claims pass through). Contradiction
                      class (docs-gate 03): dropped per the checker's contract when
                      either quote is missing or source_doc names a document outside
                      docs_context.corpus. Drift class (docs-gate 04): docs_kind/
@@ -200,6 +205,17 @@ if spawn_child:
     with open(spawn_child, "w", encoding="utf-8") as fh:
         fh.write(str(_child.pid))
 time.sleep(float(os.environ.get("STUB_SLEEP", "0") or 0))
+# STUB_TOUCH: a file to touch after the sleep, right before answering -- an
+# event-join seam for overlap tests (the touch is observable while the
+# caller is still waiting on this process).
+_stub_touch = os.environ.get("STUB_TOUCH", "")
+if _stub_touch:
+    try:
+        with open(_stub_touch, "a", encoding="utf-8"):
+            pass
+        os.utime(_stub_touch, None)
+    except OSError:
+        pass
 sleep_for = os.environ.get("STUB_SLEEP_FOR", "")
 if sleep_for and sleep_for in ((manifest or {}).get("paths") or []):
     time.sleep(float(os.environ.get("STUB_SLEEP_FOR_SECS", "30") or 30))
@@ -485,14 +501,26 @@ if os.environ.get("STUB_CROSS_FILE"):
 # (READMEs/runbooks and excluded docs never veto).
 docs_finding = os.environ.get("STUB_DOCS_FINDING", "")
 _docs_ctx = (manifest or {}).get("docs_context") or {}
-if docs_finding and _docs_ctx:
+_docs_quality = (manifest or {}).get("docs_quality") or {}
+# SPEC-14.4: a quality-duty finding (docs_quality_duty set) needs the
+# docs_quality payload, not the summary artifact; the manifest need only
+# carry one of the two blocks for the checker to have been spawned.
+if docs_finding and (_docs_ctx or _docs_quality):
     try:
         spec = json.loads(docs_finding)
         content = spec.get("content", "stub docs finding")
         code_quote = spec.get("existing_code", "stub code")
         source_doc = spec.get("source_doc")
+        quality = bool(spec.get("docs_quality_duty"))
+        # A legacy finding (contradiction/drift) needs the artifact payload;
+        # a quality-duty finding needs the docs_quality payload. Neither runs
+        # without its own block -- the skill's spawn condition.
+        if quality and not _docs_quality:
+            raise KeyError("no docs_quality block")
+        if not quality and not _docs_ctx:
+            raise KeyError("no docs_context block")
         corpus = [_p for cls in (_docs_ctx.get("corpus") or {}).values() for _p in cls]
-        if content and code_quote and (source_doc is None or source_doc in corpus):
+        if content and code_quote and (quality or source_doc is None or source_doc in corpus):
             anchor = spec.get("path") or (manifest.get("paths") or ["?"])[0]
             sev = spec.get("severity", "high")
             f = {
@@ -504,7 +532,10 @@ if docs_finding and _docs_ctx:
                 "content": content,
                 "existing_code": code_quote,
             }
-            for k in ("docs_kind", "stale_passage", "doc_path"):
+            for k in ("docs_kind", "stale_passage", "doc_path",
+                      "docs_quality_duty", "tells", "document_wide",
+                      "score", "reads", "verified_claims",
+                      "start_line", "end_line"):
                 if k in spec:
                     f[k] = spec[k]
             findings.append(f)

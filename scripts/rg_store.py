@@ -287,6 +287,37 @@ def clones_dir():
     return d
 
 
+# --- SPEC-15.2: the granular waiver ledger -------------------------------------
+
+def waiver_path(common_dir):
+    """The per-repo waiver ledger, under the EXTERNAL store (D12 layout) and
+    keyed by the canonical git common dir -- the same repo scoping async_dir
+    uses. Machine-local, no expiry: entries live until unwaived."""
+    key = hashlib.sha256(str(common_dir or "").encode("utf-8", "replace")).hexdigest()[:16]
+    return store_root() / "waivers" / f"{key}.json"
+
+
+def read_waivers(common_dir):
+    """The ledger entries ({sid, finding_id, waived_at, note?} dicts), or []
+    for a missing, empty, or corrupt ledger -- fail-soft, like every store the
+    gate only consults."""
+    try:
+        data = json.loads(waiver_path(common_dir).read_text(encoding="utf-8",
+                                                           errors="replace"))
+    except Exception:
+        return []
+    if not isinstance(data, dict):
+        return []
+    return [e for e in (data.get("waivers") or []) if isinstance(e, dict)]
+
+
+def write_waivers(common_dir, entries):
+    """Replace the ledger, atomically (0600, os.replace). Returns True, or
+    raises -- callers degrade."""
+    return _write_json(waiver_path(common_dir),
+                       {"waivers": [dict(e) for e in (entries or []) if isinstance(e, dict)]})
+
+
 def make_review_clone(repo_root, tip, run_id):
     """A `git clone --no-hardlinks` of `tip` for the reviewer to read, or "".
 
