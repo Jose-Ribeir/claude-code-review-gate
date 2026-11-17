@@ -167,6 +167,11 @@ _TEST_FEATURE_TOUCHED = _TEST_FEATURE + (
     "\n\n# acceptance sim: this suite is the long-standing coverage of "
     "simlib.feature.\n")
 
+# D starts on an INDEPENDENT first-line anchor: a waiver from scenario C
+# (which shares the machine-local store) must not suppress its first push.
+_TEST_FEATURE_D_INITIAL = _TEST_FEATURE.replace(
+    "Long-standing boundary contract", "Scenario D boundary contract")
+
 # Scenario D strengthens the contract INSIDE the finding's anchor window
 # (the docstring sits on line 1): the waiver lapses and the still-failing
 # boundary is judged fresh again.
@@ -317,12 +322,12 @@ SCENARIOS = [
         expect="block",
         steps=[
             PushStep(
-                label="the boundary regression blocks",
+                label="the independent boundary regression blocks",
                 commits=[CommitSpec(
                     message="sim D: flip the inclusive boundary in "
                             "simlib.feature",
                     write={"simlib/feature.py": _FEATURE_FLIPPED,
-                           "tests/test_feature.py": _TEST_FEATURE_TOUCHED,
+                           "tests/test_feature.py": _TEST_FEATURE_D_INITIAL,
                            # Scenario C's successful push advanced the fake
                            # origin WITH the flipped feature already, so a
                            # pure flip here has no diff to commit. This
