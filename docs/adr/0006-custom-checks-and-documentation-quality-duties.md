@@ -156,9 +156,6 @@ exactly the keys it shipped and nothing else.
 
 ## References
 
-- Spec: the enclosing workspace's SPEC-14 tracker ticket and its working
-  doc (stories 1–25); both live in the enclosing workspace's tracker, not
-  inside this repository.
 - Land commits: `e582f80` (checks config surface), `6d40dec` (evidence and
   finding-contract module), `9ac38dd` (persona duty sections), `8f501d7`
   (gate plumbing).

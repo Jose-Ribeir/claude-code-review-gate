@@ -256,10 +256,14 @@ def _collect_path_mentions(repo_root, prose, doc_rel=""):
                 resolved = os.path.normpath(
                     os.path.join(os.path.dirname(doc_rel), path))
             path = resolved.replace(os.sep, "/")
-            if not path or path.startswith(".."):
-                # Anything escaping the repo is a dangling external ref.
-                path = path or target
             if not path:
+                continue
+            if path.startswith(".."):
+                # A link escaping the repo (../outside) can never be
+                # verified and is ALWAYS reported dangling.
+                entry = {"path": path, "line": n, "kind": "markdown_link"}
+                missing_paths.append(entry)
+                dangling_links.append(dict(entry))
                 continue
             mentions.append((path, n, "markdown_link"))
         for m in _INLINE_CODE_RE.finditer(text):
@@ -347,34 +351,36 @@ def _words(sentence):
 
 
 def _scan_ste(prose, sentence_cap):
-    """Sentence-length outliers, attributed to the prose line they start on.
+    """Sentence-length outliers, attributed to the paragraph's starting line.
 
-    Each prose line is split on its own (headings and list markers stripped,
-    inline code collapsed to one word): a sentence spilling onto the next line
-    is attributed to the line it starts on -- these are surface estimates for
-    the agent to judge from, not verdicts.
+    Contiguous non-blank, non-heading lines assemble into one paragraph (a
+    wrapped sentence counts as one sentence), with parts accumulated in a
+    list and joined once; each Markdown list item is its OWN paragraph so
+    two unpunctuated items never merge into a phantom long sentence.
     """
     over_cap = []
-    # Paragraph assembly first (wrapped sentences count as one sentence):
-    # contiguous non-blank, non-heading lines form one paragraph whose
-    # starting line attributes all of its sentences.
-    para_text, para_start = "", None
-    paras = []
+    paras, parts, para_start = [], [], None
     for ln in prose:
         text, n = ln["text"].strip(), ln["n"]
-        if not text or text.startswith("#"):
-            if para_text:
-                paras.append((para_start, para_text))
-                para_text, para_start = "", None
+        item_marker = re.match(r"^(?:[-*+]|\d+[.)])\s+", text)
+        if not text or text.startswith("#") or item_marker:
+            if parts and para_start is not None:
+                paras.append((para_start, " ".join(parts)))
+            parts, para_start = [], None
+            if item_marker:
+                item = re.sub(r"^(?:[-*+]|\d+[.)])\s+", "", text)
+                item = _INLINE_CODE_RE.sub("CODE", item)
+                item = _URL_RE.sub("URL", item)
+                if item:
+                    paras.append((n, item))  # every item its own paragraph
             continue
-        text = re.sub(r"^(?:[-*+]|\d+[.)])\s+", "", text)
         text = _INLINE_CODE_RE.sub("CODE", text)
         text = _URL_RE.sub("URL", text)
         if para_start is None:
             para_start = n
-        para_text = (para_text + " " + text).strip()
-    if para_text:
-        paras.append((para_start, para_text))
+        parts.append(text)
+    if parts and para_start is not None:
+        paras.append((para_start, " ".join(parts)))
     for n, para in paras:
         for sent in _split_sentences(para):
             n_words = len(_words(sent))
