@@ -23,13 +23,22 @@ severity/confidence/path/content plus ``evidence_source``:
   that attempted a probe also emits the canonical no-permanent-coverage
   warning (see ``_coverage_warning``).
 
+The wrapper may also carry a ``telemetry`` object (SPEC-15.4): actual
+run counts -- ``selector_attempts``, ``tests_selected``, ``probes_authored``,
+``runs``, and ``reproduce_results`` (``fail``/``pass``/``flake``/``build``/
+``error``) -- which the gate merges into that check's command_checks
+telemetry entry. When the gate exports the per-check budget
+(``OCR_CHECK_TIMEOUT_S``) every internal timeout is clamped to finish
+BEFORE the gate's kill (a small grace margin is left for the answer
+write).
+
 Four phases:
 
 1. SELECT -- assemble a bounded manifest of the matched files (path, content
    capped per file and in total, diff vs HEAD~1 when git can produce one) and
    make ONE selector call (the cheap one-shot model, pinned) asking for a
    STRICT JSON object ``{"existing_tests": [...], "probes": [{"name",
-   "language", "source", "run_cmd"}]}``. Malformed output = ONE warning
+   "language", "source", "run_cmd", "path"}]}``. Malformed output = ONE warning
    "selector failed; no tests selected"; there is never a retry.
 2. RUN existing -- run each selected repo test with an inferred runner
    (``go test -race`` for ``*_test.go``, pytest/plain python for test
@@ -62,6 +71,34 @@ MODEL = "deepseek-v4.1-flash"
 # 60 s command-check default (the README recommends declaring timeout: 600).
 SELECTOR_TIMEOUT_S = 240.0   # env OCR_TEST_SELECTOR_TIMEOUT
 RUN_TIMEOUT_S = 180.0
+# The gate's per-check answer budget (OCR_CHECK_TIMEOUT_S, string seconds)
+# exported by _run_one_command_check. When present, every internal timeout
+# is clamped to finish BEFORE the gate's kill, leaving a small grace margin
+# (5 s or 5% of the budget, whichever is SMALLER, floored at 1 s) for
+# bookkeeping and the answer write. Absent (standalone runs) the knobs and
+# defaults stand unchanged.
+
+
+def _check_budget():
+    """The gate's per-check budget in seconds, or None when the executor
+    runs standalone (no OCR_CHECK_TIMEOUT_S in the environment)."""
+    try:
+        value = float(os.environ.get("OCR_CHECK_TIMEOUT_S", ""))
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def _clamp_to_budget(timeout):
+    """One internal timeout, clamped under the gate's per-check budget so
+    the phase finishes BEFORE the gate's kill (see _check_budget). Each
+    phase is bounded individually; the budget remains the hard outer bound
+    the gate enforces either way."""
+    budget = _check_budget()
+    if budget is None:
+        return timeout
+    grace = max(1.0, min(5.0, 0.05 * budget))
+    return max(1.0, min(timeout, budget - grace))
 # The manifest sent to the selector is bounded so one huge push cannot turn
 # into an unbounded model bill: per-file and total caps on content/diff text.
 MANIFEST_PER_FILE_CAP = 20000
@@ -122,7 +159,9 @@ against this change; empty when none apply>],
   "probes": [<throwaway probe objects>]}}
 Each probe object is {{"name": <short-slug string>, "language":
 "go"|"python"|"javascript"|"shell", "source": <the COMPLETE source file>,
-"run_cmd": <shell command string>}}. The source is written verbatim to a file
+"run_cmd": <shell command string>, "path": <OPTIONAL repo-relative file
+whose behavior the probe targets; omit it when the probe targets the
+first matched file, which is the default>}}. The source is written verbatim to a file
 inside a scratch directory of the review clone (file name by language:
 go -> probe_test.go, python -> probe_test.py, javascript -> probe.test.js,
 shell -> probe.sh) and run_cmd executes with that directory as its cwd; the
@@ -160,8 +199,32 @@ def _selector_timeout():
     try:
         value = float(os.environ.get("OCR_TEST_SELECTOR_TIMEOUT", ""))
     except ValueError:
-        return SELECTOR_TIMEOUT_S
-    return value if value > 0 else SELECTOR_TIMEOUT_S
+        return _clamp_to_budget(SELECTOR_TIMEOUT_S)
+    return _clamp_to_budget(value if value > 0 else SELECTOR_TIMEOUT_S)
+
+
+def _run_timeout():
+    """The per-subject run budget, clamped under the gate's exported
+    per-check budget (see _clamp_to_budget)."""
+    return _clamp_to_budget(RUN_TIMEOUT_S)
+
+
+def _reproduce_key(outcome):
+    """The telemetry bucket a classified outcome lands in (the gate's
+    contract names fail/pass/flake/build/error)."""
+    return {"finding": "fail", "pass": "pass", "flake": "flake",
+            "build": "build", "error": "error"}[outcome]
+
+
+def _bump(counts, group, key=None):
+    """Count one event in the run's telemetry object (absent counts are
+    simply not tracked -- never invented)."""
+    if counts is None:
+        return
+    if key is None:
+        counts[group] = counts.get(group, 0) + 1
+    else:
+        counts.setdefault(group, {})[key] = counts[group].get(key, 0) + 1
 
 
 def _cap(text, cap):
@@ -365,7 +428,7 @@ def _looks_like_build_error(output):
     return any(marker in lowered for marker in _BUILD_ERROR_MARKERS)
 
 
-def _execute_subject(argv, cwd, label, env=None):
+def _execute_subject(argv, cwd, label, env=None, counts=None):
     """Run once, classify, and re-run a failure EXACTLY once (the
     reproduce-then-block rule). Returns (outcome, first_output) with
     outcome in {"pass", "finding", "flake", "build", "error"}:
@@ -376,25 +439,34 @@ def _execute_subject(argv, cwd, label, env=None):
     * build       -- failed with a compile/setup shape: never a block.
     * error       -- could not be executed at all (missing binary).
     """
-    rc, out, note = _run(argv, cwd, RUN_TIMEOUT_S, env=env)
+    rc, out, note = _run(argv, cwd, _run_timeout(), env=env)
+    _bump(counts, "runs")
     _note("run %s -> exit %s" % (label, rc))
     if rc is None and note:
+        _bump(counts, "reproduce_results", "error")
         return "error", out or note
     if rc == 0:
+        _bump(counts, "reproduce_results", "pass")
         return "pass", out
     if _looks_like_build_error(out):
         _note("run %s classified as build/run error" % label)
+        _bump(counts, "reproduce_results", "build")
         return "build", out
-    rc2, _out2, note2 = _run(argv, cwd, RUN_TIMEOUT_S, env=env)
+    rc2, _out2, note2 = _run(argv, cwd, _run_timeout(), env=env)
+    _bump(counts, "runs")
     _note("re-run %s -> exit %s" % (label, rc2))
     if rc2 is None and note2:
+        _bump(counts, "reproduce_results", "error")
         return "error", out
     if rc2 == 0:
+        _bump(counts, "reproduce_results", "flake")
         return "flake", out
+    _bump(counts, "reproduce_results", "fail")
     return "finding", out
 
 
-def _handle(outcome, out, kind, name, path, evidence, findings, warnings):
+def _handle(outcome, out, kind, name, path, evidence, findings, warnings,
+             counts=None):
     """Phase 4 for one subject: translate a classified outcome into the
     findings/warnings contract. A reproduced failure is a finding quoting the
     verbatim (trimmed, capped) output and naming the test; everything else
@@ -420,7 +492,9 @@ def _handle(outcome, out, kind, name, path, evidence, findings, warnings):
                                     "the re-run; demoted to a warning (no "
                                     "finding)" % (kind, name)})
         return
-    # outcome == "finding": failed twice -- reproduce-then-block.
+    # outcome == "finding": failed twice -- reproduce-then-block (the
+    # reproduce_results counts are bumped in _execute_subject, the
+    # classifier, exactly once per classified subject).
     findings.append({
         "path": path,
         "start_line": 1,
@@ -460,21 +534,32 @@ def _slug(name):
 
 
 def run(matched):
-    """The whole executor, fail-soft: returns (findings, warnings)."""
+    """The whole executor, fail-soft: returns (findings, warnings,
+    telemetry) -- telemetry is the SPEC-15.4 counts object the gate merges
+    into the check's command_checks entry: actual counts (selector
+    attempts, tests selected, probes authored, subject runs, reproduce
+    results), never invented numbers."""
     findings, warnings = [], []
+    counts = {"selector_attempts": 0, "tests_selected": 0,
+              "probes_authored": 0, "runs": 0,
+              "reproduce_results": {"fail": 0, "pass": 0, "flake": 0,
+                                    "build": 0, "error": 0}}
     manifest = build_manifest(matched)
     _note("manifest: %d file(s), %d byte(s)"
           % (len(manifest), len(json.dumps(manifest))))
+    counts["selector_attempts"] += 1   # exactly one, never retried
     existing, probes, failed = call_selector(manifest)
     if failed:
         warnings.append({"file": None,
                          "message": "selector failed; no tests selected"})
-        return findings, warnings
+        return findings, warnings, counts
     ordered, seen = [], set()
     for path in existing:
         if path not in seen:
             seen.add(path)
             ordered.append(path)
+    counts["tests_selected"] = len(ordered)
+    counts["probes_authored"] = len(probes)
     if not ordered and not probes:
         warnings.append({"file": None,
                          "message": _coverage_warning(matched, probes=False)})
@@ -490,14 +575,14 @@ def run(matched):
                              "message": "skipped existing test %s: %s"
                                         % (path, cwd)})
             continue
-        outcome, out = _execute_subject(argv, cwd, path, env=env)
+        outcome, out = _execute_subject(argv, cwd, path, env=env, counts=counts)
         _handle(outcome, out, "existing test", path, path,
                 "existing_test", findings, warnings)
-    _run_probes(probes, matched, findings, warnings)
-    return findings, warnings
+    _run_probes(probes, matched, findings, warnings, counts)
+    return findings, warnings, counts
 
 
-def _run_probes(probes, matched, findings, warnings):
+def _run_probes(probes, matched, findings, warnings, counts=None):
     """Phase 3 + the probe half of phase 4. Probe sources are materialized
     ONLY inside ``.test-check-probes/`` under the executor's own cwd (the
     throwaway clone), run there, and destroyed afterwards -- nothing is
@@ -539,7 +624,7 @@ def _run_probes(probes, matched, findings, warnings):
             if not isinstance(path, str) or not path.strip():
                 path = default_path or name
             outcome, out = _execute_subject(["/bin/sh", "-c", run_cmd],
-                                            directory, name)
+                                            directory, name, counts=counts)
             _handle(outcome, out, "ephemeral probe", name, path,
                     "ephemeral_test", findings, warnings)
     finally:
@@ -559,15 +644,17 @@ def main():
                          "strings\n")
         return 2
     try:
-        findings, warnings = run(matched)
+        findings, warnings, telemetry = run(matched)
     except Exception as exc:  # noqa: BLE001 -- fail-soft: never raise out
         findings, warnings = [], [{"file": None,
                                    "message": "test-check executor failed "
                                               "internally (%s: %s); no "
                                               "findings"
                                               % (type(exc).__name__, exc)}]
+        telemetry = {"selector_attempts": 1}   # what actually happened
         _note("internal failure: %s: %s" % (type(exc).__name__, exc))
-    json.dump({"findings": findings, "warnings": warnings}, sys.stdout)
+    json.dump({"findings": findings, "warnings": warnings,
+               "telemetry": telemetry}, sys.stdout)
     sys.stdout.write("\n")
     return 0
 

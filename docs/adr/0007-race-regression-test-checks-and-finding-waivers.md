@@ -75,7 +75,17 @@ removed on every exit path. A clone-creation failure **skips** the
 parallel checks outright with a warning — isolation is never traded for
 throughput; the checks never fall back to `review_root`. Non-parallel
 checks keep the exact prior semantics: sequential, post-review, against
-`review_root`. The extra clone costs one local copy of the tip per opted-in
+`review_root`. Start failures are self-cleaning: a clone factory that
+raises (including after partial creation) or a worker thread that cannot
+be constructed or started removes the clone (or its deterministic
+intended path) and its `worktrees` registration and degrades to the same
+skip warning — never an orphaned directory, never a crash of the push.
+The supervisor's cleanup join is bounded (5 s after the per-check budgets
+should have finished): a worker still running is warned about
+("still running; parallel-check findings discarded") and its findings
+discarded, and an abnormal exit that never joined still drains the
+worker's warnings and telemetry, so degradation is observable and never
+silent. The extra clone costs one local copy of the tip per opted-in
 push; accepted as the price of isolation.
 
 ### 3. Executor contract: `warnings` and `evidence_source`
@@ -92,6 +102,21 @@ finding tagged `ephemeral_test` should come paired with the check's
 canonical no-permanent-coverage warning (wording that *states* the lack —
 a negation near "permanent test"/"coverage"); if the executor omits it,
 the gate adds its own pairing note so the blind spot is still loud.
+ The
+wrapper may also carry a `telemetry` object of actual run counts
+(`selector_attempts`, `tests_selected`, `probes_authored`, `runs`,
+`reproduce_results` with `fail`/`pass`/`flake`/`build`/`error`), which
+the gate merges into that check's `command_checks` telemetry entry;
+malformed values degrade to a warning and are ignored. The gate exports
+the check's resolved per-check budget to the executor as
+`OCR_CHECK_TIMEOUT_S` (string seconds, on top of the inherited
+environment) so a cooperative executor clamps its own selector/test/probe
+budgets to finish before the gate's kill (a small grace margin, 5 s or
+5% of the budget, whichever is smaller); without the variable the
+executor's knobs and defaults stand unchanged. The selector's probe
+objects may carry an optional `path` — the repo-relative file whose
+behavior the probe targets, defaulting to the first matched file when
+absent.
 
 ### 4. Selector pin, one attempt
 
@@ -144,6 +169,23 @@ keeps the same fail-closed posture: no path, no findable signature at the
 location, or no blob at the tip yields an anchor that never matches, and
 a blank tip line at the location yields no signature at all.
 
+**Evidence binding (why waiver identity includes the finding's
+evidence):** a test-evidenced finding (`evidence_source` set) says "this
+test failed, here is the output" — the acknowledged thing is the FAILURE,
+not the file's first line. Executor findings report `start_line` 1 on the
+failing test's target, so without binding, every such finding under one
+head-of-file window shared a single anchor and a waiver granted for one
+reproduced failure silently suppressed a *different* one. The anchor for
+these findings therefore also carries a deterministic fingerprint of the
+finding's quoted evidence (`content`, whitespace-normalized): the same
+evidence keeps the waiver (a far-field code edit still does not lapse
+it), while different failure evidence is a **changed finding** — fresh
+and blocking — even when the code at the reported path is unchanged. An
+evidence-source finding with no evidence to fingerprint fails closed
+(`""`), the same never-waive-blind posture as a missing path or
+signature. Reviewer findings without `evidence_source` keep the plain
+location fallback unchanged.
+
 **Lapse semantics:** an anchor match at verdict assembly suppresses the
 finding from the blocking set; a miss — no waiver, or the code changed so
 the window text changed — judges the finding fresh. A far-field edit
@@ -171,8 +213,17 @@ class — reviewer, deep reviewer, docs checker, command checks alike.
   the selected tests/probes and exactly one re-run per failure.
 - Selector-authored probe quality on a cheap model is the dogfooding risk
   to watch; the degrade contract (warning, never block, one attempt) is
-  the containment, and telemetry (tests selected, probes authored, runs,
-  reproduce results, duration, warnings) makes the quality measurable.
+  the containment, and telemetry makes the quality measurable: the
+  reference executor emits actual counts per run (`selector_attempts`,
+  `tests_selected`, `probes_authored`, `runs`, `reproduce_results`:
+  fail/pass/flake/build/error) through the contract's `telemetry`
+  field, which the gate merges into that check's `command_checks` entry
+  alongside its own `seconds`, `files`, `findings`, and `warnings`
+  counts.
+- Waiver sids for test-evidenced findings include the evidence
+  fingerprint; a ledger granted before that binding simply stops matching
+  those findings (fail-closed fresh judgment) — the ledger is
+  machine-local, so no migration is needed.
 - Waiver sids keyed to content anchors survive rebases and line movement
   but not in-window code changes; stale sids keyed to old anchoring
   schemes simply stop matching (fail-closed fresh judgment) — the ledger

@@ -392,3 +392,215 @@ def test_parallel_clone_creation_failure_skips_checks_never_review_root(
     assert "skipped" in str(tele[0].get("error") or ""), tele
     assert not executed.exists(), "the check never ran anywhere"
     runner.cleanup()   # no clone, no thread: a safe no-op
+
+
+# ---------------------------------------------------------------------------
+# W9: start-failure self-cleaning, bounded cleanup, unjoined degradation
+# ---------------------------------------------------------------------------
+
+def _unit_repo(tmp_path, check_body):
+    """A repo with ONE parallel check (unit-seam shape: uncommitted config
+    override, committed executable) plus a live tip to clone from."""
+    work = _repo_with_checks(
+        tmp_path,
+        {"race-probe": {"command": "scripts/raceprobe.sh", "globs": ["**/*.py"],
+                        "parallel": True}},
+        {"scripts/raceprobe.sh": check_body})
+    return work, _git(["rev-parse", "HEAD"], cwd=work)
+
+
+def _write_run_state(work, run_id):
+    """The supervisor's run state (run_id owned), so the parallel runner's
+    worktrees registration is accepted instead of fenced."""
+    state_path = work / "state.json"
+    review_gate._write_state(str(state_path), {"run_id": run_id,
+                                               "state": "reviewing"})
+    return str(state_path)
+
+
+def test_thread_start_failure_self_cleans(monkeypatch, tmp_path, capsys):
+    """A worker thread that cannot be constructed/started must not orphan
+    the clone or its worktrees registration: start() removes both and
+    degrades to the skip warning, never raising, never falling back to
+    review_root (the check's marker never appears)."""
+    executed = tmp_path / "executed-marker"
+    body = ("#!/bin/sh\n"
+            "cat >/dev/null\n"
+            "touch %s\n"
+            "printf '{\"findings\": []}'\n"
+            % shlex.quote(str(executed)))
+
+    def fake_clone(repo_root, tip, run_id):
+        path = rg_store.clones_dir() / f"{tip[:12]}-{run_id}"
+        path.mkdir(parents=True, exist_ok=True)
+        return str(path)
+
+    class _BoomThread:
+        def __init__(self, *a, **k):
+            pass
+
+        def start(self):
+            raise RuntimeError("synthetic thread start failure")
+
+    class _FakeThreading:
+        Thread = _BoomThread
+
+    work, tip = _unit_repo(tmp_path, body)
+    state_path = _write_run_state(work, "r1")
+    monkeypatch.setattr(review_gate, "threading", _FakeThreading)
+    monkeypatch.setattr(review_gate.rg_store, "make_review_clone", fake_clone)
+    review_gate._TELE.pop("command_checks", None)
+    runner = review_gate._ParallelCommandChecks(
+        str(work), state_path, "r1", None, tip).start()
+    # Self-cleaned: no clone, no thread, no registration, no execution.
+    assert runner.thread is None and runner.clone == ""
+    clone_path = str(rg_store.clones_dir() / f"{tip[:12]}-r1-par")
+    assert not Path(clone_path).exists(), "the orphaned clone was removed"
+    st = review_gate._read_state(state_path) or {}
+    assert clone_path not in (st.get("worktrees") or []), st
+    assert not executed.exists(), "the check never ran anywhere"
+    # ...and the degrade is the documented skip, on every channel.
+    findings, warnings = runner.join()
+    assert findings == []
+    assert any("parallel command checks skipped" in str(w.get("message") or "")
+               and "could not be started" in str(w.get("message") or "")
+               and "race-probe" in str(w.get("message") or "")
+               for w in warnings), warnings
+    assert "synthetic thread start failure" in capsys.readouterr().err
+    tele = review_gate._TELE.get("command_checks") or []
+    assert tele and tele[0].get("name") == "race-probe", tele
+    assert "start failed" in str(tele[0].get("error") or ""), tele
+    runner.cleanup()   # idempotent: nothing left to do
+
+
+def test_clone_factory_raising_after_partial_creation_self_cleans(
+        monkeypatch, tmp_path):
+    """A clone factory that dies mid-creation (directory made, then raise)
+    must not leave the half-built clone behind: start() removes the
+    deterministic intended path and degrades to the skip warning."""
+
+    def half_made_clone(repo_root, tip, run_id):
+        path = rg_store.clones_dir() / f"{tip[:12]}-{run_id}"
+        path.mkdir(parents=True, exist_ok=True)
+        raise RuntimeError("synthetic clone factory failure")
+
+    work, tip = _unit_repo(
+        tmp_path, "#!/bin/sh\ncat >/dev/null\nprintf '{\"findings\": []}'\n")
+    state_path = _write_run_state(work, "r2")
+    monkeypatch.setattr(review_gate.rg_store, "make_review_clone",
+                        half_made_clone)
+    review_gate._TELE.pop("command_checks", None)
+    runner = review_gate._ParallelCommandChecks(
+        str(work), state_path, "r2", None, tip).start()
+    assert runner.thread is None and runner.clone == ""
+    partial = str(rg_store.clones_dir() / f"{tip[:12]}-r2-par")
+    assert not Path(partial).exists(), "the partially created clone was removed"
+    findings, warnings = runner.join()
+    assert findings == []
+    assert any("parallel command checks skipped" in str(w.get("message") or "")
+               and "synthetic clone factory failure" in str(w.get("message") or "")
+               for w in warnings), warnings
+    tele = review_gate._TELE.get("command_checks") or []
+    assert tele and "start failed" in str(tele[0].get("error") or ""), tele
+    # No registration was ever written for a clone that never came back.
+    st = review_gate._read_state(state_path) or {}
+    assert not (st.get("worktrees") or []), st
+
+
+def test_worker_body_crash_degrades_to_warning_and_telemetry(
+        monkeypatch, tmp_path, capsys):
+    """The worker body itself raising (a crash outside the per-check
+    fail-soft net) degrades on the join path: findings discarded, the crash
+    named in a warning plus a telemetry entry -- never a silent empty
+    answer, never a hang."""
+    work, tip = _unit_repo(
+        tmp_path, "#!/bin/sh\ncat >/dev/null\nprintf '{\"findings\": []}'\n")
+    state_path = _write_run_state(work, "r3")
+
+    def boom(*a, **k):
+        raise RuntimeError("synthetic worker crash")
+
+    monkeypatch.setattr(review_gate, "_command_check_findings", boom)
+    review_gate._TELE.pop("command_checks", None)
+    runner = review_gate._ParallelCommandChecks(
+        str(work), state_path, "r3", None, tip).start()
+    assert runner.thread is not None, "the worker actually spawned"
+    findings, warnings = runner.join()
+    assert findings == []
+    assert any("parallel command checks failed (RuntimeError: synthetic "
+               "worker crash); findings discarded" in str(w.get("message") or "")
+               for w in warnings), warnings
+    tele = review_gate._TELE.get("command_checks") or []
+    assert any("worker crashed: RuntimeError: synthetic worker crash"
+               in str(e.get("error") or "") for e in tele), tele
+    runner.cleanup()
+
+
+def test_cleanup_drains_unjoined_results_and_discards_findings(
+        monkeypatch, tmp_path, capsys):
+    """The abnormal exit path (an exception between start and join -- the
+        supervisor's finally calls cleanup only): the worker's warnings and
+        telemetry are still drained into _TELE (observable, never silent),
+        the findings are explicitly named as discarded, and the drain is
+        idempotent -- a later join() cannot double-merge the telemetry."""
+    marker = ("#!/bin/sh\n"
+              "cat >/dev/null\n"
+              "printf '{\"findings\": [{\"path\": \"app.py\", "
+              "\"start_line\": 1, \"end_line\": 1, \"severity\": \"high\", "
+              "\"confidence\": 0.95, \"category\": \"custom\", "
+              "\"content\": \"unjoined-finding\"}]}'\n")
+    work, tip = _unit_repo(tmp_path, marker)
+    state_path = _write_run_state(work, "r4")
+    review_gate._TELE.pop("command_checks", None)
+    runner = review_gate._ParallelCommandChecks(
+        str(work), state_path, "r4", None, tip).start()
+    assert runner.thread is not None
+    runner.thread.join()          # simulate the crash happening AFTER the work
+    runner.cleanup()              # ...but BEFORE any join
+    err = capsys.readouterr().err
+    assert "parallel checks not joined; findings discarded" in err, err
+    tele = review_gate._TELE.get("command_checks") or []
+    assert any(e.get("name") == "race-probe" and e.get("findings") == 1
+               for e in tele), tele
+    assert not runner.clone and runner.thread is None
+    # Idempotent: a late join() returns the same answer without re-merging.
+    findings, warnings = runner.join()
+    assert [f.get("content") for f in findings] == ["unjoined-finding"]
+    tele2 = review_gate._TELE.get("command_checks") or []
+    assert sum(1 for e in tele2 if e.get("name") == "race-probe") == 1, tele2
+
+
+def test_cleanup_join_is_bounded_and_discards_a_stuck_worker(
+        monkeypatch, tmp_path, capsys):
+    """cleanup() must not join indefinitely: a worker still running after
+        the small grace window is warned about ("still running;
+        parallel-check findings discarded") plus telemetry, and the push is
+        never hung past supervisor cleanup. No child process is killed --
+        the daemon thread is simply abandoned with the run."""
+    work, tip = _unit_repo(
+        tmp_path, "#!/bin/sh\ncat >/dev/null\nprintf '{\"findings\": []}'\n")
+    state_path = _write_run_state(work, "r5")
+
+    def slow_checks(*a, **k):
+        time.sleep(1.0)
+        return ([{"path": "app.py", "content": "late-finding"}], [])
+
+    monkeypatch.setattr(review_gate, "_command_check_findings", slow_checks)
+    monkeypatch.setattr(review_gate._ParallelCommandChecks,
+                        "_JOIN_GRACE_S", 0.2)
+    review_gate._TELE.pop("command_checks", None)
+    runner = review_gate._ParallelCommandChecks(
+        str(work), state_path, "r5", None, tip).start()
+    t0 = time.monotonic()
+    runner.cleanup()
+    elapsed = time.monotonic() - t0
+    assert elapsed < 0.9, "cleanup returned at the grace bound, not the worker's"
+    err = capsys.readouterr().err
+    assert "still running; parallel-check findings discarded" in err, err
+    tele = review_gate._TELE.get("command_checks") or []
+    assert any("still running" in str(e.get("error") or "") for e in tele), tele
+    assert not runner.clone, "the clone is removed regardless"
+    # The late worker result can never reach a verdict through this runner.
+    time.sleep(1.0)   # let the daemon finish writing its result
+    findings, _warnings = runner.join()
+    assert findings == [], "the stuck worker's findings stay discarded"

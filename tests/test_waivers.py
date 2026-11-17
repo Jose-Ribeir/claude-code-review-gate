@@ -507,3 +507,137 @@ def test_ledger_layout_is_repo_scoped_json(tmp_path):
     assert review_gate.rg_store.read_waivers(common) == ledger
     # Repo scoping: a different common dir maps to a different (empty) ledger.
     assert review_gate.rg_store.read_waivers(str(tmp_path / "other")) == []
+
+
+# ---------------------------------------------------------------------------
+# W9: waiver identity binds to the finding's EVIDENCE (SPEC-15.6)
+# ---------------------------------------------------------------------------
+
+_EV_TARGET = ("def feature_with_a_long_distinctive_name(argument):\n"
+              "    return 1\n" + "".join(f"# filler {i}\n" for i in range(1, 31)))
+_EV_A = "reproduced failure of existing test t_pricing: assert total == 12 got 7\n"
+_EV_B = "reproduced failure of existing test t_pricing: assert tax == 0.2 got 0.0\n"
+
+
+def _evidence_repo(tmp_path):
+    work = _repo(tmp_path)
+    _commit_files(work, {"app/check_target.py": _EV_TARGET}, "executor target")
+    return work, _git(["rev-parse", "HEAD"], cwd=work)
+
+
+def test_command_check_waiver_anchor_binds_to_the_evidence(tmp_path):
+    """Same head-of-file anchor, DIFFERENT failure evidence: distinct
+    anchors. The waiver was granted for one acknowledged failure -- a
+    different reproduced failure under the same window must block again,
+    even though the code at the reported path is unchanged."""
+    work, tip = _evidence_repo(tmp_path)
+    base = {"path": "app/check_target.py", "start_line": 1, "end_line": 1,
+            "evidence_source": "existing_test"}
+    a1 = review_gate._waiver_anchor(str(work), tip, dict(base, content=_EV_A))
+    assert a1, "an evidenced command-check finding must anchor"
+    # Same evidence (whitespace normalization aside): the waiver keeps.
+    assert review_gate._waiver_anchor(
+        str(work), tip,
+        dict(base, content="  " + _EV_A.replace("got 7", "got  7\n"))) == a1
+    # Different failure output: a CHANGED finding -- fresh and blocking.
+    assert review_gate._waiver_anchor(
+        str(work), tip, dict(base, content=_EV_B)) != a1
+    # Two different failures must not share each other's anchor either.
+    assert review_gate._waiver_anchor(
+        str(work), tip, dict(base, content=_EV_B)) != \
+        review_gate._waiver_anchor(
+            str(work), tip, dict(base, content=_EV_A + "second line\n"))
+    # No evidence at all: fail closed, never waive blind.
+    assert review_gate._waiver_anchor(
+        str(work), tip, dict(base, content="   \n")) == ""
+
+
+def test_far_field_edit_with_same_evidence_keeps_the_waiver(tmp_path):
+    """A code edit far from the reported location does not lapse an
+    evidence-bound waiver: the window and the evidence fingerprint are
+    both unchanged, so the anchor still matches (the same in-window rule
+    as every other waiver)."""
+    work, tip = _evidence_repo(tmp_path)
+    finding = {"path": "app/check_target.py", "start_line": 1, "end_line": 1,
+               "content": _EV_A, "evidence_source": "ephemeral_test"}
+    a1 = review_gate._waiver_anchor(str(work), tip, finding)
+    assert a1
+    _commit_files(work, {"app/check_target.py": _EV_TARGET.replace(
+        "# filler 30\n", "# filler 30 -- far-field edit\n")}, "far-field")
+    tip2 = _git(["rev-parse", "HEAD"], cwd=work)
+    assert review_gate._waiver_anchor(str(work), tip2, finding) == a1
+    _commit_files(work, {"app/check_target.py": _EV_TARGET.replace(
+        "return 1\n", "return 2\n")}, "in-window")
+    tip3 = _git(["rev-parse", "HEAD"], cwd=work)
+    assert review_gate._waiver_anchor(str(work), tip3, finding) != a1
+
+
+def test_findings_without_evidence_source_keep_the_location_fallback(tmp_path):
+    """Reviewer findings (no evidence_source) keep the exact pre-W9
+    fallback: the tip text at the location anchors them, and the finding's
+    message content is NOT part of the anchor."""
+    work, tip = _evidence_repo(tmp_path)
+    base = {"path": "app/check_target.py", "start_line": 1, "end_line": 1}
+    a1 = review_gate._waiver_anchor(str(work), tip, dict(base, content=_EV_A))
+    assert a1
+    assert review_gate._waiver_anchor(
+        str(work), tip, dict(base, content=_EV_B)) == a1, \
+        "no evidence_source: content never changed the anchor"
+
+
+_FAILCHECK = (
+    "#!/bin/sh\n"
+    "cat >/dev/null\n"
+    "if [ -f .failmode2 ]; then\n"
+    "  out=\"reproduced failure of existing test t_pricing: assert tax == 0.2 got 0.0\"\n"
+    "else\n"
+    "  out=\"reproduced failure of existing test t_pricing: assert total == 12 got 7\"\n"
+    "fi\n"
+    "printf '{\"findings\": [{\"path\": \"app.py\", \"start_line\": 1, "
+    "\"end_line\": 1, \"severity\": \"high\", \"confidence\": 0.9, "
+    "\"category\": \"test\", \"content\": \"%s\", \"evidence_source\": "
+    "\"existing_test\"}]}' \"$out\"\n"
+)
+
+
+def test_command_check_waiver_tracks_evidence_end_to_end(tmp_path):
+    """End to end: a command-check finding is waived; the SAME reproduced
+    failure stays waived (and survives a far-field edit); a DIFFERENT
+    failure output under the same head-of-file anchor blocks again."""
+    work = _repo(tmp_path)
+    app = ("def compute_pricing_totals_for_the_cart_and_apply_discounts(c):\n"
+           "    return 1\n" + "".join(f"# filler {i}\n" for i in range(1, 31)))
+    _commit_files(work, {"app.py": app, "scripts/failcheck.sh": _FAILCHECK},
+                  "add the app and the check")
+    (work / "scripts" / "failcheck.sh").chmod(0o755)
+    _git(["add", "."], cwd=work)
+    _git(["commit", "-q", "--amend", "--no-edit"], cwd=work)
+    (work / ".ocr").mkdir(exist_ok=True)
+    (work / ".ocr" / "config.json").write_text(json.dumps(
+        {"checks": {"pricing": {"command": "scripts/failcheck.sh",
+                                "globs": ["**/*.py"]}}}), encoding="utf-8")
+    env = _env(tmp_path, STUB_FINDINGS_FOR="{}")
+    _commit_files(work, {"README.md": "v1\n"}, "trigger the check")
+    decision, reason = _push(work, env)
+    assert decision == "deny", reason
+    (fx,) = _recorded_findings(work)
+    assert fx.get("evidence_source") == "existing_test"
+    idx = _display_id(fx)
+    proc = _gate_cmd(work, env, "waive", idx)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    # Same failure reproduced: waived, push passes.
+    _commit_files(work, {"README.md": "v2\n"}, "same failure again")
+    decision, reason = _push(work, env)
+    assert decision == "pass", reason
+    assert {w["path"] for w in _last_record(work).get("waived") or []} == {"app.py"}
+    # Far-field code edit, same evidence: still waived.
+    _commit_files(work, {"app.py": app.replace(
+        "# filler 30\n", "# filler 30 -- far-field edit\n")}, "far-field edit")
+    decision, reason = _push(work, env)
+    assert decision == "pass", reason
+    # A DIFFERENT reproduced failure: fresh, blocks again.
+    _commit_files(work, {".failmode2": "", "README.md": "v3\n"},
+                  "different failure output")
+    decision, reason = _push(work, env)
+    assert decision == "deny", reason
+    assert "app.py" in [f.get("path") for f in _recorded_findings(work)]

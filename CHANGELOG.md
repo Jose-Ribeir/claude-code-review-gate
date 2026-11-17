@@ -21,18 +21,30 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   repo tests (`go test -race` for Go) and authors ephemeral probes inside
   its own clone, re-runs every failure exactly once (reproduce-then-block),
   and quotes verbatim output; flakes, unbuildable probes, and coverage gaps
-  degrade to warnings plus telemetry, never blocks.
+  degrade to warnings plus telemetry, never blocks. The executor contract
+  also carries an optional `telemetry` object (actual counts:
+  `selector_attempts`, `tests_selected`, `probes_authored`, `runs`,
+  `reproduce_results`) merged into that check's `command_checks` entry
+  (malformed values degrade to a warning), the resolved per-check budget
+  is exported to the executor as `OCR_CHECK_TIMEOUT_S` so it can finish
+  its internal phases before the gate's kill, the selector's optional
+  probe `path` field is documented in the contract, and the parallel
+  runner is self-cleaning on every start failure with a bounded (5 s)
+  cleanup join that discards-and-warns instead of hanging the push.
 - **Finding waivers (ADR 0007).** `review-gate.py waive <id>… [--note]`,
   `unwaive <id>…`, and `waive --list` record narrow, per-finding
   acknowledgments in a store-root, repo-scoped ledger (machine-local, no
   expiry). A waiver keys on the finding's content anchor — including a
   tip-location fallback for command-check findings that carry no diff
   hunk — so it survives rebases and line movement, **lapses automatically
-  when the code under the finding changes**, and stays loud: verdict
+  when the code under the finding changes**, and stays loud. For
+  test-evidenced findings (`evidence_source`) the anchor also binds a
+  deterministic fingerprint of the finding's quoted evidence, so the
+  same reproduced failure stays waived while a DIFFERENT failure output
+  under the same location is judged fresh and blocks again: verdict
   text, recorded JSON, and telemetry all list what was suppressed, and
   the findings log keeps every waived finding. Waivers apply to every
   finding class and only filter `compute_verdict`'s inputs.
-### Added
 - **Custom checks and documentation-quality duties (`checks` config, ADR 0006).**
   The settings gain a top-level `checks` object resolving through the usual
   layering (built-in defaults, store-root `config.json`, per-repo

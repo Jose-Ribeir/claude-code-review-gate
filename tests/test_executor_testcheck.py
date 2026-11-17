@@ -21,6 +21,7 @@ externally visible contract:
 * the gate's own runner accepts the executor's answer (contract proof,
   including the coverage-warning pairing rule).
 """
+import importlib.machinery
 import importlib.util
 import json
 import os
@@ -396,7 +397,7 @@ def test_contract_through_the_gate_runner(tmp_path, monkeypatch):
     cmd, _count = _stub_selector(
         tmp_path, {"existing_tests": ["tests/test_dsl.py"], "probes": []})
     monkeypatch.setenv("OCR_TEST_SELECTOR_CMD", cmd)
-    findings, warnings, note = review_gate._run_one_command_check(
+    findings, warnings, note, tele = review_gate._run_one_command_check(
         str(work), "scripts/rg_test_check", ["dsl.py"], timeout=120)
     assert note is None, note
     assert warnings == [], warnings
@@ -414,7 +415,7 @@ def test_contract_through_the_gate_runner(tmp_path, monkeypatch):
                     "run_cmd": '"%s" {probe_file}' % _PY,
                     "path": "dsl.py"}]})
     monkeypatch.setenv("OCR_TEST_SELECTOR_CMD", cmd2)
-    findings, warnings, note = review_gate._run_one_command_check(
+    findings, warnings, note, tele = review_gate._run_one_command_check(
         str(work), "scripts/rg_test_check", ["dsl.py"], timeout=120)
     assert note is None, note
     (finding,) = findings
@@ -425,3 +426,116 @@ def test_contract_through_the_gate_runner(tmp_path, monkeypatch):
     assert not any("no-permanent-coverage warning" in str(w.get("message"))
                    for w in warnings), warnings
     assert not (work / PROBE_ROOT).exists()
+
+
+# ---------------------------------------------------------------------------
+# W9: the per-check budget reaches the executor; telemetry counts are real
+# ---------------------------------------------------------------------------
+
+_spec_tc = importlib.util.spec_from_file_location(
+    "test_check_ref", EXECUTOR,
+    loader=importlib.machinery.SourceFileLoader("test_check_ref", EXECUTOR))
+test_check = importlib.util.module_from_spec(_spec_tc)
+_spec_tc.loader.exec_module(test_check)
+
+
+def test_executor_clamps_internal_budgets_under_the_gate_budget(monkeypatch):
+    """OCR_CHECK_TIMEOUT_S (the gate's resolved per-check budget) clamps the
+    executor's own selector/run budgets so every phase finishes BEFORE the
+    gate's kill; without it the knobs and defaults stand unchanged."""
+    for var in ("OCR_CHECK_TIMEOUT_S", "OCR_TEST_SELECTOR_TIMEOUT"):
+        monkeypatch.delenv(var, raising=False)
+    assert test_check._selector_timeout() == test_check.SELECTOR_TIMEOUT_S
+    assert test_check._run_timeout() == test_check.RUN_TIMEOUT_S
+    monkeypatch.setenv("OCR_CHECK_TIMEOUT_S", "30")
+    # grace = max(1, min(5, 5% of 30)) = 1.5 -> each phase at most 28.5 s.
+    assert test_check._selector_timeout() == 28.5
+    assert test_check._run_timeout() == 28.5
+    monkeypatch.setenv("OCR_TEST_SELECTOR_TIMEOUT", "3")
+    assert test_check._selector_timeout() == 3.0   # clamped, never raised
+    monkeypatch.setenv("OCR_CHECK_TIMEOUT_S", "600")
+    assert test_check._run_timeout() == test_check.RUN_TIMEOUT_S  # knob below
+    monkeypatch.setenv("OCR_TEST_SELECTOR_TIMEOUT", "700")
+    assert test_check._selector_timeout() == 595.0      # grace = min(5, 30) = 5
+    monkeypatch.setenv("OCR_CHECK_TIMEOUT_S", "garbage")
+    # An unparseable budget is no budget at all: the knobs stand (the
+    # selector knob still wins over the module default).
+    assert test_check._selector_timeout() == 700.0
+    monkeypatch.delenv("OCR_TEST_SELECTOR_TIMEOUT", raising=False)
+    assert test_check._selector_timeout() == test_check.SELECTOR_TIMEOUT_S
+    assert test_check._run_timeout() == test_check.RUN_TIMEOUT_S
+
+
+def test_executor_emits_actual_telemetry_counts(tmp_path):
+    """The telemetry object carries ACTUAL counts (SPEC-15.4): one selector
+    attempt, the selected tests, authored probes, subject runs (a failure
+    plus its re-run), and the classified reproduce result."""
+    work = _repo(tmp_path, [
+        {"dsl.py": _DSL_OK, "tests/test_dsl.py": _DSL_TEST},
+        {"dsl.py": _DSL_BROKEN},
+    ])
+    cmd, _count = _stub_selector(
+        tmp_path, {"existing_tests": ["tests/test_dsl.py"], "probes": []})
+    proc = _run_executor(work, ["dsl.py"], _env(OCR_TEST_SELECTOR_CMD=cmd))
+    data = _answer(proc)
+    assert data["telemetry"] == {
+        "selector_attempts": 1, "tests_selected": 1, "probes_authored": 0,
+        "runs": 2, "reproduce_results": {"fail": 1, "pass": 0, "flake": 0,
+                                         "build": 0, "error": 0}}
+
+
+def test_executor_telemetry_counts_probes_and_build_errors(tmp_path):
+    """An unbuildable probe still counts as authored, run once, and
+    classified as a build error -- never a finding."""
+    work = _repo(tmp_path, [{"app.py": "x = 1\n"}])
+    cmd, _count = _stub_selector(tmp_path, {
+        "existing_tests": [],
+        "probes": [{"name": "broken", "language": "python",
+                    "source": "def broken(:\n    pass\n",
+                    "run_cmd": '"%s" {probe_file}' % _PY,
+                    "path": "app.py"}]})
+    proc = _run_executor(work, ["app.py"], _env(OCR_TEST_SELECTOR_CMD=cmd))
+    data = _answer(proc)
+    assert data["findings"] == []
+    assert data["telemetry"]["probes_authored"] == 1
+    assert data["telemetry"]["runs"] == 1
+    assert data["telemetry"]["reproduce_results"]["build"] == 1
+
+
+def test_gate_merges_executor_telemetry_into_command_checks(
+        tmp_path, monkeypatch):
+    """The gate-side half of the contract: the executor's telemetry object
+    reaches _TELE merged into THAT check's command_checks entry (direct
+    _run_one_command_check path through _command_check_findings)."""
+    import rg_config
+
+    work = _repo(tmp_path, [
+        {"dsl.py": _DSL_OK, "tests/test_dsl.py": _DSL_TEST},
+        {"dsl.py": _DSL_BROKEN},
+    ])
+    exe = work / "scripts" / "rg_test_check"
+    exe.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(EXECUTOR, exe)
+    exe.chmod(0o755)
+    tip = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(work),
+                         capture_output=True, text=True, check=True).stdout.strip()
+    cmd, _count = _stub_selector(
+        tmp_path, {"existing_tests": ["tests/test_dsl.py"], "probes": []})
+    monkeypatch.setenv("OCR_TEST_SELECTOR_CMD", cmd)
+    monkeypatch.setattr(rg_config, "load_settings", lambda repo_root=None: {
+        "checks": {"test-check": {"command": "scripts/rg_test_check",
+                                  "globs": ["**/*.py"], "timeout": 120}}})
+    review_gate._TELE.pop("command_checks", None)
+    findings, warnings = review_gate._command_check_findings(
+        str(work), str(work), None, tip,
+        entries=[{"path": "dsl.py", "status": "A"}])
+    assert findings, "the executor's finding reached the stream"
+    tele = review_gate._TELE["command_checks"][-1]
+    assert tele["name"] == "test-check", tele
+    assert tele["tests_selected"] == 1, tele
+    assert tele["selector_attempts"] == 1, tele
+    assert tele["runs"] == 2, tele
+    assert tele["reproduce_results"]["fail"] == 1, tele
+    # The declared per-check budget was exported to the executor, and the
+    # executor's clamp honored it (the run finished well inside it).
+    assert tele["seconds"] < 120, tele

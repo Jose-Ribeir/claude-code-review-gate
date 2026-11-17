@@ -1486,13 +1486,16 @@ def test_command_check_config_load_failure_is_observed(monkeypatch, tmp_path, ca
 def _run_check(tmp_path, body):
     """Direct seam: run ONE repo-relative command check body against
     app.py and hand back the executor-contract triple
-    (findings, warnings, error_note) -- no push, no reviewer."""
+    (findings, warnings, error_note) -- no push, no reviewer. (The fourth
+    element, the executor's telemetry object, is covered by the SPEC-15
+    suites.)"""
     p = tmp_path / "scripts" / "dslcheck.sh"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(body, encoding="utf-8")
     p.chmod(0o755)
-    return review_gate._run_one_command_check(
+    got = review_gate._run_one_command_check(
         str(tmp_path), "scripts/dslcheck.sh", ["app.py"])
+    return got[0], got[1], got[2]
 
 
 def _evidence_body(evidence_source=None, warnings=None):
@@ -1905,3 +1908,94 @@ def test_forward_looking_statement_produces_no_integrity_finding(tmp_path):
     entry = _findings_log_last(work)
     assert not any(x.get("docs_quality_duty") == "adr-integrity"
                    for x in (entry.get("findings") or []))
+
+
+# --- W9: the telemetry field + the exported per-check budget (SPEC-15.4) ----
+
+def _run_check_four(tmp_path, body, timeout=None):
+    """Direct seam returning the full executor-contract quadruple
+    (findings, warnings, error_note, telemetry)."""
+    p = tmp_path / "scripts" / "dslcheck.sh"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(body, encoding="utf-8")
+    p.chmod(0o755)
+    kw = {} if timeout is None else {"timeout": timeout}
+    return review_gate._run_one_command_check(
+        str(tmp_path), "scripts/dslcheck.sh", ["app.py"], **kw)
+
+
+def test_per_check_budget_is_exported_without_losing_the_base_env(
+        tmp_path, monkeypatch):
+    """The resolved per-check timeout reaches the executor's environment as
+    OCR_CHECK_TIMEOUT_S (string seconds) ON TOP of the gate's own
+    environment -- a cooperative executor can clamp its phases to finish
+    before the gate's kill."""
+    monkeypatch.setenv("OCR_TEST_BASE_ENV_MARK", "yes")
+    body = ("#!/bin/sh\n"
+            "cat >/dev/null\n"
+            "printf '{\"findings\": [{\"path\": \"app.py\", "
+            "\"start_line\": 1, \"end_line\": 1, \"severity\": \"high\", "
+            "\"confidence\": 0.95, \"category\": \"custom\", "
+            "\"content\": \"%s %s\"}]}' "
+            "\"$OCR_CHECK_TIMEOUT_S\" \"$OCR_TEST_BASE_ENV_MARK\"\n")
+    findings, warnings, note, tele = _run_check_four(tmp_path, body, timeout=120)
+    assert note is None, note
+    assert [f["content"] for f in findings] == ["120 yes"], findings
+
+
+def test_malformed_telemetry_field_degrades_to_a_note(tmp_path):
+    """A malformed telemetry field (not an object) is a note, the findings
+    survive, and nothing merges -- never a failure, never a discard."""
+    payload = {"findings": [{"path": "app.py", "start_line": 1,
+                             "end_line": 1, "severity": "high",
+                             "confidence": 0.95, "category": "custom",
+                             "content": "race check tripped"}],
+               "telemetry": "oops, a string"}
+    body = ("#!/bin/sh\ncat >/dev/null\ncat <<'OCRJSON'\n"
+            + json.dumps(payload) + "\nOCRJSON\n")
+    findings, warnings, note, tele = _run_check_four(tmp_path, body)
+    assert note is None and tele == {}
+    assert [f["content"] for f in findings] == ["race check tripped"]
+    assert any("malformed telemetry field" in str(w.get("message"))
+              for w in warnings), warnings
+
+
+def test_malformed_telemetry_values_drop_only_the_bad_entries(tmp_path):
+    """Non-scalar telemetry values drop their own entries with a note;
+    the well-formed counts still merge."""
+    payload = {"findings": [], "telemetry": {"runs": 2, "bad": [1, 2]}}
+    body = ("#!/bin/sh\ncat >/dev/null\ncat <<'OCRJSON'\n"
+            + json.dumps(payload) + "\nOCRJSON\n")
+    findings, warnings, note, tele = _run_check_four(tmp_path, body)
+    assert note is None and findings == []
+    assert tele == {"runs": 2}, tele
+    assert any("malformed telemetry values for bad" in str(w.get("message"))
+               for w in warnings), warnings
+
+
+def test_command_checks_telemetry_object_merges_into_the_check_entry(
+        tmp_path, monkeypatch):
+    """A well-formed telemetry object merges into THAT check's
+    command_checks entry (the tele_sink path the parallel worker uses
+    included): counts observed by the executor ride the gate's telemetry."""
+    import rg_config
+
+    payload = {"findings": [], "telemetry": {"tests_selected": 1,
+                                             "selector_attempts": 1}}
+    body = ("#!/bin/sh\ncat >/dev/null\ncat <<'OCRJSON'\n"
+            + json.dumps(payload) + "\nOCRJSON\n")
+    work = _repo_with_check(tmp_path, body)
+    monkeypatch.setattr(rg_config, "load_settings",
+                        lambda repo_root=None: {
+                            "checks": {"dsl-check": {
+                                "command": "scripts/dslcheck.sh",
+                                "globs": ["**/*.py"]}}})
+    review_gate._TELE.pop("command_checks", None)
+    sink = []
+    findings, warnings = review_gate._command_check_findings(
+        str(work), str(work), None, None,
+        entries=[{"path": "app.py", "status": "A"}], tele_sink=sink)
+    assert findings == [] and warnings == []
+    assert sink and sink[0]["name"] == "dsl-check", sink
+    assert sink[0]["tests_selected"] == 1, sink
+    assert sink[0]["selector_attempts"] == 1, sink

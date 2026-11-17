@@ -6329,6 +6329,22 @@ def _dismiss_finding(argv):
 
 # --- SPEC-15.2: granular finding waivers --------------------------------------
 
+def _evidence_fingerprint(content):
+    """A deterministic fingerprint of a command-check finding's EVIDENCE
+    (the quoted output in `content`), normalized the way ocr_impact's
+    signature search normalizes text: each line stripped, runs of
+    whitespace collapsed, blank lines dropped. "" when nothing remains
+    (no content at all) -- the caller fails closed on that, exactly like a
+    missing path or signature."""
+    lines = [" ".join(line.split())
+              for line in str(content or "").splitlines()]
+    lines = [l for l in lines if l]
+    if not lines:
+        return ""
+    return hashlib.sha256("\n".join(lines)
+                           .encode("utf-8", "replace")).hexdigest()[:16]
+
+
 def _waiver_anchor(git_root, tip, finding):
     """The finding's content anchor (`sid`), or "" when it cannot be computed.
 
@@ -6354,7 +6370,20 @@ def _waiver_anchor(git_root, tip, finding):
     making this class of finding unwaivable (spec story 23 demands the
     opposite). No path, no signature line findable at the tip location, or
     no blob at the tip: "", which never matches -- the gate never waives
-    blind."""
+    blind.
+
+    Why identity binds to evidence for test-evidenced findings: an
+    executor finding says "this test failed, here is the output" -- the
+    waived thing is the acknowledged FAILURE, not the file's first line.
+    Two different reproduced failures at the same head-of-file location
+    (the executor reports start_line 1 on the failing test's target)
+    would otherwise share one anchor, letting a waiver granted for one
+    silently suppress the other. For findings with a valid evidence_source
+    the anchor therefore also carries a deterministic fingerprint of the
+    finding's quoted evidence (`content`, normalized); the same evidence
+    keeps the waiver while different failure evidence is a CHANGED
+    finding -- fresh and blocking -- even when the code at the reported
+    path is unchanged."""
     path = str(finding.get("path") or "").strip()
     if not path or not tip:
         return ""
@@ -6378,7 +6407,25 @@ def _waiver_anchor(git_root, tip, finding):
     if not sig:
         return ""
     window = "\n".join(lines[max(1, start - 10) - 1:end + 10])
-    raw = "\x00".join((path, sig, window))
+    # SPEC-15.6 (W9): a finding evidenced by a test run (evidence_source
+    # existing_test / ephemeral_test) binds its waiver identity to its
+    # EVIDENCE as well as its location. Without this, every executor
+    # finding anchored on the SAME tip window: a waived flaky suite let a
+    # DIFFERENT reproduced failure under the same head-of-file anchor ride
+    # the waiver -- the anchor now includes a deterministic fingerprint of
+    # the finding's quoted output, so the SAME evidence keeps the waiver
+    # (a far-field code edit does not lapse it) while DIFFERENT failure
+    # evidence is a changed finding that blocks again even though the
+    # code at the reported path is untouched. An evidence-source finding
+    # whose evidence yields no fingerprint (empty content) fails closed, ""
+    # -- the same never-match posture as a missing path or signature.
+    parts = [path, sig, window]
+    if str(finding.get("evidence_source") or "") in _EVIDENCE_SOURCES:
+        evidence = _evidence_fingerprint(finding.get("content"))
+        if not evidence:
+            return ""
+        parts.append("evidence:" + evidence)
+    raw = "\x00".join(parts)
     return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()[:16]
 
 
@@ -9762,9 +9809,10 @@ _COVERAGE_WARNING_RE = re.compile(
 
 def _run_one_command_check(review_root, command, matched,
                            timeout=_COMMAND_CHECK_TIMEOUT_S):
-    """(findings, warnings, error_note_or_None) for ONE command check over
-    its matched changed files: the repo-relative executable runs with cwd the
-    review tree root and the matched file list on stdin as a JSON array;
+    """(findings, warnings, error_note_or_None, telemetry) for ONE command
+    check over its matched changed files: the repo-relative executable runs
+    with cwd the review tree root and the matched file list on stdin as a
+    JSON array;
     stdout is the findings contract (SPEC-15.4: a bare findings array, or a
     {"findings": [...]} or {"findings": [...], "warnings": [...]} wrapper
     -- the warnings array is the check's own degradations and surfaces like
@@ -9781,15 +9829,23 @@ def _run_one_command_check(review_root, command, matched,
     findings are DISCARDED, never silently passed (the note plus telemetry
     stay) and never a crash. The contract is a REPO-RELATIVE executable: an
     absolute path or any ".." component is an escape outside the reviewed
-    tree and is rejected before anything runs."""
+    tree and is rejected before anything runs. The resolved budget is also
+    exported to the executor as OCR_CHECK_TIMEOUT_S (string seconds, on top
+    of the gate's own environment) so a cooperative executor can finish its
+    internal selector/test/probe phases BEFORE the gate's kill. An
+    executor may add a `telemetry` field (object) to its wrapper: its
+    entries -- scalars, or a one-level object of scalars (the
+    reproduce_results shape) -- merge into that check's command_checks
+    telemetry entry; a malformed field or malformed values degrade to
+    notes and are ignored -- never a failure, never a discard."""
     cmd_path = Path(command)
     if cmd_path.is_absolute() or ".." in cmd_path.parts:
         return [], [], ("command must name a repo-relative executable (no "
                         "absolute paths, no '..' components): %s; findings discarded"
-                        % command)
+                        % command), {}
     exe = str(Path(review_root) / command)
     if not (os.path.isfile(exe) and os.access(exe, os.X_OK)):
-        return [], [], f"command not executable or missing: {command}"
+        return [], [], f"command not executable or missing: {command}", {}
     # SPEC-15.1: the check's per-check answer budget, clamped to a sane
     # guard (1..3600 s). rg_config already floors positive values at 1, so
     # the ceiling is the only clamp needed here; an unusable value keeps
@@ -9798,22 +9854,55 @@ def _run_one_command_check(review_root, command, matched,
         budget = min(max(float(timeout), 1.0), 3600.0)
     except (TypeError, ValueError):
         budget = float(_COMMAND_CHECK_TIMEOUT_S)
+    # SPEC-15.4: the resolved per-check budget reaches the executor as
+    # OCR_CHECK_TIMEOUT_S (string seconds) WITHOUT losing the base
+    # environment, so a cooperative executor can clamp its own phases to
+    # finish before this budget's kill.
+    env = dict(os.environ)
+    env["OCR_CHECK_TIMEOUT_S"] = "%g" % budget
     try:
         proc = subprocess.run([exe], input=json.dumps(matched), text=True,
                               cwd=str(review_root), capture_output=True,
-                              timeout=budget)
+                              timeout=budget, env=env)
     except subprocess.TimeoutExpired:
-        return [], [], f"timed out after {budget:g}s; findings discarded"
+        return [], [], f"timed out after {budget:g}s; findings discarded", {}
     except OSError as exc:
-        return [], [], f"could not execute: {exc}"
+        return [], [], f"could not execute: {exc}", {}
     if proc.returncode != 0:
-        return [], [], f"exit code {proc.returncode}; findings discarded"
+        return [], [], f"exit code {proc.returncode}; findings discarded", {}
     try:
         data = json.loads(proc.stdout or "")
     except ValueError:
-        return [], [], "malformed output (stdout is not JSON); findings discarded"
+        return [], [], "malformed output (stdout is not JSON); findings discarded", {}
     notes, check_warnings = [], []   # gate-side degrade notes / the check's own
+    telemetry = {}
     if isinstance(data, dict):
+        raw_telemetry = data.get("telemetry")
+        if isinstance(raw_telemetry, dict):
+            def _tele_value_ok(value):
+                # Scalars pass; a one-level object of scalars (the
+                # reproduce_results shape) passes; anything else is
+                # malformed and dropped loudly.
+                if isinstance(value, dict):
+                    return all(v is None or
+                               isinstance(v, (str, int, float, bool))
+                               for v in value.values())
+                return (value is None
+                        or isinstance(value, (str, int, float, bool)))
+
+            telemetry = {k: v for k, v in raw_telemetry.items()
+                         if _tele_value_ok(v)}
+            dropped = sorted(str(k) for k in raw_telemetry
+                             if k not in telemetry)
+            if dropped:
+                notes.append({"file": None,
+                              "message": ("malformed telemetry values for "
+                                          "%s; entries ignored"
+                                          % ", ".join(dropped))})
+        elif raw_telemetry is not None:
+            notes.append({"file": None,
+                          "message": ("malformed telemetry field (not an "
+                                      "object); telemetry ignored")})
         raw_warnings = data.get("warnings")
         if isinstance(raw_warnings, list):
             for w in raw_warnings:
@@ -9832,7 +9921,7 @@ def _run_one_command_check(review_root, command, matched,
                                      "warnings ignored")})
         data = data.get("findings")
     if not isinstance(data, list):
-        return [], [], "malformed output (no findings array); findings discarded"
+        return [], [], "malformed output (no findings array); findings discarded", {}
     findings = []
     covered = any(_COVERAGE_WARNING_RE.search(str(w.get("message") or ""))
                   for w in check_warnings)
@@ -9854,7 +9943,25 @@ def _run_one_command_check(review_root, command, matched,
                             "no-permanent-coverage warning: the finding "
                             "stands on ephemeral evidence alone")})
         findings.append(f)
-    return findings, notes + check_warnings, None
+    return findings, notes + check_warnings, None, telemetry
+
+
+def _select_command_checks(checks, parallel):
+    """The enabled command checks whose `parallel` key matches the
+    requested subset -- the ONE selection used by every caller (the
+    supervisor's parallel start, the sequential post-review pass, and the
+    worker's own run), so the three can never drift apart. `parallel` is a
+    tri-state: None keeps every check (the pre-15.3 unit surface), False
+    keeps only the checks WITHOUT `parallel: true` (the supervisor's
+    post-review pass against review_root), True keeps only the
+    `parallel: true` subset (run against the worker's own tip clone,
+    never review_root). A check must be a dict with a string `command`
+    and `enabled` not False, whatever the subset."""
+    return {n: c for n, c in sorted((checks or {}).items())
+            if isinstance(c, dict)
+            and isinstance(c.get("command"), str)
+            and c.get("enabled") is not False
+            and (parallel is None or bool(c.get("parallel")) is parallel)}
 
 
 def _command_check_findings(repo_root, review_root, base, tip, entries=None,
@@ -9888,11 +9995,7 @@ def _command_check_findings(repo_root, review_root, base, tip, entries=None,
             "name": None, "mode": "", "files": 0, "findings": 0,
             "error": note, "seconds": 0.0})
         return findings, warnings
-    command_checks = {n: c for n, c in sorted(checks.items())
-                      if isinstance(c, dict)
-                      and isinstance(c.get("command"), str)
-                      and c.get("enabled") is not False
-                      and (parallel is None or bool(c.get("parallel")) is parallel)}
+    command_checks = _select_command_checks(checks, parallel)
     if not command_checks:
         return findings, warnings
     try:
@@ -9918,11 +10021,16 @@ def _command_check_findings(repo_root, review_root, base, tip, entries=None,
         if not matched:
             tele["seconds"] = round(time.monotonic() - t0, 2)
             continue
-        got, check_warnings, note = _run_one_command_check(
+        got, check_warnings, note, tele_extra = _run_one_command_check(
             review_root, check["command"], matched,
             timeout=check.get("timeout"))
         tele["seconds"] = round(time.monotonic() - t0, 2)
         tele["findings"] = len(got)
+        # SPEC-15.4: an executor-declared telemetry object (actual counts)
+        # merges into THIS check's command_checks entry, on whichever thread
+        # owns the tele list -- the worker collects, the main thread drains.
+        if tele_extra:
+            tele.update(tele_extra)
         if note:
             tele["error"] = note
             warnings.append({"file": None, "message":
@@ -9964,6 +10072,12 @@ class _ParallelCommandChecks:
     a clone-creation failure SKIPS the parallel checks outright (they never
     fall back to review_root)."""
 
+    # The cleanup join bound: a worker that has not finished 5 s after the
+    # supervisor's exit is warned about and abandoned (its findings are
+    # discarded), never waited on indefinitely -- the per-check budgets
+    # mean a healthy worker has long finished by then.
+    _JOIN_GRACE_S = 5.0
+
     def __init__(self, repo_root, state_path, run_id, base, tip, _clone=None):
         self.repo_root, self.state_path = repo_root, state_path
         self.run_id, self.base, self.tip = run_id, base, tip
@@ -9973,38 +10087,61 @@ class _ParallelCommandChecks:
         # (findings, warnings, tele_entries) -- filled by the worker thread,
         # or by a degrade path on the main thread before any thread exists.
         self.result = ([], [], [])
+        # True once the worker's results have been merged (join) or drained
+        # (cleanup): the telemetry flows into _TELE exactly once per runner.
+        self._drained = False
+        # True when cleanup discarded a still-running worker: its late
+        # results can never be trusted through this runner again.
+        self._discarded = False
 
     def start(self):
         """Create the isolated clone and spawn the worker, unless the repo
         declares no parallel check (then this is a no-op) or the checks
         config cannot be read (the sequential pass reports that failure
         exactly as today). Raises _Fenced only when the clone's state
-        registration loses the tip to a newer run."""
+        registration loses the tip to a newer run. Every OTHER failure --
+        the clone factory raising (including after partial creation) or
+        the worker thread failing to construct/start -- is self-cleaning:
+        the clone (or its deterministic intended path, when the factory
+        died mid-creation) and its `worktrees` registration are removed
+        and the checks degrade to a warning plus telemetry, exactly like a
+        plain clone-creation failure; the supervisor's fail-soft path
+        continues and the checks never fall back to review_root."""
         try:
             checks = rg_config.load_settings(self.repo_root)["checks"]
         except Exception:
             return self  # the post-review sequential pass emits this degrade
-        names = [n for n, c in sorted(checks.items())
-                 if isinstance(c, dict)
-                 and isinstance(c.get("command"), str)
-                 and c.get("enabled") is not False
-                 and bool(c.get("parallel"))]
+        names = sorted(_select_command_checks(checks, True))
         if not names:
             return self
-        # A run_id suffix keeps the parallel clone's directory distinct from
-        # the reviewer clone's (make_review_clone names dirs tip12-run_id).
+        try:
+            return self._spawn(names)
+        except _Fenced:
+            raise
+        except Exception as exc:  # noqa: BLE001 -- self-clean, fail-soft
+            partial = self.clone or self._intended_clone_path()
+            self._drop_clone(partial)
+            self.clone = ""
+            self.thread = None
+            self._unregister_clone(partial)
+            self._skip(
+                names,
+                "the parallel runner could not be started for %s (%s: %s)"
+                % (", ".join(names), type(exc).__name__, exc),
+                "parallel runner start failed (%s: %s); check skipped"
+                % (type(exc).__name__, exc))
+        return self
+
+    def _spawn(self, names):
+        """The raw spawn path (clone, registration, thread) whose failures
+        start() self-cleans. A run_id suffix keeps the parallel clone's
+        directory distinct from the reviewer clone's (make_review_clone
+        names dirs tip12-run_id)."""
         self.clone = self._make_clone(
             self.repo_root, self.tip, self.run_id + "-par")
         if not self.clone:
-            note = ("parallel command checks skipped: could not create the "
-                    "isolated tip clone for %s; the checks did NOT run "
-                    "against the review tree" % ", ".join(names))
-            self.result = (
-                [], [{"file": None, "message": note}],
-                [{"name": n, "mode": "", "files": 0, "findings": 0,
-                   "error": "isolated tip clone creation failed; check skipped",
-                   "seconds": 0.0} for n in names])
-            _warn(f"[gate] {note}")
+            self._skip(names, "could not create the isolated tip clone for "
+                       ", ".join(names))
             return self
         try:
             # Reaper protection: registered under `worktrees` (the list the
@@ -10013,7 +10150,7 @@ class _ParallelCommandChecks:
             _update_state_owned(self.state_path, self.run_id,
                                 worktrees=[self.clone])
         except _Fenced:
-            _remove_worktree(self.repo_root, self.clone)
+            self._drop_clone(self.clone)
             self.clone = ""
             raise
         except Exception:
@@ -10022,6 +10159,52 @@ class _ParallelCommandChecks:
             target=self._work, name="ocr-parallel-checks", daemon=True)
         self.thread.start()
         return self
+
+    def _skip(self, names, reason, tele_error=None):
+        """The degrade result for a parallel subset that never ran: an empty
+        findings/warnings answer plus one tele entry per skipped check, so
+        the skip is loud in the record and the verdict alike."""
+        note = ("parallel command checks skipped: %s; the checks did NOT "
+                "run against the review tree" % reason)
+        self.result = (
+            [], [{"file": None, "message": note}],
+            [{"name": n, "mode": "", "files": 0, "findings": 0,
+               "error": tele_error or
+               "isolated tip clone creation failed; check skipped",
+               "seconds": 0.0} for n in names])
+        _warn(f"[gate] {note}")
+
+    def _intended_clone_path(self):
+        """The deterministic clone path make_review_clone creates for this
+        runner (clones/<tip12>-<run_id>): the cleanup target when the
+        factory raises after partial creation and returns no path."""
+        try:
+            return str(rg_store.clones_dir()
+                       / f"{self.tip[:12]}-{self.run_id}-par")
+        except Exception:
+            return ""
+
+    def _drop_clone(self, path):
+        """Best-effort clone removal. remove_review_clone refuses anything
+        outside the gate's own clones/ dir, so a bogus or empty path is a
+        safe no-op -- the only directory this can delete is a gate clone."""
+        if path:
+            _remove_worktree(self.repo_root, path)
+
+    def _unregister_clone(self, path):
+        """Best-effort removal of the clone's reaper-protection
+        registration (the run state's `worktrees` list). Never raises; a
+        fenced run (a newer run owns the state) keeps the stale entry --
+        the reaper's sweep tolerates paths that no longer exist."""
+        if not path:
+            return
+        try:
+            current = (_read_state(self.state_path) or {}).get(
+                "worktrees") or []
+            _update_state_owned(self.state_path, self.run_id,
+                                worktrees=[w for w in current if w != path])
+        except Exception:
+            pass
 
     def _work(self):
         """Worker body: runs the parallel subset against the isolated clone.
@@ -10046,25 +10229,66 @@ class _ParallelCommandChecks:
     def join(self):
         """(findings, warnings): the worker's results, with its telemetry
         entries written to _TELE here on the main thread. Never raises; a
-        worker that never started returns its degrade result."""
+        worker that never started returns its degrade result. Idempotent:
+        the telemetry is merged exactly once per runner, whichever of
+        join()/cleanup() runs first."""
         if self.thread is not None:
             self.thread.join()
+            self.thread = None
+        if self._discarded:
+            # A cleanup that abandoned a stuck worker already declared its
+            # findings discarded; a late answer is never resurrected.
+            return [], []
         findings, warnings, tele = self.result
-        if tele:
-            _TELE.setdefault("command_checks", []).extend(tele)
+        if not self._drained:
+            self._drained = True
+            if tele:
+                _TELE.setdefault("command_checks", []).extend(tele)
         return findings, warnings
 
     def cleanup(self):
         """Remove the parallel clone on every exit path (the supervisor's
-        finally, exceptions included). Joins the worker first -- bounded by
-        each check's own timeout -- so the clone never disappears under a
-        live executor."""
+        finally, exceptions included). Joins the worker first, but only for
+        a SMALL documented grace window (5 s -- after the per-check budgets
+        a healthy worker has long finished): supervisor cleanup must never
+        hang the push on a stuck executor, and no arbitrary child process
+        is killed (the executor's own subprocess timeouts bound it). A
+        worker still alive after the grace window draws a warning ("still
+        running; parallel-check findings discarded") plus telemetry, and
+        its unverifiable findings are discarded. An abnormal exit that
+        never called join() still drains the worker's warnings and
+        telemetry here, so the degradation is observable, never silent.
+        Idempotent with join(): the telemetry drains exactly once, on the
+        main thread either way (the worker only collects; _TELE is never
+        written off-main)."""
+        alive = False
         if self.thread is not None:
-            self.thread.join()
+            self.thread.join(self._JOIN_GRACE_S)
+            alive = self.thread.is_alive()
             self.thread = None
         if self.clone:
             _remove_worktree(self.repo_root, self.clone)
             self.clone = ""
+        if self._drained:
+            return
+        self._drained = True
+        findings, warnings, tele = self.result
+        if tele:
+            _TELE.setdefault("command_checks", []).extend(tele)
+        for w in warnings:
+            _warn("[gate] parallel command check warning (unjoined exit): %s"
+                  % str(w.get("message") or w))
+        if alive:
+            note = ("parallel command check worker still running; "
+                    "parallel-check findings discarded (cleanup join bound "
+                    "%gs)" % self._JOIN_GRACE_S)
+            _warn(f"[gate] {note}")
+            _TELE.setdefault("command_checks", []).append(
+                {"name": None, "mode": "", "files": 0, "findings": 0,
+                 "error": note, "seconds": 0.0})
+            self._discarded = True
+        elif findings:
+            _warn("[gate] parallel checks not joined; findings discarded")
 
 
 class _ManifestScope:

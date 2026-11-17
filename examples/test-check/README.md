@@ -58,6 +58,14 @@ ride the normal stream through the falsify pass into `compute_verdict`.
 | `OCR_TEST_SELECTOR_TIMEOUT` | `240` | Seconds the selector call may take |
 | `OCR_TEST_SELECTOR_CMD` | `kimchi -p … --model deepseek-v4.1-flash` | Override for the selector invocation (used by the test suite's stub; the command receives the manifest JSON on stdin) |
 
+`OCR_CHECK_TIMEOUT_S` is not a knob but an INPUT the gate exports to the
+executor (the check's resolved `timeout`, string seconds, on top of the
+inherited environment): when present, the executor clamps its own selector
+and per-subject run budgets so every phase finishes BEFORE the gate's kill
+(a small grace margin — 5 s or 5% of the budget, whichever is smaller — is
+left for the answer write). Standalone runs without the variable keep the
+knobs and defaults above.
+
 ## Contract (winds both ways)
 
 - **Convention for coverage warnings:** when a finding's evidence is an
@@ -72,10 +80,19 @@ ride the normal stream through the falsify pass into `compute_verdict`.
 - **Selector output is strict JSON:**
   `{"existing_tests": [paths], "probes": [{"name", "language", "source",
   "run_cmd"}]}`. A malformed selector reply costs exactly one attempt and
-  one warning; no retry, no blocking.
+  one warning; no retry, no blocking. Each probe may also carry an optional
+  `path` — the repo-relative file whose behavior the probe targets — which
+  anchors the finding when it fails; when absent, the finding anchors on
+  the first matched file (the default).
 - **Probes** are materialized under `.test-check-probes/` inside the
   executor's clone and deleted after the run. They never touch your working
   tree and never appear in reviewer evidence.
+- **Telemetry (SPEC-15.4):** the stdout wrapper may carry a `telemetry`
+  object of actual run counts — `selector_attempts`, `tests_selected`,
+  `probes_authored`, `runs`, and `reproduce_results`
+  (`fail`/`pass`/`flake`/`build`/`error`) — which the gate merges into that
+  check's `command_checks` telemetry entry (malformed values degrade to a
+  warning and are ignored). This executor always emits it.
 
 ## Costs
 
