@@ -9070,12 +9070,15 @@ def _warn_mode_clamp(tagged):
     if conf_cap >= min_conf:
         conf_cap = round(min_conf - 0.01, 2)
     if conf_cap < 0:
-        # No valid confidence sits strictly below the bar (bar at or below
-        # 0): the severity side must be the escape, so the finding drops at
-        # most to the lowest rank that never blocks unconditionally.
+        # The confidence bar is inclusive (block tests conf >= min_conf), so
+        # when no valid confidence sits strictly below it the severity side
+        # must be the escape: drop a RANKED safe_sev one tier below the
+        # confidence-gated bar (medium). When the bar is already lowest
+        # (min_rank=low), safe_sev is already "note" -- never raise it back.
         conf_cap = 0.0
-        safe_sev = "low"
-    if rank > _SEVERITY_RANK.get(safe_sev, -1):
+        if safe_rank >= _SEVERITY_RANK["medium"]:
+            safe_sev = "low"
+    if rank > safe_rank:
         tagged["severity"] = safe_sev
     if conf > conf_cap:
         tagged["confidence"] = conf_cap
@@ -9156,6 +9159,7 @@ def _docs_quality_block(repo_root, review_root, base, tip, entries=None,
             return None
         diff_base = base or _EMPTY_TREE
         enabled_duties, options, evidence, files = {}, {}, {}, []
+        scopes = {}   # duty -> the doc paths that duty's own globs matched
         for duty in _DOC_QUALITY_DUTIES:
             check = checks.get(duty) or {}
             if check.get("enabled") is not True:
@@ -9166,21 +9170,24 @@ def _docs_quality_block(repo_root, review_root, base, tip, entries=None,
                 enabled_duties[duty] = False
                 continue
             enabled_duties[duty] = True
+            scopes[duty] = list(matched)
             options[duty] = {k: check[k] for k in _DOC_QUALITY_OPTION_KEYS
                              if k in check}
             targets = matched
             if options[duty].get("sweep") is True and duty != "docs-deslop":
                 # Whole-corpus sweep (story 20), markdown-only in v1: every
-                # ADR under the records root, not just the pushed ones.
+                # ADR under the records root RECURSIVELY, not just the
+                # pushed ones -- a sub-dir tree of records is still records.
                 records_root = _records_root(review_root)
                 if records_root:
-                    try:
-                        sweep = [records_root + "/" + name
-                                 for name in sorted(os.listdir(
-                                     str(Path(review_root) / records_root)))
-                                 if name.lower().endswith(".md")]
-                    except OSError:
-                        sweep = []
+                    sweep = []
+                    base = str(Path(review_root) / records_root)
+                    for dirpath, _dirs, walk_files in os.walk(base):
+                        for name in walk_files:
+                            if name.lower().endswith(".md"):
+                                full = os.path.join(dirpath, name)
+                                sweep.append(os.path.relpath(full, review_root)
+                                             .replace(os.sep, "/"))
                     targets = sorted(set(matched) | set(sweep))
             t0 = time.monotonic()
             cap = options[duty].get("sentence_cap")
@@ -9214,7 +9221,7 @@ def _docs_quality_block(repo_root, review_root, base, tip, entries=None,
                 Path(run_dir) if run_dir else None, index,
                 review_root, diff_base, tip, path))
         return {"enabled_duties": enabled_duties, "options": options,
-                "files": payload_files, "evidence": evidence}
+                "files": payload_files, "scopes": scopes, "evidence": evidence}
     except Exception as exc:  # noqa: BLE001 -- the payload must never break a review
         _warn(f"[gate] docs-quality payload failed ({type(exc).__name__}: {exc}); "
               "the push continues without it")
@@ -9396,8 +9403,20 @@ def _run_one_command_check(review_root, command, matched):
                     "absolute paths, no '..' components): %s; findings discarded"
                     % command)
     exe = str(Path(review_root) / command)
-    if not (os.path.isfile(exe) and os.access(exe, os.X_OK)):
+    # Lexical checks are not a sandbox: isfile/access/subprocess all follow
+    # symlinks, so a repo-committed symlink could point outside the tree.
+    # Resolve to the real target and require it stays inside review_root.
+    try:
+        real_exe = os.path.realpath(exe)
+        inside = os.path.realpath(str(review_root))
+        if os.path.commonpath([real_exe, inside]) != inside:
+            return [], ("resolved command escapes the review tree (symlink "
+                        "outside the repo): %s; findings discarded" % command)
+    except (OSError, ValueError):
+        return [], f"command not resolvable inside the review tree: {command}"
+    if not (os.path.isfile(real_exe) and os.access(real_exe, os.X_OK)):
         return [], f"command not executable or missing: {command}"
+    exe = real_exe
     try:
         proc = subprocess.run([exe], input=json.dumps(matched), text=True,
                               cwd=str(review_root), capture_output=True,

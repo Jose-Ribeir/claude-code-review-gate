@@ -225,11 +225,15 @@ def _scan_deslop(prose, catalog):
 # Path references + ADR references + dangling links
 # ---------------------------------------------------------------------------
 
-def _collect_path_mentions(repo_root, prose):
+def _collect_path_mentions(repo_root, prose, doc_rel=""):
     """Path mentions with existence checked against the review tree.
 
     Returns (missing_paths, dangling_links); entry dicts {"path", "line",
-    "kind"} with kind "markdown_link" or "inline_code".
+    "kind"} with kind "markdown_link" or "inline_code". Relative markdown
+    links resolve against the DOCUMENT's directory (standard markdown-
+    viewer semantics), repo-root-absolute links ("/docs/x") against the
+    repository root; inline-code path mentions resolve against the repo
+    root (they name repo paths by convention).
     """
     seen, missing_paths, dangling_links = set(), [], []
     for ln in prose:
@@ -243,10 +247,18 @@ def _collect_path_mentions(repo_root, prose):
                 continue
             path, _, _anchor = target.partition("#")
             path = path.split("?", 1)[0].strip()
-            # A leading "/" means repo root (GitHub convention): strip it so
-            # os.path.join(repo_root, path) resolves against the review tree,
-            # never the filesystem root.
-            path = path.lstrip("/")
+            if path.startswith("/"):
+                # GitHub convention: leading "/" means repo root.
+                resolved = path.lstrip("/")
+            else:
+                # Standard markdown: resolve against the document's
+                # directory; normpath collapses ".." components.
+                resolved = os.path.normpath(
+                    os.path.join(os.path.dirname(doc_rel), path))
+            path = resolved.replace(os.sep, "/")
+            if not path or path.startswith(".."):
+                # Anything escaping the repo is a dangling external ref.
+                path = path or target
             if not path:
                 continue
             mentions.append((path, n, "markdown_link"))
@@ -343,14 +355,28 @@ def _scan_ste(prose, sentence_cap):
     the agent to judge from, not verdicts.
     """
     over_cap = []
+    # Paragraph assembly first (wrapped sentences count as one sentence):
+    # contiguous non-blank, non-heading lines form one paragraph whose
+    # starting line attributes all of its sentences.
+    para_text, para_start = "", None
+    paras = []
     for ln in prose:
         text, n = ln["text"].strip(), ln["n"]
         if not text or text.startswith("#"):
+            if para_text:
+                paras.append((para_start, para_text))
+                para_text, para_start = "", None
             continue
         text = re.sub(r"^(?:[-*+]|\d+[.)])\s+", "", text)
         text = _INLINE_CODE_RE.sub("CODE", text)
         text = _URL_RE.sub("URL", text)
-        for sent in _split_sentences(text):
+        if para_start is None:
+            para_start = n
+        para_text = (para_text + " " + text).strip()
+    if para_text:
+        paras.append((para_start, para_text))
+    for n, para in paras:
+        for sent in _split_sentences(para):
             n_words = len(_words(sent))
             if sentence_cap is not None and n_words > sentence_cap:
                 over_cap.append({"line": n, "words": n_words})
@@ -371,20 +397,27 @@ def _expansion_parens_re(acronym):
 
 
 def _scan_acronyms(prose):
-    """ALL-CAPS acronym (3+ letters) first-use table."""
+    """ALL-CAPS acronym (3+ letters) first-use table. A definition counts
+    only when it appears at (or immediately after) the acronym's FIRST
+    occurrence -- an acronym used bare for 20 lines and expanded on line 21
+    is reported as undefined, the wait-what first-use rule."""
     found = {}
     for ln in prose:
         text = _INLINE_CODE_RE.sub(" ", ln["text"])
         for m in _ACRONYM_RE.finditer(text):
             found.setdefault(m.group(0), ln["n"])
     patterns = {k: _expansion_parens_re(k) for k in found}
-    plain = "\n".join(ln["text"] for ln in prose)
-    plain = _INLINE_CODE_RE.sub(" ", plain)
     table = []
     for acr in sorted(found):
-        defined = any(rx.search(plain) for rx in patterns[acr])
+        first_line = found[acr]
+        # Only the first occurrence's own line (and its immediate follow-up
+        # lines, for wrapped definitions) can define it: later prose is out.
+        first_use_text = "\n".join(
+            ln["text"] for ln in prose if ln["n"] in (first_line, first_line + 1))
+        first_use_text = _INLINE_CODE_RE.sub(" ", first_use_text)
+        defined = any(rx.search(first_use_text) for rx in patterns[acr])
         table.append({"acronym": acr, "defined": defined,
-                      "first_line": found[acr]})
+                      "first_line": first_line})
     return table
 
 
@@ -416,7 +449,8 @@ def _evidence_for_file(repo_root, rel, sentence_cap, catalog, warnings):
         warnings.append("docsquality: could not read %s (%s); skipped" % (rel, exc))
         return None
     prose = _prose_lines(text)
-    missing_paths, dangling_links = _collect_path_mentions(repo_root, prose)
+    missing_paths, dangling_links = _collect_path_mentions(repo_root, prose,
+                                                           doc_rel=rel)
     return {
         "missing_paths": missing_paths,
         "unresolved_adr_refs": _scan_adr_refs(repo_root, prose),

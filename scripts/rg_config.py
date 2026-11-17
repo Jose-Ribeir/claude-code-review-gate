@@ -28,8 +28,9 @@ Resolution order -- later wins, key by key:
                       "globs" list of repo-relative globs the check runs
                       over, and pass-through options ("sections",
                       "template", "sentence_cap", "sweep"). A "command"
-                      string names a repo-relative executable (run in a later
-                      ticket). Command checks may define new check names;
+                      string names a repo-relative executable the gate runs
+                      over matched changed files. Command checks may define
+                      new check names;
                       other unknown names are typos and are ignored.
 
 Missing files degrade to defaults silently -- that is the normal state for
