@@ -23,10 +23,14 @@ import shutil
 import subprocess
 import sys
 import tempfile
-
 import ocr_profile
+from rg_final_compose import compose_stack
+from rg_final_graph import discover_linear_graph
 from rg_final_gitlab import GitLabProvider
 from rg_final_lenses import (
+    CROSS_ITEM_CONTRACTS,
+    INTEGRATION_BEHAVIOR,
+    REQUIRED_LENS_NAMES,
     failed_lens_aggregation,
     run_independent_lenses,
 )
@@ -42,6 +46,11 @@ STAGE = "S16-02A"
 MISSING_STAGES = [
     "required_and_dynamic_tests",
     "composition",
+    "provider_publication",
+]
+STACK_STAGE = "S16-06B"
+STACK_MISSING_STAGES = [
+    "required_and_dynamic_tests",
     "provider_publication",
 ]
 
@@ -333,7 +342,7 @@ def _record_lens_aggregation(store, unit_id, aggregation, materialized=None):
     })
 
 
-def _write_reports(store, run_id, orchestration):
+def _write_reports(store, run_id, orchestration, completion_marker=None):
     report = store.machine_report(run_id)
     report["orchestration"] = orchestration
     directory = store.path.parent / "reports"
@@ -349,7 +358,7 @@ def _write_reports(store, run_id, orchestration):
         pass
     os.replace(temporary, machine_path)
     human = store.human_report(run_id)
-    marker = (
+    marker = completion_marker or (
         f"\nStage: {STAGE}\n"
         "Completion: INCOMPLETE - this stage runs every individual static lens independently. "
         "Tests, composition and provider publication are not implemented.\n"
@@ -371,6 +380,11 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
     for scripted or alternate workers.  The default uses ``RG_FINAL_WORKER`` or
     the selected normal review backend.  No provider mutation method is called.
     """
+    if isinstance(reference, (list, tuple)):
+        return run_final_stack(
+            reference, repo_root=repo_root, provider=provider, store_path=store_path,
+            worker=worker, environ=environ,
+        )
     environ = os.environ if environ is None else environ
     repo_root = str(repo_root or os.getcwd())
     provider = provider or GitLabProvider()
@@ -537,6 +551,404 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
         return result
 
 
+def _graph_stack(graph):
+    """Translate validated provider metadata without changing unit identity."""
+    items = graph["items"]
+    root = graph["root_target"]
+    return {
+        "provider": graph["provider"],
+        "target_project": root["project_path"],
+        "root_target_ref": root["branch"],
+        "root_target_sha": root["sha"],
+        "items": [{
+            "item_key": item["id"],
+            "source_project": item["source"]["project_path"],
+            "source_ref": item["source"]["branch"],
+            "source_sha": item["source"]["sha"],
+            "target_project": item["target"]["project_path"],
+            "target_ref": item["target"]["branch"],
+            "target_sha": item["target"]["sha"],
+            "provider_data": _provider_data(item),
+        } for item in items],
+    }
+
+
+def _record_stack_pending(store, unit_id):
+    for kind, summary in (
+        ("required_tests", "Repository-required verification is reserved for a later stage"),
+        ("dynamic_tests", "Dynamic checks are reserved for a later stage"),
+        ("provider_publication", "No official provider status is emitted by this stage"),
+    ):
+        store.record_coverage(unit_id, kind, "not_implemented", summary,
+                              {"stage": STACK_STAGE, "complete": False})
+
+
+def _current_stack_root(provider, graph, repo_root, explicit_sha):
+    if explicit_sha is not None:
+        return str(explicit_sha), None
+    root = graph["root_target"]
+    try:
+        fresh = provider.read(graph["references"][0], repo_root=repo_root)
+        current = fresh["target"]
+        identity = ("project_id", "project_path", "branch")
+        if any(current.get(key) != root.get(key) for key in identity):
+            return root["sha"], {
+                "code": "root-target-moved", "message": "The root target moved during discovery",
+                "pinned": {key: root.get(key) for key in identity},
+                "current": {key: current.get(key) for key in identity},
+            }
+        return current["sha"], None
+    except Exception as exc:
+        return root["sha"], {
+            "code": "current-target-unavailable",
+            "message": f"The current root target could not be refreshed: {exc}",
+        }
+
+
+def _combined_item(graph, unit_key):
+    return {
+        "provider": graph["provider"], "id": unit_key,
+        "title": ("Ordered combined stack" if unit_key == "combined"
+                  else "Prospective root-target integration"),
+        "description": "Review cross-item contracts and integration behavior across the full diff.",
+        "items": [_public_item(item) for item in graph["items"]],
+    }
+
+
+def _record_stack_composition(store, unit_id, composed):
+    state = "complete" if composed["complete"] else "incomplete"
+    store.record_coverage(unit_id, "composition", state,
+                          "Ordered composition is reproducible" if composed["complete"]
+                          else "Composition conflict or unreproducibility prevents review",
+                          {"errors": composed["errors"],
+                           "applied_item_keys": composed["applied_item_keys"]})
+
+
+def _run_stack_unit(store, identity, graph, unit_key, unit_id, *, item=None,
+                    composed=None, source_repository, target_repository=None,
+                    target_sha, head_sha, worker, environ, repo_root):
+    """Materialize and run every mandatory lens, returning detached unit output."""
+    capabilities = () if composed is None else (
+        (CROSS_ITEM_CONTRACTS, INTEGRATION_BEHAVIOR) if unit_key == "combined"
+        else (INTEGRATION_BEHAVIOR,)
+    )
+    aggregation = None
+    merge_base = None
+    repository_path = ""
+    try:
+        with materialize_review(
+            source_repository, target_sha, head_sha,
+            target_repository=(target_repository if target_repository
+                               and target_repository != source_repository else None),
+            require_lfs=True,
+        ) as materialized:
+            merge_base = materialized.merge_base_sha
+            repository_path = str(materialized.path)
+            store.record_coverage(
+                unit_id, "repository", "complete", "Complete immutable checkout available",
+                {"submodules": list(materialized.submodules),
+                 "lfs_files": list(materialized.lfs_files),
+                 "lfs_complete": materialized.lfs_complete},
+            )
+            store.record_coverage(
+                unit_id, "diff", "complete", "Complete binary-capable merge-base diff",
+                {"merge_base_sha": merge_base, "sha256": _sha256(materialized.diff)},
+            )
+            request = {
+                "schema": WORKER_REQUEST_SCHEMA, "stage": STACK_STAGE,
+                "run_id": identity["run_id"], "unit_id": unit_id, "unit_key": unit_key,
+                "store_instance_id": identity["store_instance_id"],
+                "contract_version": identity["contract_version"],
+                "revision_tuple": (list(revision_tuple(item)) if item is not None
+                                   else graph["revisions"]),
+                "item": (_public_item(item) if item is not None
+                         else _combined_item(graph, unit_key)),
+                "repository": {
+                    "path": str(materialized.path), "access": "full_tree",
+                    "head_sha": materialized.head_sha,
+                    "target_sha": materialized.target_sha,
+                    "merge_base_sha": merge_base,
+                    "submodules": list(materialized.submodules),
+                    "lfs_files": list(materialized.lfs_files),
+                    "lfs_complete": materialized.lfs_complete,
+                },
+                "diff": materialized.diff,
+            }
+            if composed is not None:
+                request["composition"] = {
+                    "schema": composed.get("schema", "final-review-composition-unit/v1"),
+                    "kind": unit_key, "item_keys": graph["item_keys"],
+                    "root_target_sha": graph["root_target"]["sha"],
+                    "current_root_sha": composed["target_sha"],
+                    "applied_item_keys": composed["applied_item_keys"],
+                    "evidence_only_commit": unit_key == "prospective",
+                }
+
+            def isolated_worker(lens_request):
+                lens_request["capabilities"] = list(capabilities)
+                if capabilities:
+                    lens_request["review_duty"] += (
+                        " Review cross-item contracts and actual integration behavior, not "
+                        "just the sum of isolated changes."
+                    )
+                return invoke_worker(
+                    lens_request, command=worker, repo_root=repo_root, environ=environ,
+                    timeout=float(environ.get("RG_FINAL_WORKER_TIMEOUT", "900")),
+                )
+
+            aggregation = run_independent_lenses(request, isolated_worker)
+            _record_lens_aggregation(store, unit_id, aggregation, materialized)
+    except Exception as exc:
+        if aggregation is None:
+            aggregation = failed_lens_aggregation(exc)
+            _record_lens_aggregation(store, unit_id, aggregation)
+        store.record_coverage(unit_id, "repository", "incomplete",
+                              "Immutable full-tree review did not complete", {"error": str(exc)})
+        store.record_warning(unit_id, "materialization", str(exc), "repository")
+    verdict = aggregation.finding_verdict if aggregation is not None else None
+    state = "findings" if verdict == "block" else "incomplete"
+    complete = bool(aggregation and aggregation.complete)
+    summary = ("Static-lens findings block this incomplete stack review" if verdict == "block"
+               else "Independent static lenses completed; tests and publication are pending"
+               if complete else "A required static lens is incomplete; no final pass is available")
+    store.set_unit_state(unit_id, state, summary)
+    return {
+        "unit_id": unit_id, "unit_key": unit_key,
+        "kind": ("individual" if item is not None else unit_key),
+        "state": state, "finding_verdict": verdict,
+        "static_lenses_complete": complete, "base_sha": target_sha, "head_sha": head_sha,
+        "merge_base_sha": merge_base, "repository_path": repository_path,
+        "composition_complete": True if composed is None else composed["complete"],
+        "composition_errors": [] if composed is None else composed["errors"],
+        "lenses": [{"name": outcome.name, "state": outcome.state,
+                    "summary": outcome.summary, "capabilities": list(capabilities)}
+                   for outcome in (aggregation.outcomes if aggregation else ())],
+    }
+
+
+def _incomplete_composed_unit(store, identity, graph, unit_key, unit_id, composed):
+    message = "; ".join(error["message"] for error in composed["errors"]) or \
+        "Composition did not produce a reviewable tree"
+    aggregation = failed_lens_aggregation(message)
+    _record_lens_aggregation(store, unit_id, aggregation)
+    store.record_coverage(unit_id, "repository", "incomplete",
+                          "No immutable composed tree is available")
+    store.record_coverage(unit_id, "diff", "incomplete",
+                          "No complete composed merge-base diff is available")
+    store.record_warning(unit_id, "composition-incomplete", message, unit_key,
+                         {"errors": composed["errors"]})
+    store.record_stop(
+        unit_id, message, evidence={"composition": composed},
+        affected_unit_ids=[unit_id],
+        skipped_work=[{"unit_id": unit_id, "kind": "lens", "name": name}
+                      for name in REQUIRED_LENS_NAMES],
+    )
+    store.set_unit_state(unit_id, "incomplete", "Composition is incomplete; no official pass")
+    return {
+        "unit_id": unit_id, "unit_key": unit_key, "kind": unit_key,
+        "state": "incomplete", "finding_verdict": None,
+        "static_lenses_complete": False, "base_sha": composed["target_sha"],
+        "head_sha": composed["head_sha"], "merge_base_sha": None,
+        "repository_path": "", "composition_complete": False,
+        "composition_errors": composed["errors"],
+        "lenses": [{"name": outcome.name, "state": outcome.state,
+                    "summary": outcome.summary, "capabilities": []}
+                   for outcome in aggregation.outcomes],
+    }
+
+
+def _execute_composed_unit(store, identity, graph, unit_key, unit_id, composed,
+                           worker, environ, repo_root):
+    _record_stack_composition(store, unit_id, composed)
+    if not composed["complete"]:
+        return _incomplete_composed_unit(
+            store, identity, graph, unit_key, unit_id, composed)
+    return _run_stack_unit(
+        store, identity, graph, unit_key, unit_id, composed=composed,
+        source_repository=composed["repository"]["source_repository"],
+        target_sha=composed["target_sha"], head_sha=composed["head_sha"],
+        worker=worker, environ=environ, repo_root=repo_root,
+    )
+
+
+def _write_stack_unit_report(store, run_id, unit, links):
+    directory = store.path.parent / "reports"
+    directory.mkdir(parents=True, exist_ok=True)
+    stem = re.sub(r"[^A-Za-z0-9_.-]+", "-", unit["unit_key"])
+    machine_path = directory / f"{run_id}-{stem}.json"
+    human_path = directory / f"{run_id}-{stem}.md"
+    report = store.machine_report(run_id, unit["unit_id"])
+    report["orchestration"] = {"stage": STACK_STAGE, "complete": False, **links}
+    temporary = machine_path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(report, indent=2, sort_keys=True,
+                                    ensure_ascii=False) + "\n", encoding="utf-8")
+    try:
+        os.chmod(temporary, 0o600)
+    except OSError:
+        pass
+    os.replace(temporary, machine_path)
+    human = store.human_report(run_id, unit["unit_id"])
+    marker = (f"\nStage: {STACK_STAGE}\nCompletion: INCOMPLETE - required/dynamic tests "
+              "and official publication remain pending.\n")
+    human_path.write_text(human.replace("\n", marker, 1), encoding="utf-8")
+    for path in (machine_path, human_path):
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+    unit["machine_report_path"] = str(machine_path)
+    unit["human_report_path"] = str(human_path)
+
+
+def run_final_stack(references, *, repo_root=None, provider=None, store_path=None,
+                    worker=None, environ=None, current_root_sha=None):
+    """Validate and review a complete base-first stack through composition.
+
+    The returned units and per-unit report paths are the C14 publication
+    hand-off. Dynamic/required tests and official provider statuses deliberately
+    remain pending, so a clean static result still exits incomplete.
+    """
+    environ = os.environ if environ is None else environ
+    repo_root = str(repo_root or os.getcwd())
+    provider = provider or GitLabProvider()
+    graph = discover_linear_graph(references, provider=provider, repo_root=repo_root)
+    items = graph["items"]
+    with FinalStore(store_path) as store:
+        identity = store.start_run(_graph_stack(graph), metadata={
+            "stage": STACK_STAGE, "complete": False,
+            "missing_stages": STACK_MISSING_STAGES, "standalone": False,
+            "graph": {"schema": graph["schema"], "item_keys": graph["item_keys"]},
+        })
+        run_id = identity["run_id"]
+        combined_id = identity["unit_ids"]["combined"]
+        unit_results = []
+        for position, item in enumerate(items, 1):
+            unit_id = identity["unit_ids"][f"individual:{position}"]
+            _record_stack_pending(store, unit_id)
+        _record_stack_pending(store, combined_id)
+        current_sha, current_error = _current_stack_root(
+            provider, graph, repo_root, current_root_sha)
+
+        with compose_stack(graph, current_root_sha=current_sha) as composition:
+            for position, item in enumerate(items, 1):
+                unit_key = f"individual:{position}"
+                source = item["source"]
+                target = item["target"]
+                source_repository = source.get("http_url") or source["url"]
+                target_repository = target.get("http_url") or target["url"]
+                unit_results.append(_run_stack_unit(
+                    store, identity, graph, unit_key, identity["unit_ids"][unit_key],
+                    item=item, source_repository=source_repository,
+                    target_repository=target_repository, target_sha=target["sha"],
+                    head_sha=source["sha"], worker=worker, environ=environ,
+                    repo_root=repo_root,
+                ))
+            unit_results.append(_execute_composed_unit(
+                store, identity, graph, "combined", combined_id,
+                composition["combined"], worker, environ, repo_root))
+            prospective = composition["prospective"]
+            prospective_id = store.add_unit(
+                run_id, "prospective", "prospective", prospective["target_sha"],
+                prospective["head_sha"], target_ref=graph["root_target"]["branch"],
+                metadata={"schema": "final-review-composition-unit/v1",
+                          "complete": prospective["complete"],
+                          "head_sha_role": "composed" if prospective["complete"]
+                          else "pinned_candidate_only",
+                          "errors": prospective["errors"]},
+            )
+            _record_stack_pending(store, prospective_id)
+            unit_results.append(_execute_composed_unit(
+                store, identity, graph, "prospective", prospective_id,
+                prospective, worker, environ, repo_root))
+
+        if current_error is not None:
+            store.record_coverage(unit_results[-1]["unit_id"], "current_target", "incomplete",
+                                  current_error["message"], current_error)
+            store.record_warning(unit_results[-1]["unit_id"], current_error["code"],
+                                 current_error["message"], "prospective", current_error)
+        else:
+            store.record_coverage(unit_results[-1]["unit_id"], "current_target", "complete",
+                                  "Prospective integration uses the refreshed root target",
+                                  {"current_root_sha": current_sha})
+
+        stale = current_error is not None and current_error.get("code") == "root-target-moved"
+        for position, item in enumerate(items, 1):
+            unit_id = identity["unit_ids"][f"individual:{position}"]
+            try:
+                provider.revalidate(item, repo_root=repo_root)
+            except RevisionChangedError as exc:
+                stale = True
+                store.record_warning(unit_id, "revision-stale", str(exc), "freshness", {
+                    "field": exc.field, "expected": exc.expected, "current": exc.current,
+                })
+            except Exception as exc:
+                store.record_warning(unit_id, "freshness-check", str(exc), "freshness")
+        if stale:
+            for unit in unit_results:
+                unit["state"] = "stale"
+                store.set_unit_state(unit["unit_id"], "stale",
+                                     "Pinned stack revisions moved; explicit restart is required")
+
+        verdicts = [unit["finding_verdict"] for unit in unit_results]
+        finding_verdict = ("block" if "block" in verdicts
+                           else "pass" if verdicts and all(v == "pass" for v in verdicts)
+                           else None)
+        static_complete = all(unit["static_lenses_complete"] for unit in unit_results)
+        state = "stale" if stale else "incomplete"
+        trust = store.finish_run(run_id, state, trust={
+            "local_only": True, "enforced": False, "official": False,
+            "stage_incomplete": True, "missing_stages": STACK_MISSING_STAGES,
+            "static_lenses_complete": static_complete,
+            "reason": "C10 composes and reviews statically; tests and official publication remain",
+        })
+        exit_code = 3 if stale else 1 if finding_verdict == "block" else 2
+        result = {
+            "schema": RESULT_SCHEMA, "stage": STACK_STAGE, "complete": False,
+            "missing_stages": STACK_MISSING_STAGES, "state": state, "exit_code": exit_code,
+            "finding_verdict": finding_verdict, "static_lenses_complete": static_complete,
+            "store_instance_id": identity["store_instance_id"], "store_path": str(store.path),
+            "run_id": run_id, "run_seq": identity["run_seq"],
+            "stack_key": identity["stack_key"], "unit_id": combined_id,
+            "unit_key": "combined", "combined_unit_id": combined_id,
+            "prospective_unit_id": prospective_id,
+            "contract_version": identity["contract_version"],
+            "acceptance_version": identity["acceptance_version"],
+            "graph": {"schema": graph["schema"], "references": graph["references"],
+                      "item_keys": graph["item_keys"]},
+            "item_keys": graph["item_keys"], "revisions": graph["revisions"],
+            "composition": composition, "units": unit_results, "trust": trust,
+        }
+        marker = (f"\nStage: {STACK_STAGE}\nCompletion: INCOMPLETE - composition and all static "
+                  "lenses ran; required/dynamic tests and official publication remain pending.\n")
+        machine_path, human_path = _write_reports(store, run_id, {
+            "schema": RESULT_SCHEMA, "stage": STACK_STAGE, "complete": False,
+            "missing_stages": STACK_MISSING_STAGES, "state": state,
+            "exit_code": exit_code, "finding_verdict": finding_verdict,
+            "combined_unit_id": combined_id, "prospective_unit_id": prospective_id,
+            "static_lenses_complete": static_complete,
+        }, completion_marker=marker)
+        result["machine_report_path"] = machine_path
+        result["human_report_path"] = human_path
+        for unit in unit_results:
+            _write_stack_unit_report(store, run_id, unit, {
+                "run_machine_report_path": machine_path,
+                "combined_unit_id": combined_id,
+                "individual_unit_ids": [item["unit_id"] for item in unit_results
+                                        if item["kind"] == "individual"],
+            })
+        combined = next(unit for unit in unit_results if unit["kind"] == "combined")
+        combined["individual_unit_ids"] = [unit["unit_id"] for unit in unit_results
+                                           if unit["kind"] == "individual"]
+        combined["individual_reports"] = [{
+            "unit_id": unit["unit_id"], "unit_key": unit["unit_key"],
+            "machine_report_path": unit["machine_report_path"],
+            "human_report_path": unit["human_report_path"],
+        } for unit in unit_results if unit["kind"] == "individual"]
+        for unit in unit_results:
+            unit["combined_report_path"] = combined["machine_report_path"]
+        return result
+
+
 def main(argv=None):
     """Run the standalone ``final-review`` operator command."""
     args = list(sys.argv[1:] if argv is None else argv)
@@ -544,20 +956,26 @@ def main(argv=None):
         args = args[1:]
     elif len(args) > 1 and args[1] == "final-review":
         args = args[2:]
-    if len(args) != 1:
+    if not args:
+        sys.stderr.write("review-gate final-review requires at least one explicit ref.\n")
+        return 2
+    if len(args) > 1 and not all(reference.startswith(("https://", "http://"))
+                                 for reference in args):
+        # Preserve the unambiguous legacy shorthand contract. Graph discovery
+        # emits canonical provider URLs for corrected multi-item commands.
         sys.stderr.write(
-            "review-gate final-review requires exactly one ref; multiple refs "
-            "are reserved for later stack orchestration.\n"
+            "review-gate final-review requires exactly one numeric ref; multiple numeric "
+            "refs are reserved. Use canonical provider URLs for stack orchestration.\n"
         )
         return 2
     try:
-        result = run_final_review(args[0])
+        result = run_final_review(args[0] if len(args) == 1 else args)
     except Exception as exc:
         sys.stderr.write(f"review-gate final-review failed: {exc}\n")
         return 2
     sys.stdout.write(json.dumps(result, sort_keys=True, ensure_ascii=False) + "\n")
     sys.stderr.write(
-        f"review-gate final-review: {result['state']}; stage {STAGE} is incomplete; "
+        f"review-gate final-review: {result['state']}; stage {result['stage']} is incomplete; "
         f"finding verdict: {result['finding_verdict'] or 'unavailable'}; "
         f"run {result['run_id']}\n"
     )
