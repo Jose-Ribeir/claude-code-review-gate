@@ -140,18 +140,31 @@ if len(sys.argv) > 2 and sys.argv[1] == "--final-review":
             "local_only_exists": (Path(request["repository"]["path"]) / "local-only.txt")
             .exists(),
         }
-        Path(trace_path).write_text(json.dumps(traced), encoding="utf-8")
-    if os.environ.get("STUB_FINAL_EXIT"):
+        with open(trace_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(traced) + "\n")
+
+    def lens_setting(name, default=None):
+        """Return a per-lens override, falling back to the historical global knob."""
+        overrides = json.loads(os.environ.get(name, "{}") or "{}")
+        if request["lens"] in overrides:
+            return overrides[request["lens"]]
+        return os.environ.get(name.removesuffix("_FOR"), default)
+
+    exit_code = lens_setting("STUB_FINAL_EXIT_FOR")
+    if exit_code:
         sys.stderr.write("scripted final worker failure\n")
-        sys.exit(int(os.environ["STUB_FINAL_EXIT"]))
-    raw = os.environ.get("STUB_FINAL_RAW")
+        sys.exit(int(exit_code))
+    raw = lens_setting("STUB_FINAL_RAW_FOR")
     if raw is not None:
         sys.stdout.write(raw)
         sys.exit(0)
-    result = json.loads(os.environ.get("STUB_FINAL_RESULT", "{}"))
+    result = lens_setting("STUB_FINAL_RESULT_FOR", "{}")
+    if isinstance(result, str):
+        result = json.loads(result)
     result.setdefault("schema", "final-review-worker-result/v1")
     result.setdefault("status", "success")
-    result.setdefault("summary", "correctness lens inspected the complete tree and diff")
+    result.setdefault(
+        "summary", f"{request['lens']} lens inspected the complete tree and diff")
     result.setdefault("findings", [])
     result.setdefault("warnings", [])
     sys.stdout.write(json.dumps(result))
