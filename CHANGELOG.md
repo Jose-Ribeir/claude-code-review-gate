@@ -7,6 +7,32 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Race & regression test checks and granular finding waivers (ADR 0007,
+  SPEC-15).** Command checks gain `parallel` (default `false`; run the
+  executor concurrently with the review session against its own throwaway
+  tip clone — probe files can never leak into reviewer evidence; a
+  clone-creation failure skips the check with a warning, never a fallback
+  to the review tree) and `timeout` (default 60 s, clamped to 1–3600).
+  The executor contract extends to `warnings` and
+  `evidence_source: "existing_test" | "ephemeral_test"` (validated;
+  `ephemeral_test` findings pair with the canonical no-permanent-coverage
+  warning). A **reference executor** ships in `examples/test-check/`:
+  a pinned one-shot selector model reads the matched diff, runs selected
+  repo tests (`go test -race` for Go) and authors ephemeral probes inside
+  its own clone, re-runs every failure exactly once (reproduce-then-block),
+  and quotes verbatim output; flakes, unbuildable probes, and coverage gaps
+  degrade to warnings plus telemetry, never blocks.
+- **Finding waivers (ADR 0007).** `review-gate.py waive <id>… [--note]`,
+  `unwaive <id>…`, and `waive --list` record narrow, per-finding
+  acknowledgments in a store-root, repo-scoped ledger (machine-local, no
+  expiry). A waiver keys on the finding's content anchor — including a
+  tip-location fallback for command-check findings that carry no diff
+  hunk — so it survives rebases and line movement, **lapses automatically
+  when the code under the finding changes**, and stays loud: verdict
+  text, recorded JSON, and telemetry all list what was suppressed, and
+  the findings log keeps every waived finding. Waivers apply to every
+  finding class and only filter `compute_verdict`'s inputs.
+### Added
 - **Custom checks and documentation-quality duties (`checks` config, ADR 0006).**
   The settings gain a top-level `checks` object resolving through the usual
   layering (built-in defaults, store-root `config.json`, per-repo

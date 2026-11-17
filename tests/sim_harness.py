@@ -446,16 +446,19 @@ def run_scenario(scratch, env, scenario, timeout_s=5400, gate_scripts=None):
                           forbid_message=scenario.forbid_message)]
     outcome = "error"
     for step in steps:
-        for spec in step.commits or []:
-            apply_commit(scratch.work, spec)
-        for argv in step.commands or []:
-            rc, out = _run_gate_command(scratch, env, argv, gate_scripts)
-            transcripts.append(f"$ {' '.join(argv)}\n{out}")
+        step_text = []   # this step's commands + push transcript (assertions
+        for spec in step.commits or []:   # see both: an operator command's
+            apply_commit(scratch.work, spec)   # output is part of what the
+        for argv in step.commands or []:  # pusher reads, e.g. a waiver's
+            rc, out = _run_gate_command(scratch, env, argv, gate_scripts)  # loud
+            step_text.append(f"$ {' '.join(argv)}\n{out}")  # listing or a
+            transcripts.append(step_text[-1])  # recorded warning read back
             if rc != 0:
                 failures.append(f"command step {step.label!r} exited {rc}: "
                                 f"{argv}")
         outcome, transcript, attempts = drive_push(scratch, env, timeout_s=timeout_s)
         pushes += len(attempts)
+        step_text.append(transcript)
         transcripts.append(transcript)
         if outcome != step.expect:
             failures.append(f"step {step.label!r}: expected {step.expect!r}, "
@@ -466,7 +469,7 @@ def run_scenario(scratch, env, scenario, timeout_s=5400, gate_scripts=None):
         if outcome == "pass" and BLOCK_BANNER.lower() in transcript.lower():
             failures.append(f"step {step.label!r}: approval transcript contains "
                             "the block banner")
-        low = transcript.lower()
+        low = "\n".join(step_text).lower()
         for sub in step.expect_message:
             if sub.lower() not in low:
                 failures.append(f"step {step.label!r}: message missing required "

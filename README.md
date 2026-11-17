@@ -454,6 +454,39 @@ Declare any executable in your repo as a push check:
   authority.
 - A check whose globs match nothing in the diff costs nothing.
 
+A complete, working example lives in **`examples/test-check/`**: the
+reference race & regression test executor (selector-driven, runs selected
+repo tests and ephemeral `-race` probes in its own tip clone, reproduces
+failures before blocking) plus its install guide.
+
+### Finding waivers
+
+`--no-verify` is the nuclear option. For the case of expected findings you
+accept, the gate offers narrow, per-finding acknowledgment (ADR 0007):
+
+```console
+$ python3 scripts/review-gate.py waive F2 F3 --note "expected during the migration"
+$ python3 scripts/review-gate.py waive --list
+$ python3 scripts/review-gate.py unwaive F2
+```
+
+- Waiving is a **between-pushes act** on the repo you push from: after a
+  blocked push, waive the findings you accept by id; your next push is
+  judged on what is left.
+- A waiver keys on the finding's **content anchor** (path + signature + the
+  tip's local text window around the finding), so it survives rebases and
+  line movement — and **lapses automatically when the code under the
+  finding changes**: anything new or altered can never ride an old waiver.
+  Findings without diff hunks (command checks) anchor on the tip text at
+  the finding's own location instead, so they are waivable too.
+- Suppression is **loud, always**: the verdict text, the recorded JSON, and
+telemetry list what was waived; the findings log keeps every finding
+  (waived findings are never deleted from the record).
+- The ledger is store-root, **repo-scoped, machine-local, no expiry** —
+  like the verdict store. Waivers apply to every finding class (reviewer,
+  deep reviewer, docs checker, command checks) and only filter what
+  `compute_verdict` sees; they never alter the verdict rule.
+
 ## Relationship to upstream
 
 This repository is a flat port of `claude-code-review-gate` (D2 of the port
