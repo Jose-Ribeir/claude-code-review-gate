@@ -4,8 +4,8 @@ The database lives under the existing *external* review-gate store root, never
 inside a repository under review.  Only Python's standard-library sqlite3 is
 used.  All writes are explicit transactions; a write transaction is acquired
 with BEGIN IMMEDIATE so its run sequence and same-store supersession decisions
-are atomic.  The module records verdicts supplied by the supervisor; it does
-not implement finding-severity or verdict logic.
+are atomic.  The module records verdicts supplied by the supervisor and
+delegates official finding verdicts to the existing ocr_verdict authority.
 """
 from __future__ import annotations
 
@@ -21,12 +21,14 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+import ocr_verdict
 import rg_final_contract
 import rg_final_memory
 import rg_store
 
 SCHEMA_VERSION = 2
 REPORT_SCHEMA = "final-review-report/v1"
+PUBLICATION_STATUS_CONTEXT = "review-gate/final-review"
 FINAL_STATES = frozenset(("pass", "findings", "stale", "incomplete"))
 _SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 
@@ -37,6 +39,33 @@ class StoreError(Exception):
 
 class StoreBusyError(StoreError):
     """A SQLite writer remained unavailable after bounded retries."""
+
+
+class _PublicationAttempt:
+    """One audit row finalized while its same-store writer guard is held."""
+
+    def __init__(self, store, publication_id, run_id, current):
+        self.store = store
+        self.publication_id = publication_id
+        self.run_id = run_id
+        self.current = current
+        self.finalized = False
+
+    def record(self, status, status_context, details=None, error=""):
+        if self.finalized:
+            raise StoreError("publication attempt was already finalized")
+        cursor = self.store._conn.execute(
+            "UPDATE publications SET status = ?, status_context = ?, details_json = ?, "
+            "error = ? WHERE publication_id = ? AND run_id = ?",
+            (str(status), str(status_context), _json(details), str(error),
+             self.publication_id, self.run_id),
+        )
+        if cursor.rowcount != 1:
+            raise StoreError("publication audit row is unavailable")
+        self.finalized = True
+
+    def degrade_trust(self, reason):
+        return self.store._degrade_publication_trust(self.run_id, reason)
 
 
 def _now():
@@ -1337,16 +1366,101 @@ class FinalStore:
                 "publication_pass_allowed": state == "fresh",
             }
 
-    def publication_decision(self, run_id, *, local_waivers=()):
-        """C13 seam: official findings/trust/freshness with local waivers isolated.
+    def _publication_target(self, run_id, unit_id=None, item_key=None):
+        """Resolve and cross-check one unit's fork-aware status destination."""
+        run = self._run_row(run_id)
+        unit = None
+        item = None
+        if unit_id is not None:
+            unit = self._unit_row(unit_id)
+            if unit["run_id"] != run_id:
+                raise StoreError("publication unit does not belong to run")
+        if unit is not None and unit["kind"] == "individual":
+            item = self._conn.execute(
+                "SELECT * FROM run_items WHERE run_id = ? AND position = ?",
+                (run_id, unit["item_position"]),
+            ).fetchone()
+        elif item_key is not None:
+            item = self._conn.execute(
+                "SELECT * FROM run_items WHERE run_id = ? AND item_key = ?",
+                (run_id, str(item_key)),
+            ).fetchone()
+        if item_key is not None and item is not None and item["item_key"] != str(item_key):
+            raise StoreError("publication item does not match the individual unit")
+        if item is not None and unit is not None and unit["kind"] == "individual" and \
+                unit["item_position"] != item["position"]:
+            raise StoreError("publication item does not match the individual unit")
+        return run, unit, item
 
-        ``can_publish_pass`` is deliberately narrower than publication of a
-        findings/stale/incomplete status. Local waiver records are returned as
-        visible operator context but are never matched out of the official
-        finding stream.
+    @staticmethod
+    def _publication_identity(run, unit, item):
+        provider_data = _loads(item["provider_data_json"]) if item is not None else {}
+        source = provider_data.get("source") or {}
+        target = provider_data.get("target") or {}
+        return {
+            "store_instance_id": None,  # filled by publication_decision
+            "run_id": run["run_id"],
+            "run_seq": run["run_seq"],
+            "stack_key": run["stack_id"],
+            "contract_version": run["contract_version"],
+            "unit_id": unit["unit_id"] if unit is not None else None,
+            "unit_key": unit["unit_key"] if unit is not None else None,
+            "item_key": item["item_key"] if item is not None else None,
+            "source_project": source.get("project_id") or
+            (item["source_project"] if item is not None else None),
+            "source_ref": item["source_ref"] if item is not None else None,
+            "head_sha": item["source_sha"] if item is not None else None,
+            "target_project": target.get("project_id") or
+            (item["target_project"] if item is not None else None),
+            "target_ref": item["target_ref"] if item is not None else None,
+            "target_sha": item["target_sha"] if item is not None else None,
+            "base_sha": (item["base_sha"] or unit["base_sha"])
+            if item is not None and unit is not None else
+            (item["base_sha"] if item is not None else None),
+        }
+
+    @staticmethod
+    def _verdict_findings(findings):
+        normalized = []
+        for original in findings:
+            finding = dict(original)
+            if "start_line" not in finding and finding.get("line") is not None:
+                finding["start_line"] = finding["line"]
+            if "end_line" not in finding and finding.get("line") is not None:
+                finding["end_line"] = finding["line"]
+            normalized.append(finding)
+        return normalized
+
+    @staticmethod
+    def _coverage_complete(unit, coverage, stopped, skipped):
+        required_status = coverage.get("required_tests")
+        dynamic_status = coverage.get("dynamic_tests")
+        required_done = required_status not in (
+            None, "", "incomplete", "STOP", "stop", "stopped", "skipped",
+        )
+        dynamic_done = dynamic_status not in (
+            None, "", "incomplete", "error", "STOP", "stop", "stopped", "skipped",
+        )
+        composition_done = unit["kind"] != "combined" or \
+            coverage.get("composition") == "complete"
+        return bool(
+            unit["state"] in ("pass", "findings") and
+            coverage.get("repository") == "complete" and
+            coverage.get("mandatory_lenses") == "complete" and
+            required_done and dynamic_done and composition_done and
+            not stopped and not skipped
+        )
+
+    def publication_decision(self, run_id, *, unit_id=None, item_key=None, local_waivers=()):
+        """Derive status and official-green eligibility from durable authority.
+
+        The existing finding verdict remains the only severity authority. Full
+        individual+combined execution evidence, run completion, fresh pins,
+        same-store ordering, and enforceable trust are additional mandatory
+        gates. Local waiver records are visible but never enter verdict input.
         """
         with self._lock:
-            run = self._run_row(run_id)
+            run, selected_unit, item = self._publication_target(run_id, unit_id, item_key)
             findings = self.official_findings(run_id)
             finding_memory = self.memory_status(run_id)
             freshness = self.latest_freshness(run_id)
@@ -1357,38 +1471,211 @@ class FinalStore:
                 "waiver_isolation": "local-context-only",
                 "local_waivers_applied": False,
             })
-            if ((freshness and freshness["state"] == "stale") or run["state"] == "stale"):
+            units = self._rows(
+                "SELECT * FROM units WHERE run_id = ? AND kind IN ('individual', 'combined') "
+                "ORDER BY rowid", (run_id,),
+            )
+            scope_units = []
+            stopped = False
+            lens_count = test_count = warning_count = stop_count = 0
+            for unit in units:
+                coverage = {
+                    row["kind"]: row["status"] for row in self._rows(
+                        "SELECT kind, status FROM coverage WHERE unit_id = ?", (unit["unit_id"],),
+                    )
+                }
+                unit_stops = self._rows(
+                    "SELECT DISTINCT s.stop_id FROM stops s LEFT JOIN stop_units su "
+                    "ON su.stop_id = s.stop_id WHERE s.unit_id = ? OR su.unit_id = ?",
+                    (unit["unit_id"], unit["unit_id"]),
+                )
+                skipped = self._conn.execute(
+                    "SELECT count(*) FROM skipped_work WHERE unit_id = ?", (unit["unit_id"],),
+                ).fetchone()[0]
+                complete = self._coverage_complete(
+                    unit, coverage, bool(unit_stops), bool(skipped),
+                )
+                stopped = stopped or bool(unit_stops)
+                stop_count += len(unit_stops)
+                lens_count += self._conn.execute(
+                    "SELECT count(*) FROM lenses WHERE unit_id = ?", (unit["unit_id"],),
+                ).fetchone()[0]
+                test_count += self._conn.execute(
+                    "SELECT count(*) FROM test_evidence WHERE unit_id = ?", (unit["unit_id"],),
+                ).fetchone()[0]
+                warning_count += self._conn.execute(
+                    "SELECT count(*) FROM warnings WHERE unit_id = ?", (unit["unit_id"],),
+                ).fetchone()[0]
+                scope_units.append({
+                    "unit_id": unit["unit_id"], "unit_key": unit["unit_key"],
+                    "kind": unit["kind"], "state": unit["state"],
+                    "complete": complete, "stopped": bool(unit_stops),
+                    "skipped_work": skipped, "coverage": coverage,
+                })
+            evidence_complete = bool(units) and all(unit["complete"] for unit in scope_units)
+            all_pass = bool(units) and all(unit["state"] == "pass" for unit in scope_units)
+            fresh = bool(freshness and freshness["fresh"])
+            scope_complete = bool(evidence_complete and fresh and not stopped)
+            run_completed = run["completed_at"] is not None
+            superseded = run["superseded_by_run_id"] is not None
+            finding_verdict = ocr_verdict.compute_verdict({
+                "findings": self._verdict_findings(findings),
+            })
+            if ((freshness and freshness["state"] == "stale") or run["state"] == "stale" or
+                    any(unit["state"] == "stale" for unit in scope_units)):
                 state = "stale"
-            elif findings:
+            elif stopped:
+                state = "incomplete"
+            elif findings or run["state"] == "findings":
                 state = "findings"
+            elif run["state"] == "incomplete" or not scope_complete:
+                state = "incomplete"
             elif run["state"] == "pass" and (
-                    not finding_memory["complete_for_finalization"] or
-                    freshness is None or not freshness["fresh"]):
+                    not finding_memory["complete_for_finalization"] or not all_pass):
                 state = "incomplete"
             else:
                 state = run["state"]
-            can_publish_pass = bool(
-                state == "pass" and freshness and freshness["fresh"] and
-                finding_memory["clear_allowed"] and not run["superseded_by_run_id"] and
-                trust.get("enforced") and not trust.get("local_only")
+
+            status_blockers = []
+            if run["state"] not in FINAL_STATES:
+                status_blockers.append("invalid-final-state")
+            if not run_completed:
+                status_blockers.append("run-not-completed")
+            if superseded:
+                status_blockers.append("run-superseded")
+            if selected_unit is None:
+                status_blockers.append("unit-required")
+            elif selected_unit["kind"] not in ("individual", "combined"):
+                status_blockers.append("unsupported-unit-kind")
+            if item is None:
+                status_blockers.append("publication-target-required")
+            stack = self._conn.execute(
+                "SELECT provider FROM stacks WHERE stack_id = ?", (run["stack_id"],),
+            ).fetchone()
+            if stack is None or stack["provider"] != "gitlab":
+                status_blockers.append("unsupported-provider")
+            if trust.get("local_only"):
+                status_blockers.append("trust-local-only")
+            if not trust.get("enforced"):
+                status_blockers.append("trust-not-enforced")
+            if trust.get("official") is False:
+                status_blockers.append("trust-not-official")
+
+            green_blockers = list(status_blockers)
+            if bool(run["independent"]):
+                green_blockers.append("independent-run")
+            if not scope_complete:
+                green_blockers.append("scope-incomplete")
+            if not all_pass:
+                green_blockers.append("units-not-pass")
+            if not fresh:
+                green_blockers.append("revisions-not-fresh")
+            if stopped:
+                green_blockers.append("stop-recorded")
+            if findings:
+                green_blockers.append("official-findings")
+            if finding_verdict != "pass":
+                green_blockers.append("finding-verdict-not-pass")
+            if not finding_memory["clear_allowed"]:
+                green_blockers.append("finding-memory-not-clear")
+            if state != "pass":
+                green_blockers.append("final-state-not-pass")
+            green_blockers = list(dict.fromkeys(green_blockers))
+            can_publish_status = not status_blockers
+            can_publish_pass = not green_blockers
+            publication_state = "pass" if can_publish_pass else (
+                state if state in ("findings", "stale", "incomplete") else "incomplete"
             )
             stale = state == "stale"
+            identity = self._publication_identity(run, selected_unit, item)
+            identity["store_instance_id"] = self.store_instance_id
+            provider_data = _loads(item["provider_data_json"]) if item is not None else {}
+            reference = (item["reference"] if item is not None else None) or \
+                provider_data.get("url")
+            report = {
+                "findings": len(findings), "lenses": lens_count, "tests": test_count,
+                "warnings": warning_count, "stops": stop_count,
+                "completed_units": sum(unit["complete"] for unit in scope_units),
+                "total_units": len(scope_units), "freshness": (
+                    freshness["state"] if freshness else "not_checked"
+                ),
+            }
             return {
                 "schema": "final-review-publication-decision/v1",
                 "run_id": run_id, "stack_key": run["stack_id"], "state": state,
+                "publication_state": publication_state,
                 "store_instance_id": self.store_instance_id,
+                "unit_id": unit_id, "item_key": identity["item_key"],
+                "identity": identity,
+                "transport": {"reference": reference},
+                "scope": {
+                    "complete": scope_complete, "evidence_complete": evidence_complete,
+                    "all_pass": all_pass, "stopped": stopped, "units": scope_units,
+                },
+                "report": report,
+                "run_completed": run_completed,
                 "official_findings": findings,
+                "finding_verdict": finding_verdict,
                 "suppressed_finding_ids": [],
                 "local_waivers_applied": False,
                 "local_waiver_context": rg_final_memory.local_waiver_context(
                     findings, local_waivers),
                 "memory": finding_memory, "freshness": freshness, "trust": trust,
-                "can_publish": state in FINAL_STATES,
+                "status_blockers": status_blockers,
+                "green_blockers": green_blockers,
+                "can_publish": can_publish_status,
+                "can_publish_status": can_publish_status,
                 "can_publish_pass": can_publish_pass,
-                "superseded": run["superseded_by_run_id"] is not None,
+                "official_green": can_publish_pass,
+                "superseded": superseded,
+                "independent": bool(run["independent"]),
                 "restart_required": stale, "automatic_restart": False,
                 "restart": {"required": stale, "automatic": False},
             }
+
+    def _degrade_publication_trust(self, run_id, reason):
+        """Degrade an existing run without changing its verdict or completion."""
+        run = self._run_row(run_id)
+        effective = self._trust(
+            run["independent"], run["continuity_required"], _loads(run["trust_json"]),
+        )
+        effective.update({
+            "local_only": True, "enforced": False, "official": False,
+            "degraded_reason": f"publication degraded: {str(reason)}",
+        })
+        self._conn.execute(
+            "UPDATE runs SET trust_json = ? WHERE run_id = ?", (_json(effective), run_id),
+        )
+        return effective
+
+    @contextmanager
+    def publication_guard(self, run_id, unit_id=None, item_key=None):
+        """Serialize final publication against newer runs in this store.
+
+        The writer transaction remains held across the provider request. A
+        newer ``start_run`` therefore commits only after an older in-flight
+        request finishes, and must publish its own newer outcome afterwards.
+        An already superseded run yields ``current=False`` and no request may
+        be made by its caller. Each guard owns exactly one durable audit row.
+        """
+        with self._transaction():
+            run, _unit, item = self._publication_target(run_id, unit_id, item_key)
+            if item is not None:
+                item_key = item["item_key"]
+            latest = self._conn.execute(
+                "SELECT run_id FROM runs WHERE stack_id = ? ORDER BY run_seq DESC LIMIT 1",
+                (run["stack_id"],),
+            ).fetchone()
+            current = latest is not None and latest["run_id"] == run_id and \
+                run["superseded_by_run_id"] is None
+            publication_id = _identifier()
+            self._conn.execute(
+                "INSERT INTO publications(publication_id, run_id, unit_id, item_key, status, "
+                "status_context, details_json, error, attempted_at) "
+                "VALUES (?, ?, ?, ?, 'attempting', ?, '{}', '', ?)",
+                (publication_id, run_id, unit_id, item_key, PUBLICATION_STATUS_CONTEXT, _now()),
+            )
+            yield _PublicationAttempt(self, publication_id, run_id, current)
 
     def record_warning(self, unit_id, code, message, scope="", details=None):
         warning_id = _identifier()
