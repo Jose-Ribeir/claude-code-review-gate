@@ -9068,7 +9068,15 @@ def _warn_mode_clamp(tagged):
         conf = 0.0
     conf_cap = _WARN_MODE_CONFIDENCE_CAP
     if conf_cap >= min_conf:
-        conf_cap = max(0.0, round(min_conf - 0.01, 2))
+        conf_cap = round(min_conf - 0.01, 2)
+    if conf_cap < 0:
+        # No valid confidence sits strictly below the bar (bar at or below
+        # 0): the severity side must be the escape, so the finding drops at
+        # most to the lowest rank that never blocks unconditionally.
+        conf_cap = 0.0
+        safe_sev = "low"
+    if rank > _SEVERITY_RANK.get(safe_sev, -1):
+        tagged["severity"] = safe_sev
     if conf > conf_cap:
         tagged["confidence"] = conf_cap
     return tagged
@@ -9243,15 +9251,18 @@ def _apply_docs_quality_demotion(result, repo_root=None):
         subset = [out[i] for i in indexes]
         checked = ocr_docsquality.validate_findings(subset)
         validated = checked.get("findings") or []
-        if len(validated) == len(indexes):  # the helper failed soft: keep as-is
+        if len(validated) == len(indexes):  # helper full-success only
             for i, f in zip(indexes, validated):
                 out[i] = f
-            warnings += [{"file": None, "message": w}
-                         for w in (checked.get("warnings") or [])]
             _TELE.setdefault("docs_quality", []).append({
                 "duty": "docs-deslop-validate", "findings": len(indexes),
                 "demotions": int(checked.get("demoted") or 0),
                 "seconds": round(time.monotonic() - t0, 2)})
+        # The helper's warnings are always kept, partial failure included:
+        # silently dropping them would hide the degrade (ADR 0006:
+        # observable fail-soft). Raw findings stay as-is on that path.
+        warnings += [{"file": None, "message": w}
+                     for w in (checked.get("warnings") or [])]
     modes = {}
     if repo_root is not None:
         try:
@@ -11445,6 +11456,11 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
         pass
     stop_evt = threading.Event()   # a sibling failed hard: no more attempts
     docs_context = _docs_context(review_root)
+    # Chunked runs carry docs_quality ONLY on chunk 0: a full payload
+    # (doc diffs + per-duty evidence) re-shipped into every chunk would
+    # duplicate the documentation check N-fold -- one documentation pass
+    # per push is the contract (chunk 0 or the single/deep manifest).
+    quality_attached = {"done": False}
 
     def _prepare(k, chunk_items):
         """Write chunk k's manifest (main thread: the impact bundle touches _TELE)."""
@@ -11465,10 +11481,14 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
         else:
             extras = chunk_extras(k, chunk_paths)
         scope = _ManifestScope(common_dir, run_id, k, len(chunks))
+        chunk_quality = None
+        if docs_quality and not quality_attached["done"]:
+            chunk_quality = docs_quality
+            quality_attached["done"] = True
         manifest = _build_review_manifest(
             scope, chunk_items, other_changed, carry_paths,
             extras, diffs, docs_context=docs_context, arch_flags=arch_flags,
-            docs_quality=docs_quality)
+            docs_quality=chunk_quality)
         _write_manifest_file(manifest_path, manifest, f"chunk manifest for chunk {k}")
         return manifest, manifest_path
 

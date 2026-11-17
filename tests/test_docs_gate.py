@@ -1234,6 +1234,30 @@ def test_warn_mode_holds_under_a_lowered_block_bar(tmp_path):
     assert st.get("verdict") == "warn", st
 
 
+
+
+def test_warn_mode_holds_when_block_confidence_is_zero(tmp_path, monkeypatch):
+    """Clamp edge (push review): OCR_BLOCK_CONFIDENCE=0 makes every conf
+    'at the bar'). The conf cap must be able to descend below zero only via
+    the severity side: the finding drops to low, ranked below medium, so
+    compute_verdict -- whose unconditional branch (rank >= min_rank) is the
+    only thing that can block without a confidence test -- cannot fire it."""
+    work = _repo(tmp_path, {"README.md": "# project\n"})
+    _write_checks_config(work, {"docs-deslop": {"mode": "warn"}})
+    tip = _commit(work, {"README.md": "# project\n\nmore docs\n"})
+    spec = _quality_spec("README.md", "docs-deslop", tells=[
+        {"phrase": "robust", "line": 2},
+        {"phrase": "seamless", "line": 3},
+        {"phrase": "--", "line": 4},
+    ])
+    env = _env(tmp_path, "t.trace", STUB_DOCS_FINDING=json.dumps(spec))
+    env["OCR_BLOCK_CONFIDENCE"] = "0"
+    decision, reason = _push(work, env)
+    assert decision == "pass", reason
+    st = _state(work, tip)
+    assert st.get("verdict") == "warn", st
+
+
 def test_warn_mode_adr_integrity_finding_never_blocks(tmp_path):
     """The clamp keys on the resolved per-duty mode for every quality duty,
     not only on the tell-carrying deslop class."""

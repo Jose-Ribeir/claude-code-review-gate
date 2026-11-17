@@ -153,7 +153,7 @@ def _phrase_regex(phrase):
     esc = _PLACEHOLDER_RE.sub(r"\\S+", esc)
     if re.match(r"[\w']", phrase):
         esc = r"\b" + esc
-    if re.match(r"[\w'.]", phrase[-1]):
+    if re.match(r"\w", phrase[-1]):
         esc = esc + r"\b"
     try:
         return re.compile(esc, re.IGNORECASE)
@@ -243,6 +243,10 @@ def _collect_path_mentions(repo_root, prose):
                 continue
             path, _, _anchor = target.partition("#")
             path = path.split("?", 1)[0].strip()
+            # A leading "/" means repo root (GitHub convention): strip it so
+            # os.path.join(repo_root, path) resolves against the review tree,
+            # never the filesystem root.
+            path = path.lstrip("/")
             if not path:
                 continue
             mentions.append((path, n, "markdown_link"))
