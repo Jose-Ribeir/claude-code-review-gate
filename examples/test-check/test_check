@@ -56,8 +56,10 @@ Four phases:
    the scratch dir.
 4. CLASSIFY -- reproduced failure (failed twice) -> finding; failed once then
    passed -> flake warning; build/run error (syntax error, missing module,
-   unexecutable) -> warning; pass -> silent. Fail-soft everywhere: exit 0
-   unless stdin itself violates the contract.
+   unexecutable) or timeout -> warning; pass -> silent. Selector
+   authentication and publication/provider credentials are stripped before
+   untrusted tests/probes execute. Fail-soft everywhere: exit 0 unless stdin
+   itself violates the contract.
 
 Python 3, stdlib only. POSIX (probe run_cmd goes through /bin/sh).
 """
@@ -224,7 +226,7 @@ def _reproduce_key(outcome):
     """The telemetry bucket a classified outcome lands in (the gate's
     contract names fail/pass/flake/build/error)."""
     return {"finding": "fail", "pass": "pass", "flake": "flake",
-            "build": "build", "error": "error"}[outcome]
+            "build": "build", "error": "error", "timeout": "error"}[outcome]
 
 
 def _bump(counts, group, key=None):
@@ -250,7 +252,7 @@ def _run(argv, cwd, timeout, stdin=None, env=None):
     """(rc, combined_output, note): one bounded subprocess run, never an
     exception. ``note`` is set only when argv could not be executed at all
     (binary missing); a timeout is reported through rc None + output text
-    and is treated like a failing run by the caller."""
+    and is classified as a visible timeout gap by the caller."""
     try:
         proc = subprocess.run(argv, cwd=cwd, input=stdin, capture_output=True,
                               text=True, errors="replace", timeout=timeout,
@@ -411,26 +413,52 @@ def _pytest_available():
     return _PYTEST
 
 
+def _subject_environment():
+    """Credential-free environment for untrusted repo tests and probes.
+
+    Selector model authentication is needed only by the trusted selector
+    process.  Tests receive neither it nor publication/provider credentials.
+    Non-secret test knobs such as FLAKE_STATE remain available to fixtures.
+    """
+    env = dict(os.environ)
+    sensitive = ("TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "COOKIE",
+                 "PRIVATE_KEY", "ASKPASS", "AUTH")
+    model = ("ANTHROPIC_", "CLAUDE_", "KIMI_", "OPENAI_", "PI_", "KIMCHI_")
+    for key in list(env):
+        upper = key.upper()
+        provider = any(part in upper for part in
+                       ("GITLAB", "GITHUB", "GLAB_", "GH_",
+                        "PUBLICATION", "PUBLISH"))
+        if provider or upper.startswith(model) or any(
+                part in upper for part in sensitive):
+            env.pop(key, None)
+    for key in ("SSH_AUTH_SOCK", "GIT_ASKPASS", "SSH_ASKPASS",
+                "GIT_CONFIG_COUNT", "OCR_TEST_SELECTOR_CMD"):
+        env.pop(key, None)
+    env["RG_FINAL_CREDENTIAL_FREE"] = "1"
+    return env
+
+
 def _runner_for(path):
-    """(argv, cwd) to run ONE existing repo test, or (None, reason) when no
-    runner can be inferred -- an unknown shape is a warning, never a wild
-    guess. Python runs get PYTHONDONTWRITEBYTECODE and pytest runs drop the
-    cache provider so a test run leaves no artifacts in the clone."""
+    """(argv, cwd, env) to run ONE existing repo test, or (None, reason)
+    when no runner can be inferred -- an unknown shape is a warning, never a
+    wild guess. Python runs get PYTHONDONTWRITEBYTECODE and pytest runs drop
+    the cache provider so a test run leaves no artifacts in the clone."""
     base = os.path.basename(path)
     directory = os.path.dirname(path) or "."
+    env = _subject_environment()
     if base.endswith("_test.go"):
-        return (["go", "test", "-race", "-count=1", "."], directory, None)
+        return (["go", "test", "-race", "-count=1", "."], directory, env)
     if base.endswith((".test.js", ".test.mjs", ".test.cjs")):
-        return (["node", "--test", base], directory, None)
+        return (["node", "--test", base], directory, env)
     if base.endswith(".py"):
-        env = dict(os.environ)
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         if _pytest_available():
             return ([sys.executable, "-m", "pytest", "-q", "-p",
                      "no:cacheprovider", base], directory, env)
         return ([sys.executable, base], directory, env)
     if base.endswith(".sh"):
-        return (["sh", base], directory, None)
+        return (["sh", base], directory, env)
     return (None, None, "runner unknown for this file type")
 
 
@@ -442,13 +470,14 @@ def _looks_like_build_error(output):
 def _execute_subject(argv, cwd, label, env=None, counts=None):
     """Run once, classify, and re-run a failure EXACTLY once (the
     reproduce-then-block rule). Returns (outcome, first_output) with
-    outcome in {"pass", "finding", "flake", "build", "error"}:
+    outcome in {"pass", "finding", "flake", "build", "error", "timeout"}:
 
     * pass        -- exited 0.
     * finding     -- failed, re-run failed again: a reproduced failure.
     * flake       -- failed, re-run passed: repro-free, demoted.
     * build       -- failed with a compile/setup shape: never a block.
     * error       -- could not be executed at all (missing binary).
+    * timeout     -- a subject exceeded its bound: dynamic evidence is unknown.
     """
     rc, out, note = _run(argv, cwd, _run_timeout(), env=env)
     _bump(counts, "runs")
@@ -456,6 +485,10 @@ def _execute_subject(argv, cwd, label, env=None, counts=None):
     if rc is None and note:
         _bump(counts, "reproduce_results", "error")
         return "error", out or note
+    if rc is None:
+        _bump(counts, "timeouts")
+        _bump(counts, "reproduce_results", "error")
+        return "timeout", out
     if rc == 0:
         _bump(counts, "reproduce_results", "pass")
         return "pass", out
@@ -469,6 +502,10 @@ def _execute_subject(argv, cwd, label, env=None, counts=None):
     if rc2 is None and note2:
         _bump(counts, "reproduce_results", "error")
         return "error", out
+    if rc2 is None:
+        _bump(counts, "timeouts")
+        _bump(counts, "reproduce_results", "error")
+        return "timeout", out
     if rc2 == 0:
         _bump(counts, "reproduce_results", "flake")
         return "flake", out
@@ -488,6 +525,13 @@ def _handle(outcome, out, kind, name, path, evidence, findings, warnings,
         warnings.append({"file": path,
                          "message": "%s %s could not be executed (%s); skipped"
                                     % (kind, name, out.strip())})
+        return
+    if outcome == "timeout":
+        warnings.append({"file": path,
+                         "message": "%s %s timed out; the dynamic check was "
+                                    "demoted to a warning (no finding): %s"
+                                    % (kind, name, _cap(out.strip(),
+                                                        CONTENT_CAP))})
         return
     if outcome == "build":
         warnings.append({"file": path,
@@ -648,8 +692,9 @@ def _run_probes(probes, matched, findings, warnings, counts=None):
             path = probe.get("path")
             if not isinstance(path, str) or not path.strip():
                 path = default_path or name
-            outcome, out = _execute_subject(["/bin/sh", "-c", run_cmd],
-                                            directory, name, counts=counts)
+            outcome, out = _execute_subject(
+                ["/bin/sh", "-c", run_cmd], directory, name,
+                env=_subject_environment(), counts=counts)
             _handle(outcome, out, "ephemeral probe", name, path,
                     "ephemeral_test", findings, warnings)
     finally:

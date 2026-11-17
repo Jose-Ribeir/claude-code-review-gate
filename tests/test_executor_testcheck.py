@@ -574,3 +574,55 @@ def test_gate_merges_executor_telemetry_into_command_checks(
     # The declared per-check budget was exported to the executor, and the
     # executor's clamp honored it (the run finished well inside it).
     assert tele["seconds"] < 120, tele
+
+
+def test_executor_subject_environment_excludes_selector_and_publication_secrets(
+        monkeypatch):
+    """Model auth stops at the selector; untrusted tests get no write secrets.
+
+    Non-secret fixture state remains usable, so this boundary does not alter
+    the existing reproduce/flake tests' behavior.
+    """
+    for key, value in {
+        "PUBLICATION_SECRET": "do-not-publish",
+        "GITLAB_TOKEN": "do-not-write",
+        "OPENAI_API_KEY": "selector-only",
+        "KIMCHI_BIN": "selector-only-binary",
+        "OCR_TEST_SELECTOR_CMD": "selector-only-command",
+        "FLAKE_STATE": "/tmp/non-secret-fixture-state",
+    }.items():
+        monkeypatch.setenv(key, value)
+
+    argv, _cwd, env = test_check._runner_for("tests/test_example.py")
+
+    assert argv
+    assert env["FLAKE_STATE"] == "/tmp/non-secret-fixture-state"
+    assert env["RG_FINAL_CREDENTIAL_FREE"] == "1"
+    for key in ("PUBLICATION_SECRET", "GITLAB_TOKEN", "OPENAI_API_KEY",
+                "KIMCHI_BIN", "OCR_TEST_SELECTOR_CMD"):
+        assert key not in env
+
+
+def test_executor_subject_timeout_is_a_warning_without_a_second_run(
+        tmp_path, monkeypatch):
+    """A timed-out subject is missing evidence, not a reproduced defect."""
+    monkeypatch.setattr(test_check, "_run_timeout", lambda: 0.05)
+    counts = {"runs": 0,
+              "reproduce_results": {"fail": 0, "pass": 0, "flake": 0,
+                                    "build": 0, "error": 0}}
+    argv = [sys.executable, "-c", "import time; time.sleep(2)"]
+
+    outcome, output = test_check._execute_subject(
+        argv, str(tmp_path), "slow test", counts=counts)
+    findings, warnings = [], []
+    test_check._handle(outcome, output, "existing test", "tests/slow.py",
+                       "tests/slow.py", "existing_test", findings, warnings)
+
+    assert outcome == "timeout"
+    assert counts["runs"] == 1, "a timeout is not retried as a failure"
+    assert counts["timeouts"] == 1
+    assert counts["reproduce_results"]["error"] == 1
+    assert findings == []
+    (warning,) = warnings
+    assert "timed out" in warning["message"]
+    assert "tests/slow.py" in warning["message"]
