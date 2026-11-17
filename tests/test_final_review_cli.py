@@ -122,6 +122,16 @@ def standalone(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     glab.chmod(0o755)
+    gh = bindir / "gh"
+    gh.write_text(
+        f"#!{sys.executable}\n"
+        "import runpy, sys\n"
+        f"stub = {str(STUB)!r}\n"
+        "sys.argv = [stub, '--gh', *sys.argv[1:]]\n"
+        "runpy.run_path(stub, run_name='__main__')\n",
+        encoding="utf-8",
+    )
+    gh.chmod(0o755)
     monkeypatch.setenv("PATH", str(bindir) + os.pathsep + os.environ["PATH"])
     monkeypatch.setenv("OCR_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("RG_TEST_PROVIDER_SCRIPT", str(script))
@@ -130,6 +140,10 @@ def standalone(tmp_path, monkeypatch):
         f"{shlex.quote(sys.executable)} {shlex.quote(str(STUB))} --final-review",
     )
     monkeypatch.setenv("STUB_FINAL_TRACE", str(tmp_path / "worker-trace.json"))
+    monkeypatch.setenv(
+        "RG_FINAL_DYNAMIC_EXECUTOR",
+        f"{shlex.quote(sys.executable)} {shlex.quote(str(STUB))} --final-dynamic",
+    )
     monkeypatch.setenv("GLAB_TOKEN", "provider-read-and-write-secret")
     monkeypatch.setenv("GITLAB_WRITE_TOKEN", "provider-write-secret")
     monkeypatch.setenv("GH_TOKEN", "another-provider-write-secret")
@@ -194,11 +208,11 @@ def test_final_review_rejects_multiple_refs_as_reserved_for_stack_orchestration(
     assert not result.stdout
 
 
-def test_standalone_reviews_full_immutable_tree_and_persists_incomplete_result(standalone):
+def test_standalone_reviews_full_immutable_tree_and_persists_complete_result(standalone):
     # A model-declared block is advisory: with no findings compute_verdict says pass.
     standalone.monkeypatch.setenv("STUB_FINAL_RESULT", json.dumps({"verdict": "block"}))
 
-    output = _result(_gate("final-review", standalone.ref), 2)
+    output = _result(_gate("final-review", standalone.ref), 0)
     machine, human = _reports(output)
     traces = _worker_traces(standalone)
     trace = traces[0]
@@ -208,10 +222,11 @@ def test_standalone_reviews_full_immutable_tree_and_persists_incomplete_result(s
     assert output["static_lenses_complete"] is True
     assert [lens["name"] for lens in output["lenses"]] == list(LENS_NAMES)
     assert all(lens["state"] == "completed" for lens in output["lenses"])
-    assert output["complete"] is False
-    assert output["state"] == "incomplete"
+    assert output["complete"] is True
+    assert output["execution_complete"] is True
+    assert output["state"] == "pass"
     assert output["finding_verdict"] == "pass"
-    assert output["exit_code"] == 2
+    assert output["exit_code"] == 0
     assert output["run_id"] == machine["run"]["run_id"]
     assert output["store_instance_id"] == machine["store"]["store_instance_id"]
     assert output["unit_key"] == "individual:1"
@@ -227,17 +242,17 @@ def test_standalone_reviews_full_immutable_tree_and_persists_incomplete_result(s
     assert output["trust"]["local_only"] is True
     assert output["trust"]["enforced"] is False
     assert output["trust"]["official"] is False
-    assert output["trust"]["stage_incomplete"] is True
-    assert machine["run"]["state"] == "incomplete"
-    assert machine["run"]["metadata"]["complete"] is False
-    assert machine["run"]["metadata"]["missing_stages"] == [
-        "required_and_dynamic_tests", "composition", "provider_publication",
-    ]
+    assert output["trust"]["stage_incomplete"] is False
+    assert output["publication"]["status"] == "local_only"
+    assert output["publication"]["official_green"] is False
+    assert machine["run"]["state"] == "pass"
+    assert machine["run"]["metadata"]["complete"] is True
+    assert machine["run"]["metadata"]["missing_stages"] == []
     individual, combined = machine["units"]
-    assert individual["state"] == "incomplete"
-    assert combined["state"] == "incomplete"
-    assert combined["lenses"] == []
-    assert machine["publications"] == []
+    assert individual["state"] == "pass"
+    assert combined["state"] == "pass"
+    assert [lens["name"] for lens in combined["lenses"]] == list(LENS_NAMES)
+    assert machine["publications"][0]["status"] == "local_only"
     assert [lens["name"] for lens in individual["lenses"]] == list(LENS_NAMES)
     assert all(lens["state"] == "completed" for lens in individual["lenses"])
     assert all(lens["evidence"]["diff_sha256"] for lens in individual["lenses"])
@@ -248,13 +263,19 @@ def test_standalone_reviews_full_immutable_tree_and_persists_incomplete_result(s
     assert coverage["diff"]["status"] == "complete"
     assert all(coverage[f"lens:{name}"]["status"] == "completed" for name in LENS_NAMES)
     assert coverage["mandatory_lenses"]["status"] == "complete"
-    assert coverage["required_tests"]["status"] == "not_implemented"
-    assert coverage["dynamic_tests"]["status"] == "not_implemented"
-    assert coverage["composition"]["status"] == "not_implemented"
-    assert coverage["provider_publication"]["status"] == "not_implemented"
+    assert coverage["review_context"]["status"] == "complete"
+    assert coverage["intent"]["status"] == "complete"
+    assert coverage["required_tests"]["status"] == "absent"
+    assert coverage["dynamic_tests"]["status"] == "not_applicable"
+    assert coverage["composition"]["status"] == "not_applicable"
+    assert coverage["freshness"]["status"] == "fresh"
+    assert _coverage(combined)["composition"]["status"] == "complete"
 
     requests = [entry["request"] for entry in traces]
-    assert [request["lens"] for request in requests] == list(LENS_NAMES)
+    assert [request["lens"] for request in requests] == [*LENS_NAMES, *LENS_NAMES]
+    assert [request["unit_key"] for request in requests] == [
+        *(["individual:1"] * len(LENS_NAMES)), *(["combined"] * len(LENS_NAMES)),
+    ]
     request = requests[0]
     assert request["schema"] == "final-review-worker-request/v1"
     assert request["repository"]["head_sha"] == standalone.head
@@ -281,14 +302,15 @@ def test_standalone_reviews_full_immutable_tree_and_persists_incomplete_result(s
     assert len(provider_calls) == 4
     assert all(call["provider_token_available"] for call in provider_calls)
     assert all(call["argv"][:2] == ["--glab", "api"] for call in provider_calls)
-    assert "incomplete" in human.lower()
+    assert "Completion: COMPLETE" in human
     assert output["run_id"] in human
     assert output["unit_id"] in human
     assert "correctness" in human
 
     with FinalStore(standalone.store_path) as reopened:
-        assert reopened.machine_report(output["run_id"])["run"]["state"] == "incomplete"
-        assert reopened.machine_report(output["run_id"])["publications"] == []
+        assert reopened.machine_report(output["run_id"])["run"]["state"] == "pass"
+        assert reopened.machine_report(output["run_id"])["publications"][0]["status"] == \
+            "local_only"
 
 
 def test_blocking_correctness_finding_is_normalized_and_never_an_official_pass(standalone):
@@ -316,11 +338,11 @@ def test_blocking_correctness_finding_is_normalized_and_never_an_official_pass(s
     machine, human = _reports(output)
 
     assert output["finding_verdict"] == "block"
-    assert output["state"] == "incomplete"
-    assert output["complete"] is False
+    assert output["state"] == "findings"
+    assert output["complete"] is True
     unit = machine["units"][0]
     assert unit["state"] == "findings"
-    assert machine["run"]["state"] == "incomplete"
+    assert machine["run"]["state"] == "findings"
     assert len(unit["findings"]) == 1
     finding = unit["findings"][0]
     assert finding["finding_key"] == "return-contract"
@@ -334,7 +356,7 @@ def test_blocking_correctness_finding_is_normalized_and_never_an_official_pass(s
     assert finding["anchors"][0]["anchor_type"] == "content"
     assert finding["anchors"][0]["anchor"].startswith("sha256:")
     assert [warning["code"] for warning in unit["warnings"]] == [
-        "speculative-concern", "reviewer-warning",
+        "speculative-concern", "reviewer-warning", "required-verification",
     ]
     assert unit["warnings"][1]["message"] == "plain reviewer warning"
     assert machine["publications"] == []
@@ -369,13 +391,17 @@ def test_worker_failure_is_incomplete_with_reports_and_cleanup(
     coverage = _coverage(unit)
     assert coverage[f"lens:{failed_lens}"]["status"] == "incomplete"
     assert coverage["mandatory_lenses"]["status"] == "incomplete"
-    assert len(unit["warnings"]) == 1
+    assert [warning["code"] for warning in unit["warnings"]] == [
+        "required-lens-failed", "required-verification",
+    ]
     warning = unit["warnings"][0]
     assert warning["code"] == "required-lens-failed"
     assert warning["details"]["lens"] == failed_lens
+    assert coverage["required_tests"]["status"] == "absent"
+    assert coverage["dynamic_tests"]["status"] == "not_applicable"
     assert unit["findings"] == []
     traces = _worker_traces(standalone)
-    assert [entry["request"]["lens"] for entry in traces] == list(LENS_NAMES)
+    assert [entry["request"]["lens"] for entry in traces] == [*LENS_NAMES, *LENS_NAMES]
     assert not Path(traces[0]["request"]["repository"]["path"]).exists()
     assert not list(Path(rg_store.clones_dir()).glob("*-final-*"))
 
@@ -394,7 +420,9 @@ def test_unparseable_finding_cannot_be_dropped_into_a_clean_verdict(standalone):
     assert lenses["correctness"]["state"] == "incomplete"
     assert all(lens["state"] == "completed" for name, lens in lenses.items()
                if name != "correctness")
-    assert len(unit["warnings"]) == 1
+    assert [warning["code"] for warning in unit["warnings"]] == [
+        "required-lens-failed", "required-verification",
+    ]
     assert unit["warnings"][0]["code"] == "required-lens-failed"
     assert unit["warnings"][0]["details"]["lens"] == "correctness"
     assert "unparseable finding" in unit["warnings"][0]["message"]
@@ -437,8 +465,10 @@ def test_numeric_reference_and_arbitrary_fork_use_provider_repository_identity(s
     scripted["merge_request"]["source_project_id"] = 222
     standalone.script.write_text(json.dumps(scripted), encoding="utf-8")
 
-    output = _result(_gate("final-review", "!17", cwd=standalone.repo), 2)
+    output = _result(_gate("final-review", "!17", cwd=standalone.repo), 0)
     machine, _ = _reports(output)
+
+    assert output["complete"] is True
 
     item = machine["revisions"]["items"][0]
     assert item["source_project"] == "arbitrary-contributor/fork"
@@ -470,7 +500,8 @@ def test_compute_verdict_alone_decides_normalized_finding_disposition(
     machine, _ = _reports(output)
 
     assert output["finding_verdict"] == expected_verdict
-    assert output["state"] == "incomplete"
+    assert output["state"] == ("findings" if expected_verdict == "block" else "incomplete")
+    assert output["complete"] is (expected_verdict == "block")
     assert machine["units"][0]["state"] == unit_state
     assert len(machine["units"][0]["findings"]) == 1
     assert machine["units"][0]["findings"][0]["content"] == finding["content"]
@@ -512,7 +543,9 @@ def test_malformed_warning_array_also_makes_the_lens_incomplete(standalone):
     assert lenses["documentation/domain"]["state"] == "incomplete"
     assert all(lens["state"] == "completed" for name, lens in lenses.items()
                if name != "documentation/domain")
-    assert len(unit["warnings"]) == 1
+    assert [warning["code"] for warning in unit["warnings"]] == [
+        "required-lens-failed", "required-verification",
+    ]
     assert "warnings must be arrays" in unit["warnings"][0]["message"]
     assert unit["warnings"][0]["details"]["lens"] == "documentation/domain"
     assert not Path(_worker_trace(standalone)["request"]["repository"]["path"]).exists()
@@ -527,9 +560,10 @@ def test_binary_merge_base_diff_reaches_the_worker_without_utf8_loss(standalone)
     scripted["merge_request"]["diff_refs"]["head_sha"] = head
     standalone.script.write_text(json.dumps(scripted), encoding="utf-8")
 
-    output = _result(_gate("final-review", standalone.ref), 2)
+    output = _result(_gate("final-review", standalone.ref), 0)
     trace = _worker_trace(standalone)
 
+    assert output["complete"] is True
     assert output["finding_verdict"] == "pass"
     assert "GIT binary patch" in trace["request"]["diff"]
     assert not Path(trace["request"]["repository"]["path"]).exists()

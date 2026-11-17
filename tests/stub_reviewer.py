@@ -96,6 +96,21 @@ import time
 
 # SPEC-16 standalone final-review test doubles.  These modes return before the
 # historical pre-push stub parses its argv, so existing stub behavior is intact.
+if len(sys.argv) > 1 and sys.argv[1] == "--gh":
+    if sys.argv[2:5] == ["issue", "view", "88"]:
+        sys.stdout.write(json.dumps({
+            "title": "Normalize the return value",
+            "body": "Return the value required by the existing caller.",
+        }))
+        sys.exit(0)
+    sys.stderr.write("unexpected scripted gh invocation\n")
+    sys.exit(1)
+
+if len(sys.argv) > 1 and sys.argv[1] == "--final-dynamic":
+    json.load(sys.stdin)
+    sys.stdout.write(json.dumps({"findings": [], "warnings": [], "telemetry": {}}))
+    sys.exit(0)
+
 if len(sys.argv) > 1 and sys.argv[1] == "--glab":
     script_path = os.environ["RG_TEST_PROVIDER_SCRIPT"]
     with open(script_path, encoding="utf-8") as fh:

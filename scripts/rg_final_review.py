@@ -767,6 +767,11 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
     environ = os.environ if environ is None else environ
     repo_root = str(repo_root or os.getcwd())
     provider = provider or GitLabProvider()
+    standalone_dynamic_kwargs = dict(dynamic_kwargs or {})
+    configured_executor = environ.get("RG_FINAL_DYNAMIC_EXECUTOR", "").strip()
+    if configured_executor:
+        standalone_dynamic_kwargs.setdefault("executor", shlex.split(configured_executor))
+    standalone_dynamic_kwargs.setdefault("environ", environ)
     item = provider.read(reference, repo_root=repo_root)
     revisions = list(revision_tuple(item))
     source = item["source"]
@@ -893,7 +898,7 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
                         request, isolated_worker, unit_id=current_id,
                         required_runner=required_runner or run_required_verification,
                         dynamic_runner=dynamic_runner or run_dynamic_checks,
-                        dynamic_kwargs=dynamic_kwargs,
+                        dynamic_kwargs=standalone_dynamic_kwargs,
                     )
                     aggregations[current_id] = executions[current_id].aggregation
                     observations = _record_lens_aggregation(

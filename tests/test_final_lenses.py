@@ -291,6 +291,7 @@ def orchestrated(tmp_path, monkeypatch):
         revalidate=lambda pinned, repo_root=None: None,
     )
     requests = []
+    stages = []
     store_path = tmp_path / "final.sqlite3"
 
     def run(worker, materialization_error=None):
@@ -317,17 +318,53 @@ def orchestrated(tmp_path, monkeypatch):
             def __exit__(self, exc_type, exc, traceback):
                 return False
 
+        def context(review, **kwargs):
+            return {
+                "contract": "final-review-context/v1",
+                "review_mode": "complete-repository",
+                "search_roots": [str(repository)],
+                "diff": review.diff,
+                "documents": [],
+                "files": {"all": ["app.py"], "implementation": ["app.py"], "tests": []},
+                "intent": {
+                    "description": {"text": item["description"], "source": "provider"},
+                    "tickets": [], "references": [], "listed_only": [], "warnings": [],
+                },
+                "completeness": {"complete": True, "submodules": [], "lfs_files": []},
+                "warnings": [],
+            }
+
+        def required(repository_arg, commit):
+            stages.append("required")
+            return {
+                "status": "absent", "blocking": False, "commit": commit,
+                "suites": [], "findings": [], "warnings": [],
+            }
+
+        def dynamic(repository_arg, target_sha, head_sha, **kwargs):
+            stages.append("dynamic")
+            return {
+                "schema": "final-review-dynamic-result/v1",
+                "unit_key": kwargs["unit_key"], "state": "not_applicable",
+                "complete": True, "findings": [], "warnings": [], "tests": [],
+                "coverage": {"status": "not_applicable", "summary": "No dynamic subject"},
+                "telemetry": {"executor_attempts": 1},
+                "revisions": {"target_sha": target_sha, "head_sha": head_sha,
+                              "merge_base_sha": item["target"]["base_sha"]},
+            }
+
         monkeypatch.setattr(rg_final_review, "invoke_worker", invoke)
+        monkeypatch.setattr(rg_final_review, "collect_review_context", context)
         monkeypatch.setattr(rg_final_review, "materialize_review", lambda *args, **kwargs: Materialization())
         output = rg_final_review.run_final_review(
             "!17", repo_root=tmp_path, provider=provider, store_path=store_path,
-            environ={},
+            required_runner=required, dynamic_runner=dynamic, environ={},
         )
         with FinalStore(store_path) as store:
             manifest = store.machine_report(output["run_id"])
         return output, manifest
 
-    return SimpleNamespace(run=run, requests=requests, repository=repository)
+    return SimpleNamespace(run=run, requests=requests, stages=stages, repository=repository)
 
 
 def _lens_coverage(unit):
@@ -355,15 +392,17 @@ def test_standalone_records_all_lens_results_before_finding_aggregation(orchestr
 
     output, manifest = orchestrated.run(worker)
 
-    assert [request["lens"] for request in orchestrated.requests] == list(LENS_NAMES)
-    assert output["stage"] == "S16-02A"
-    assert output["complete"] is False
-    assert output["state"] == "incomplete"
+    assert [request["lens"] for request in orchestrated.requests] == [
+        *LENS_NAMES, *LENS_NAMES,
+    ]
+    assert orchestrated.stages == ["required", "dynamic", "required", "dynamic"]
+    assert output["stage"] == "S16-07"
+    assert output["complete"] is True
+    assert output["execution_complete"] is True
+    assert output["state"] == "findings"
     assert output["finding_verdict"] == "block"
     assert output["exit_code"] == 1
-    assert output["missing_stages"] == [
-        "required_and_dynamic_tests", "composition", "provider_publication",
-    ]
+    assert output["missing_stages"] == []
     individual = manifest["units"][0]
     lenses = {lens["name"]: lens for lens in individual["lenses"]}
     assert list(lenses) == list(LENS_NAMES)
@@ -382,7 +421,7 @@ def test_standalone_records_all_lens_results_before_finding_aggregation(orchestr
     assert individual["findings"][0]["finding_key"] == "standard-contract"
     assert [warning["code"] for warning in individual["warnings"]] == ["optional-standard"]
     assert individual["warnings"][0]["details"]["lens"] == "repository-standards"
-    assert manifest["units"][1]["state"] == "incomplete"
+    assert manifest["units"][1]["state"] == "findings"
 
 
 def test_standalone_required_failure_persists_partial_evidence_but_never_passes(orchestrated):
@@ -398,7 +437,8 @@ def test_standalone_required_failure_persists_partial_evidence_but_never_passes(
 
     output, manifest = orchestrated.run(worker)
 
-    assert len(orchestrated.requests) == 7
+    assert len(orchestrated.requests) == 14
+    assert orchestrated.stages == ["required", "dynamic", "required", "dynamic"]
     assert output["state"] == "incomplete"
     assert output["finding_verdict"] is None
     assert output["exit_code"] == 2
@@ -423,6 +463,7 @@ def test_materialization_failure_records_every_required_lens_as_incomplete(orche
     assert output["finding_verdict"] is None
     assert output["state"] == "incomplete"
     assert orchestrated.requests == []
+    assert orchestrated.stages == []
     unit = manifest["units"][0]
     lenses = {lens["name"]: lens for lens in unit["lenses"]}
     assert set(lenses) == set(LENS_NAMES)
