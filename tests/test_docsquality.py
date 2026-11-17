@@ -70,6 +70,13 @@ Adds the thing.
 The template — twice — is here.
 """
 
+_RELEASES_MD = """# Release Notes
+
+First drafted on 2024-01-15; the 2026-11 cycle updated it.
+Per ADR 0001, templates are global.
+The 0009-phantom-slug record is planned but unwritten.
+"""
+
 
 @pytest.fixture
 def scratch(tmp_path):
@@ -137,6 +144,21 @@ class TestExistenceEvidence:
             {"ref": "0002-scope", "line": 3},
             {"ref": "0004-glossary", "line": 4},
         ]
+
+    def test_iso_dates_are_not_adr_refs(self, scratch):
+        # Gate fix: the slug reader used to treat 2024-01-15 and 2026-11 as
+        # 0004-glossary-style record refs, flooding unresolved_adr_refs with
+        # record numbers that can never exist. The lookahead excludes ISO
+        # dates now; a real phantom slug still reports, ADR 0001 resolves.
+        p = os.path.join(scratch, "docs", "releases.md")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(_RELEASES_MD)
+        ev = _evidence(scratch, "docs/releases.md")["evidence"]["docs/releases.md"]
+        assert ev["unresolved_adr_refs"] == [
+            {"ref": "0009-phantom-slug", "line": 5},
+        ]
+        refs = [e["ref"] for e in ev["unresolved_adr_refs"]]
+        assert not any(r.startswith(("2024-", "2026-")) for r in refs), refs
 
 
 # ---------------------------------------------------------------------------

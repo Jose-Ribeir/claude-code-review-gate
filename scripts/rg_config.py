@@ -119,8 +119,20 @@ def load_settings(repo_root=None):
     _merge_file(resolved, notes, global_config_path(), "global")
     if repo_root:
         _merge_file(resolved, notes, repo_config_path(repo_root), "repo")
+    _note_globless_command_checks(resolved["checks"], notes)
     return {"intent": resolved["intent"], "jira": resolved["jira"],
             "checks": resolved["checks"], "notes": notes}
+
+
+def _note_globless_command_checks(checks, notes):
+    """One note per resolved command check with no globs. An empty glob list
+    matches no changed file, so the check silently never runs -- a declared
+    check must never be invisible (ADR 0006: fail-soft AND observable)."""
+    for name, check in checks.items():
+        if isinstance(check, dict) and isinstance(check.get("command"), str) \
+                and check.get("enabled") and not check.get("globs"):
+            notes.append(f"check \"{name}\" declares a command but no globs; "
+                         "it matches no changed file and will never run")
 
 
 def _merge_file(resolved, notes, path, label):

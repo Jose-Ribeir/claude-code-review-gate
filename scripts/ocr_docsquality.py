@@ -95,7 +95,10 @@ _ACRONYM_RE = re.compile(r"\b[A-Z][A-Z0-9]{2,}\b")
 _MD_LINK_RE = re.compile(r"!?\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 _INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
 _ADR_NUMBER_RE = re.compile(r"\bADR[\s-]#?\s*0*(\d{1,5})\b", re.IGNORECASE)
-_ADR_SLUG_RE = re.compile(r"\b(\d{4})-[a-z0-9][a-z0-9-]*")
+# A cited ADR by number+slug ("ADR 0006", "adr/0006-custom-checks"). The
+# lookahead excludes ISO dates (2024-01-15, 2026-11), which would otherwise
+# flood unresolved_adr_refs with record numbers that can never exist.
+_ADR_SLUG_RE = re.compile(r"\b(\d{4})-(?!\d{2}(?:-\d{2})?\b)[a-z0-9][a-z0-9-]*")
 _ADR_RECORD_NUM_RE = re.compile(r"^(\d+)")
 
 # A path mention: word chars plus . / -, either carrying a "/" or ending in a

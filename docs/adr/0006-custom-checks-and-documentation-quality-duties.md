@@ -69,8 +69,9 @@ exactly the keys it shipped and nothing else.
    review tree at the tip — the deslop catalog scan (163 entries snapshotted
    from the deslop skill's references into `scripts/deslop_catalog.json`),
    throat-clearing, em-dash density, and template skeletons for
-   docs-deslop; STE surface stats (sentence-length outliers, acronym table,
-   passive-voice estimate) for adr-wait-what; existence facts
+   docs-deslop; STE (ASD-STE100 Simplified Technical English) surface stats
+   (sentence-length outliers, acronym table, passive-voice estimate) for
+   adr-wait-what; existence facts
    (`missing_paths`, `dangling_links`, `unresolved_adr_refs`) for
    adr-integrity — and emits it into the manifest's `docs_quality.evidence`
    block in the established arch_flags pattern. The integrity duty is

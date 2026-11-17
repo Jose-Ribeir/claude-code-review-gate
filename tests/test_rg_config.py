@@ -310,6 +310,24 @@ def test_a_command_check_registers_as_a_user_check():
     assert settings["notes"] == []
 
 
+def test_a_command_check_without_globs_is_noted_as_never_running():
+    """A declared command check with no globs matches no changed file, so it
+    silently never runs. Fail-soft AND observable (ADR 0006): the check still
+    registers with the command-check defaults, and load_settings leaves one
+    note naming the dead check."""
+    _write(rg_config.global_config_path(), {
+        "checks": {"my-lint": {"command": "tools/lint.sh"}},
+    })
+    settings = rg_config.load_settings()
+    check = settings["checks"]["my-lint"]
+    assert check["command"] == "tools/lint.sh"
+    assert check["globs"] == []
+    assert check["mode"] == "block"
+    assert check["enabled"] is True
+    assert any("my-lint" in n and "will never run" in n
+               for n in settings["notes"]), settings["notes"]
+
+
 def test_an_unknown_check_with_an_invalid_command_is_noted_and_ignored():
     _write(rg_config.global_config_path(), {
         "checks": {"weird": {"command": ["tools/lint.sh"]}},

@@ -71,7 +71,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ocr_verdict import (compute_verdict, drop_failed_intent_findings,  # noqa: E402
                          comment_kind, comment_quotes_missing,
                          norm_severity, _INTENT_SEVERITIES, _is_intent_finding,
-                         _SEVERITY_RANK)
+                         _SEVERITY_RANK, _block_threshold)
 import ocr_docsquality  # noqa: E402  # SPEC-14: docs-quality evidence + demotion
 import ocr_impact  # noqa: E402
 import ocr_index  # noqa: E402
@@ -3117,15 +3117,24 @@ def _check_limit(out_text, err_text=""):
 
 def _final_verdict(result):
     """The run's verdict: compute_verdict's recompute, plus the SPEC-06
-    warn-fallback honor rule. compute_verdict is the only verdict authority
-    for what the reviewer reported; the fallback downgrade on top exists
-    because a counts-only axis report carries signal the reconstructed (and
-    therefore empty) findings list can no longer express -- recomputing over
-    it would turn an unreconstructable report into an unearned silent pass.
-    """
+    warn-fallback honor rule and the warn-mode clamp honor rule.
+    compute_verdict is the only verdict authority for what the reviewer
+    reported; the fallback downgrade on top exists because a counts-only
+    axis report carries signal the reconstructed (and therefore empty)
+    findings list can no longer express -- recomputing over it would turn
+    an unreconstructable report into an unearned silent pass. The clamp
+    honor rule is the same shape: a warn-mode finding the operator's lowered
+    block bar forced below the warn tier (low/note ranks) still carries real
+    signal the severity alone can no longer express, and ADR 0006's contract
+    is "a warning at the verdict" -- never a silent pass. Both rules only
+    ever sharpen toward warn, never toward block."""
     verdict = compute_verdict(result)
     if isinstance(result, dict) and result.get("rescued") == "warn_fallback" \
             and verdict == "pass":
+        return "warn"
+    if verdict == "pass" and isinstance(result, dict) and any(
+            isinstance(f, dict) and f.get("warn_mode_clamped")
+            for f in (result.get("findings") or [])):
         return "warn"
     return verdict
 
@@ -9035,20 +9044,33 @@ _DETERMINISTIC_NOTE_TELLS_CAP = 10
 
 
 def _warn_mode_clamp(tagged):
-    """The warn-mode clamp, one finding, in place: severity at most medium,
-    confidence at most the cap. Downgrade-only -- a warn finding warns but
-    never blocks; compute_verdict stays the sole verdict authority. Every
+    """The warn-mode clamp, one finding, in place: severity strictly below
+    the effective block bar and confidence strictly below the confidence bar,
+    so a warn finding warns but never blocks WHATEVER the operator lowered
+    OCR_BLOCK_SEVERITY / OCR_BLOCK_CONFIDENCE to (downgrade-only; compute_verdict
+    stays the sole verdict authority). Severity ladder: high > medium > low;
+    below low the finding is reduced to "note" (unranked, never blocking).
+    The clamp stamps warn_mode_clamped: true so _final_verdict's honor rule
+    can keep ADR 0006's contract -- "a warning at the verdict" -- when the
+    lowered bar forces the severity below the warn tier (low/note). Every
     checks-config mode consumer uses this one clamp (command checks, the
     built-in quality duties)."""
+    tagged["warn_mode_clamped"] = True
+    min_rank, min_conf = _block_threshold()
+    safe_rank = min_rank - 1
+    safe_sev = {0: "low", 1: "medium"}.get(safe_rank, "note")
     rank = _SEVERITY_RANK.get(norm_severity(tagged.get("severity")), -1)
-    if rank > _SEVERITY_RANK["medium"]:
-        tagged["severity"] = "medium"
+    if rank > safe_rank:
+        tagged["severity"] = safe_sev
     try:
         conf = float(tagged.get("confidence") or 0.0)
     except (TypeError, ValueError):
         conf = 0.0
-    if conf > _WARN_MODE_CONFIDENCE_CAP:
-        tagged["confidence"] = _WARN_MODE_CONFIDENCE_CAP
+    conf_cap = _WARN_MODE_CONFIDENCE_CAP
+    if conf_cap >= min_conf:
+        conf_cap = max(0.0, round(min_conf - 0.01, 2))
+    if conf > conf_cap:
+        tagged["confidence"] = conf_cap
     return tagged
 
 

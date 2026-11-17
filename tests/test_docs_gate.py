@@ -1211,6 +1211,29 @@ def test_warn_mode_deslop_cluster_never_blocks(tmp_path):
     assert "the prose reads as generated slurry" in st.get("reasons", "")
 
 
+def test_warn_mode_holds_under_a_lowered_block_bar(tmp_path):
+    """Gate fix: the warn clamp follows the OPERATOR's block bar. With
+    OCR_BLOCK_SEVERITY=medium the old clamp (severity capped at medium,
+    confidence capped at 0.5) left this cluster AT the bar and the push
+    blocked -- medium blocks at any confidence once the bar is lowered. The
+    clamp now lands strictly below the effective bars, so warn mode warns
+    and never blocks whatever the operator lowered the bars to."""
+    work = _repo(tmp_path, {"README.md": "# project\n"})
+    _write_checks_config(work, {"docs-deslop": {"mode": "warn"}})
+    tip = _commit(work, {"README.md": "# project\n\nmore docs\n"})
+    spec = _quality_spec("README.md", "docs-deslop", tells=[
+        {"phrase": "robust", "line": 2},
+        {"phrase": "seamless", "line": 3},
+        {"phrase": "--", "line": 4},
+    ])
+    decision, reason = _push(work, _env(tmp_path, "t.trace",
+                                        OCR_BLOCK_SEVERITY="medium",
+                                        STUB_DOCS_FINDING=json.dumps(spec)))
+    assert decision == "pass", reason
+    st = _state(work, tip)
+    assert st.get("verdict") == "warn", st
+
+
 def test_warn_mode_adr_integrity_finding_never_blocks(tmp_path):
     """The clamp keys on the resolved per-duty mode for every quality duty,
     not only on the tell-carrying deslop class."""
