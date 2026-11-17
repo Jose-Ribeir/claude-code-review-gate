@@ -22,9 +22,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import rg_final_contract
+import rg_final_memory
 import rg_store
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 REPORT_SCHEMA = "final-review-report/v1"
 FINAL_STATES = frozenset(("pass", "findings", "stale", "incomplete"))
 _SHA = re.compile(r"^[0-9a-fA-F]{40}$")
@@ -258,6 +259,53 @@ _SCHEMA_V1 = (
     "CREATE INDEX publications_run ON publications(run_id)",
 )
 
+_SCHEMA_V2 = (
+    "ALTER TABLE run_items ADD COLUMN base_sha TEXT",
+    "ALTER TABLE run_items ADD COLUMN reference TEXT",
+    "ALTER TABLE run_items ADD COLUMN ancestors_json TEXT NOT NULL DEFAULT '[]'",
+    """CREATE TABLE finding_threads (
+        thread_id TEXT PRIMARY KEY,
+        stack_id TEXT NOT NULL REFERENCES stacks(stack_id),
+        unit_key TEXT NOT NULL,
+        finding_key TEXT NOT NULL,
+        content_anchor TEXT NOT NULL,
+        origin_finding_id TEXT NOT NULL UNIQUE REFERENCES findings(finding_id),
+        created_at TEXT NOT NULL,
+        UNIQUE(stack_id, unit_key, content_anchor)
+    )""",
+    "CREATE INDEX finding_threads_scope ON finding_threads(stack_id, unit_key, content_anchor)",
+    """CREATE TABLE finding_events (
+        event_id TEXT PRIMARY KEY,
+        thread_id TEXT NOT NULL REFERENCES finding_threads(thread_id),
+        run_id TEXT NOT NULL REFERENCES runs(run_id),
+        unit_id TEXT NOT NULL REFERENCES units(unit_id),
+        finding_id TEXT REFERENCES findings(finding_id),
+        event_type TEXT NOT NULL
+            CHECK(event_type IN ('observed', 'reopened', 'carried', 'resolved', 'falsified')),
+        anchors_json TEXT NOT NULL,
+        evidence_anchor TEXT NOT NULL,
+        previous_evidence_anchor TEXT,
+        evidence_json TEXT NOT NULL,
+        rationale TEXT NOT NULL,
+        resolution_json TEXT NOT NULL,
+        revalidation_json TEXT NOT NULL,
+        recorded_at TEXT NOT NULL
+    )""",
+    "CREATE INDEX finding_events_history ON finding_events(thread_id, recorded_at, event_id)",
+    "CREATE INDEX finding_events_run ON finding_events(run_id, event_type)",
+    """CREATE TABLE freshness_checks (
+        check_id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+        state TEXT NOT NULL CHECK(state IN ('fresh', 'stale', 'incomplete')),
+        changes_json TEXT NOT NULL,
+        errors_json TEXT NOT NULL,
+        pinned_json TEXT NOT NULL,
+        current_json TEXT NOT NULL,
+        recorded_at TEXT NOT NULL
+    )""",
+    "CREATE INDEX freshness_checks_run ON freshness_checks(run_id, recorded_at, check_id)",
+)
+
 
 class FinalStore:
     """A persistent final-review SQLite store.
@@ -377,6 +425,18 @@ class FinalStore:
                     (_now(),),
                 )
                 self._conn.execute("PRAGMA user_version = 1")
+            if 2 not in applied:
+                if existing_version not in (0, 1, 2):
+                    raise StoreError(f"unsupported database schema {existing_version}")
+                if existing_version == 2:
+                    raise StoreError("database schema version has no migration record")
+                for statement in _SCHEMA_V2:
+                    self._conn.execute(statement)
+                self._conn.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (2, ?)",
+                    (_now(),),
+                )
+                self._conn.execute("PRAGMA user_version = 2")
             self._conn.execute(
                 "INSERT OR IGNORE INTO store_metadata(key, value) VALUES "
                 "('store_instance_id', ?)", (_identifier(),)
@@ -525,6 +585,15 @@ class FinalStore:
             if item_key in seen:
                 raise ValueError(f"duplicate item_key {item_key}")
             seen.add(item_key)
+            provider_data = dict(item.get("provider_data") or {})
+            provider_target = provider_data.get("target") or {}
+            base_sha = item.get("base_sha", provider_target.get("base_sha"))
+            if base_sha is not None:
+                base_sha = _sha(base_sha, "base_sha")
+            ancestors = item.get("ancestors", provider_data.get("ancestors", []))
+            if not isinstance(ancestors, (list, tuple)):
+                raise ValueError("ancestors must be a list of provider revision items")
+            reference = str(item.get("reference") or provider_data.get("url") or "").strip()
             normalized_items.append({
                 "position": position,
                 "item_key": item_key,
@@ -534,7 +603,10 @@ class FinalStore:
                 "target_project": _required_text(item, "target_project"),
                 "target_ref": _required_text(item, "target_ref"),
                 "target_sha": target_sha,
-                "provider_data": dict(item.get("provider_data") or {}),
+                "base_sha": base_sha,
+                "reference": reference or None,
+                "ancestors": list(ancestors),
+                "provider_data": provider_data,
             })
         normalized["items"] = normalized_items
         return normalized
@@ -622,10 +694,12 @@ class FinalStore:
                 self._conn.execute(
                     "INSERT INTO run_items(run_id, position, item_key, source_project, "
                     "source_ref, source_sha, target_project, target_ref, target_sha, "
-                    "provider_data_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "provider_data_json, base_sha, reference, ancestors_json) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (run_id, item["position"], item["item_key"], item["source_project"],
                      item["source_ref"], item["source_sha"], item["target_project"],
-                     item["target_ref"], item["target_sha"], _json(item["provider_data"])),
+                     item["target_ref"], item["target_sha"], _json(item["provider_data"]),
+                     item["base_sha"], item["reference"], _json(item["ancestors"])),
                 )
             unit_ids = {}
             for unit_id, key, kind, position, base, head, target_ref, source_ref in units:
@@ -736,28 +810,585 @@ class FinalStore:
             )
         return test_id
 
+    def _insert_finding_row(self, unit_id, finding_key, content, severity, confidence,
+                            state, lens, path, line, anchors, evidence):
+        finding_id = _identifier()
+        self._conn.execute(
+            "INSERT INTO findings(finding_id, unit_id, finding_key, content, severity, "
+            "confidence, state, lens, path, line, evidence_json, recorded_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (finding_id, unit_id, str(finding_key), str(content), str(severity),
+             str(confidence), str(state), lens, path, line, _json(evidence), _now()),
+        )
+        for anchor in anchors:
+            normalized = rg_final_memory.normalize_anchors([anchor])
+            item = normalized[0] if normalized[0]["anchor_type"] != "content" or \
+                str(anchor.get("anchor_type") or "") == "content" else normalized[1]
+            self._conn.execute(
+                "INSERT INTO finding_anchors(anchor_id, finding_id, anchor_type, anchor, "
+                "evidence_fingerprint, details_json) VALUES (?, ?, ?, ?, ?, ?)",
+                (_identifier(), finding_id, item["anchor_type"], item["anchor"],
+                 item["evidence_fingerprint"], _json(item["details"])),
+            )
+        return finding_id
+
+    def _finding_by_id(self, finding_id):
+        item = self._conn.execute(
+            "SELECT * FROM findings WHERE finding_id = ?", (finding_id,)
+        ).fetchone()
+        if item is None:
+            raise StoreError(f"unknown finding {finding_id}")
+        finding = {
+            "finding_id": item["finding_id"], "finding_key": item["finding_key"],
+            "content": item["content"], "severity": item["severity"],
+            "confidence": item["confidence"], "state": item["state"],
+            "lens": item["lens"], "path": item["path"], "line": item["line"],
+            "evidence": _loads(item["evidence_json"]), "recorded_at": item["recorded_at"],
+        }
+        finding["anchors"] = [
+            {"anchor_id": anchor["anchor_id"], "anchor_type": anchor["anchor_type"],
+             "anchor": anchor["anchor"], "evidence_fingerprint": anchor["evidence_fingerprint"],
+             "details": _loads(anchor["details_json"])}
+            for anchor in self._rows(
+                "SELECT * FROM finding_anchors WHERE finding_id = ? ORDER BY anchor_id",
+                (finding_id,))
+        ]
+        return finding
+
+    def _thread(self, thread_id):
+        row = self._conn.execute(
+            "SELECT * FROM finding_threads WHERE thread_id = ?", (thread_id,)
+        ).fetchone()
+        if row is None:
+            raise StoreError(f"unknown finding thread {thread_id}")
+        return row
+
+    def _thread_events(self, thread_id, through_seq=None):
+        sql = (
+            "SELECT e.*, r.run_seq FROM finding_events e "
+            "JOIN runs r ON r.run_id = e.run_id WHERE e.thread_id = ?"
+        )
+        parameters = [thread_id]
+        if through_seq is not None:
+            sql += " AND r.run_seq <= ?"
+            parameters.append(through_seq)
+        sql += " ORDER BY r.run_seq, e.recorded_at, e.event_id"
+        return self._rows(sql, tuple(parameters))
+
+    @staticmethod
+    def _event_state(events):
+        if not events:
+            return None
+        return ("falsified" if events[-1]["event_type"] == "falsified" else
+                "resolved" if events[-1]["event_type"] == "resolved" else "open")
+
+    def _insert_event(self, thread_id, run_id, unit_id, finding_id, event_type,
+                      anchors, evidence_anchor, previous_evidence_anchor, *, evidence=None,
+                      rationale="", resolution=None, revalidation=None):
+        event_id = _identifier()
+        self._conn.execute(
+            "INSERT INTO finding_events(event_id, thread_id, run_id, unit_id, finding_id, "
+            "event_type, anchors_json, evidence_anchor, previous_evidence_anchor, "
+            "evidence_json, rationale, resolution_json, revalidation_json, recorded_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (event_id, thread_id, run_id, unit_id, finding_id, event_type,
+             _json(list(anchors)), evidence_anchor, previous_evidence_anchor, _json(evidence),
+             str(rationale), _json(resolution), _json(revalidation), _now()),
+        )
+        return event_id
+
+    def _track_observation(self, unit, finding_id, finding_key, anchors, evidence):
+        finding = self._finding_by_id(finding_id)
+        normalized = rg_final_memory.normalize_anchors(anchors, finding)
+        content_anchor = rg_final_memory.finding_content_anchor(finding, normalized)
+        evidence_anchor = rg_final_memory.finding_evidence_anchor(
+            normalized, evidence=evidence, finding=finding)
+        run = self._conn.execute("SELECT stack_id FROM runs WHERE run_id = ?",
+                                 (unit["run_id"],)).fetchone()
+        thread = self._conn.execute(
+            "SELECT * FROM finding_threads WHERE stack_id = ? AND unit_key = ? "
+            "AND content_anchor = ?",
+            (run["stack_id"], unit["unit_key"], content_anchor),
+        ).fetchone()
+        if thread is None:
+            thread_id = _identifier()
+            self._conn.execute(
+                "INSERT INTO finding_threads(thread_id, stack_id, unit_key, finding_key, "
+                "content_anchor, origin_finding_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (thread_id, run["stack_id"], unit["unit_key"], str(finding_key),
+                 content_anchor, finding_id, _now()),
+            )
+            previous = None
+            event_type = "observed"
+        else:
+            thread_id = thread["thread_id"]
+            events = self._thread_events(thread_id)
+            previous = events[-1]["evidence_anchor"] if events else None
+            event_type = "reopened" if self._event_state(events) in ("resolved", "falsified") \
+                else "observed"
+        self._insert_event(
+            thread_id, unit["run_id"], unit["unit_id"], finding_id, event_type,
+            normalized, evidence_anchor, previous, evidence=evidence,
+        )
+        return thread_id
+
     def record_finding(self, unit_id, finding_key, content, severity, confidence,
                        state="open", lens=None, path=None, line=None, anchors=(), evidence=None):
-        finding_id = _identifier()
+        if str(state) in ("resolved", "falsified"):
+            raise ValueError(f"{state} requires the explicit finding-memory closure seam")
+        finding_data = {
+            "finding_key": finding_key, "content": content, "lens": lens,
+            "path": path, "line": line,
+        }
+        normalized = rg_final_memory.normalize_anchors(anchors, finding_data)
+        # Normalize a caller-supplied anchor list before storing it, but retain
+        # the historical behavior of storing no anchors when none were given.
+        stored_anchors = normalized if anchors else ()
         with self._transaction():
-            self._unit_row(unit_id)
-            self._conn.execute(
-                "INSERT INTO findings(finding_id, unit_id, finding_key, content, severity, "
-                "confidence, state, lens, path, line, evidence_json, recorded_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (finding_id, unit_id, str(finding_key), str(content), str(severity),
-                 str(confidence), str(state), lens, path, line, _json(evidence), _now()),
+            unit = self._unit_row(unit_id)
+            finding_id = self._insert_finding_row(
+                unit_id, finding_key, content, severity, confidence, state,
+                lens, path, line, stored_anchors, evidence,
             )
-            for anchor in anchors:
-                self._conn.execute(
-                    "INSERT INTO finding_anchors(anchor_id, finding_id, anchor_type, anchor, "
-                    "evidence_fingerprint, details_json) VALUES (?, ?, ?, ?, ?, ?)",
-                    (_identifier(), finding_id, _required_text(anchor, "anchor_type"),
-                     _required_text(anchor, "anchor"),
-                     str(anchor.get("evidence_fingerprint", "")),
-                     _json(anchor.get("details"))),
-                )
+            self._track_observation(unit, finding_id, finding_key, stored_anchors, evidence)
         return finding_id
+
+    def _run_row(self, run_id):
+        row = self._conn.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+        if row is None:
+            raise StoreError(f"unknown run {run_id}")
+        return row
+
+    def _snapshot(self, stack_id, through_seq):
+        threads = self._rows(
+            "SELECT * FROM finding_threads WHERE stack_id = ? ORDER BY created_at, thread_id",
+            (stack_id,),
+        )
+        return [
+            {"thread": thread, "events": self._thread_events(thread["thread_id"], through_seq)}
+            for thread in threads
+        ]
+
+    @staticmethod
+    def _latest_finding_event(events):
+        return next((event for event in reversed(events) if event["finding_id"] is not None), None)
+
+    def _thread_public(self, entry, run_id=None):
+        thread = entry["thread"]
+        events = entry["events"]
+        event = self._latest_finding_event(events)
+        if event is None:
+            return None
+        finding = self._finding_by_id(event["finding_id"])
+        latest = events[-1]
+        finding.update({
+            "thread_id": thread["thread_id"],
+            "memory_thread_id": thread["thread_id"],
+            "memory_state": self._event_state(events),
+            "origin_finding_id": thread["origin_finding_id"],
+            "origin_run_id": next(
+                (item["run_id"] for item in events
+                 if item["finding_id"] == thread["origin_finding_id"]),
+                event["run_id"],
+            ),
+            "unit_key": thread["unit_key"],
+            "content_anchor": thread["content_anchor"],
+            "evidence_anchor": latest["evidence_anchor"],
+            "inherited": run_id is not None and event["run_id"] != run_id,
+            "carried_into_run": run_id is not None and any(
+                item["run_id"] == run_id and item["event_type"] == "carried" for item in events),
+        })
+        return finding
+
+    def rerun_context(self, run_id):
+        """Outstanding prior-run threads; omission can never acknowledge them."""
+        with self._lock:
+            run = self._run_row(run_id)
+            findings = []
+            for entry in self._snapshot(run["stack_id"], run["run_seq"] - 1):
+                if self._event_state(entry["events"]) != "open":
+                    continue
+                finding = self._thread_public(entry)
+                finding["instruction"] = rg_final_memory.CARRY_FORWARD_INSTRUCTION
+                findings.append(finding)
+            return {
+                "schema": rg_final_memory.RERUN_CONTEXT_SCHEMA,
+                "store_instance_id": self.store_instance_id,
+                "run_id": run_id,
+                "stack_key": run["stack_id"],
+                "required": bool(findings),
+                "findings": findings,
+                "local_waivers_are_official_suppression": False,
+            }
+
+    def carry_finding(self, run_id, unit_id, thread_id, *, finding_id=None,
+                      anchors=None, evidence=None):
+        """Append an explicit current-run carry without changing prior findings."""
+        with self._transaction():
+            run = self._run_row(run_id)
+            unit = self._unit_row(unit_id)
+            if unit["run_id"] != run_id:
+                raise ValueError("carried finding unit does not belong to run")
+            thread = self._thread(thread_id)
+            if thread["stack_id"] != run["stack_id"] or thread["unit_key"] != unit["unit_key"]:
+                raise ValueError("finding thread does not match the run stack and unit scope")
+            previous_events = self._thread_events(thread_id, run["run_seq"])
+            previous = previous_events[-1] if previous_events else None
+            original = self._finding_by_id(thread["origin_finding_id"])
+            if finding_id is None:
+                if anchors is None:
+                    stored_anchors = _loads(previous["anchors_json"]) if previous is not None else []
+                else:
+                    stored_anchors = rg_final_memory.normalize_anchors(anchors, original)
+                finding_id = self._insert_finding_row(
+                    unit_id, original["finding_key"], original["content"], original["severity"],
+                    original["confidence"], "open", original["lens"], original["path"],
+                    original["line"], stored_anchors, evidence,
+                )
+            else:
+                current = self._finding_by_id(finding_id)
+                current_unit = self._conn.execute(
+                    "SELECT u.run_id, u.unit_id FROM findings f "
+                    "JOIN units u ON u.unit_id = f.unit_id WHERE f.finding_id = ?",
+                    (finding_id,),
+                ).fetchone()
+                if current_unit is None or current_unit["run_id"] != run_id or \
+                        current_unit["unit_id"] != unit_id:
+                    raise ValueError("carried finding does not belong to the current run and unit")
+                stored_anchors = current["anchors"]
+            current_finding = self._finding_by_id(finding_id)
+            normalized = rg_final_memory.normalize_anchors(stored_anchors, current_finding)
+            if rg_final_memory.finding_content_anchor(current_finding, normalized) != \
+                    thread["content_anchor"]:
+                raise ValueError("carried finding content anchor does not match its thread")
+            evidence_anchor = rg_final_memory.finding_evidence_anchor(
+                normalized, finding=current_finding)
+            self._insert_event(
+                thread_id, run_id, unit_id, finding_id, "carried", normalized, evidence_anchor,
+                previous["evidence_anchor"] if previous is not None else None, evidence=evidence,
+            )
+        return finding_id
+
+    @staticmethod
+    def _evidence_present(value):
+        if isinstance(value, str):
+            return bool(value.strip())
+        return bool(value)
+
+    def _closure_scope(self, run_id, thread_id):
+        run = self._run_row(run_id)
+        thread = self._thread(thread_id)
+        if thread["stack_id"] != run["stack_id"]:
+            raise StoreError("finding thread belongs to a different stack")
+        unit = self._conn.execute(
+            "SELECT * FROM units WHERE run_id = ? AND unit_key = ?",
+            (run_id, thread["unit_key"]),
+        ).fetchone()
+        if unit is None:
+            raise StoreError("finding thread has no matching unit in this run")
+        events = self._thread_events(thread_id, run["run_seq"])
+        if self._event_state(events) != "open":
+            raise ValueError("finding thread is not open at this run")
+        return thread, unit, events
+
+    def resolve_finding(self, run_id, thread_id, *, anchors, resolution_evidence,
+                        revalidation):
+        """Append positive closure only for changed anchors and real revalidation."""
+        with self._transaction():
+            thread, unit, events = self._closure_scope(run_id, thread_id)
+            original = self._finding_by_id(thread["origin_finding_id"])
+            normalized = rg_final_memory.normalize_anchors(anchors, original)
+            if not anchors or rg_final_memory.finding_content_anchor(original, normalized) != \
+                    thread["content_anchor"]:
+                raise ValueError("resolution must retain the original content anchor")
+            previous = events[-1]
+            current_anchor = rg_final_memory.finding_evidence_anchor(normalized, finding=original)
+            if current_anchor == previous["evidence_anchor"]:
+                raise ValueError("positive resolution requires changed code or evidence anchors")
+            if not self._evidence_present(resolution_evidence):
+                raise ValueError("positive resolution requires resolution evidence")
+            if not isinstance(revalidation, dict) or not revalidation:
+                raise ValueError("positive resolution requires revalidation evidence")
+            status = str(revalidation.get("status") or "").strip().lower()
+            successful = status in (
+                "pass", "passed", "success", "succeeded", "completed",
+                "revalidated", "not_reproduced",
+            ) or revalidation.get("revalidated") is True
+            if not successful:
+                raise ValueError("positive resolution requires successful revalidation")
+            latest = self._latest_finding_event(events)
+            self._insert_event(
+                thread_id, run_id, unit["unit_id"], latest["finding_id"], "resolved",
+                normalized, current_anchor, previous["evidence_anchor"], evidence={},
+                resolution=resolution_evidence, revalidation=revalidation,
+            )
+        return self.finding_history(thread_id)
+
+    def falsify_finding(self, run_id, thread_id, rationale, *, evidence=None):
+        """Append explicit falsification; no anchor movement is required."""
+        if not str(rationale or "").strip():
+            raise ValueError("finding falsification requires a non-empty rationale")
+        with self._transaction():
+            thread, unit, events = self._closure_scope(run_id, thread_id)
+            previous = events[-1]
+            latest = self._latest_finding_event(events)
+            self._insert_event(
+                thread_id, run_id, unit["unit_id"], latest["finding_id"], "falsified",
+                _loads(previous["anchors_json"]), previous["evidence_anchor"],
+                previous["evidence_anchor"], evidence=evidence, rationale=str(rationale).strip(),
+            )
+        return self.finding_history(thread_id)
+
+    def finding_history(self, thread_id):
+        """Return the complete append-only thread, including immutable snapshots."""
+        with self._lock:
+            thread = self._thread(thread_id)
+            events = []
+            for event in self._thread_events(thread_id):
+                events.append({
+                    "event_id": event["event_id"], "thread_id": thread_id,
+                    "run_id": event["run_id"], "run_seq": event["run_seq"],
+                    "unit_id": event["unit_id"], "event_type": event["event_type"],
+                    "anchors": _loads(event["anchors_json"]),
+                    "evidence_anchor": event["evidence_anchor"],
+                    "previous_evidence_anchor": event["previous_evidence_anchor"],
+                    "evidence": _loads(event["evidence_json"]),
+                    "rationale": event["rationale"],
+                    "resolution_evidence": _loads(event["resolution_json"]),
+                    "revalidation": _loads(event["revalidation_json"]),
+                    "recorded_at": event["recorded_at"],
+                    "finding": (self._finding_by_id(event["finding_id"])
+                                if event["finding_id"] is not None else None),
+                })
+            return {
+                "thread_id": thread_id, "store_instance_id": self.store_instance_id,
+                "stack_key": thread["stack_id"], "unit_key": thread["unit_key"],
+                "finding_key": thread["finding_key"],
+                "content_anchor": thread["content_anchor"],
+                "origin_finding_id": thread["origin_finding_id"],
+                "state": self._event_state(self._thread_events(thread_id)),
+                "events": events,
+            }
+
+    def memory_status(self, run_id):
+        """Derive this run's historical memory view from events, never quiet output."""
+        with self._lock:
+            run = self._run_row(run_id)
+            current = self._snapshot(run["stack_id"], run["run_seq"])
+            prior = {
+                entry["thread"]["thread_id"]: entry
+                for entry in self._snapshot(run["stack_id"], run["run_seq"] - 1)
+            }
+            unresolved = []
+            pending = []
+            for entry in current:
+                thread_id = entry["thread"]["thread_id"]
+                if self._event_state(entry["events"]) != "open":
+                    continue
+                unresolved.append(thread_id)
+                previous = prior.get(thread_id)
+                handled = any(
+                    event["run_id"] == run_id and
+                    event["event_type"] in ("carried", "resolved", "falsified")
+                    for event in entry["events"]
+                )
+                if previous and self._event_state(previous["events"]) == "open" and not handled:
+                    pending.append(thread_id)
+            return {
+                "schema": "final-review-finding-memory/v1",
+                "store_instance_id": self.store_instance_id,
+                "run_id": run_id, "stack_key": run["stack_id"],
+                "unresolved_thread_ids": unresolved,
+                "pending_thread_ids": pending,
+                "complete_for_finalization": not pending,
+                "clear_allowed": not unresolved and not pending,
+                "quiet_rerun_cleared": False,
+                "carry_forward_instruction": rg_final_memory.CARRY_FORWARD_INSTRUCTION,
+            }
+
+    def official_findings(self, run_id):
+        """Open current and inherited findings, with no local-waiver filtering."""
+        with self._lock:
+            run = self._run_row(run_id)
+            findings = []
+            for entry in self._snapshot(run["stack_id"], run["run_seq"]):
+                if self._event_state(entry["events"]) == "open":
+                    finding = self._thread_public(entry, run_id)
+                    if finding is not None:
+                        findings.append(finding)
+            return findings
+
+    def pinned_revisions(self, run_id):
+        """Reconstruct complete provider-read inputs from immutable run rows."""
+        with self._lock:
+            self._run_row(run_id)
+            pinned = []
+            for row in self._rows(
+                    "SELECT * FROM run_items WHERE run_id = ? ORDER BY position", (run_id,)):
+                provider_data = _loads(row["provider_data_json"])
+                source_data = provider_data.get("source") or {}
+                target_data = provider_data.get("target") or {}
+                item = {
+                    "provider": provider_data.get("provider"),
+                    "id": provider_data.get("id"),
+                    "iid": provider_data.get("iid"),
+                    "url": provider_data.get("url") or row["reference"],
+                    "source": {
+                        "project_id": source_data.get("project_id"),
+                        "project_path": row["source_project"],
+                        "branch": row["source_ref"], "sha": row["source_sha"],
+                    },
+                    "target": {
+                        "project_id": target_data.get("project_id"),
+                        "project_path": row["target_project"],
+                        "branch": row["target_ref"], "sha": row["target_sha"],
+                        "base_sha": row["base_sha"],
+                    },
+                }
+                pinned.append({
+                    "item_key": row["item_key"], "reference": row["reference"],
+                    "pinned": item, "ancestors": _loads(row["ancestors_json"]),
+                })
+            return pinned
+
+    def record_freshness(self, run_id, assessment):
+        """Persist fresh/stale/incomplete evidence and require explicit restart on movement."""
+        if not isinstance(assessment, dict) or assessment.get("schema") != \
+                rg_final_memory.FRESHNESS_SCHEMA:
+            raise ValueError("freshness assessment has an invalid schema")
+        state = assessment.get("state")
+        if state not in ("fresh", "stale", "incomplete"):
+            raise ValueError("invalid freshness state")
+        changes = list(assessment.get("changes") or ())
+        errors = list(assessment.get("errors") or ())
+        expected_state = "stale" if changes else "incomplete" if errors else "fresh"
+        if state != expected_state or bool(assessment.get("fresh")) != (state == "fresh"):
+            raise ValueError("freshness state does not match its evidence")
+        check_id = _identifier()
+        recorded_at = _now()
+        with self._transaction():
+            self._run_row(run_id)
+            self._conn.execute(
+                "INSERT INTO freshness_checks(check_id, run_id, state, changes_json, "
+                "errors_json, pinned_json, current_json, recorded_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (check_id, run_id, state, _json(changes), _json(errors),
+                 _json(assessment.get("pinned") or {}),
+                 _json(assessment.get("current") or {}), recorded_at),
+            )
+            units = self._rows("SELECT unit_id FROM units WHERE run_id = ?", (run_id,))
+            for unit in units:
+                summary = ("Complete pinned revision tuple remains fresh" if state == "fresh" else
+                           "Pinned source, target, base, retarget, or ancestor revisions moved"
+                           if state == "stale" else
+                           "Complete current revision evidence is unavailable")
+                self._conn.execute(
+                    "INSERT INTO coverage(coverage_id, unit_id, kind, status, summary, "
+                    "details_json, recorded_at) VALUES (?, ?, 'freshness', ?, ?, ?, ?)",
+                    (_identifier(), unit["unit_id"], state, summary,
+                     _json({"check_id": check_id, "changes": changes, "errors": errors,
+                            "automatic_restart": False}), recorded_at),
+                )
+                if state != "fresh":
+                    self._conn.execute(
+                        "INSERT INTO warnings(warning_id, unit_id, code, message, scope, "
+                        "details_json, recorded_at) VALUES (?, ?, ?, ?, 'freshness', ?, ?)",
+                        (_identifier(), unit["unit_id"],
+                         "revision-stale" if state == "stale" else "freshness-check",
+                         summary, _json({"check_id": check_id, "changes": changes,
+                                        "errors": errors, "restart_required": state == "stale",
+                                        "automatic_restart": False}), recorded_at),
+                    )
+                    self._conn.execute(
+                        "UPDATE units SET state = ?, summary = ? WHERE unit_id = ?",
+                        (state, summary if state == "stale" else
+                         "Freshness could not be established; no official pass is available",
+                         unit["unit_id"]),
+                    )
+            if state != "fresh":
+                self._conn.execute("UPDATE runs SET state = ? WHERE run_id = ?", (state, run_id))
+        return {
+            **assessment, "check_id": check_id, "run_id": run_id,
+            "recorded_at": recorded_at, "restart_required": state == "stale",
+            "automatic_restart": False,
+            "restart": {"required": state == "stale", "automatic": False},
+            "publication_pass_allowed": state == "fresh",
+        }
+
+    def latest_freshness(self, run_id):
+        """Latest durable freshness assessment for this run, or ``None``."""
+        with self._lock:
+            self._run_row(run_id)
+            row = self._conn.execute(
+                "SELECT * FROM freshness_checks WHERE run_id = ? "
+                "ORDER BY recorded_at DESC, check_id DESC LIMIT 1", (run_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            state = row["state"]
+            return {
+                "schema": rg_final_memory.FRESHNESS_SCHEMA,
+                "check_id": row["check_id"], "run_id": run_id, "state": state,
+                "fresh": state == "fresh", "changes": _loads(row["changes_json"]),
+                "errors": _loads(row["errors_json"]), "pinned": _loads(row["pinned_json"]),
+                "current": _loads(row["current_json"]), "recorded_at": row["recorded_at"],
+                "restart_required": state == "stale", "automatic_restart": False,
+                "restart": {"required": state == "stale", "automatic": False},
+                "publication_pass_allowed": state == "fresh",
+            }
+
+    def publication_decision(self, run_id, *, local_waivers=()):
+        """C13 seam: official findings/trust/freshness with local waivers isolated.
+
+        ``can_publish_pass`` is deliberately narrower than publication of a
+        findings/stale/incomplete status. Local waiver records are returned as
+        visible operator context but are never matched out of the official
+        finding stream.
+        """
+        with self._lock:
+            run = self._run_row(run_id)
+            findings = self.official_findings(run_id)
+            finding_memory = self.memory_status(run_id)
+            freshness = self.latest_freshness(run_id)
+            trust = _loads(run["trust_json"])
+            trust.update({
+                "store_instance_id": self.store_instance_id,
+                "continuity_scope": "store",
+                "waiver_isolation": "local-context-only",
+                "local_waivers_applied": False,
+            })
+            if ((freshness and freshness["state"] == "stale") or run["state"] == "stale"):
+                state = "stale"
+            elif findings:
+                state = "findings"
+            elif run["state"] == "pass" and (
+                    not finding_memory["complete_for_finalization"] or
+                    freshness is None or not freshness["fresh"]):
+                state = "incomplete"
+            else:
+                state = run["state"]
+            can_publish_pass = bool(
+                state == "pass" and freshness and freshness["fresh"] and
+                finding_memory["clear_allowed"] and not run["superseded_by_run_id"] and
+                trust.get("enforced") and not trust.get("local_only")
+            )
+            stale = state == "stale"
+            return {
+                "schema": "final-review-publication-decision/v1",
+                "run_id": run_id, "stack_key": run["stack_id"], "state": state,
+                "store_instance_id": self.store_instance_id,
+                "official_findings": findings,
+                "suppressed_finding_ids": [],
+                "local_waivers_applied": False,
+                "local_waiver_context": rg_final_memory.local_waiver_context(
+                    findings, local_waivers),
+                "memory": finding_memory, "freshness": freshness, "trust": trust,
+                "can_publish": state in FINAL_STATES,
+                "can_publish_pass": can_publish_pass,
+                "superseded": run["superseded_by_run_id"] is not None,
+                "restart_required": stale, "automatic_restart": False,
+                "restart": {"required": stale, "automatic": False},
+            }
 
     def record_warning(self, unit_id, code, message, scope="", details=None):
         warning_id = _identifier()
@@ -1019,6 +1650,8 @@ class FinalStore:
                 },
                 "contract": self.contract_view(run["contract_version"]),
                 "trust": _loads(run["trust_json"]),
+                "finding_memory": self.memory_status(run_id),
+                "freshness": self.latest_freshness(run_id),
                 "units": [self._unit_manifest(item, individual_ids, publications) for item in selected],
                 "all_unit_ids": all_unit_ids,
                 "publications": publications,
@@ -1049,6 +1682,9 @@ class FinalStore:
             f"Contract: {run['contract_version']}",
             f"Acceptance: {run['acceptance_version'] or 'not recorded'}",
             f"State: {run['state']}",
+            "Finding memory: Content and evidence anchors require explicit carry-forward; "
+            f"{len(report['finding_memory']['unresolved_thread_ids'])} unresolved thread(s)",
+            f"Freshness: {report['freshness']['state'] if report['freshness'] else 'not checked'}",
             f"Trust: {'ENFORCED' if trust.get('enforced') else 'UNENFORCED'}; "
             f"{'local-only' if trust.get('local_only') else 'provider-capable'}; "
             f"{'independent' if trust.get('independent') else 'same-store continuity'}",
