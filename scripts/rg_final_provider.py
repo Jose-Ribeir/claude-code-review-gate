@@ -5,8 +5,10 @@ Adapters return JSON-friendly dictionaries and accept an injected runner with
 failures; provider adapters turn them into explicit exceptions rather than
 silently reviewing incomplete metadata.
 """
+import json
 import subprocess
 from typing import Protocol
+from urllib.parse import quote, urlsplit
 
 
 FETCH_TIMEOUT = 10
@@ -42,6 +44,66 @@ class FinalReviewProvider(Protocol):
 
     def revalidate(self, pinned, repo_root=None):
         """Return fresh identical-revision metadata or raise RevisionChangedError."""
+
+
+class FinalReviewGraphProvider(FinalReviewProvider, Protocol):
+    """Provider reads needed to discover a complete open-item graph."""
+
+    def list_open(self, pinned, repo_root=None):
+        """Return canonical references for open items in the target project."""
+
+
+def _gitlab_open_references(provider, pinned, repo_root):
+    """List canonical open-MR URLs using the existing glab transport seam."""
+    runner = getattr(provider, "runner", None)
+    if runner is None:
+        raise ProviderReadError("GitLab open-item discovery requires an authenticated glab runner")
+    host = urlsplit(pinned["url"]).netloc or None
+    project_id = quote(str(pinned["target"]["project_id"]), safe="")
+    references = []
+    page = 1
+    while True:
+        endpoint = (f"projects/{project_id}/merge_requests?state=opened&scope=all"
+                    f"&per_page=100&page={page}")
+        argv = ["glab", "api"]
+        if host is not None:
+            argv.extend(["--hostname", host])
+        argv.append(endpoint)
+        try:
+            out, note = runner(argv, repo_root, FETCH_TIMEOUT)
+        except Exception as exc:
+            raise ProviderReadError(f"glab open-item discovery failed: {exc}") from exc
+        if out is None:
+            raise ProviderReadError(note or "glab could not discover open merge requests")
+        try:
+            batch = json.loads(out)
+        except (TypeError, ValueError) as exc:
+            raise ProviderReadError("glab open-item discovery returned invalid JSON") from exc
+        if not isinstance(batch, list):
+            raise ProviderReadError("glab open-item discovery returned a non-array response")
+        for data in batch:
+            if not isinstance(data, dict) or not isinstance(data.get("web_url"), str) \
+                    or not data["web_url"]:
+                raise ProviderReadError("open merge request is missing its canonical web_url")
+            references.append(data["web_url"])
+        if len(batch) < 100:
+            return references
+        page += 1
+
+
+def list_open_references(provider, pinned, repo_root=None):
+    """Read open-item references without making prose a graph authority."""
+    list_open = getattr(provider, "list_open", None)
+    try:
+        if list_open is not None:
+            return list(list_open(pinned, repo_root=repo_root))
+        if pinned.get("provider") == "gitlab":
+            return _gitlab_open_references(provider, pinned, repo_root)
+        raise ProviderReadError("provider does not implement open-item discovery")
+    except ProviderError:
+        raise
+    except Exception as exc:
+        raise ProviderReadError(f"open-item discovery failed: {exc}") from exc
 
 
 _REVISION_FIELDS = (
