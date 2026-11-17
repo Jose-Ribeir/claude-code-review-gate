@@ -89,8 +89,74 @@ the trace so a test can assert what was reviewed.
 """
 import json
 import os
+from pathlib import Path
 import sys
 import time
+
+
+# SPEC-16 standalone final-review test doubles.  These modes return before the
+# historical pre-push stub parses its argv, so existing stub behavior is intact.
+if len(sys.argv) > 1 and sys.argv[1] == "--glab":
+    script_path = os.environ["RG_TEST_PROVIDER_SCRIPT"]
+    with open(script_path, encoding="utf-8") as fh:
+        scripted = json.load(fh)
+    endpoint = sys.argv[-1]
+    calls_path = Path(scripted["calls"])
+    calls = json.loads(calls_path.read_text(encoding="utf-8")) \
+        if calls_path.exists() else []
+    calls.append({
+        "argv": sys.argv[1:],
+        "provider_token_available": bool(os.environ.get("GLAB_TOKEN")),
+    })
+    calls_path.write_text(json.dumps(calls), encoding="utf-8")
+    if "/merge_requests/" in endpoint:
+        prior = sum("/merge_requests/" in call["argv"][-1] for call in calls[:-1])
+        key = "revalidated_merge_request" if prior else "merge_request"
+        payload = scripted.get(key) or scripted["merge_request"]
+    elif endpoint == "projects/111":
+        payload = scripted["target_project"]
+    elif endpoint == "projects/222":
+        payload = scripted["source_project"]
+    else:
+        sys.stderr.write("unexpected scripted glab endpoint: " + endpoint + "\n")
+        sys.exit(1)
+    sys.stdout.write(json.dumps(payload))
+    sys.exit(0)
+
+if len(sys.argv) > 2 and sys.argv[1] == "--final-review":
+    request_path = Path(sys.argv[2])
+    request = json.loads(request_path.read_text(encoding="utf-8"))
+    trace_path = os.environ.get("STUB_FINAL_TRACE")
+    if trace_path:
+        sensitive_names = (
+            "GLAB_TOKEN", "GITLAB_WRITE_TOKEN", "GH_TOKEN",
+            "UNRELATED_SECRET", "STUB_FINAL_TRACE",
+        )
+        traced = {
+            "request": request,
+            "environment": {name: os.environ.get(name) for name in sensitive_names},
+            "unchanged_adr": (Path(request["repository"]["path"]) / "docs/ADR.md")
+            .read_text(encoding="utf-8"),
+            "local_only_exists": (Path(request["repository"]["path"]) / "local-only.txt")
+            .exists(),
+        }
+        Path(trace_path).write_text(json.dumps(traced), encoding="utf-8")
+    if os.environ.get("STUB_FINAL_EXIT"):
+        sys.stderr.write("scripted final worker failure\n")
+        sys.exit(int(os.environ["STUB_FINAL_EXIT"]))
+    raw = os.environ.get("STUB_FINAL_RAW")
+    if raw is not None:
+        sys.stdout.write(raw)
+        sys.exit(0)
+    result = json.loads(os.environ.get("STUB_FINAL_RESULT", "{}"))
+    result.setdefault("schema", "final-review-worker-result/v1")
+    result.setdefault("status", "success")
+    result.setdefault("summary", "correctness lens inspected the complete tree and diff")
+    result.setdefault("findings", [])
+    result.setdefault("warnings", [])
+    sys.stdout.write(json.dumps(result))
+    sys.exit(0)
+
 
 # Parse arguments: range is the last non-flag arg; --paths-file, --resolve and
 # --docs-summary (docs-gate 05) are optional.
