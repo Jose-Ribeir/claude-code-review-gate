@@ -1,0 +1,420 @@
+"""SPEC-15.5 end to end: the reference test-check executor (examples/test-check).
+
+The executor is the command check a gated repo wires up: matched changed
+paths on stdin, {"findings", "warnings"} on stdout, selector-driven (one
+cheap model call per push, stubbed here through OCR_TEST_SELECTOR_CMD -- the
+OCR_REVIEWER_CMD stub pattern, so no test ever calls a real model). These
+tests drive the REAL executable against scratch fixture repos and assert the
+externally visible contract:
+
+* a fabricated regression in changed behavior, selected as an EXISTING repo
+  test, fails twice and becomes a finding quoting the verbatim output
+  (evidence_source existing_test) with no fail-soft warnings;
+* a race-detector probe (Go where the toolchain exists, a simulated probe
+  otherwise) becomes an ephemeral_test finding paired with the canonical
+  no-permanent-coverage warning;
+* a flake (fails once, passes the re-run) warns instead of blocking;
+* a coverage gap (nothing selected, nothing probed) is the canonical warning;
+* an unbuildable probe degrades to a warning, never a crash or a finding;
+* nothing outside the executor's own scratch dir is ever written;
+* a malformed selector reply costs exactly ONE attempt and one warning;
+* the gate's own runner accepts the executor's answer (contract proof,
+  including the coverage-warning pairing rule).
+"""
+import importlib.util
+import json
+import os
+import shutil
+import subprocess
+import sys
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(_HERE)
+EXECUTOR = os.path.join(_ROOT, "examples", "test-check", "test_check")
+PROBE_ROOT = ".test-check-probes"
+
+sys.path.insert(0, os.path.join(_ROOT, "scripts"))
+_spec = importlib.util.spec_from_file_location(
+    "review_gate_tc", os.path.join(_ROOT, "scripts", "review-gate.py"))
+review_gate = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(review_gate)
+
+_PY = sys.executable
+_IMPORTER = (
+    "import os, sys\n"
+    "sys.path.insert(0, os.path.dirname(os.path.dirname("
+    "os.path.abspath(__file__))))\n"
+    "from dsl import verdict\n"
+)
+_DSL_OK = "def verdict():\n    return 'ok'\n"
+_DSL_TEST = (_IMPORTER
+             + "assert verdict() == 'ok', 'regression: verdict broken'\n")
+_DSL_BROKEN = "def verdict():\n    return None\n"
+
+_STUB_BODY = (
+    "#!/usr/bin/env python3\n"
+    "import json, os, sys\n"
+    "here = os.path.dirname(os.path.abspath(__file__))\n"
+    "try:\n"
+    "    manifest = json.load(sys.stdin)\n"
+    "    assert isinstance(manifest, list) and manifest\n"
+    "    assert all(isinstance(e, dict) and 'path' in e for e in manifest)\n"
+    "except Exception:\n"
+    "    pass\n"
+    "with open(os.path.join(here, 'calls'), 'a') as fh:\n"
+    "    fh.write('call\\n')\n"
+    "with open(os.path.join(here, 'selection.json'), encoding='utf-8') as fh:\n"
+    "    sys.stdout.write(fh.read())\n"
+)
+
+
+def _git(args, cwd):
+    subprocess.run(["git"] + args, cwd=str(cwd), capture_output=True,
+                   text=True, check=True)
+
+
+def _repo(tmp_path, commits):
+    """A git repo whose commits are the given {path: content} dicts."""
+    work = tmp_path / "work"
+    work.mkdir(parents=True)
+    _git(["init", "-q", "-b", "main", str(work)], cwd=tmp_path)
+    for key, value in (("user.email", "t@t.com"), ("user.name", "t"),
+                       ("commit.gpgsign", "false")):
+        _git(["config", key, value], cwd=work)
+    for files in commits:
+        for rel, body in files.items():
+            path = work / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(body, encoding="utf-8")
+        _git(["add", "."], cwd=work)
+        _git(["commit", "-q", "-m", "c"], cwd=work)
+    return work
+
+
+def _stub_selector(tmp_path, selection):
+    """(OCR_TEST_SELECTOR_CMD value, call-count file): a selector stub that
+    consumes the manifest from stdin and answers with the given selection
+    (a dict) or raw text (malformed-output cases)."""
+    sel_dir = tmp_path / "selector"
+    sel_dir.mkdir(exist_ok=True)
+    stub = sel_dir / "stub.py"
+    stub.write_text(_STUB_BODY, encoding="utf-8")
+    sel_file = sel_dir / "selection.json"
+    sel_file.write_text(selection if isinstance(selection, str)
+                        else json.dumps(selection), encoding="utf-8")
+    count = sel_dir / "calls"
+    return '"%s" "%s"' % (_PY, stub), count
+
+
+def _env(**kw):
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("OCR_", "STUB_", "FLAKE_", "KIMCHI_"))}
+    env.update({k: str(v) for k, v in kw.items()})
+    return env
+
+
+def _run_executor(repo, matched, env, timeout=120):
+    return subprocess.run([EXECUTOR], input=json.dumps(matched), text=True,
+                          capture_output=True, cwd=str(repo), env=env,
+                          timeout=timeout)
+
+
+def _answer(proc):
+    assert proc.returncode == 0, proc.stderr
+    data = json.loads(proc.stdout)
+    assert isinstance(data, dict), data
+    assert isinstance(data.get("findings"), list), data
+    assert isinstance(data.get("warnings"), list), data
+    return data
+
+
+def test_existing_test_regression_blocks_with_verbatim_output(tmp_path):
+    """The core story: a selected EXISTING repo test that fails the push's
+    behavior fails, is re-run, fails again, and becomes a blocking finding
+    quoting the failing output verbatim -- with the fail-soft channels
+    silent (no warnings at all)."""
+    work = _repo(tmp_path, [
+        {"dsl.py": _DSL_OK, "tests/test_dsl.py": _DSL_TEST},
+        {"dsl.py": _DSL_BROKEN},
+    ])
+    cmd, _count = _stub_selector(
+        tmp_path, {"existing_tests": ["tests/test_dsl.py"], "probes": []})
+    proc = _run_executor(work, ["dsl.py"], _env(OCR_TEST_SELECTOR_CMD=cmd))
+    data = _answer(proc)
+    assert data["warnings"] == []
+    (finding,) = data["findings"]
+    assert finding["evidence_source"] == "existing_test"
+    assert finding["path"] == "tests/test_dsl.py"
+    assert finding["severity"] == "high"
+    assert finding["confidence"] == 0.9
+    assert "regression: verdict broken" in finding["content"], finding
+    assert finding["content"].startswith("reproduced failure of existing test")
+
+
+def test_race_probe_finding_and_coverage_warning(tmp_path):
+    """A selector-authored probe for uncovered changed behavior: with the Go
+    toolchain present, a real data race under `go test -race` becomes an
+    ephemeral_test finding quoting the race detector's verbatim output,
+    paired with the canonical no-permanent-coverage warning; without Go, a
+    simulated probe proves the same contract (run_cmd executed the source
+    file the executor wrote, via the {probe_file} placeholder)."""
+    if shutil.which("go"):
+        language, run_cmd = "go", "go test -race -count=1 ."
+        marker = "WARNING: DATA RACE"
+        source = (
+            "package probe\n"
+            "\n"
+            "import (\n"
+            '\t"sync"\n'
+            '\t"testing"\n'
+            ")\n"
+            "\n"
+            "func TestUnsynchronizedCounter(t *testing.T) {\n"
+            "\tvar n int\n"
+            "\tvar wg sync.WaitGroup\n"
+            "\tfor i := 0; i < 4; i++ {\n"
+            "\t\twg.Add(1)\n"
+            "\t\tgo func() {\n"
+            "\t\t\tdefer wg.Done()\n"
+            "\t\t\tn++\n"
+            "\t\t}()\n"
+            "\t}\n"
+            "\twg.Wait()\n"
+            "\t_ = n\n"
+            "}\n"
+        )
+        work = _repo(tmp_path, [
+            {"go.mod": "module example.com/racy\n\ngo 1.16\n",
+             "main.go": "package main\n\nfunc Counter() int { return 0 }\n"}])
+    else:
+        language = "python"
+        run_cmd = '"%s" {probe_file}' % _PY
+        marker = "simulated-race-detected"
+        source = ('print("simulated-race-detected: unsynchronized counter")\n'
+                  "import sys\n"
+                  "sys.exit(3)\n")
+        work = _repo(tmp_path, [{"main.py": "x = 1\n"}])
+    cmd, _count = _stub_selector(tmp_path, {
+        "existing_tests": [],
+        "probes": [{"name": "race", "language": language,
+                    "source": source, "run_cmd": run_cmd,
+                    "path": "main.go" if language == "go" else "main.py"}]})
+    proc = _run_executor(
+        work, ["main.go" if language == "go" else "main.py"],
+        _env(OCR_TEST_SELECTOR_CMD=cmd))
+    data = _answer(proc)
+    (finding,) = data["findings"]
+    assert finding["evidence_source"] == "ephemeral_test"
+    assert marker in finding["content"], finding["content"]
+    covered = [w for w in data["warnings"]
+               if str(w.get("message", "")).startswith(
+                   "no permanent test coverage for")]
+    assert covered, data["warnings"]
+    assert "ephemeral probe was the only evidence" in covered[0]["message"]
+    assert review_gate._COVERAGE_WARNING_RE.search(covered[0]["message"])
+    assert not (work / PROBE_ROOT).exists(), "probe scratch dir was cleaned"
+
+
+def test_flaky_test_demotes_to_warning(tmp_path):
+    """Reproduce-then-block: a fixture that fails the first invocation and
+    passes the second (state file) is a flake -- a WARNING naming the test,
+    never a finding."""
+    state = tmp_path / "flake-state"
+    flaky = (
+        "import os, sys\n"
+        "state = os.environ['FLAKE_STATE']\n"
+        "if not os.path.exists(state):\n"
+        "    open(state, 'w').close()\n"
+        "    print('flake: first invocation fails')\n"
+        "    sys.exit(1)\n"
+        "\n"
+        "def test_flake_stable():\n"
+        "    assert True\n"
+    )
+    work = _repo(tmp_path, [{"flake.py": "VALUE = 1\n",
+                             "tests/test_flake.py": flaky}])
+    cmd, _count = _stub_selector(
+        tmp_path, {"existing_tests": ["tests/test_flake.py"], "probes": []})
+    proc = _run_executor(work, ["flake.py"], _env(
+        OCR_TEST_SELECTOR_CMD=cmd, FLAKE_STATE=state))
+    data = _answer(proc)
+    assert data["findings"] == []
+    assert state.exists(), "the fixture test actually ran"
+    (warning,) = data["warnings"]
+    assert "flak" in warning["message"], warning
+    assert "tests/test_flake.py" in warning["message"], warning
+
+
+def test_coverage_gap_is_the_canonical_warning(tmp_path):
+    """Nothing selected and nothing probed: the canonical no-permanent-
+    coverage warning (matching the gate's _COVERAGE_WARNING_RE pairing
+    pattern), no findings, no other noise."""
+    work = _repo(tmp_path, [{"dsl.py": _DSL_OK}])
+    cmd, _count = _stub_selector(
+        tmp_path, {"existing_tests": [], "probes": []})
+    proc = _run_executor(work, ["dsl.py"], _env(OCR_TEST_SELECTOR_CMD=cmd))
+    data = _answer(proc)
+    assert data["findings"] == []
+    (warning,) = data["warnings"]
+    assert warning["message"].startswith(
+        "no permanent test coverage for dsl.py"), warning
+    assert review_gate._COVERAGE_WARNING_RE.search(warning["message"])
+    assert "no existing tests, no probes" in warning["message"]
+
+
+def test_unbuildable_probe_degrades_to_warning(tmp_path):
+    """A probe whose source does not compile never became a running test:
+    warning, no crash, no findings -- the selector's limits can never block
+    a push."""
+    work = _repo(tmp_path, [{"app.py": "x = 1\n"}])
+    cmd, _count = _stub_selector(tmp_path, {
+        "existing_tests": [],
+        "probes": [{"name": "broken", "language": "python",
+                    "source": "def broken(:\n    pass\n",
+                    "run_cmd": '"%s" {probe_file}' % _PY,
+                    "path": "app.py"}]})
+    proc = _run_executor(work, ["app.py"], _env(OCR_TEST_SELECTOR_CMD=cmd))
+    data = _answer(proc)
+    assert data["findings"] == []
+    assert any("failed to build or run" in str(w.get("message", ""))
+               and "broken" in str(w.get("message", ""))
+               for w in data["warnings"]), data["warnings"]
+    assert not (work / PROBE_ROOT).exists()
+
+
+def test_nothing_written_outside_the_probe_scratch(tmp_path):
+    """Isolation, asserted: a full run (existing test + probe) leaves the
+    clone's file tree byte-identical and adds nothing anywhere else in the
+    fixture area -- probes live only inside the executor's scratch dir,
+    which is removed afterwards. The probe is a shell one so no bytecode
+    or cache side effects exist even without the executor's own hygiene."""
+    passing = ("import os, sys\n"
+               "sys.path.insert(0, os.path.dirname(os.path.dirname("
+               "os.path.abspath(__file__))))\n"
+               "import app\n"
+               "assert app.x == 1\n"
+               "\n"
+               "def test_app_value():\n"
+               "    assert app.x == 1\n")
+    work = _repo(tmp_path, [{"app.py": "x = 1\n",
+                             "tests/test_app.py": passing}])
+    cmd, _count = _stub_selector(tmp_path, {
+        "existing_tests": ["tests/test_app.py"],
+        "probes": [{"name": "smoke", "language": "shell",
+                    "source": "echo probe-ran\n",
+                    "run_cmd": "sh {probe_file}", "path": "app.py"}]})
+
+    def snapshot():
+        out = {}
+        for root, _dirs, files in os.walk(work):
+            if ".git" in root.split(os.sep):
+                continue
+            for name in files:
+                rel = os.path.relpath(os.path.join(root, name), work)
+                with open(os.path.join(root, name), "rb") as fh:
+                    out[rel] = fh.read()
+        return out
+
+    def outside_names():
+        names = []
+        for root, dirs, files in os.walk(tmp_path):
+            if root == str(tmp_path):
+                dirs[:] = [d for d in dirs
+                          if os.path.join(root, d) != str(work)]
+            for name in files:
+                names.append(os.path.relpath(os.path.join(root, name),
+                                             tmp_path))
+            for name in dirs:
+                names.append(os.path.join(
+                    os.path.relpath(root, tmp_path), name))
+        return sorted(names)
+
+    before, outside_before = snapshot(), outside_names()
+    proc = _run_executor(work, ["app.py"], _env(OCR_TEST_SELECTOR_CMD=cmd))
+    data = _answer(proc)
+    assert data["findings"] == []
+    assert any("ephemeral probe was the only evidence" in str(w.get("message"))
+               for w in data["warnings"]), data["warnings"]
+    assert snapshot() == before, "the clone's tree was modified"
+    assert outside_names() == outside_before, "something appeared outside"
+    assert not (work / PROBE_ROOT).exists()
+
+
+def test_malformed_selector_output_one_warning_no_retry(tmp_path):
+    """A plain-text selector reply: exactly ONE attempt (the stub counts its
+    invocations), ONE warning, no findings, exit 0."""
+    work = _repo(tmp_path, [{"app.py": "x = 1\n"}])
+    cmd, count = _stub_selector(tmp_path, "this is plain text, not JSON")
+    proc = _run_executor(work, ["app.py"], _env(OCR_TEST_SELECTOR_CMD=cmd))
+    data = _answer(proc)
+    assert data["findings"] == []
+    assert data["warnings"] == [
+        {"file": None, "message": "selector failed; no tests selected"}]
+    assert count.read_text(encoding="utf-8") == "call\n", \
+        "the selector is invoked exactly once"
+
+
+def test_severity_and_confidence_env_knobs(tmp_path):
+    """The finding's rank comes from the environment (default high): a repo
+    can demote the whole check's findings without touching the executor."""
+    work = _repo(tmp_path, [
+        {"dsl.py": _DSL_OK, "tests/test_dsl.py": _DSL_TEST},
+        {"dsl.py": _DSL_BROKEN},
+    ])
+    cmd, _count = _stub_selector(
+        tmp_path, {"existing_tests": ["tests/test_dsl.py"], "probes": []})
+    proc = _run_executor(work, ["dsl.py"], _env(
+        OCR_TEST_SELECTOR_CMD=cmd, OCR_TEST_SEVERITY="medium",
+        OCR_TEST_CONFIDENCE="0.5"))
+    data = _answer(proc)
+    (finding,) = data["findings"]
+    assert finding["severity"] == "medium"
+    assert finding["confidence"] == 0.5
+
+
+def test_contract_through_the_gate_runner(tmp_path, monkeypatch):
+    """The gate's own command-check runner accepts the executor end to end:
+    copied into a repo as scripts/rg_test_check and run through
+    _run_one_command_check, its findings parse (evidence_source survives),
+    and the coverage-warning pairing holds -- an ephemeral_test finding
+    WITH the canonical warning draws no gate-side note."""
+    work = _repo(tmp_path, [
+        {"dsl.py": _DSL_OK, "tests/test_dsl.py": _DSL_TEST},
+        {"dsl.py": _DSL_BROKEN},
+    ])
+    exe = work / "scripts" / "rg_test_check"
+    exe.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(EXECUTOR, exe)
+    exe.chmod(0o755)
+    cmd, _count = _stub_selector(
+        tmp_path, {"existing_tests": ["tests/test_dsl.py"], "probes": []})
+    monkeypatch.setenv("OCR_TEST_SELECTOR_CMD", cmd)
+    findings, warnings, note = review_gate._run_one_command_check(
+        str(work), "scripts/rg_test_check", ["dsl.py"], timeout=120)
+    assert note is None, note
+    assert warnings == [], warnings
+    (finding,) = findings
+    assert finding["evidence_source"] == "existing_test"
+    assert "regression: verdict broken" in finding["content"]
+
+    # The ephemeral half: a failing probe finding PLUS the canonical
+    # coverage warning -- the gate pairs them, so no gate-side note appears.
+    cmd2, _count2 = _stub_selector(tmp_path, {
+        "existing_tests": [],
+        "probes": [{"name": "sim", "language": "python",
+                    "source": 'import sys\nprint("sim-failure")\n'
+                              "sys.exit(1)\n",
+                    "run_cmd": '"%s" {probe_file}' % _PY,
+                    "path": "dsl.py"}]})
+    monkeypatch.setenv("OCR_TEST_SELECTOR_CMD", cmd2)
+    findings, warnings, note = review_gate._run_one_command_check(
+        str(work), "scripts/rg_test_check", ["dsl.py"], timeout=120)
+    assert note is None, note
+    (finding,) = findings
+    assert finding["evidence_source"] == "ephemeral_test"
+    assert "sim-failure" in finding["content"]
+    assert any(review_gate._COVERAGE_WARNING_RE.search(str(w.get("message")))
+               for w in warnings), warnings
+    assert not any("no-permanent-coverage warning" in str(w.get("message"))
+                   for w in warnings), warnings
+    assert not (work / PROBE_ROOT).exists()
