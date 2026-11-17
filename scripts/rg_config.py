@@ -29,8 +29,12 @@ Resolution order -- later wins, key by key:
                       over, and pass-through options ("sections",
                       "template", "sentence_cap", "sweep"). A "command"
                       string names a repo-relative executable (run in a later
-                      ticket). Command checks may define new check names;
-                      other unknown names are typos and are ignored.
+                      ticket); a command check also takes "parallel"
+                      (default False -- its executor may run concurrently
+                      against its own tip clone; SPEC-15.1) and "timeout"
+                      (seconds, default 60 -- its answer budget). Command
+                      checks may define new check names; other unknown names
+                      are typos and are ignored.
 
 Missing files degrade to defaults silently -- that is the normal state for
 most installs. Unreadable/invalid files, and invalid VALUES for known keys,
@@ -70,8 +74,13 @@ _BUILT_IN_CHECKS = {
 }
 # A user-declared command check defaults to on and empty-scoped: the
 # declaration itself is the enabling act, and how an empty glob list scopes a
-# run is the execution ticket's call (SPEC-14.4).
-_COMMAND_CHECK_DEFAULTS = {"enabled": True, "mode": "block", "globs": []}
+# run is the execution ticket's call (SPEC-14.4). A command check also
+# declares its execution posture (SPEC-15.1): "parallel" says its executor
+# may run concurrently against its own tip clone (scheduling lands in
+# SPEC-15.3), and "timeout" pins its answer budget -- 60 s, the budget the
+# gate already gives every command check (_COMMAND_CHECK_TIMEOUT_S).
+_COMMAND_CHECK_DEFAULTS = {"enabled": True, "mode": "block", "globs": [],
+                            "parallel": False, "timeout": 60}
 
 
 def _defaults():
@@ -309,6 +318,27 @@ def _as_check_value(key, value, notes, path, label, name):
         notes.append(f"{note}invalid checks.{name}.sweep value {value!r}; "
                      "current value kept")
         return False, None
+    if key == "parallel":
+        ok, parsed = _as_switch(value)
+        if ok:
+            return True, parsed
+        notes.append(f"{note}invalid checks.{name}.parallel value {value!r}; "
+                     "current value kept")
+        return False, None
+    if key == "timeout":
+        # Command-check answer budget in seconds (SPEC-15.1). Numeric and
+        # positive; a positive value under one second is floored to one the
+        # same way the env-int timeouts floor (max(floor, val)) -- a budget
+        # under a second is a disallow, which no positive config value means.
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            notes.append(f"{note}checks.{name}.timeout must be a number of "
+                         "seconds; current value kept")
+            return False, None
+        if value <= 0:
+            notes.append(f"{note}checks.{name}.timeout must be a positive "
+                         "number of seconds; current value kept")
+            return False, None
+        return True, max(1, value)
     if key == "command":
         if isinstance(value, str):
             return True, value
