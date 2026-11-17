@@ -1649,6 +1649,9 @@ def _record_review(git_dir, head_sha, branch, mode, verdict, advisory, blocked, 
             "blocked": bool(blocked),
             "finding_count": len(findings),
             "findings": findings,
+            # SPEC-15.2: the record keeps what was waived -- never deleted.
+            "waived": (list(result.get("waived") or [])
+                       if isinstance(result, dict) and result.get("waived") else []),
             "truncated": False,
             "raw": f"{HISTORY_DIR}/{raw_name}" if raw_name else "",
         }
@@ -5573,6 +5576,13 @@ def _supervise_run(state_path, run_id):
     # the sole writer, and bypasses never teach the store.
     if isinstance(result, dict):
         result = _apply_memory_demotion(repo_root, result)
+    # SPEC-15.2: waiver enforcement at verdict-assembly time. The ledger
+    # filters compute_verdict's inputs (an anchor match moves the finding to
+    # a `waived` list the reasons, the record, and telemetry all carry; a
+    # miss -- no waiver, or the code changed so it lapsed -- judges it
+    # fresh); compute_verdict stays the only verdict authority.
+    if isinstance(result, dict):
+        result = _apply_waivers(repo_root, tip, result, common_dir)
     verdict = _final_verdict(result)
     if isinstance(result, dict):
         _TELE["findings"] = [
@@ -5585,6 +5595,15 @@ def _supervise_run(state_path, run_id):
         ]
         _TELE["warnings"] = [w if isinstance(w, dict) else {"message": str(w)}
                              for w in (result.get("warnings") or [])][:50]
+        # SPEC-15.2: loud always -- telemetry carries the waived list
+        # whenever suppression happened.
+        if result.get("waived"):
+            _TELE["waived"] = [
+                {"id": w.get("id") or _finding_id(w), "path": w.get("path"),
+                 "start_line": w.get("start_line"), "severity": w.get("severity"),
+                 "category": w.get("category"),
+                 "content": str(w.get("content") or "")[:300]}
+                for w in result["waived"] if isinstance(w, dict)]
         if isinstance(result.get("cross_file_context_summary"), dict):
             _TELE["model_cross_file"] = result["cross_file_context_summary"]
         if isinstance(result.get("impact_verdicts"), dict):
@@ -6281,6 +6300,296 @@ def _dismiss_finding(argv):
         f"{_sanitize(f.get('path', '?'), 120)}: {_sanitize(f.get('content') or '', 100)}\n"
         f"recorded to {ocr_memory.store_path(repo_root)} -- future matches demote "
         "to low severity with a 'previously dismissed' note.\n" + caveat)
+    return 0
+
+
+# --- SPEC-15.2: granular finding waivers --------------------------------------
+
+def _waiver_anchor(git_root, tip, finding):
+    """The finding's content anchor (`sid`), or "" when it cannot be computed.
+
+    The same anchoring _known_defects uses for re-detection, applied
+    inversely: the finding's path, the signature_line() of its code (the
+    distinctive code line ocr_impact's sibling sweep anchors on), and the
+    file's blob at `tip`. The blob is the "code changed since the waiver"
+    axis -- any change to the file makes the anchor miss, so an altered
+    finding can never ride an old waiver (it is judged fresh and blocks
+    again). No path, no signature line, or no blob at the tip: "", which
+    never matches -- the gate never waives blind."""
+    path = str(finding.get("path") or "").strip()
+    sig = ocr_impact.signature_line(str(finding.get("existing_code") or ""))
+    if not path or not sig or not tip:
+        return ""
+    out, rc = _git(["rev-parse", f"{tip}:{path}"], cwd=git_root)
+    if rc != 0:
+        return ""
+    raw = "\x00".join((path, sig, out.strip()))
+    return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def _waiver_display_id(f):
+    """The id a waived finding is shown and waived/unwaived by: the
+    reviewer-assigned id verbatim, else the gate's stable sha (12 chars)."""
+    sid = str(f.get("id") or "").strip()
+    return sid if sid else _finding_id(f)[:12]
+
+
+def _apply_waivers(repo_root, tip, result, common_dir):
+    """SPEC-15.2 waiver enforcement at verdict-assembly time.
+
+    After the merged findings stream is assembled and BEFORE compute_verdict:
+    each finding's current content anchor is matched against the repo-scoped
+    waiver ledger. An exact match leaves the blocking set and moves to a
+    `waived` list -- still in the record, the printed reasons, and telemetry,
+    never deleted. A miss (no waiver, or the code changed since it was
+    granted -- the waiver lapsed) judges the finding fresh. compute_verdict
+    stays the only verdict authority: waivers filter its inputs, they never
+    alter the rule. Fail-soft: an unreadable or empty ledger changes nothing.
+    """
+    if not isinstance(result, dict):
+        return result
+    try:
+        ledger = rg_store.read_waivers(common_dir)
+    except Exception:
+        return result
+    sids = {str(e.get("sid") or "") for e in ledger if e.get("sid")}
+    if not sids:
+        return result
+    kept, waived = [], []
+    for f in result.get("findings") or []:
+        try:
+            hit = isinstance(f, dict) and _waiver_anchor(repo_root, tip, f) in sids
+        except Exception:
+            hit = False
+        if hit:
+            waived.append(dict(f, waived=True))
+        else:
+            kept.append(f)
+    if not waived:
+        return result  # nothing suppressed: the record and output stay as-is
+    result = dict(result, findings=kept, waived=waived)
+    ids = ", ".join(_sanitize(_waiver_display_id(w), 80) for w in waived)
+    result["warnings"] = list(result.get("warnings") or []) + [
+        {"message": (f"waiver: suppressed {len(waived)} finding(s) "
+                     f"[{ids}] - still recorded, never deleted")}]
+    return result
+
+
+def _resolve_waiver_finding(findings, fid):
+    """Resolve <fid> against the last verdict's findings, --dismiss style:
+    reviewer ids verbatim, else the gate's stable _finding_id sha. An exact
+    match wins; otherwise a >=6-char prefix that identifies exactly one
+    finding. None when nothing (or nothing unique) matches."""
+    candidates = []
+    for f in findings:
+        ids = {str(i) for i in [f.get("id")] if i}
+        ids.add(_finding_id(f))
+        candidates.append((f, ids))
+    exact = [f for f, ids in candidates if fid in ids]
+    if len(exact) == 1:
+        return exact[0]
+    prefix = [f for f, ids in candidates
+              if len(fid) >= 6 and any(s.startswith(fid) for s in ids)]
+    if len(exact) == 0 and len(prefix) == 1:
+        return prefix[0]
+    return None
+
+
+def _waiver_counts(repo_root, common_dir, head, findings):
+    """(active, suppressed): waivers in the ledger vs findings of the last
+    recorded verdict their anchors currently suppress."""
+    try:
+        ledger = rg_store.read_waivers(common_dir)
+    except Exception:
+        ledger = []
+    sids = {str(e.get("sid") or "") for e in ledger if e.get("sid")}
+    suppressed = 0
+    if sids and findings:
+        for f in findings:
+            if isinstance(f, dict) and _waiver_anchor(repo_root, head, f) in sids:
+                suppressed += 1
+    return len(sids), suppressed
+
+
+def _waiver_list(repo_root, common_dir):
+    """`review-gate.py waive --list`: the ledger, or a note for an empty one.
+    Never a failure."""
+    try:
+        ledger = rg_store.read_waivers(common_dir)
+    except Exception:
+        ledger = []
+    if not ledger:
+        sys.stdout.write("no waivers recorded for this repository.\n")
+        return 0
+    for e in ledger:
+        when = e.get("waived_at")
+        try:
+            when = time.strftime("%Y-%m-%d %H:%M:%SZ", time.gmtime(float(when)))
+        except (TypeError, ValueError):
+            when = str(when or "?")
+        note = (f"  note: {_sanitize(str(e.get('note') or ''), 120)}"
+                if e.get("note") else "")
+        sys.stdout.write(
+            f"  {_sanitize(str(e.get('sid') or '?'), 16)}  "
+            f"{_sanitize(str(e.get('finding_id') or '?'), 80)}  waived {when}{note}\n")
+    git_dir = _git_dir(repo_root)
+    entries = _read_history(git_dir, 1) if git_dir else []
+    head = str(entries[-1].get("head") or "") if entries else ""
+    findings = (entries[-1].get("findings") or []) if entries else []
+    active, suppressed = _waiver_counts(repo_root, common_dir, head, findings)
+    sys.stdout.write(
+        f"{active} active waiver(s), {suppressed} finding(s) suppressed in the last "
+        "recorded verdict.\n")
+    return 0
+
+
+def _waiver_command(argv):
+    """`review-gate.py waive <finding-id> [<finding-id>...] [--note TEXT]` and
+    `review-gate.py waive --list` (SPEC-15.2, ADR 0004 operator-command
+    precedent: standalone, no review, no markers, no hook payload; waiving is
+    a between-pushes act, nothing attaches to the push command line).
+
+    `waive` resolves each id against the LAST recorded verdict's findings
+    (same resolution as --dismiss), computes the finding's content anchor at
+    that verdict's head, and appends {sid, finding_id, waived_at, note?} to
+    the store-root, repo-scoped ledger. Prints the resulting active/suppressed
+    counts. Unknown ids, empty histories, and anchorless findings degrade
+    with notes, never failures.
+    """
+    args = argv[2:]  # argv[1] == "waive"
+    repo_root = _repo_root()
+    git_dir = _git_dir(repo_root)
+    if not git_dir:
+        _warn("not inside a git repository - no waiver ledger here.")
+        return 1
+    common_dir = _git_common_dir(repo_root) or git_dir
+    if "--list" in args:
+        return _waiver_list(repo_root, common_dir)
+    note = ""
+    fids, i = [], 0
+    while i < len(args):
+        if args[i] == "--note":
+            note = args[i + 1] if i + 1 < len(args) else ""
+            if not note:
+                _warn("waive: --note given with no text; ignoring it")
+            i += 2
+        elif not args[i].startswith("--"):
+            fids.append(args[i])
+            i += 1
+        else:
+            i += 1
+    if not fids:
+        _warn("usage: review-gate.py waive <finding-id> [<finding-id>...] "
+              "[--note TEXT]  (or: review-gate.py waive --list)")
+        return 1
+    entries = _read_history(git_dir, 1)
+    if not entries:
+        _warn(f"no recorded verdicts yet ({_findings_log_path(git_dir)}) - "
+              "nothing to waive.")
+        return 0  # nothing recorded: a note, never a failure
+    entry = entries[-1]
+    findings = [f for f in entry.get("findings") or [] if isinstance(f, dict)]
+    head = str(entry.get("head") or "")
+    try:
+        ledger = rg_store.read_waivers(common_dir)
+    except Exception:
+        ledger = []
+    added, skipped = [], []
+    for fid in fids:
+        f = _resolve_waiver_finding(findings, fid)
+        if f is None:
+            skipped.append(fid)
+            _warn(f"waive: unknown finding '{_sanitize(fid, 80)}' in the last "
+                  f"recorded verdict ({entry.get('at', '?')}) - not waived.")
+            continue
+        sid = _waiver_anchor(repo_root, head, f)
+        disp = _waiver_display_id(f)
+        if not sid:
+            skipped.append(fid)
+            _warn(f"waive: '{_sanitize(disp, 80)}' has no computable content anchor "
+                  "(no path or no code) - not waived.")
+            continue
+        if any(str(e.get("sid") or "") == sid for e in ledger):
+            _warn(f"waive: '{_sanitize(disp, 80)}' is already waived "
+                  f"(anchor {sid}).")
+            continue
+        e = {"sid": sid, "finding_id": disp, "waived_at": time.time()}
+        if note:
+            e["note"] = str(note)
+        ledger.append(e)
+        added.append(e)
+        sys.stdout.write(
+            f"waived [{_sanitize(f.get('severity', '?'), 20)}] "
+            f"{_sanitize(f.get('path', '?'), 120)}: "
+            f"{_sanitize(f.get('content') or '', 100)}\n")
+    if added:
+        try:
+            rg_store.write_waivers(common_dir, ledger)
+        except Exception as exc:
+            _warn(f"waiver ledger could not be written: {_sanitize(str(exc), 200)}")
+            return 1
+        sys.stdout.write(
+            f"recorded to {rg_store.waiver_path(common_dir)} -- the same finding, "
+            "code unchanged, is suppressed from the blocking set on the next "
+            "push (code changed: the waiver lapses and it blocks again).\n")
+    active, suppressed = _waiver_counts(repo_root, common_dir, head, findings)
+    sys.stdout.write(
+        f"ledger: {active} active waiver(s), {suppressed} finding(s) suppressed "
+        f"in the last recorded verdict, {len(skipped)} skipped.\n")
+    return 0
+
+
+def _unwaive_command(argv):
+    """`review-gate.py unwaive <finding-id> [<finding-id>...]`: remove ledger
+    entries by finding_id (exact, else a >=4-char unique prefix). An unknown
+    id or an empty ledger degrades with a note, never a failure."""
+    fids = [a for a in argv[2:] if not a.startswith("--")]  # argv[1] == "unwaive"
+    if not fids:
+        _warn("usage: review-gate.py unwaive <finding-id> [<finding-id>...]")
+        return 1
+    repo_root = _repo_root()
+    git_dir = _git_dir(repo_root)
+    if not git_dir:
+        _warn("not inside a git repository - no waiver ledger here.")
+        return 1
+    common_dir = _git_common_dir(repo_root) or git_dir
+    try:
+        ledger = rg_store.read_waivers(common_dir)
+    except Exception:
+        ledger = []
+    if not ledger:
+        sys.stdout.write("no waivers recorded for this repository - nothing to "
+                         "unwaive.\n")
+        return 0
+    removed = 0
+    for fid in fids:
+        exact = [e for e in ledger if str(e.get("finding_id") or "") == fid]
+        prefix = ([e for e in ledger
+                   if len(fid) >= 4 and str(e.get("finding_id") or "").startswith(fid)]
+                  if not exact else [])
+        hits = exact or prefix
+        if not hits:
+            _warn(f"unwaive: no waiver for '{_sanitize(fid, 80)}' - the ledger is "
+                  "unchanged.")
+            continue
+        for h in hits:
+            ledger.remove(h)
+            removed += 1
+            sys.stdout.write(f"unwaived {_sanitize(str(h.get('finding_id') or '?'), 80)} "
+                             f"(anchor {_sanitize(str(h.get('sid') or '?'), 16)}) - the "
+                             "finding blocks again on its next appearance.\n")
+    if removed:
+        try:
+            rg_store.write_waivers(common_dir, ledger)
+        except Exception as exc:
+            _warn(f"waiver ledger could not be written: {_sanitize(str(exc), 200)}")
+            return 1
+    entries = _read_history(git_dir, 1)
+    head = str(entries[-1].get("head") or "") if entries else ""
+    findings = (entries[-1].get("findings") or []) if entries else []
+    active, suppressed = _waiver_counts(repo_root, common_dir, head, findings)
+    sys.stdout.write(f"ledger: {active} active waiver(s), {suppressed} finding(s) "
+                     "suppressed in the last recorded verdict.\n")
     return 0
 
 
@@ -12604,6 +12913,16 @@ def _format_reasons(result, limit=20):
     # limit=0 means "all of them" -- used by --history, which is read on demand
     # and has no context budget to protect, unlike the gate's own messages.
     out = "\n".join(lines if not limit else lines[:limit])
+    # SPEC-15.2: loud always -- the waived list rides the reasons text
+    # whenever suppression happened (never when it did not).
+    waived = result.get("waived") if isinstance(result, dict) else None
+    if isinstance(waived, list) and waived:
+        wids = [_waiver_display_id(w) for w in waived if isinstance(w, dict)]
+        wids = [i for i in wids if i]
+        out += ("\n" if out else "") + (
+            f"  waived: [{', '.join(_sanitize(i, 80) for i in wids)}] - "
+            f"{len(waived)} finding(s) suppressed by waiver; still recorded, "
+            "never deleted (a code change lapses the waiver and blocks again)")
     paths = result.get("unreviewed_truncated") if isinstance(result, dict) else None
     if isinstance(paths, list) and paths:
         # Cached truncated reviews (see _surface_truncated): said on every verdict, because
@@ -13576,6 +13895,13 @@ def main(argv):
         # Records a dismissal into .ocr/memory.jsonl -- the store's only write
         # path. Standalone like --history: no review, no markers, no payload.
         sys.exit(_dismiss_finding(argv))
+    # SPEC-15.2 operator commands: subcommand form (argv[1]), same standalone
+    # contract as --dismiss / --reset-tip -- no review, no markers, no payload.
+    # Nothing attaches to the push command line; --no-verify stays untouched.
+    if len(argv) > 1 and argv[1] == "waive":
+        sys.exit(_waiver_command(argv))
+    if len(argv) > 1 and argv[1] == "unwaive":
+        sys.exit(_unwaive_command(argv))
     if "--telemetry-report" in argv:
         sys.exit(_print_telemetry_report(argv))
     if "--print-range" in argv:
