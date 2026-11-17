@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from copy import deepcopy
 from pathlib import Path
 import re
 import shlex
@@ -27,12 +28,18 @@ import ocr_profile
 from rg_final_compose import compose_stack
 from rg_final_graph import discover_linear_graph
 from rg_final_gitlab import GitLabProvider
+from rg_final_dynamic import run_dynamic_checks
+from rg_final_execution import (
+    execute_unit,
+    record_execution_tests,
+    skipped_execution,
+)
+from rg_final_verification import run_required_verification
 from rg_final_lenses import (
     CROSS_ITEM_CONTRACTS,
     INTEGRATION_BEHAVIOR,
     REQUIRED_LENS_NAMES,
     failed_lens_aggregation,
-    run_independent_lenses,
 )
 from rg_final_materialize import materialize_review
 from rg_final_provider import RevisionChangedError, revision_tuple
@@ -53,6 +60,9 @@ STACK_MISSING_STAGES = [
     "required_and_dynamic_tests",
     "provider_publication",
 ]
+EXECUTION_STAGE = "S16-04B"
+EXECUTION_MISSING_STAGES = ["composition", "provider_publication"]
+EXECUTION_STACK_MISSING_STAGES = ["provider_publication"]
 
 
 class WorkerError(RuntimeError):
@@ -260,15 +270,18 @@ def _line(finding):
         return None
 
 
-def _record_pending(store, unit_id):
-    for kind, summary in (
-        ("required_tests", "Repository-required verification is reserved for a later stage"),
-        ("dynamic_tests", "Dynamic checks are reserved for a later stage"),
+def _record_pending(store, unit_id, *, include_tests=True):
+    pending = [
         ("composition", "Combined and prospective composition are reserved for later stages"),
         ("provider_publication", "No official provider status is emitted by this stage"),
-    ):
-        status = "incomplete" if kind == "mandatory_lenses" else "not_implemented"
-        store.record_coverage(unit_id, kind, status, summary,
+    ]
+    if include_tests:
+        pending[:0] = [
+            ("required_tests", "Repository-required verification is reserved for a later stage"),
+            ("dynamic_tests", "Dynamic checks are reserved for a later stage"),
+        ]
+    for kind, summary in pending:
+        store.record_coverage(unit_id, kind, "not_implemented", summary,
                               {"stage": STAGE, "complete": False})
 
 
@@ -342,6 +355,55 @@ def _record_lens_aggregation(store, unit_id, aggregation, materialized=None):
     })
 
 
+def _record_execution_evidence(store, unit_id, execution, diff="", affected_units=None,
+                               *, record_tests=True):
+    """Persist stage outputs and a supervisor-mapped stop in one hand-off."""
+    if record_tests:
+        record_execution_tests(store, unit_id, execution)
+    for rejected in execution.rejected_stops if record_tests else ():
+        store.record_warning(unit_id, "structured-stop-rejected", rejected["error"],
+                             rejected["stage"], rejected)
+    stop_id = None
+    if execution.stop is not None:
+        stop = execution.stop
+        finding = deepcopy(stop["finding"])
+        finding["lens"] = stop["stage"]
+        finding.setdefault("category", "critical-stop")
+        _record_finding(store, unit_id, finding,
+                        "stop-" + stop["reason_code"], diff)
+        affected = list(affected_units or [unit_id])
+        skipped = []
+        for item in execution.skipped_work:
+            detached = deepcopy(item)
+            detached["unit_id"] = detached.get("unit_id") or unit_id
+            skipped.append(detached)
+        stop_id = store.record_stop(
+            unit_id, f"{stop['reason_code']}: {stop['reason']}", evidence=stop,
+            affected_unit_ids=affected, skipped_work=skipped,
+        )
+        for affected_id in affected:
+            store.record_coverage(
+                affected_id, "critical_stop", "incomplete",
+                stop["reason"], {"stop_id": stop_id, "source_unit_id": unit_id,
+                                 "reason_code": stop["reason_code"]},
+            )
+    return stop_id
+
+
+def _execution_result_fields(execution):
+    if execution is None:
+        return {"execution_complete": None, "stops": [], "rejected_stops": [],
+                "skipped_work": []}
+    stop_id = getattr(execution, "stop_id", None)
+    stops = [] if execution.stop is None else [{**deepcopy(execution.stop), "stop_id": stop_id}]
+    return {
+        "execution_complete": execution.checks_complete,
+        "stops": stops,
+        "rejected_stops": deepcopy(execution.rejected_stops),
+        "skipped_work": deepcopy(execution.skipped_work),
+    }
+
+
 def _write_reports(store, run_id, orchestration, completion_marker=None):
     report = store.machine_report(run_id)
     report["orchestration"] = orchestration
@@ -358,11 +420,17 @@ def _write_reports(store, run_id, orchestration, completion_marker=None):
         pass
     os.replace(temporary, machine_path)
     human = store.human_report(run_id)
-    marker = completion_marker or (
-        f"\nStage: {STAGE}\n"
-        "Completion: INCOMPLETE - this stage runs every individual static lens independently. "
-        "Tests, composition and provider publication are not implemented.\n"
-    )
+    if completion_marker is None:
+        stage = orchestration.get("stage", STAGE)
+        marker = (f"\nStage: {stage}\n" + (
+            "Completion: INCOMPLETE - individual static lenses and applicable tests ran; "
+            "composition and provider publication remain pending.\n"
+            if stage == EXECUTION_STAGE else
+            "Completion: INCOMPLETE - this stage runs every individual static lens independently. "
+            "Tests, composition and provider publication are not implemented.\n"
+        ))
+    else:
+        marker = completion_marker
     human = human.replace("\n", marker, 1)
     human_path.write_text(human, encoding="utf-8")
     try:
@@ -373,7 +441,8 @@ def _write_reports(store, run_id, orchestration, completion_marker=None):
 
 
 def run_final_review(reference, *, repo_root=None, provider=None, store_path=None,
-                     worker=None, environ=None):
+                     worker=None, environ=None, execute_checks=False,
+                     required_runner=None, dynamic_runner=None, dynamic_kwargs=None):
     """Review one provider-pinned ref and return the versioned operator result.
 
     ``worker`` is an optional argv prefix (``{request}`` placeholder supported)
@@ -388,21 +457,23 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
     environ = os.environ if environ is None else environ
     repo_root = str(repo_root or os.getcwd())
     provider = provider or GitLabProvider()
+    stage = EXECUTION_STAGE if execute_checks else STAGE
+    missing_stages = EXECUTION_MISSING_STAGES if execute_checks else MISSING_STAGES
     item = provider.read(reference, repo_root=repo_root)
     revisions = list(revision_tuple(item))
     source = item["source"]
     target = item["target"]
     with FinalStore(store_path) as store:
         identity = store.start_run(_stack(item), metadata={
-            "stage": STAGE,
+            "stage": stage,
             "complete": False,
-            "missing_stages": MISSING_STAGES,
+            "missing_stages": missing_stages,
             "standalone": True,
         })
         run_id = identity["run_id"]
         unit_id = identity["unit_ids"]["individual:1"]
         combined_id = identity["unit_ids"]["combined"]
-        _record_pending(store, unit_id)
+        _record_pending(store, unit_id, include_tests=not execute_checks)
         _record_pending(store, combined_id)
         store.record_coverage(
             combined_id, "mandatory_lenses", "not_implemented",
@@ -412,6 +483,7 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
         merge_base = None
         state = "incomplete"
         aggregation = None
+        execution = None
         lenses_recorded = False
         try:
             source_repository = source.get("http_url") or source["url"]
@@ -459,11 +531,23 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
                         timeout=float(environ.get("RG_FINAL_WORKER_TIMEOUT", "900")),
                     )
 
-                # This returns only after every required lens has completed or
-                # failed. Blocking findings never short-circuit other evidence.
-                aggregation = run_independent_lenses(request, isolated_worker)
-                finding_verdict = aggregation.finding_verdict
+                # Ordinary findings and stage errors never short-circuit useful
+                # independent evidence. Only a supervisor-validated STOP can
+                # suppress dependent work, with explicit skipped evidence.
+                execution = execute_unit(
+                    request, isolated_worker, unit_id=unit_id,
+                    required_runner=((required_runner or run_required_verification)
+                                     if execute_checks else None),
+                    dynamic_runner=((dynamic_runner or run_dynamic_checks)
+                                    if execute_checks else None),
+                    dynamic_kwargs=dynamic_kwargs,
+                )
+                aggregation = execution.aggregation
+                finding_verdict = (execution.finding_verdict if execute_checks
+                                   else aggregation.finding_verdict)
                 _record_lens_aggregation(store, unit_id, aggregation, materialized)
+                execution.stop_id = _record_execution_evidence(
+                    store, unit_id, execution, materialized.diff)
                 lenses_recorded = True
                 try:
                     provider.revalidate(item, repo_root=repo_root)
@@ -491,8 +575,16 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
         else:
             unit_state = "incomplete"
         static_lenses_complete = bool(aggregation and aggregation.complete)
-        summary = ("Static-lens findings block this incomplete standalone review"
+        if execution is not None and execution.stop is not None:
+            unit_state = "incomplete"
+            state = "incomplete"
+            finding_verdict = None
+        summary = ("A validated critical stop skipped dependent work; original evidence is retained"
+                   if execution is not None and execution.stop is not None else
+                   "Static-lens findings block this incomplete standalone review"
                    if unit_state == "findings" else
+                   "Independent static lenses and applicable tests completed; composition is pending"
+                   if static_lenses_complete and execute_checks else
                    "Independent static lenses completed; verification and composition are pending"
                    if static_lenses_complete else
                    "A required static lens is incomplete; no final pass is available")
@@ -501,9 +593,12 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
                              "Combined review is not implemented in this stage")
         trust = store.finish_run(run_id, state, trust={
             "local_only": True, "enforced": False, "official": False,
-            "stage_incomplete": True, "missing_stages": MISSING_STAGES,
+            "stage_incomplete": True, "missing_stages": missing_stages,
             "static_lenses_complete": static_lenses_complete,
-            "reason": "C5 performs independent static lenses but never verifies, composes or publishes",
+            "stopped": bool(execution and execution.stop),
+            "reason": "C12 preserves safe completion and scoped stops; composition/publication remain"
+            if execute_checks else
+            "C5 performs independent static lenses but never verifies, composes or publishes",
         })
         if state == "stale":
             exit_code = 3
@@ -513,9 +608,9 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
             exit_code = 2
         result = {
             "schema": RESULT_SCHEMA,
-            "stage": STAGE,
+            "stage": stage,
             "complete": False,
-            "missing_stages": MISSING_STAGES,
+            "missing_stages": missing_stages,
             "state": state,
             "exit_code": exit_code,
             "finding_verdict": finding_verdict,
@@ -539,16 +634,30 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
                 "provider_base_sha": target["base_sha"], "merge_base_sha": merge_base,
             },
             "trust": trust,
+            **_execution_result_fields(execution),
+            "required_verification": deepcopy(execution.required) if execution else None,
+            "dynamic_checks": deepcopy(execution.dynamic) if execution else None,
         }
         machine_path, human_path = _write_reports(store, run_id, {
-            "schema": RESULT_SCHEMA, "stage": STAGE, "complete": False,
-            "missing_stages": MISSING_STAGES, "state": state, "exit_code": exit_code,
+            "schema": RESULT_SCHEMA, "stage": stage, "complete": False,
+            "missing_stages": missing_stages, "state": state, "exit_code": exit_code,
             "finding_verdict": finding_verdict, "unit_id": unit_id,
             "static_lenses_complete": static_lenses_complete,
+            **_execution_result_fields(execution),
         })
         result["machine_report_path"] = machine_path
         result["human_report_path"] = human_path
         return result
+
+
+def execute_final_review(reference, **kwargs):
+    """Run C12 safe static/required/dynamic completion without publication.
+
+    C13/C14 consume the returned execution/stop/skip evidence. Composition and
+    official provider mutation remain separate trusted supervisor stages.
+    """
+    kwargs["execute_checks"] = True
+    return run_final_review(reference, **kwargs)
 
 
 def _graph_stack(graph):
@@ -626,13 +735,16 @@ def _record_stack_composition(store, unit_id, composed):
 
 def _run_stack_unit(store, identity, graph, unit_key, unit_id, *, item=None,
                     composed=None, source_repository, target_repository=None,
-                    target_sha, head_sha, worker, environ, repo_root):
+                    target_sha, head_sha, worker, environ, repo_root,
+                    execute_checks=False, required_runner=None, dynamic_runner=None,
+                    dynamic_kwargs=None):
     """Materialize and run every mandatory lens, returning detached unit output."""
     capabilities = () if composed is None else (
         (CROSS_ITEM_CONTRACTS, INTEGRATION_BEHAVIOR) if unit_key == "combined"
         else (INTEGRATION_BEHAVIOR,)
     )
     aggregation = None
+    execution = None
     merge_base = None
     repository_path = ""
     try:
@@ -696,8 +808,21 @@ def _run_stack_unit(store, identity, graph, unit_key, unit_id, *, item=None,
                     timeout=float(environ.get("RG_FINAL_WORKER_TIMEOUT", "900")),
                 )
 
-            aggregation = run_independent_lenses(request, isolated_worker)
+            execution = execute_unit(
+                request, isolated_worker, unit_id=unit_id,
+                required_runner=((required_runner or run_required_verification)
+                                 if execute_checks else None),
+                dynamic_runner=((dynamic_runner or run_dynamic_checks)
+                                if execute_checks else None),
+                dynamic_kwargs=dynamic_kwargs,
+            )
+            aggregation = execution.aggregation
             _record_lens_aggregation(store, unit_id, aggregation, materialized)
+            record_execution_tests(store, unit_id, execution)
+            for rejected in execution.rejected_stops:
+                store.record_warning(unit_id, "structured-stop-rejected", rejected["error"],
+                                     rejected["stage"], rejected)
+            # Stack STOP persistence is deferred until dependent units have IDs.
     except Exception as exc:
         if aggregation is None:
             aggregation = failed_lens_aggregation(exc)
@@ -705,8 +830,9 @@ def _run_stack_unit(store, identity, graph, unit_key, unit_id, *, item=None,
         store.record_coverage(unit_id, "repository", "incomplete",
                               "Immutable full-tree review did not complete", {"error": str(exc)})
         store.record_warning(unit_id, "materialization", str(exc), "repository")
-    verdict = aggregation.finding_verdict if aggregation is not None else None
-    state = "findings" if verdict == "block" else "incomplete"
+    verdict = ((execution.finding_verdict if execute_checks else aggregation.finding_verdict)
+               if aggregation is not None else None)
+    state = "findings" if verdict == "block" and not (execution and execution.stop) else "incomplete"
     complete = bool(aggregation and aggregation.complete)
     summary = ("Static-lens findings block this incomplete stack review" if verdict == "block"
                else "Independent static lenses completed; tests and publication are pending"
@@ -723,6 +849,7 @@ def _run_stack_unit(store, identity, graph, unit_key, unit_id, *, item=None,
         "lenses": [{"name": outcome.name, "state": outcome.state,
                     "summary": outcome.summary, "capabilities": list(capabilities)}
                    for outcome in (aggregation.outcomes if aggregation else ())],
+        "_execution": execution,
     }
 
 
@@ -754,11 +881,50 @@ def _incomplete_composed_unit(store, identity, graph, unit_key, unit_id, compose
         "lenses": [{"name": outcome.name, "state": outcome.state,
                     "summary": outcome.summary, "capabilities": []}
                    for outcome in aggregation.outcomes],
+        "_execution": None,
+    }
+
+
+def _stop_dependents(unit_key):
+    """Supervisor graph mapping; worker-provided scopes are never consulted."""
+    if unit_key.startswith("individual:"):
+        position = int(unit_key.split(":", 1)[1])
+        descendants = {f"individual:{number}" for number in range(position + 1, 1000)}
+        return descendants | {"combined", "prospective"}
+    if unit_key == "combined":
+        return {"prospective"}
+    return set()
+
+
+def _record_skipped_stack_unit(store, graph, unit_key, unit_id, stop, execute_checks):
+    execution = skipped_execution(stop, unit_id=unit_id, run_tests=execute_checks)
+    _record_lens_aggregation(store, unit_id, execution.aggregation)
+    record_execution_tests(store, unit_id, execution)
+    # Preserve the dependent's complete skip ledger locally as well as in the
+    # origin stop's affected-unit list. This keeps per-unit reports auditable.
+    store.record_stop(
+        unit_id, f"Dependent work skipped after {stop['reason_code']}",
+        evidence={"dependent_skip": True, "original_stop": stop},
+        affected_unit_ids=[unit_id], skipped_work=execution.skipped_work,
+    )
+    store.record_coverage(unit_id, "repository", "skipped",
+                          "Dependent immutable tree was not used after a critical stop",
+                          {"reason_code": stop["reason_code"], "evidence": stop["evidence"]})
+    store.set_unit_state(unit_id, "incomplete", "Dependent work skipped after critical stop")
+    return {
+        "unit_id": unit_id, "unit_key": unit_key,
+        "kind": "individual" if unit_key.startswith("individual:") else unit_key,
+        "state": "incomplete", "finding_verdict": None,
+        "static_lenses_complete": False, "base_sha": "",
+        "head_sha": "", "merge_base_sha": None, "repository_path": "",
+        "composition_complete": False, "composition_errors": [], "lenses": [],
+        "inherited_stop": True, "_execution": execution,
     }
 
 
 def _execute_composed_unit(store, identity, graph, unit_key, unit_id, composed,
-                           worker, environ, repo_root):
+                           worker, environ, repo_root, execute_checks=False,
+                           required_runner=None, dynamic_runner=None, dynamic_kwargs=None):
     _record_stack_composition(store, unit_id, composed)
     if not composed["complete"]:
         return _incomplete_composed_unit(
@@ -768,17 +934,21 @@ def _execute_composed_unit(store, identity, graph, unit_key, unit_id, composed,
         source_repository=composed["repository"]["source_repository"],
         target_sha=composed["target_sha"], head_sha=composed["head_sha"],
         worker=worker, environ=environ, repo_root=repo_root,
+        execute_checks=execute_checks, required_runner=required_runner,
+        dynamic_runner=dynamic_runner, dynamic_kwargs=dynamic_kwargs,
     )
 
 
-def _write_stack_unit_report(store, run_id, unit, links):
+def _write_stack_unit_report(store, run_id, unit, links, *, stage=STACK_STAGE,
+                             missing_stages=STACK_MISSING_STAGES):
     directory = store.path.parent / "reports"
     directory.mkdir(parents=True, exist_ok=True)
     stem = re.sub(r"[^A-Za-z0-9_.-]+", "-", unit["unit_key"])
     machine_path = directory / f"{run_id}-{stem}.json"
     human_path = directory / f"{run_id}-{stem}.md"
     report = store.machine_report(run_id, unit["unit_id"])
-    report["orchestration"] = {"stage": STACK_STAGE, "complete": False, **links}
+    report["orchestration"] = {
+        "stage": stage, "complete": False, "missing_stages": list(missing_stages), **links}
     temporary = machine_path.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(report, indent=2, sort_keys=True,
                                     ensure_ascii=False) + "\n", encoding="utf-8")
@@ -788,8 +958,11 @@ def _write_stack_unit_report(store, run_id, unit, links):
         pass
     os.replace(temporary, machine_path)
     human = store.human_report(run_id, unit["unit_id"])
-    marker = (f"\nStage: {STACK_STAGE}\nCompletion: INCOMPLETE - required/dynamic tests "
-              "and official publication remain pending.\n")
+    marker = (f"\nStage: {stage}\nCompletion: INCOMPLETE - " + (
+        "per-unit static/required/dynamic execution evidence is recorded; official publication "
+        "remains pending.\n" if stage == EXECUTION_STAGE else
+        "required/dynamic tests and official publication remain pending.\n"
+    ))
     human_path.write_text(human.replace("\n", marker, 1), encoding="utf-8")
     for path in (machine_path, human_path):
         try:
@@ -801,7 +974,8 @@ def _write_stack_unit_report(store, run_id, unit, links):
 
 
 def run_final_stack(references, *, repo_root=None, provider=None, store_path=None,
-                    worker=None, environ=None, current_root_sha=None):
+                    worker=None, environ=None, current_root_sha=None, execute_checks=False,
+                    required_runner=None, dynamic_runner=None, dynamic_kwargs=None):
     """Validate and review a complete base-first stack through composition.
 
     The returned units and per-unit report paths are the C14 publication
@@ -811,21 +985,32 @@ def run_final_stack(references, *, repo_root=None, provider=None, store_path=Non
     environ = os.environ if environ is None else environ
     repo_root = str(repo_root or os.getcwd())
     provider = provider or GitLabProvider()
+    stage = EXECUTION_STAGE if execute_checks else STACK_STAGE
+    missing_stages = EXECUTION_STACK_MISSING_STAGES if execute_checks else STACK_MISSING_STAGES
     graph = discover_linear_graph(references, provider=provider, repo_root=repo_root)
     items = graph["items"]
     with FinalStore(store_path) as store:
         identity = store.start_run(_graph_stack(graph), metadata={
-            "stage": STACK_STAGE, "complete": False,
-            "missing_stages": STACK_MISSING_STAGES, "standalone": False,
+            "stage": stage, "complete": False,
+            "missing_stages": missing_stages, "standalone": False,
             "graph": {"schema": graph["schema"], "item_keys": graph["item_keys"]},
         })
         run_id = identity["run_id"]
         combined_id = identity["unit_ids"]["combined"]
         unit_results = []
+        stopped_dependents = {}
         for position, item in enumerate(items, 1):
             unit_id = identity["unit_ids"][f"individual:{position}"]
-            _record_stack_pending(store, unit_id)
-        _record_stack_pending(store, combined_id)
+            if execute_checks:
+                store.record_coverage(unit_id, "provider_publication", "not_implemented",
+                                      "Official publication remains a trusted later stage")
+            else:
+                _record_stack_pending(store, unit_id)
+        if execute_checks:
+            store.record_coverage(combined_id, "provider_publication", "not_implemented",
+                                  "Official publication remains a trusted later stage")
+        else:
+            _record_stack_pending(store, combined_id)
         current_sha, current_error = _current_stack_root(
             provider, graph, repo_root, current_root_sha)
 
@@ -836,16 +1021,40 @@ def run_final_stack(references, *, repo_root=None, provider=None, store_path=Non
                 target = item["target"]
                 source_repository = source.get("http_url") or source["url"]
                 target_repository = target.get("http_url") or target["url"]
-                unit_results.append(_run_stack_unit(
-                    store, identity, graph, unit_key, identity["unit_ids"][unit_key],
-                    item=item, source_repository=source_repository,
-                    target_repository=target_repository, target_sha=target["sha"],
-                    head_sha=source["sha"], worker=worker, environ=environ,
-                    repo_root=repo_root,
-                ))
-            unit_results.append(_execute_composed_unit(
-                store, identity, graph, "combined", combined_id,
-                composition["combined"], worker, environ, repo_root))
+                unit_id = identity["unit_ids"][unit_key]
+                if unit_key in stopped_dependents:
+                    unit_results.append(_record_skipped_stack_unit(
+                        store, graph, unit_key, unit_id, stopped_dependents[unit_key],
+                        execute_checks))
+                else:
+                    unit_results.append(_run_stack_unit(
+                        store, identity, graph, unit_key, unit_id,
+                        item=item, source_repository=source_repository,
+                        target_repository=target_repository, target_sha=target["sha"],
+                        head_sha=source["sha"], worker=worker, environ=environ,
+                        repo_root=repo_root, execute_checks=execute_checks,
+                        required_runner=required_runner, dynamic_runner=dynamic_runner,
+                        dynamic_kwargs=dynamic_kwargs,
+                    ))
+                execution = unit_results[-1]["_execution"]
+                if execution and execution.stop and not unit_results[-1].get("inherited_stop"):
+                    for dependent in _stop_dependents(unit_key):
+                        stopped_dependents.setdefault(dependent, execution.stop)
+            if "combined" in stopped_dependents:
+                unit_results.append(_record_skipped_stack_unit(
+                    store, graph, "combined", combined_id,
+                    stopped_dependents["combined"], execute_checks))
+            else:
+                unit_results.append(_execute_composed_unit(
+                    store, identity, graph, "combined", combined_id,
+                    composition["combined"], worker, environ, repo_root,
+                    execute_checks=execute_checks, required_runner=required_runner,
+                    dynamic_runner=dynamic_runner, dynamic_kwargs=dynamic_kwargs))
+            combined_execution = unit_results[-1]["_execution"]
+            if combined_execution and combined_execution.stop and \
+                    not unit_results[-1].get("inherited_stop"):
+                for dependent in _stop_dependents("combined"):
+                    stopped_dependents.setdefault(dependent, combined_execution.stop)
             prospective = composition["prospective"]
             prospective_id = store.add_unit(
                 run_id, "prospective", "prospective", prospective["target_sha"],
@@ -856,10 +1065,21 @@ def run_final_stack(references, *, repo_root=None, provider=None, store_path=Non
                           else "pinned_candidate_only",
                           "errors": prospective["errors"]},
             )
-            _record_stack_pending(store, prospective_id)
-            unit_results.append(_execute_composed_unit(
-                store, identity, graph, "prospective", prospective_id,
-                prospective, worker, environ, repo_root))
+            if execute_checks:
+                store.record_coverage(prospective_id, "provider_publication", "not_implemented",
+                                      "Official publication remains a trusted later stage")
+            else:
+                _record_stack_pending(store, prospective_id)
+            if "prospective" in stopped_dependents:
+                unit_results.append(_record_skipped_stack_unit(
+                    store, graph, "prospective", prospective_id,
+                    stopped_dependents["prospective"], execute_checks))
+            else:
+                unit_results.append(_execute_composed_unit(
+                    store, identity, graph, "prospective", prospective_id,
+                    prospective, worker, environ, repo_root,
+                    execute_checks=execute_checks, required_runner=required_runner,
+                    dynamic_runner=dynamic_runner, dynamic_kwargs=dynamic_kwargs))
 
         if current_error is not None:
             store.record_coverage(unit_results[-1]["unit_id"], "current_target", "incomplete",
@@ -889,22 +1109,48 @@ def run_final_stack(references, *, repo_root=None, provider=None, store_path=Non
                 store.set_unit_state(unit["unit_id"], "stale",
                                      "Pinned stack revisions moved; explicit restart is required")
 
+        # Only now are every origin and dependent ID known. Record each original
+        # STOP once, with the supervisor-computed blast radius and all skips.
+        origin_stops = []
+        for origin in unit_results:
+            execution = origin["_execution"]
+            if not execution or not execution.stop or origin.get("inherited_stop"):
+                continue
+            affected = [unit for unit in unit_results if unit["unit_key"] == origin["unit_key"]
+                        or unit["unit_key"] in _stop_dependents(origin["unit_key"])]
+            for dependent in affected:
+                if dependent is origin:
+                    continue
+                execution.skipped_work.extend(deepcopy(
+                    dependent["_execution"].skipped_work
+                    if dependent["_execution"] else skipped_execution(
+                        execution.stop, unit_id=dependent["unit_id"],
+                        run_tests=execute_checks).skipped_work))
+            execution.stop_id = _record_execution_evidence(
+                store, origin["unit_id"], execution,
+                affected_units=[unit["unit_id"] for unit in affected], record_tests=False)
+            origin_stops.append(origin)
+
         verdicts = [unit["finding_verdict"] for unit in unit_results]
-        finding_verdict = ("block" if "block" in verdicts
+        finding_verdict = (None if origin_stops else
+                           "block" if "block" in verdicts
                            else "pass" if verdicts and all(v == "pass" for v in verdicts)
                            else None)
         static_complete = all(unit["static_lenses_complete"] for unit in unit_results)
         state = "stale" if stale else "incomplete"
         trust = store.finish_run(run_id, state, trust={
             "local_only": True, "enforced": False, "official": False,
-            "stage_incomplete": True, "missing_stages": STACK_MISSING_STAGES,
+            "stage_incomplete": True, "missing_stages": missing_stages,
             "static_lenses_complete": static_complete,
-            "reason": "C10 composes and reviews statically; tests and official publication remain",
+            "stopped": bool(origin_stops),
+            "reason": "C12 executes safe evidence and scoped stops; official publication remains"
+            if execute_checks else
+            "C10 composes and reviews statically; tests and official publication remain",
         })
         exit_code = 3 if stale else 1 if finding_verdict == "block" else 2
         result = {
-            "schema": RESULT_SCHEMA, "stage": STACK_STAGE, "complete": False,
-            "missing_stages": STACK_MISSING_STAGES, "state": state, "exit_code": exit_code,
+            "schema": RESULT_SCHEMA, "stage": stage, "complete": False,
+            "missing_stages": missing_stages, "state": state, "exit_code": exit_code,
             "finding_verdict": finding_verdict, "static_lenses_complete": static_complete,
             "store_instance_id": identity["store_instance_id"], "store_path": str(store.path),
             "run_id": run_id, "run_seq": identity["run_seq"],
@@ -917,12 +1163,24 @@ def run_final_stack(references, *, repo_root=None, provider=None, store_path=Non
                       "item_keys": graph["item_keys"]},
             "item_keys": graph["item_keys"], "revisions": graph["revisions"],
             "composition": composition, "units": unit_results, "trust": trust,
+            "execution_complete": not origin_stops and all(
+                not unit["_execution"] or unit["_execution"].checks_complete
+                for unit in unit_results),
+            "stops": [_execution_result_fields(unit["_execution"])["stops"][0]
+                      for unit in origin_stops],
         }
-        marker = (f"\nStage: {STACK_STAGE}\nCompletion: INCOMPLETE - composition and all static "
-                  "lenses ran; required/dynamic tests and official publication remain pending.\n")
+        for unit in unit_results:
+            execution = unit.pop("_execution")
+            unit.update(_execution_result_fields(execution))
+        marker = (f"\nStage: {stage}\nCompletion: INCOMPLETE - " + (
+            "ordered per-unit static/required/dynamic execution evidence is recorded; "
+            "official publication remains pending.\n" if execute_checks else
+            "composition and all static lenses ran; required/dynamic tests and official "
+            "publication remain pending.\n"
+        ))
         machine_path, human_path = _write_reports(store, run_id, {
-            "schema": RESULT_SCHEMA, "stage": STACK_STAGE, "complete": False,
-            "missing_stages": STACK_MISSING_STAGES, "state": state,
+            "schema": RESULT_SCHEMA, "stage": stage, "complete": False,
+            "missing_stages": missing_stages, "state": state,
             "exit_code": exit_code, "finding_verdict": finding_verdict,
             "combined_unit_id": combined_id, "prospective_unit_id": prospective_id,
             "static_lenses_complete": static_complete,
@@ -935,7 +1193,7 @@ def run_final_stack(references, *, repo_root=None, provider=None, store_path=Non
                 "combined_unit_id": combined_id,
                 "individual_unit_ids": [item["unit_id"] for item in unit_results
                                         if item["kind"] == "individual"],
-            })
+            }, stage=stage, missing_stages=missing_stages)
         combined = next(unit for unit in unit_results if unit["kind"] == "combined")
         combined["individual_unit_ids"] = [unit["unit_id"] for unit in unit_results
                                            if unit["kind"] == "individual"]
@@ -947,6 +1205,12 @@ def run_final_stack(references, *, repo_root=None, provider=None, store_path=Non
         for unit in unit_results:
             unit["combined_report_path"] = combined["machine_report_path"]
         return result
+
+
+def execute_final_stack(references, **kwargs):
+    """Run full C12 per-unit execution, preserving safe independent stack work."""
+    kwargs["execute_checks"] = True
+    return run_final_stack(references, **kwargs)
 
 
 def main(argv=None):
