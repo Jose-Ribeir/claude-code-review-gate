@@ -293,15 +293,40 @@ SCENARIOS = [
     ),
     Scenario(
         name="D-waiver-lapse-blocks",
-        description="the finding's code altered since the waiver: the anchor "
-                    "no longer matches, the waiver lapses, it blocks again",
-        commits=[CommitSpec(
-            message="sim D: strengthen the boundary contract test",
-            write={"tests/test_feature.py": _TEST_FEATURE_STRENGTHENED},
-        )],
+        description="the finding's code/evidence altered since the waiver: "
+                    "the anchor no longer matches, the waiver lapses, it blocks again",
+        commits=[],    # block, waive, alter the finding, re-push on a new tip
         expect="block",
-        expect_message=["reproduced failure of existing test"],
-        forbid_message=["suppressed by waiver"],
+        steps=[
+            PushStep(
+                label="the boundary regression blocks",
+                commits=[CommitSpec(
+                    message="sim D: flip the inclusive boundary in "
+                            "simlib.feature",
+                    write={"simlib/feature.py": _FEATURE_FLIPPED,
+                           "tests/test_feature.py": _TEST_FEATURE_TOUCHED,
+                           # Scenario C's successful push advanced the fake
+                           # origin WITH the flipped feature already, so a
+                           # pure flip here has no diff to commit. This
+                           # unrelated file makes D's setup commit non-empty.
+                           "docs/sim-d-setup.md": _UNRELATED_DOC},
+                )],
+                expect="block",
+                expect_message=["reproduced failure of existing test"],
+            ),
+            PushStep(
+                label="waive, then strengthen the finding's contract test",
+                commands=[["{python}", "{gate}", "waive",
+                           "{finding:tests/test_feature.py}"]],
+                commits=[CommitSpec(
+                    message="sim D: strengthen the boundary contract test",
+                    write={"tests/test_feature.py": _TEST_FEATURE_STRENGTHENED},
+                )],
+                expect="block",
+                expect_message=["reproduced failure of existing test"],
+                forbid_message=["suppressed by waiver"],
+            ),
+        ],
     ),
     Scenario(
         name="E-coverage-gap-passes-with-warning",

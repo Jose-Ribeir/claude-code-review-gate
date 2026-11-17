@@ -31,6 +31,7 @@ and what did the pusher read -- never on gate internals.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -394,10 +395,9 @@ def reset_to_origin(scratch):
 
 
 def _last_finding_id_for_path(scratch, path):
-    """The display id of the most recent recorded verdict's finding on
-    `path` -- read straight from the append-only findings log (the same
-    record `--history` replays), so a scenario can script `waive <id>` the
-    way a pusher would after reading the block output."""
+    """The display id accepted by the gate for the finding on `path`.
+    Command checks (no reviewer-assigned id) use the gate's own fallback:
+    sha256(path, existing_code, content) truncated to twelve characters."""
     log = scratch.work / ".git" / "review-gate-findings.jsonl"
     try:
         lines = [ln for ln in log.read_text(encoding="utf-8").splitlines() if ln.strip()]
@@ -409,8 +409,13 @@ def _last_finding_id_for_path(scratch, path):
         except ValueError:
             continue
         for f in entry.get("findings") or []:
-            if isinstance(f, dict) and f.get("path") == path and f.get("id"):
-                return str(f["id"])
+            if isinstance(f, dict) and f.get("path") == path:
+                if f.get("id"):
+                    return str(f["id"])
+                raw = "\x00".join(str(v) for v in (
+                    f.get("path") or "", f.get("existing_code") or "",
+                    f.get("content") or ""))
+                return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()[:12]
     raise SimError(f"no recorded finding on {path!r} in the findings log")
 
 
