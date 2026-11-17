@@ -427,6 +427,19 @@ Declare any executable in your repo as a push check:
   repo-relative paths.
 - Findings come back on **stdout** as a JSON array (bare or wrapped as
   `{"findings": [...]}`) of finding objects in the gate's findings shape.
+  A check may additionally report its own degradations in a `warnings`
+  array (`{"findings": [...], "warnings": [...]}`) — coverage gaps,
+  unbuildable probes, flake demotions; they surface in the gate output and
+  telemetry like every other check degradation, and a malformed warnings
+  field degrades to a note, never a failure.
+- A finding may carry `evidence_source: "existing_test" | "ephemeral_test"`
+  (which kind of test evidenced it). The gate validates the value against
+  that enumeration: absent is fine (non-test checks), an unknown value
+  drops the tag with a note while the finding survives. A finding tagged
+  `ephemeral_test` should come with the check's no-permanent-coverage
+  warning; its absence produces a gate-side note — never a verdict change.
+  The tag flows into the verdict output and telemetry untouched by
+  demotion passes.
 - The check gets **60 seconds**. Nonzero exit, timeout, or malformed output
   discards that check's findings and records a warning plus telemetry —
   never a silent pass, never a gate crash.

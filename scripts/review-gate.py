@@ -5590,6 +5590,7 @@ def _supervise_run(state_path, run_id):
              "start_line": f.get("start_line"), "severity": f.get("severity"),
              "confidence": f.get("confidence"), "category": f.get("category"),
              "provenance": f.get("provenance") or "new",
+             "evidence_source": f.get("evidence_source"),
              "content": str(f.get("content") or "")[:300]}
             for f in (result.get("findings") or []) if isinstance(f, dict)
         ]
@@ -9679,42 +9680,106 @@ def _docs_quality_scan_notes(repo_root, review_root, base, tip, entries=None):
 
 # --- user-registered command checks (SPEC-14 story 4) -------------------------
 
+# SPEC-15.4: the evidence_source tag a command-check finding may carry, and
+# the substring that marks a check warning as the no-permanent-coverage
+# warning an ephemeral_test finding should be paired with.
+_EVIDENCE_SOURCES = frozenset(("existing_test", "ephemeral_test"))
+_COVERAGE_WARNING_RE = re.compile(r"coverage", re.IGNORECASE)
+
+
+def _evidence_pairing_note(f):
+    """The gate-side note (SPEC-15.4 provenance pairing): a finding whose
+    evidence_source is ephemeral_test should come with the check's
+    no-permanent-coverage warning; its absence produces THIS -- a severity-\n    "note" finding that can never block, never a verdict change, never fatal."""
+    return {
+        "path": f.get("path"), "start_line": f.get("start_line") or 0,
+        "end_line": f.get("end_line") or 0, "severity": "note",
+        "confidence": 1.0, "category": "custom",
+        "content": ("ephemeral_test evidence without the check's "
+                    "no-permanent-coverage warning: the finding stands on "
+                    "ephemeral evidence alone"),
+        "deterministic": True,
+    }
+
+
 def _run_one_command_check(review_root, command, matched):
-    """(findings, error_note_or_None) for ONE command check over its matched
-    changed files: the repo-relative executable runs with cwd the review tree
-    root and the matched file list on stdin as a JSON array; stdout is the
-    findings contract. Nonzero exit, timeout, and malformed output degrade
-    to a note -- the check's findings are DISCARDED, never silently passed
-    (the note plus telemetry stay) and never a crash. The contract is a
-    REPO-RELATIVE executable: an absolute path or any ".." component is an
-    escape outside the reviewed tree and is rejected before anything runs."""
+    """(findings, warnings, error_note_or_None) for ONE command check over
+    its matched changed files: the repo-relative executable runs with cwd the
+    review tree root and the matched file list on stdin as a JSON array;
+    stdout is the findings contract (SPEC-15.4: a bare findings array, or a
+    {"findings": [...]} or {"findings": [...], "warnings": [...]} wrapper
+    -- the warnings array is the check's own degradations and surfaces like
+    every other one; a malformed warnings field degrades to a note, never a
+    failure). Findings may carry evidence_source "existing_test" or
+    "ephemeral_test"; an unknown value degrades the tag with a note while
+    the finding survives. An ephemeral_test finding without the check's
+    no-permanent-coverage warning gains a gate-side pairing note. Nonzero
+    exit, timeout, and malformed output degrade to a note -- the check's
+    findings are DISCARDED, never silently passed (the note plus telemetry
+    stay) and never a crash. The contract is a REPO-RELATIVE executable: an
+    absolute path or any ".." component is an escape outside the reviewed
+    tree and is rejected before anything runs."""
     cmd_path = Path(command)
     if cmd_path.is_absolute() or ".." in cmd_path.parts:
-        return [], ("command must name a repo-relative executable (no "
-                    "absolute paths, no '..' components): %s; findings discarded"
-                    % command)
+        return [], [], ("command must name a repo-relative executable (no "
+                        "absolute paths, no '..' components): %s; findings discarded"
+                        % command)
     exe = str(Path(review_root) / command)
     if not (os.path.isfile(exe) and os.access(exe, os.X_OK)):
-        return [], f"command not executable or missing: {command}"
+        return [], [], f"command not executable or missing: {command}"
     try:
         proc = subprocess.run([exe], input=json.dumps(matched), text=True,
                               cwd=str(review_root), capture_output=True,
                               timeout=_COMMAND_CHECK_TIMEOUT_S)
     except subprocess.TimeoutExpired:
-        return [], f"timed out after {_COMMAND_CHECK_TIMEOUT_S}s; findings discarded"
+        return [], [], f"timed out after {_COMMAND_CHECK_TIMEOUT_S}s; findings discarded"
     except OSError as exc:
-        return [], f"could not execute: {exc}"
+        return [], [], f"could not execute: {exc}"
     if proc.returncode != 0:
-        return [], f"exit code {proc.returncode}; findings discarded"
+        return [], [], f"exit code {proc.returncode}; findings discarded"
     try:
         data = json.loads(proc.stdout or "")
     except ValueError:
-        return [], "malformed output (stdout is not JSON); findings discarded"
+        return [], [], "malformed output (stdout is not JSON); findings discarded"
+    notes, check_warnings = [], []   # gate-side degrade notes / the check's own
     if isinstance(data, dict):
+        raw_warnings = data.get("warnings")
+        if isinstance(raw_warnings, list):
+            for w in raw_warnings:
+                if isinstance(w, str):
+                    check_warnings.append({"file": None, "message": w})
+                elif isinstance(w, dict):
+                    check_warnings.append({"file": w.get("file"),
+                                           "message": str(w.get("message") or "")})
+                else:
+                    notes.append({"file": None,
+                                 "message": ("malformed warnings entry (%s); "
+                                             "entry ignored" % type(w).__name__)})
+        elif raw_warnings is not None:
+            notes.append({"file": None,
+                         "message": ("malformed warnings field (not an array); "
+                                     "warnings ignored")})
         data = data.get("findings")
     if not isinstance(data, list):
-        return [], "malformed output (no findings array); findings discarded"
-    return [f for f in data if isinstance(f, dict)], None
+        return [], [], "malformed output (no findings array); findings discarded"
+    findings = []
+    covered = any(_COVERAGE_WARNING_RE.search(str(w.get("message") or ""))
+                  for w in check_warnings)
+    for f in data:
+        if not isinstance(f, dict):
+            continue
+        f = dict(f)
+        src = f.get("evidence_source")
+        if "evidence_source" in f and src not in _EVIDENCE_SOURCES:
+            f.pop("evidence_source")
+            notes.append({"file": f.get("path"),
+                         "message": ("unknown evidence_source %r (expected "
+                                     "existing_test or ephemeral_test); tag "
+                                     "dropped, finding kept" % (src,))})
+        if src == "ephemeral_test" and not covered:
+            findings.append(_evidence_pairing_note(f))
+        findings.append(f)
+    return findings, notes + check_warnings, None
 
 
 def _command_check_findings(repo_root, review_root, base, tip, entries=None):
@@ -9765,7 +9830,8 @@ def _command_check_findings(repo_root, review_root, base, tip, entries=None):
         if not matched:
             tele["seconds"] = round(time.monotonic() - t0, 2)
             continue
-        got, note = _run_one_command_check(review_root, check["command"], matched)
+        got, check_warnings, note = _run_one_command_check(
+            review_root, check["command"], matched)
         tele["seconds"] = round(time.monotonic() - t0, 2)
         tele["findings"] = len(got)
         if note:
@@ -9773,6 +9839,14 @@ def _command_check_findings(repo_root, review_root, base, tip, entries=None):
             warnings.append({"file": None, "message":
                              f"command check {name!r}: {note}"})
             continue
+        # SPEC-15.4: the check's own warnings (coverage gaps, unbuildable
+        # probes, flake demotions) surface like every other degradation,
+        # named after the check that raised them.
+        tele["warnings"] = len(check_warnings)
+        for w in check_warnings:
+            warnings.append({"file": w.get("file"),
+                             "message": f"command check {name!r}: "
+                                        f"{w.get('message')}"})
         warn_mode = tele["mode"] != "block"
         for f in got:
             tagged = dict(f)

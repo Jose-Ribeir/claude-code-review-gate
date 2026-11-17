@@ -1481,6 +1481,160 @@ def test_command_check_config_load_failure_is_observed(monkeypatch, tmp_path, ca
     assert "synthetic store failure" in capsys.readouterr().err
 
 
+# --- SPEC-15.4: warnings field + evidence_source (executor contract) --------
+
+def _run_check(tmp_path, body):
+    """Direct seam: run ONE repo-relative command check body against
+    app.py and hand back the executor-contract triple
+    (findings, warnings, error_note) -- no push, no reviewer."""
+    p = tmp_path / "scripts" / "dslcheck.sh"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(body, encoding="utf-8")
+    p.chmod(0o755)
+    return review_gate._run_one_command_check(
+        str(tmp_path), "scripts/dslcheck.sh", ["app.py"])
+
+
+def _evidence_body(evidence_source=None, warnings=None):
+    """A check body answering with a findings+warnings wrapper; the finding
+    carries the given evidence_source and the wrapper the given warnings."""
+    finding = {"path": "app.py", "start_line": 1, "end_line": 1,
+               "severity": "high", "confidence": 0.95,
+               "category": "custom", "content": "race check tripped"}
+    if evidence_source is not None:
+        finding["evidence_source"] = evidence_source
+    payload = {"findings": [finding]}
+    if warnings is not None:
+        payload["warnings"] = warnings
+    return ("#!/bin/sh\ncat >/dev/null\ncat <<'OCRJSON'\n"
+            + json.dumps(payload) + "\nOCRJSON\n")
+
+
+def test_command_check_findings_plus_warnings_wrapper_parses_both_arrays(tmp_path):
+    """SPEC-15.4: a check may answer {"findings": [...], "warnings": [...]};
+    both arrays parse -- the findings survive and the warnings surface in
+    the same (findings, warnings) channel every other check degradation
+    uses."""
+    findings, warnings, note = _run_check(
+        tmp_path, _evidence_body(warnings=["no permanent coverage for the "
+                                           "race probe: tests/dsl.py missing"]))
+    assert note is None
+    assert [f["content"] for f in findings] == ["race check tripped"]
+    assert len(warnings) == 1
+    assert "no permanent coverage" in str(warnings[0].get("message"))
+
+
+def test_command_check_bare_and_findings_only_shapes_unchanged(tmp_path):
+    """Regression: the pre-15.4 shapes still work exactly as before -- a
+    bare findings array and a findings-only wrapper carry no warnings."""
+    bare = ("#!/bin/sh\ncat >/dev/null\n"
+            "printf '[{\"path\": \"app.py\", \"start_line\": 1, \"end_line\": 1, "
+            "\"severity\": \"high\", \"confidence\": 0.95, "
+            "\"category\": \"custom\", \"content\": \"bare tripped\"}]'\n")
+    findings, warnings, note = _run_check(tmp_path, bare)
+    assert note is None and warnings == []
+    assert [f["content"] for f in findings] == ["bare tripped"]
+    findings, warnings, note = _run_check(tmp_path, _evidence_body())
+    assert note is None and warnings == []
+    assert [f["content"] for f in findings] == ["race check tripped"]
+
+
+def test_command_check_malformed_warnings_field_degrades_never_fails(tmp_path):
+    """A malformed warnings field (not an array, or junk entries) degrades
+    to a note and the findings survive -- never a failure, never a discard."""
+    findings, warnings, note = _run_check(
+        tmp_path, _evidence_body(warnings="oops, a string"))
+    assert note is None, "a malformed warnings field is never a failure"
+    assert [f["content"] for f in findings] == ["race check tripped"]
+    assert any("warnings" in str(w.get("message")) for w in warnings), warnings
+    findings, warnings, note = _run_check(
+        tmp_path, _evidence_body(warnings=["ok", 7]))
+    assert note is None
+    assert [f["content"] for f in findings] == ["race check tripped"]
+    messages = [str(w.get("message")) for w in warnings]
+    assert any("ok" in m for m in messages), messages
+    assert any("ignored" in m for m in messages), messages
+
+
+def test_command_check_valid_evidence_source_flows_to_output_and_telemetry(tmp_path):
+    """A valid evidence_source tag (existing_test) flows through the findings
+    stream into the verdict output and telemetry, and the check's warnings
+    surface alongside it (per-check warnings count included)."""
+    work = _repo_with_check(
+        tmp_path, _evidence_body(evidence_source="existing_test",
+                                 warnings=["no permanent coverage yet"]))
+    tip = _commit(work, {"app.py": _APP_V2})
+    decision, reason = _push(work, _env(tmp_path, "t.trace"))
+    assert decision == "deny", reason
+    assert "race check tripped" in reason, reason
+    st = _state(work, tip)
+    assert st.get("verdict") == "block", st
+    records = [r for r in _tele_run_records(work) if r.get("command_checks")]
+    assert records, "telemetry carries the command-check run"
+    entry = records[-1]["command_checks"][0]
+    assert entry.get("warnings") == 1, entry
+    tagged = [f for f in records[-1].get("findings") or []
+              if f.get("path") == "app.py"]
+    assert tagged and tagged[0].get("evidence_source") == "existing_test", tagged
+    run_warnings = [str(w.get("message")) for w in records[-1].get("warnings") or []]
+    assert any("no permanent coverage" in m for m in run_warnings), run_warnings
+
+
+def test_command_check_unknown_evidence_source_degrades_tag_not_finding(tmp_path):
+    """An unknown evidence_source value degrades the tag with a note while
+    the finding itself survives (still blocks); the tag is dropped from
+    output and telemetry."""
+    work = _repo_with_check(
+        tmp_path, _evidence_body(evidence_source="gut_feeling"))
+    tip = _commit(work, {"app.py": _APP_V2})
+    decision, reason = _push(work, _env(tmp_path, "t.trace"))
+    assert decision == "deny", reason
+    assert "race check tripped" in reason, "the finding survives the tag degrade"
+    st = _state(work, tip)
+    assert st.get("verdict") == "block", st
+    records = [r for r in _tele_run_records(work) if r.get("command_checks")]
+    assert records
+    tagged = [f for f in records[-1].get("findings") or []
+              if f.get("path") == "app.py"]
+    assert tagged and not tagged[0].get("evidence_source"), tagged
+    run_warnings = [str(w.get("message")) for w in records[-1].get("warnings") or []]
+    assert any("evidence_source" in m for m in run_warnings), run_warnings
+
+
+def test_command_check_ephemeral_pairing_note_fires_without_coverage_warning(tmp_path):
+    """Provenance pairing (SPEC-15.4): an ephemeral_test finding without the
+    check's no-permanent-coverage warning produces a gate-side NOTE -- never
+    a verdict change, never fatal. With the coverage warning present, no
+    note fires."""
+    findings, warnings, note = _run_check(
+        tmp_path, _evidence_body(evidence_source="ephemeral_test"))
+    assert note is None
+    notes = [f for f in findings if f.get("severity") == "note"]
+    assert notes and "no-permanent-coverage" in notes[0]["content"], findings
+    assert review_gate.compute_verdict({"findings": [notes[0]]}) != "block"
+    findings, warnings, note = _run_check(
+        tmp_path, _evidence_body(evidence_source="ephemeral_test",
+                                 warnings=["no permanent coverage for the probe"]))
+    assert note is None
+    assert not [f for f in findings if f.get("severity") == "note"], findings
+
+
+def test_command_check_ephemeral_pairing_note_reaches_telemetry(tmp_path):
+    """The pairing note rides the findings stream end to end: a push whose
+    ephemeral finding lacks the coverage warning lands the note in telemetry
+    alongside the finding (and never changes the verdict on its own)."""
+    work = _repo_with_check(
+        tmp_path, _evidence_body(evidence_source="ephemeral_test"))
+    tip = _commit(work, {"app.py": _APP_V2})
+    decision, reason = _push(work, _env(tmp_path, "t.trace"))
+    assert decision == "deny", reason  # the high finding blocks, not the note
+    records = [r for r in _tele_run_records(work) if r.get("command_checks")]
+    assert records
+    notes = [f for f in records[-1].get("findings") or []
+             if f.get("severity") == "note"]
+    assert notes and "no-permanent-coverage" in str(notes[0].get("content")), notes
+
+
 # --- the sweep option (story 20) ----------------------------------------------
 
 def test_sweep_true_expands_integrity_evidence_to_the_whole_records_root(tmp_path):
