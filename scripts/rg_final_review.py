@@ -1,8 +1,8 @@
 """Standalone orchestration for explicit SPEC-16 final review.
 
-This layer deliberately performs only the individual correctness review.  The
-remaining mandatory lenses, verification, composition, and provider publication
-are later contract stages; a successful worker therefore never becomes an
+This layer performs every mandatory independent static lens against the
+individual immutable tree. Verification, composition, and provider publication
+are later contract stages; successful workers therefore never become an
 official final pass.
 
 The stable hand-off for later layers is :func:`run_final_review` and the JSON
@@ -25,8 +25,11 @@ import sys
 import tempfile
 
 import ocr_profile
-import ocr_verdict
 from rg_final_gitlab import GitLabProvider
+from rg_final_lenses import (
+    failed_lens_aggregation,
+    run_independent_lenses,
+)
 from rg_final_materialize import materialize_review
 from rg_final_provider import RevisionChangedError, revision_tuple
 from rg_final_store import FinalStore
@@ -35,9 +38,8 @@ from rg_final_store import FinalStore
 RESULT_SCHEMA = "final-review-result/v1"
 WORKER_REQUEST_SCHEMA = "final-review-worker-request/v1"
 WORKER_RESULT_SCHEMA = "final-review-worker-result/v1"
-STAGE = "S16-01D"
+STAGE = "S16-02A"
 MISSING_STAGES = [
-    "remaining_mandatory_lenses",
     "required_and_dynamic_tests",
     "composition",
     "provider_publication",
@@ -45,7 +47,7 @@ MISSING_STAGES = [
 
 
 class WorkerError(RuntimeError):
-    """A correctness worker did not produce a trustworthy completed result."""
+    """A lens worker did not produce a trustworthy completed result."""
 
 
 def _sha256(text):
@@ -116,18 +118,19 @@ def worker_environment(environ=None):
     return child
 
 
-def _default_worker_command(request_path, repo_root, environ):
+def _default_worker_command(request_path, repo_root, environ, request):
     selection = ocr_profile.select_backend(env=environ, repo_root=repo_root)
     executable = shutil.which(selection.name, path=environ.get("PATH"))
     if not executable:
         raise WorkerError(f"selected review backend {selection.name!r} is not on PATH")
     prompt = (
-        "Perform one independent correctness review. Read the JSON request at "
+        f"Perform one independent {request['lens']} static review. Read the JSON request at "
         f"{request_path}. Its repository.path is a complete immutable checkout and its "
         "diff is the complete merge-base patch. Iteratively inspect unchanged code, "
-        "docs, callers and tests as needed. Return only a "
-        f"{WORKER_RESULT_SCHEMA} JSON object with status, summary, findings and warnings; "
-        "do not trust your own verdict field to determine the gate result."
+        "docs, callers and tests as needed. Your assigned evidence duty is: "
+        f"{request['review_duty']} Do not use or wait for another lens's conclusions. "
+        f"Return only a {WORKER_RESULT_SCHEMA} JSON object with status, summary, findings "
+        "and warnings; do not trust your own verdict field to determine the gate result."
     )
     if selection.name == "claude":
         args = [
@@ -204,7 +207,7 @@ def invoke_worker(request, *, command=None, repo_root=None, environ=None, timeou
                 replaced = [part.replace("{request}", str(request_path)) for part in command]
                 command = replaced if replaced != command else [*command, str(request_path)]
             else:
-                command = _default_worker_command(str(request_path), repo_root, source)
+                command = _default_worker_command(str(request_path), repo_root, source, request)
         elif any("{request}" in str(part) for part in command):
             command = [str(part).replace("{request}", str(request_path)) for part in command]
         else:
@@ -217,81 +220,19 @@ def invoke_worker(request, *, command=None, repo_root=None, environ=None, timeou
                 timeout=float(timeout), check=False,
             )
         except (OSError, subprocess.SubprocessError) as exc:
-            raise WorkerError(f"correctness worker could not run: {exc}") from exc
+            raise WorkerError(f"{request['lens']} worker could not run: {exc}") from exc
     if process.returncode:
-        raise WorkerError(f"correctness worker exited {process.returncode}")
+        raise WorkerError(f"{request['lens']} worker exited {process.returncode}")
     result = _object_from_text(process.stdout)
     if result is None:
-        raise WorkerError("correctness worker returned no valid contracted JSON result")
+        raise WorkerError(f"{request['lens']} worker returned no valid contracted JSON result")
     return result
-
-
-def _normal_warning(warning):
-    if isinstance(warning, str):
-        return {"code": "reviewer-warning", "message": warning, "scope": "", "details": {}}
-    if not isinstance(warning, dict):
-        return {"code": "reviewer-warning", "message": str(warning),
-                "scope": "", "details": {"raw": warning}}
-    return {
-        "code": str(warning.get("code") or "reviewer-warning"),
-        "message": str(warning.get("message") or warning.get("content") or warning),
-        "scope": str(warning.get("scope") or warning.get("path") or ""),
-        "details": warning.get("details") if isinstance(warning.get("details"), dict)
-        else {"worker": warning},
-    }
-
-
-def normalize_worker_result(result):
-    """Normalize findings and warnings without trusting a model verdict."""
-    if not isinstance(result, dict) or result.get("schema") != WORKER_RESULT_SCHEMA:
-        raise WorkerError("correctness worker result has the wrong schema")
-    if result.get("status") not in ("success", "completed", "completed_with_warnings"):
-        raise WorkerError("correctness worker did not complete successfully")
-    raw_findings = result.get("findings")
-    raw_warnings = result.get("warnings", [])
-    if not isinstance(raw_findings, list) or not isinstance(raw_warnings, list):
-        raise WorkerError("correctness worker findings and warnings must be arrays")
-    if any(not isinstance(finding, dict) for finding in raw_findings):
-        raise WorkerError("correctness worker emitted an unparseable finding")
-    findings = []
-    for raw in raw_findings:
-        finding = dict(raw)
-        if "path" not in finding and "file" in finding:
-            finding["path"] = finding["file"]
-        if "start_line" not in finding and "line" in finding:
-            finding["start_line"] = finding["line"]
-        finding.setdefault("end_line", finding.get("start_line"))
-        if "content" not in finding:
-            finding["content"] = next(
-                (finding[key] for key in ("issue", "message", "description", "title")
-                 if str(finding.get(key) or "").strip()), ""
-            )
-        finding["severity"] = ocr_verdict.norm_severity(finding.get("severity"))
-        try:
-            finding["confidence"] = float(finding.get("confidence", 0.0))
-        except (TypeError, ValueError):
-            finding["confidence"] = 0.0
-        findings.append(finding)
-    retained = ocr_verdict.drop_failed_intent_findings(findings)
-    warnings = [_normal_warning(warning) for warning in raw_warnings]
-    if len(retained) != len(findings):
-        warnings.append({
-            "code": "intent-validation", "scope": "correctness",
-            "message": "An intent finding failed its required self-check and was excluded",
-            "details": {"excluded": len(findings) - len(retained)},
-        })
-    return {
-        "findings": retained,
-        "warnings": warnings,
-        "unreviewed": result.get("unreviewed") or [],
-        "summary": str(result.get("summary") or "correctness lens completed"),
-    }
 
 
 def _finding_key(finding, used):
     base = str(finding.get("id") or finding.get("finding_key") or "").strip()
     if not base:
-        base = "correctness-" + _sha256(json.dumps(
+        base = str(finding.get("lens") or "static") + "-" + _sha256(json.dumps(
             finding, sort_keys=True, ensure_ascii=False, default=str))[:16]
     key = base
     suffix = 2
@@ -312,7 +253,6 @@ def _line(finding):
 
 def _record_pending(store, unit_id):
     for kind, summary in (
-        ("mandatory_lenses", "Other independent mandatory lenses are not implemented in C4"),
         ("required_tests", "Repository-required verification is reserved for a later stage"),
         ("dynamic_tests", "Dynamic checks are reserved for a later stage"),
         ("composition", "Combined and prospective composition are reserved for later stages"),
@@ -325,6 +265,7 @@ def _record_pending(store, unit_id):
 
 def _record_finding(store, unit_id, finding, key, diff):
     raw = dict(finding)
+    lens = str(finding.get("lens") or "static")
     evidence_text = str(finding.get("evidence") or finding.get("existing_code") or "")
     anchors = [{
         "anchor_type": "content",
@@ -336,37 +277,60 @@ def _record_finding(store, unit_id, finding, key, diff):
     store.record_finding(
         unit_id, key, str(finding.get("content") or ""),
         str(finding.get("severity") or ""), str(finding.get("confidence", 0.0)),
-        lens="correctness", path=finding.get("path"), line=_line(finding),
-        anchors=anchors, evidence={"worker": raw, "lens": "correctness"},
+        lens=lens, path=finding.get("path"), line=_line(finding),
+        anchors=anchors, evidence={"worker": raw, "lens": lens},
     )
 
 
-def _record_worker_result(store, unit_id, normalized, verdict, materialized):
-    lens_state = "completed_with_warnings" if normalized["unreviewed"] else "completed"
-    evidence = {
+def _record_lens_aggregation(store, unit_id, aggregation, materialized=None):
+    """Persist every lens completion and every normalized warning/findings stream."""
+    common = {
         "request_schema": WORKER_REQUEST_SCHEMA,
         "result_schema": WORKER_RESULT_SCHEMA,
         "repository_access": "full_tree",
-        "merge_base_sha": materialized.merge_base_sha,
-        "diff_bytes": len(materialized.diff.encode("utf-8", "surrogateescape")),
-        "diff_sha256": _sha256(materialized.diff),
-        "submodules": list(materialized.submodules),
-        "lfs_files": list(materialized.lfs_files),
-        "lfs_complete": materialized.lfs_complete,
-        "summary": normalized["summary"],
-        "finding_verdict": verdict,
-        "warning_count": len(normalized["warnings"]),
-        "unreviewed": normalized["unreviewed"],
     }
-    store.record_lens(unit_id, "correctness", lens_state, normalized["summary"], evidence)
-    store.record_coverage(unit_id, "lens:correctness", lens_state,
-                          normalized["summary"], {"evidence": evidence})
+    if materialized is not None:
+        common.update({
+            "merge_base_sha": materialized.merge_base_sha,
+            "diff_bytes": len(materialized.diff.encode("utf-8", "surrogateescape")),
+            "diff_sha256": _sha256(materialized.diff),
+            "submodules": list(materialized.submodules),
+            "lfs_files": list(materialized.lfs_files),
+            "lfs_complete": materialized.lfs_complete,
+        })
     used = set()
-    for finding in normalized["findings"]:
-        _record_finding(store, unit_id, finding, _finding_key(finding, used), materialized.diff)
-    for warning in normalized["warnings"]:
-        store.record_warning(unit_id, warning["code"], warning["message"],
-                             warning["scope"], warning["details"])
+    for outcome in aggregation.outcomes:
+        evidence = {
+            **common,
+            "summary": outcome.summary,
+            "finding_verdict": aggregation.finding_verdict if aggregation.complete else None,
+            "warning_count": len(outcome.warnings),
+            "unreviewed": list(outcome.unreviewed),
+            "capabilities": list(outcome.capabilities),
+            "independent_context": True,
+            "error": outcome.error,
+        }
+        store.record_lens(unit_id, outcome.name, outcome.state, outcome.summary, evidence)
+        store.record_coverage(unit_id, f"lens:{outcome.name}", outcome.state,
+                              outcome.summary, {"evidence": evidence})
+        for finding in outcome.findings:
+            _record_finding(store, unit_id, finding, _finding_key(finding, used),
+                            materialized.diff if materialized is not None else "")
+        for warning in outcome.warnings:
+            details = dict(warning["details"])
+            details["lens"] = warning["lens"]
+            store.record_warning(unit_id, warning["code"], warning["message"],
+                                 warning["scope"], details)
+    state = "complete" if aggregation.complete else "incomplete"
+    summary = ("Every mandatory independent static lens completed" if aggregation.complete else
+               "One or more mandatory independent static lenses did not complete")
+    store.record_coverage(unit_id, "mandatory_lenses", state, summary, {
+        "complete": aggregation.complete,
+        "missing_lenses": list(aggregation.missing_lenses),
+        "incomplete_lenses": [outcome.name for outcome in aggregation.outcomes
+                              if outcome.state == "incomplete"],
+        "aggregate_after_completion": True,
+    })
 
 
 def _write_reports(store, run_id, orchestration):
@@ -387,8 +351,8 @@ def _write_reports(store, run_id, orchestration):
     human = store.human_report(run_id)
     marker = (
         f"\nStage: {STAGE}\n"
-        "Completion: INCOMPLETE - this stage runs only the individual correctness lens. "
-        "Other mandatory lenses, tests, composition and provider publication are not implemented.\n"
+        "Completion: INCOMPLETE - this stage runs every individual static lens independently. "
+        "Tests, composition and provider publication are not implemented.\n"
     )
     human = human.replace("\n", marker, 1)
     human_path.write_text(human, encoding="utf-8")
@@ -426,10 +390,15 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
         combined_id = identity["unit_ids"]["combined"]
         _record_pending(store, unit_id)
         _record_pending(store, combined_id)
+        store.record_coverage(
+            combined_id, "mandatory_lenses", "not_implemented",
+            "Combined and stack execution are reserved for a later layer",
+        )
         finding_verdict = None
         merge_base = None
         state = "incomplete"
-        worker_completed = False
+        aggregation = None
+        lenses_recorded = False
         try:
             source_repository = source.get("http_url") or source["url"]
             target_repository = target.get("http_url") or target["url"]
@@ -452,7 +421,6 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
                 )
                 request = {
                     "schema": WORKER_REQUEST_SCHEMA,
-                    "lens": "correctness",
                     "stage": STAGE,
                     "run_id": run_id,
                     "unit_id": unit_id,
@@ -471,40 +439,34 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
                     },
                     "diff": materialized.diff,
                 }
-                try:
-                    response = invoke_worker(
-                        request, command=worker, repo_root=repo_root, environ=environ,
+                def isolated_worker(lens_request):
+                    return invoke_worker(
+                        lens_request, command=worker, repo_root=repo_root, environ=environ,
                         timeout=float(environ.get("RG_FINAL_WORKER_TIMEOUT", "900")),
                     )
-                    normalized = normalize_worker_result(response)
-                    finding_verdict = ocr_verdict.compute_verdict({
-                        "findings": normalized["findings"],
-                        "unreviewed": normalized["unreviewed"],
+
+                # This returns only after every required lens has completed or
+                # failed. Blocking findings never short-circuit other evidence.
+                aggregation = run_independent_lenses(request, isolated_worker)
+                finding_verdict = aggregation.finding_verdict
+                _record_lens_aggregation(store, unit_id, aggregation, materialized)
+                lenses_recorded = True
+                try:
+                    provider.revalidate(item, repo_root=repo_root)
+                except RevisionChangedError as exc:
+                    state = "stale"
+                    store.record_warning(unit_id, "revision-stale", str(exc), "freshness", {
+                        "field": exc.field, "expected": exc.expected, "current": exc.current,
                     })
-                    _record_worker_result(store, unit_id, normalized,
-                                          finding_verdict, materialized)
-                    worker_completed = True
-                except (WorkerError, ValueError, TypeError) as exc:
-                    store.record_lens(unit_id, "correctness", "incomplete", str(exc),
-                                      {"request_schema": WORKER_REQUEST_SCHEMA})
-                    store.record_coverage(unit_id, "lens:correctness", "incomplete", str(exc))
-                    store.record_warning(unit_id, "correctness-worker", str(exc), "correctness")
-                if worker_completed:
-                    try:
-                        provider.revalidate(item, repo_root=repo_root)
-                    except RevisionChangedError as exc:
-                        state = "stale"
-                        store.record_warning(unit_id, "revision-stale", str(exc), "freshness", {
-                            "field": exc.field, "expected": exc.expected, "current": exc.current,
-                        })
-                    except Exception as exc:  # freshness cannot be inferred as valid
-                        store.record_warning(unit_id, "freshness-check", str(exc), "freshness")
+                except Exception as exc:  # freshness cannot be inferred as valid
+                    store.record_warning(unit_id, "freshness-check", str(exc), "freshness")
         except Exception as exc:
             # Materialization and unexpected execution failures are never a
             # reduced-scope pass; the clone context has already been cleaned.
-            if not worker_completed and not store.manifest(run_id, unit_id)["units"][0]["lenses"]:
-                store.record_lens(unit_id, "correctness", "incomplete", str(exc))
-                store.record_coverage(unit_id, "lens:correctness", "incomplete", str(exc))
+            if not lenses_recorded:
+                aggregation = aggregation or failed_lens_aggregation(exc)
+                _record_lens_aggregation(store, unit_id, aggregation)
+                lenses_recorded = True
             store.record_coverage(unit_id, "repository", "incomplete",
                                   "Immutable full-tree review did not complete", {"error": str(exc)})
             store.record_warning(unit_id, "materialization", str(exc), "repository")
@@ -514,16 +476,20 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
             unit_state = "findings"
         else:
             unit_state = "incomplete"
-        summary = ("Correctness findings block this incomplete standalone review"
+        static_lenses_complete = bool(aggregation and aggregation.complete)
+        summary = ("Static-lens findings block this incomplete standalone review"
                    if unit_state == "findings" else
-                   "Standalone correctness stage is incomplete; no official final pass")
+                   "Independent static lenses completed; verification and composition are pending"
+                   if static_lenses_complete else
+                   "A required static lens is incomplete; no final pass is available")
         store.set_unit_state(unit_id, unit_state, summary)
         store.set_unit_state(combined_id, "incomplete",
                              "Combined review is not implemented in this stage")
         trust = store.finish_run(run_id, state, trust={
             "local_only": True, "enforced": False, "official": False,
             "stage_incomplete": True, "missing_stages": MISSING_STAGES,
-            "reason": "C4 implements only one correctness lens and never publishes",
+            "static_lenses_complete": static_lenses_complete,
+            "reason": "C5 performs independent static lenses but never verifies, composes or publishes",
         })
         if state == "stale":
             exit_code = 3
@@ -539,6 +505,10 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
             "state": state,
             "exit_code": exit_code,
             "finding_verdict": finding_verdict,
+            "static_lenses_complete": static_lenses_complete,
+            "lenses": [{"name": outcome.name, "state": outcome.state,
+                        "summary": outcome.summary, "capabilities": list(outcome.capabilities)}
+                       for outcome in (aggregation.outcomes if aggregation else ())],
             "store_instance_id": identity["store_instance_id"],
             "store_path": str(store.path),
             "run_id": run_id,
@@ -560,6 +530,7 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
             "schema": RESULT_SCHEMA, "stage": STAGE, "complete": False,
             "missing_stages": MISSING_STAGES, "state": state, "exit_code": exit_code,
             "finding_verdict": finding_verdict, "unit_id": unit_id,
+            "static_lenses_complete": static_lenses_complete,
         })
         result["machine_report_path"] = machine_path
         result["human_report_path"] = human_path
