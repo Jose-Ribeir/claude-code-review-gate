@@ -183,7 +183,21 @@ def _github_declarations(source: str, raw: str) -> list[dict]:
                     for following in step[offset + 1:]:
                         if following.strip() and len(following) - len(following.lstrip()) <= run_indent:
                             break
-                        body.append(following.strip())
+                        body.append(following)
+                    content_indent = min(
+                        (len(line) - len(line.lstrip()) for line in body if line.strip()),
+                        default=0,
+                    )
+                    body = [line[content_indent:] if line.strip() else "" for line in body]
+                    if command.startswith(">"):
+                        while body and not body[-1]:
+                            body.pop()
+                        if any(not line or line[:1].isspace() for line in body):
+                            declarations.append(_unassessable(
+                                source, name,
+                                "only a single-paragraph, uniformly indented folded "
+                                "block scalar can be reproduced faithfully"))
+                            break
                     command = (" " if command.startswith(">") else "\n").join(body)
                 if command:
                     if "${{" in command:
