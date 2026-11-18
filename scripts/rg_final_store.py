@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import sqlite3
@@ -30,10 +31,17 @@ import rg_final_memory
 import rg_final_provider
 import rg_final_telemetry
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 REPORT_SCHEMA = "final-review-report/v1"
 PUBLICATION_STATUS_CONTEXT = "review-gate/final-review"
 FINAL_STATES = frozenset(("pass", "findings", "stale", "incomplete"))
+NATIVE_TASK_SCHEMA = "native-review-task/v1"
+NATIVE_EVENT_SCHEMA = "native-review-event/v1"
+NATIVE_ARTIFACT_SCHEMA = "native-review-artifact/v1"
+NATIVE_EVENT_TYPES = frozenset((
+    "queued", "started", "completed", "warning", "timeout", "cancelled",
+    "cleanup", "finalization",
+))
 _SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 
 
@@ -101,6 +109,166 @@ def _sha(value, field):
     if not _SHA.fullmatch(text):
         raise ValueError(f"{field} must be an immutable 40-character commit SHA")
     return text.lower()
+
+
+def _finite_time(value, field, *, optional=False):
+    if value is None and optional:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or \
+            not math.isfinite(float(value)):
+        raise ValueError(f"{field} must be a finite Unix timestamp")
+    return float(value)
+
+
+def _native_identity(value):
+    if not isinstance(value, dict):
+        raise ValueError("native task identity must be an object")
+    required = {
+        "run_id", "task_id", "session_name", "unit_id", "stage", "lens",
+        "revision_tuple", "input_sha256", "backend", "model", "deadline_at_unix",
+    }
+    if set(value) != required:
+        raise ValueError("native task identity has missing or unknown fields")
+    normalized = {
+        key: _required_text(value, key) for key in (
+            "run_id", "task_id", "session_name", "unit_id", "stage", "lens",
+            "backend", "model",
+        )
+    }
+    revisions = value["revision_tuple"]
+    if not isinstance(revisions, (list, tuple)) or not revisions or any(
+            not isinstance(item, str) or not item.strip() for item in revisions):
+        raise ValueError("native task revision_tuple must contain immutable revision identities")
+    normalized["revision_tuple"] = list(revisions)
+    normalized["input_sha256"] = _required_text(value, "input_sha256").lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", normalized["input_sha256"]):
+        raise ValueError("native task input_sha256 must be a SHA-256 digest")
+    normalized["deadline_at_unix"] = _finite_time(
+        value["deadline_at_unix"], "deadline_at_unix",
+    )
+    return normalized
+
+
+def _native_task(value):
+    if not isinstance(value, dict) or value.get("schema") != NATIVE_TASK_SCHEMA:
+        raise ValueError("native task has the wrong schema")
+    if set(value) != {"schema", "identity", "transport"}:
+        raise ValueError("native task has missing or unknown fields")
+    return {
+        "schema": NATIVE_TASK_SCHEMA,
+        "identity": _native_identity(value.get("identity")),
+        "transport": _required_text(value, "transport"),
+    }
+
+
+def _native_artifact(value):
+    if not isinstance(value, dict) or value.get("schema") != NATIVE_ARTIFACT_SCHEMA:
+        raise ValueError("native artifact has the wrong schema")
+    fields = {"schema", "transport", "native_session_id", "identity", "payload", "timing"}
+    if set(value) != fields:
+        raise ValueError("native artifact has missing or unknown fields")
+    payload = value.get("payload")
+    required_payload = {"schema", "status", "summary", "findings", "warnings", "unreviewed"}
+    if not isinstance(payload, dict) or not required_payload <= set(payload):
+        raise ValueError("native artifact worker result is incomplete")
+    if payload["schema"] != "final-review-worker-result/v1":
+        raise ValueError("native artifact worker result has the wrong schema")
+    if payload["status"] not in ("success", "completed", "completed_with_warnings"):
+        raise ValueError("native artifact worker result is not a completed result")
+    if not isinstance(payload["summary"], str) or not payload["summary"].strip():
+        raise ValueError("native artifact worker result summary is incomplete")
+    if any(not isinstance(payload[key], list) for key in ("findings", "warnings", "unreviewed")):
+        raise ValueError("native artifact worker result collections must be arrays")
+    if any(not isinstance(finding, dict) for finding in payload["findings"]):
+        raise ValueError("native artifact worker result contains an invalid finding")
+    timing = value.get("timing")
+    if not isinstance(timing, dict) or set(timing) != {
+            "started_at_unix", "finished_at_unix", "duration_seconds"}:
+        raise ValueError("native artifact timing has missing or unknown fields")
+    started = _finite_time(timing["started_at_unix"], "started_at_unix")
+    finished = _finite_time(timing["finished_at_unix"], "finished_at_unix")
+    duration = _finite_time(timing["duration_seconds"], "duration_seconds")
+    if finished < started:
+        raise ValueError("native artifact finish precedes its start")
+    if duration != finished - started:
+        raise ValueError("native artifact duration does not match its exact timing")
+    return {
+        "schema": NATIVE_ARTIFACT_SCHEMA,
+        "transport": _required_text(value, "transport"),
+        "native_session_id": _required_text(value, "native_session_id"),
+        "identity": _native_identity(value.get("identity")),
+        "payload": payload,
+        "timing": {
+            "started_at_unix": started,
+            "finished_at_unix": finished,
+            "duration_seconds": duration,
+        },
+    }
+
+
+def _native_event(value):
+    if not isinstance(value, dict) or value.get("schema") != NATIVE_EVENT_SCHEMA:
+        raise ValueError("native event has the wrong schema")
+    fields = {
+        "schema", "event_id", "event_type", "identity", "transport",
+        "native_session_id", "timing", "details",
+    }
+    if set(value) != fields:
+        raise ValueError("native event has missing or unknown fields")
+    event_type = _required_text(value, "event_type")
+    if event_type not in NATIVE_EVENT_TYPES:
+        raise ValueError(f"unsupported native event type {event_type}")
+    timing = value.get("timing")
+    if not isinstance(timing, dict) or set(timing) != {
+            "occurred_at_unix", "started_at_unix", "finished_at_unix", "duration_seconds"}:
+        raise ValueError("native event timing has missing or unknown fields")
+    occurred = _finite_time(timing["occurred_at_unix"], "occurred_at_unix")
+    started = _finite_time(timing["started_at_unix"], "started_at_unix", optional=True)
+    finished = _finite_time(timing["finished_at_unix"], "finished_at_unix", optional=True)
+    duration = _finite_time(timing["duration_seconds"], "duration_seconds", optional=True)
+    if event_type == "started" and started is None:
+        started = occurred
+    if event_type in ("completed", "timeout", "cancelled") and finished is None:
+        finished = occurred
+    if event_type == "queued" and any(
+            item is not None for item in (started, finished, duration)):
+        raise ValueError("queued native events cannot have execution timing")
+    if event_type == "started" and (finished is not None or duration is not None):
+        raise ValueError("started native events cannot have completion timing")
+    if started is None and duration is not None:
+        raise ValueError("native event duration requires a start time")
+    if finished is not None and finished != occurred:
+        raise ValueError("native event occurrence must equal its finish time")
+    if started is not None and finished is not None:
+        if finished < started:
+            raise ValueError("native event finish precedes its start")
+        measured = finished - started
+        if duration is not None and duration != measured:
+            raise ValueError("native event duration does not match its exact timing")
+        duration = measured
+    session = value.get("native_session_id")
+    if session is not None:
+        session = _required_text({"native_session_id": session}, "native_session_id")
+    if event_type in ("started", "completed", "timeout", "cancelled") and session is None:
+        raise ValueError(f"{event_type} native events require native_session_id")
+    details = value.get("details")
+    if not isinstance(details, dict):
+        raise ValueError("native event details must be an object")
+    return {
+        "schema": NATIVE_EVENT_SCHEMA,
+        "event_id": _required_text(value, "event_id"),
+        "event_type": event_type,
+        "identity": _native_identity(value.get("identity")),
+        "transport": _required_text(value, "transport"),
+        "native_session_id": session,
+        "timing": {
+            "occurred_at_unix": occurred,
+            "started_at_unix": started,
+            "finished_at_unix": finished,
+            "duration_seconds": duration,
+        },
+        "details": details,
+    }
 
 
 _SCHEMA_V1 = (
@@ -395,6 +563,85 @@ _SCHEMA_V3 = (
     "CREATE INDEX acceptance_results_state ON acceptance_results(state, recorded_at, result_id)",
 )
 
+_SCHEMA_V4 = (
+    """CREATE TABLE native_tasks (
+        run_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        unit_id TEXT NOT NULL,
+        stage TEXT NOT NULL,
+        lens TEXT NOT NULL,
+        identity_json TEXT NOT NULL,
+        transport TEXT NOT NULL,
+        registered_at TEXT NOT NULL,
+        PRIMARY KEY(run_id, task_id),
+        FOREIGN KEY(run_id) REFERENCES runs(run_id) ON DELETE CASCADE,
+        FOREIGN KEY(unit_id) REFERENCES units(unit_id) ON DELETE CASCADE
+    )""",
+    "CREATE INDEX native_tasks_scope ON native_tasks(run_id, unit_id, stage, lens, task_id)",
+    """CREATE TABLE native_task_events (
+        run_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        unit_id TEXT NOT NULL,
+        stage TEXT NOT NULL,
+        lens TEXT NOT NULL,
+        event_type TEXT NOT NULL CHECK(event_type IN (
+            'queued', 'started', 'completed', 'warning', 'timeout', 'cancelled',
+            'cleanup', 'finalization')),
+        transport TEXT NOT NULL,
+        native_session_id TEXT,
+        occurred_at_unix REAL NOT NULL,
+        started_at_unix REAL,
+        finished_at_unix REAL,
+        duration_seconds REAL,
+        details_json TEXT NOT NULL,
+        event_sha256 TEXT NOT NULL,
+        recorded_at TEXT NOT NULL,
+        PRIMARY KEY(run_id, event_id),
+        FOREIGN KEY(run_id, task_id) REFERENCES native_tasks(run_id, task_id) ON DELETE CASCADE
+    )""",
+    "CREATE INDEX native_task_events_timeline ON "
+    "native_task_events(run_id, task_id, occurred_at_unix, event_id)",
+    "CREATE INDEX native_task_events_scope ON "
+    "native_task_events(run_id, unit_id, stage, lens, event_type)",
+    """CREATE TABLE native_artifacts (
+        run_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        artifact_sha256 TEXT NOT NULL,
+        schema TEXT NOT NULL,
+        transport TEXT NOT NULL,
+        native_session_id TEXT NOT NULL,
+        artifact_json TEXT NOT NULL,
+        started_at_unix REAL NOT NULL,
+        finished_at_unix REAL NOT NULL,
+        duration_seconds REAL NOT NULL,
+        recorded_at TEXT NOT NULL,
+        PRIMARY KEY(run_id, task_id),
+        UNIQUE(run_id, message_id),
+        FOREIGN KEY(run_id, task_id) REFERENCES native_tasks(run_id, task_id) ON DELETE CASCADE
+    )""",
+    "CREATE INDEX native_artifacts_scope ON native_artifacts(run_id, task_id, artifact_sha256)",
+    """CREATE TABLE native_artifact_messages (
+        run_id TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        request_sha256 TEXT NOT NULL,
+        accepted INTEGER NOT NULL CHECK(accepted IN (0, 1)),
+        reason TEXT NOT NULL,
+        artifact_sha256 TEXT,
+        recorded_at TEXT NOT NULL,
+        PRIMARY KEY(run_id, message_id),
+        UNIQUE(run_id, event_id),
+        FOREIGN KEY(run_id, task_id) REFERENCES native_tasks(run_id, task_id) ON DELETE CASCADE,
+        FOREIGN KEY(run_id, event_id)
+            REFERENCES native_task_events(run_id, event_id) ON DELETE CASCADE
+    )""",
+    "CREATE INDEX native_artifact_messages_task ON "
+    "native_artifact_messages(run_id, task_id, message_id)",
+)
+
 
 def resolve_store_path(path=None, *, environ=None):
     """Resolve the standalone database without consulting coding-tool state.
@@ -553,6 +800,18 @@ class FinalStore:
                     (_now(),),
                 )
                 self._conn.execute("PRAGMA user_version = 3")
+            if 4 not in applied:
+                if existing_version not in (0, 1, 2, 3, 4):
+                    raise StoreError(f"unsupported database schema {existing_version}")
+                if existing_version == 4:
+                    raise StoreError("database schema version has no migration record")
+                for statement in _SCHEMA_V4:
+                    self._conn.execute(statement)
+                self._conn.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (4, ?)",
+                    (_now(),),
+                )
+                self._conn.execute("PRAGMA user_version = 4")
             self._conn.execute(
                 "INSERT OR IGNORE INTO store_metadata(key, value) VALUES "
                 "('store_instance_id', ?)", (_identifier(),)
@@ -1320,6 +1579,263 @@ class FinalStore:
             "unit_ids": unit_ids,
             "trust": trust,
         }
+
+    def _native_task_row(self, run_id, task_id):
+        row = self._conn.execute(
+            "SELECT * FROM native_tasks WHERE run_id = ? AND task_id = ?",
+            (run_id, task_id),
+        ).fetchone()
+        if row is None:
+            raise StoreError(f"unknown native task {task_id} in run {run_id}")
+        return row
+
+    @staticmethod
+    def _native_event_public(row, identity):
+        return {
+            "schema": NATIVE_EVENT_SCHEMA,
+            "event_id": row["event_id"],
+            "event_type": row["event_type"],
+            "identity": dict(identity),
+            "transport": row["transport"],
+            "native_session_id": row["native_session_id"],
+            "timing": {
+                "occurred_at_unix": row["occurred_at_unix"],
+                "started_at_unix": row["started_at_unix"],
+                "finished_at_unix": row["finished_at_unix"],
+                "duration_seconds": row["duration_seconds"],
+            },
+            "details": _loads(row["details_json"]),
+            "recorded_at": row["recorded_at"],
+        }
+
+    def _native_task_public(self, row):
+        identity = _loads(row["identity_json"])
+        events = [
+            self._native_event_public(event, identity)
+            for event in self._rows(
+                "SELECT * FROM native_task_events WHERE run_id = ? AND task_id = ? "
+                "ORDER BY occurred_at_unix, event_id", (row["run_id"], row["task_id"]),
+            )
+        ]
+        artifacts = [
+            {
+                "message_id": item["message_id"],
+                "artifact_sha256": item["artifact_sha256"],
+                "artifact": _loads(item["artifact_json"]),
+                "recorded_at": item["recorded_at"],
+            }
+            for item in self._rows(
+                "SELECT * FROM native_artifacts WHERE run_id = ? AND task_id = ? "
+                "ORDER BY message_id", (row["run_id"], row["task_id"]),
+            )
+        ]
+        messages = [
+            {
+                "message_id": item["message_id"],
+                "event_id": item["event_id"],
+                "accepted": bool(item["accepted"]),
+                "reason": item["reason"] or None,
+                "artifact_sha256": item["artifact_sha256"],
+                "recorded_at": item["recorded_at"],
+            }
+            for item in self._rows(
+                "SELECT * FROM native_artifact_messages WHERE run_id = ? AND task_id = ? "
+                "ORDER BY message_id", (row["run_id"], row["task_id"]),
+            )
+        ]
+        return {
+            "schema": row["schema"] if "schema" in row.keys() else NATIVE_TASK_SCHEMA,
+            "identity": identity,
+            "transport": row["transport"],
+            "registered_at": row["registered_at"],
+            "events": events,
+            "artifacts": artifacts,
+            "artifact_messages": messages,
+        }
+
+    def _native_tasks_public(self, run_id):
+        return [
+            self._native_task_public(row)
+            for row in self._rows(
+                "SELECT * FROM native_tasks WHERE run_id = ? "
+                "ORDER BY unit_id, stage, lens, task_id", (run_id,),
+            )
+        ]
+
+    def register_native_task(self, task):
+        """Register immutable supervisor-owned native identity idempotently."""
+        normalized = _native_task(task)
+        identity = normalized["identity"]
+        identity_json = _json(identity)
+        with self._transaction():
+            unit = self._conn.execute(
+                "SELECT run_id FROM units WHERE unit_id = ?", (identity["unit_id"],),
+            ).fetchone()
+            if unit is None or unit["run_id"] != identity["run_id"]:
+                raise StoreError("native task unit does not belong to its run")
+            existing = self._conn.execute(
+                "SELECT * FROM native_tasks WHERE run_id = ? AND task_id = ?",
+                (identity["run_id"], identity["task_id"]),
+            ).fetchone()
+            if existing is not None:
+                if existing["identity_json"] != identity_json or \
+                        existing["transport"] != normalized["transport"]:
+                    raise StoreError("registered native task identity is immutable")
+                return self._native_task_public(existing)
+            self._conn.execute(
+                "INSERT INTO native_tasks(run_id, task_id, unit_id, stage, lens, "
+                "identity_json, transport, registered_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (identity["run_id"], identity["task_id"], identity["unit_id"],
+                 identity["stage"], identity["lens"], identity_json,
+                 normalized["transport"], _now()),
+            )
+            return self._native_task_public(
+                self._native_task_row(identity["run_id"], identity["task_id"]),
+            )
+
+    def _insert_native_event(self, normalized):
+        """Insert one new normalized event inside the current write transaction."""
+        identity = normalized["identity"]
+        digest = hashlib.sha256(_json(normalized).encode("utf-8")).hexdigest()
+        recorded_at = _now()
+        self._conn.execute(
+            "INSERT INTO native_task_events(run_id, event_id, task_id, unit_id, stage, "
+            "lens, event_type, transport, native_session_id, occurred_at_unix, "
+            "started_at_unix, finished_at_unix, duration_seconds, details_json, "
+            "event_sha256, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (identity["run_id"], normalized["event_id"], identity["task_id"],
+             identity["unit_id"], identity["stage"], identity["lens"],
+             normalized["event_type"], normalized["transport"],
+             normalized["native_session_id"], normalized["timing"]["occurred_at_unix"],
+             normalized["timing"]["started_at_unix"], normalized["timing"]["finished_at_unix"],
+             normalized["timing"]["duration_seconds"], _json(normalized["details"]),
+             digest, recorded_at),
+        )
+        return self._conn.execute(
+            "SELECT * FROM native_task_events WHERE run_id = ? AND event_id = ?",
+            (identity["run_id"], normalized["event_id"]),
+        ).fetchone()
+
+    def record_native_event(self, event):
+        """Append a deterministic lifecycle edge once, including exact stage timing."""
+        normalized = _native_event(event)
+        identity = normalized["identity"]
+        with self._transaction():
+            task = self._native_task_row(identity["run_id"], identity["task_id"])
+            if _loads(task["identity_json"]) != identity or \
+                    task["transport"] != normalized["transport"]:
+                raise StoreError("native event identity does not match its registered task")
+            existing = self._conn.execute(
+                "SELECT * FROM native_task_events WHERE run_id = ? AND event_id = ?",
+                (identity["run_id"], normalized["event_id"]),
+            ).fetchone()
+            if existing is not None:
+                digest = hashlib.sha256(_json(normalized).encode("utf-8")).hexdigest()
+                if existing["event_sha256"] != digest:
+                    raise StoreError("native event idempotent identity has conflicting content")
+                return self._native_event_public(existing, identity)
+            row = self._insert_native_event(normalized)
+            return self._native_event_public(row, identity)
+
+    def commit_native_artifact(self, identity, message_id, *, artifact, received_at_unix):
+        """Commit a validated result, event and receipt as one idempotent write."""
+        identity = _native_identity(identity)
+        message_id = _required_text({"message_id": message_id}, "message_id")
+        artifact = _native_artifact(artifact)
+        received_at_unix = _finite_time(received_at_unix, "received_at_unix")
+        if received_at_unix < artifact["timing"]["finished_at_unix"]:
+            raise ValueError("native artifact was received before it finished")
+        if artifact["identity"] != identity:
+            raise StoreError("native artifact identity does not match its message")
+        artifact_json = _json(artifact)
+        artifact_digest = hashlib.sha256(artifact_json.encode("utf-8")).hexdigest()
+        request_sha256 = hashlib.sha256(_json({
+            "message_id": message_id, "identity": identity, "artifact": artifact,
+        }).encode("utf-8")).hexdigest()
+        event_id = f"artifact-commit:{message_id}"
+        with self._transaction():
+            task = self._native_task_row(identity["run_id"], identity["task_id"])
+            if _loads(task["identity_json"]) != identity or \
+                    task["transport"] != artifact["transport"]:
+                raise StoreError("native artifact identity does not match its registered task")
+            receipt = self._conn.execute(
+                "SELECT * FROM native_artifact_messages WHERE run_id = ? AND message_id = ?",
+                (identity["run_id"], message_id),
+            ).fetchone()
+            if receipt is not None:
+                if receipt["request_sha256"] != request_sha256:
+                    raise StoreError("native artifact message idempotent identity has conflicting content")
+            else:
+                existing_artifact = self._conn.execute(
+                    "SELECT message_id FROM native_artifacts WHERE run_id = ? AND task_id = ?",
+                    (identity["run_id"], identity["task_id"]),
+                ).fetchone()
+                if existing_artifact is not None:
+                    raise StoreError("native task already has an accepted artifact")
+                event = _native_event({
+                    "schema": NATIVE_EVENT_SCHEMA,
+                    "event_id": event_id,
+                    "event_type": "completed",
+                    "identity": identity,
+                    "transport": artifact["transport"],
+                    "native_session_id": artifact["native_session_id"],
+                    "timing": {
+                        "occurred_at_unix": artifact["timing"]["finished_at_unix"],
+                        "started_at_unix": artifact["timing"]["started_at_unix"],
+                        "finished_at_unix": artifact["timing"]["finished_at_unix"],
+                        "duration_seconds": artifact["timing"]["duration_seconds"],
+                    },
+                    "details": {
+                        "artifact_sha256": artifact_digest,
+                        "message_id": message_id,
+                    },
+                })
+                event_row = self._insert_native_event(event)
+                recorded_at = _now()
+                self._conn.execute(
+                    "INSERT INTO native_artifacts(run_id, task_id, message_id, "
+                    "artifact_sha256, schema, transport, native_session_id, artifact_json, "
+                    "started_at_unix, finished_at_unix, duration_seconds, recorded_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (identity["run_id"], identity["task_id"], message_id, artifact_digest,
+                     NATIVE_ARTIFACT_SCHEMA, artifact["transport"],
+                     artifact["native_session_id"], artifact_json,
+                     artifact["timing"]["started_at_unix"],
+                     artifact["timing"]["finished_at_unix"],
+                     artifact["timing"]["duration_seconds"], recorded_at),
+                )
+                self._conn.execute(
+                    "INSERT INTO native_artifact_messages(run_id, message_id, task_id, "
+                    "event_id, request_sha256, accepted, reason, artifact_sha256, recorded_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (identity["run_id"], message_id, identity["task_id"], event_id,
+                     request_sha256, 1, "", artifact_digest, recorded_at),
+                )
+                receipt = self._conn.execute(
+                    "SELECT * FROM native_artifact_messages WHERE run_id = ? AND message_id = ?",
+                    (identity["run_id"], message_id),
+                ).fetchone()
+            artifact_row = self._conn.execute(
+                "SELECT * FROM native_artifacts WHERE run_id = ? AND message_id = ?",
+                (identity["run_id"], message_id),
+            ).fetchone()
+            event_row = self._conn.execute(
+                "SELECT * FROM native_task_events WHERE run_id = ? AND event_id = ?",
+                (identity["run_id"], receipt["event_id"]),
+            ).fetchone()
+            return {
+                "schema": "native-review-artifact-commit/v1",
+                "message_id": message_id,
+                "accepted": bool(receipt["accepted"]),
+                "reason": receipt["reason"] or None,
+                "artifact": {
+                    "message_id": message_id,
+                    "artifact_sha256": artifact_row["artifact_sha256"],
+                    "artifact": _loads(artifact_row["artifact_json"]),
+                    "recorded_at": artifact_row["recorded_at"],
+                },
+                "event": self._native_event_public(event_row, identity),
+            }
 
     def _unit_row(self, unit_id):
         row = self._conn.execute("SELECT * FROM units WHERE unit_id = ?", (unit_id,)).fetchone()
@@ -2700,6 +3216,7 @@ class FinalStore:
                 "units": [self._unit_manifest(item, individual_ids, publications) for item in selected],
                 "all_unit_ids": all_unit_ids,
                 "publications": publications,
+                "native_tasks": self._native_tasks_public(run_id),
             }
 
     def machine_report(self, run_id, unit_id=None):
