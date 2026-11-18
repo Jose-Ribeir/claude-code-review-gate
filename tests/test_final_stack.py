@@ -11,6 +11,8 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import threading
+import time
 
 import pytest
 
@@ -333,6 +335,53 @@ def test_three_item_stack_runs_complete_units_links_reports_and_publishes_each_i
                 for entry in report["units"][0]["coverage"]}["composition"] == "not_applicable"
         assert {entry["kind"]: entry["status"]
                 for entry in combined_coverage(report)}["composition"] == "complete"
+
+
+def test_complete_stack_uses_caller_lens_worker_environment_not_process_global(
+        tmp_path, monkeypatch):
+    harness = Harness(tmp_path)
+    monkeypatch.setenv("RG_FINAL_LENS_WORKERS", "4")
+    monkeypatch.setenv("RG_FINAL_WORKER_TIMEOUT", "999")
+    harness.environ.update({
+        "RG_FINAL_LENS_WORKERS": "1", "RG_FINAL_WORKER_TIMEOUT": "17",
+    })
+    lock = threading.Lock()
+    active = 0
+    peak_active = 0
+    calls = []
+    worker_options = []
+
+    def invoke(request, **kwargs):
+        nonlocal active, peak_active
+        with lock:
+            active += 1
+            peak_active = max(peak_active, active)
+            calls.append((request["unit_key"], request["lens"]))
+            worker_options.append((kwargs["environ"], kwargs["timeout"]))
+        try:
+            # With the process-global fallback of four, concurrent non-sentinel
+            # lenses reliably overlap. The explicit caller limit must serialize them.
+            time.sleep(0.03)
+            return {
+                "schema": "final-review-worker-result/v1", "status": "success",
+                "summary": request["lens"] + " complete", "findings": [],
+                "warnings": [], "unreviewed": [],
+            }
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(rg_final_review, "invoke_worker", invoke)
+    output = harness.run(tmp_path / "explicit-environ.sqlite3", worker=None)
+
+    assert output["complete"] is True
+    assert output["state"] == "pass"
+    assert len(output["units"]) == 5
+    assert len(calls) == 5 * len(REQUIRED_LENS_NAMES)
+    assert len(harness.required_calls) == len(harness.dynamic_calls) == 5
+    assert peak_active == 1
+    assert all(environ["RG_FINAL_LENS_WORKERS"] == "1" and timeout == 17
+               for environ, timeout in worker_options)
 
 
 def test_newer_stack_findings_replace_older_green_on_every_pinned_item(tmp_path):

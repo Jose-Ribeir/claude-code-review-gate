@@ -243,7 +243,7 @@ def _run_unit(store, identity, graph, unit_key, unit_id, *, item=None, composed=
                 request, isolated_worker, unit_id=unit_id,
                 required_runner=required_runner or run_required_verification,
                 dynamic_runner=dynamic_runner or run_dynamic_checks,
-                dynamic_kwargs=dynamic_kwargs,
+                dynamic_kwargs=dynamic_kwargs, environ=environ,
             )
             aggregation = execution.aggregation
             observations = standalone._record_lens_aggregation(

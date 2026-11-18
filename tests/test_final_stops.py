@@ -4,6 +4,7 @@ from __future__ import annotations
 from copy import deepcopy
 from pathlib import Path
 import sys
+import threading
 import time
 from types import SimpleNamespace
 
@@ -12,6 +13,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+import rg_final_execution  # noqa: E402
 import rg_final_review  # noqa: E402
 from rg_final_execution import execute_unit  # noqa: E402
 from rg_final_lenses import REQUIRED_LENS_NAMES  # noqa: E402
@@ -262,6 +264,90 @@ def test_later_stop_joins_running_safe_peers_and_marks_pending_lenses(tmp_path):
     assert {item["name"] for item in execution.skipped_work} >= {
         "compatibility/migrations", "change-intent", "required_tests", "dynamic_tests",
     }
+
+
+def test_reverse_completion_stop_uses_declared_lens_order_and_joins_peer_evidence(
+        tmp_path, monkeypatch):
+    request = {
+        "unit_key": "individual:1",
+        "repository": {"path": str(tmp_path), "access": "full_tree",
+                       "head_sha": "a" * 40, "target_sha": "b" * 40},
+        "diff": "diff --git a/app.py b/app.py\n",
+    }
+    validated = {
+        "lens:repository-standards": threading.Event(),
+        "lens:documentation/domain": threading.Event(),
+    }
+    original_validate = rg_final_execution.validate_stop
+    requests = []
+
+    def observe_validation(result, *, stage="execution"):
+        stop = original_validate(result, stage=stage)
+        if stop is not None and stage in validated:
+            validated[stage].set()
+        return stop
+
+    def stopped(lens, code):
+        result = _stop_result(code=code)
+        result["stop"]["reason"] = f"{lens} invalidated dependent test evidence"
+        result["stop"]["scope"] = "correctness"  # Untrusted and deliberately too narrow.
+        return result
+
+    def peer_finding(lens):
+        finding = _blocking_finding()
+        finding.update({"id": f"{lens}-evidence", "content": f"{lens} peer finding"})
+        return finding
+
+    def worker(lens_request):
+        lens = lens_request["lens"]
+        requests.append(lens)
+        if lens == "correctness":
+            return _worker_result([peer_finding(lens)])
+        if lens == "repository-standards":
+            assert validated["lens:documentation/domain"].wait(5)
+            return stopped(lens, "repository-stop")
+        if lens == "documentation/domain":
+            return stopped(lens, "documentation-stop")
+        if lens == "testing":
+            assert validated["lens:repository-standards"].wait(5)
+            return _worker_result([peer_finding(lens)])
+        if lens == "security":
+            return _worker_result([peer_finding(lens)])
+        return _worker_result()
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("both dependent tests must skip after concurrent STOPs")
+
+    monkeypatch.setattr(rg_final_execution, "validate_stop", observe_validation)
+    execution = execute_unit(
+        request, worker, required_runner=forbidden, dynamic_runner=forbidden,
+        environ={"RG_FINAL_LENS_WORKERS": "4"},
+    )
+
+    assert requests == list(REQUIRED_LENS_NAMES[:5])
+    assert [outcome.name for outcome in execution.aggregation.outcomes] == \
+        list(REQUIRED_LENS_NAMES)
+    assert [outcome.state for outcome in execution.aggregation.outcomes] == [
+        "completed", "stopped", "stopped", "completed", "completed",
+        "skipped", "skipped",
+    ]
+    assert execution.stop["stage"] == "lens:repository-standards"
+    assert execution.stop["reason_code"] == "repository-stop"
+    outcomes = {outcome.name: outcome for outcome in execution.aggregation.outcomes}
+    documentation_stop = outcomes["documentation/domain"].warnings[0]["details"]["stop"]
+    assert documentation_stop["reason_code"] == "documentation-stop"
+    assert [finding["id"] for finding in execution.aggregation.findings] == [
+        "correctness-evidence", "testing-evidence", "security-evidence",
+    ]
+    for lens in REQUIRED_LENS_NAMES[5:]:
+        skipped_stop = outcomes[lens].warnings[0]["details"]["stop"]
+        assert skipped_stop["reason_code"] == "repository-stop"
+    test_skips = [item for item in execution.skipped_work
+                  if item["name"] in ("required_tests", "dynamic_tests")]
+    assert len(test_skips) == 2
+    assert all(item["details"]["reason_code"] == "repository-stop"
+               for item in test_skips)
+    assert execution.required is None and execution.dynamic is None
 
 
 def test_stack_supervisor_scopes_stop_to_dependents_and_preserves_safe_individuals(

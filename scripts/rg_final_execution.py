@@ -274,6 +274,7 @@ def execute_unit(request, worker, *, required_runner=None, dynamic_runner=None,
     from pathlib import Path
 
     stop = None
+    stops_by_lens = {}
     rejected = []
     skipped = []
 
@@ -286,9 +287,10 @@ def execute_unit(request, worker, *, required_runner=None, dynamic_runner=None,
             raw = _rejected_result(raw, exc)
             stage_stop = None
         if stage_stop is not None:
-            # The first stable lens-order STOP owns dependent test scope. Safe
-            # peers already in flight still return full, separately attributable
-            # evidence and are joined before aggregation.
+            # Safe peers already in flight still return full, separately
+            # attributable evidence. Ownership is selected only after every
+            # peer joins; this provisional value lets the scheduler build skips.
+            stops_by_lens[spec.name] = stage_stop
             if stop is None:
                 stop = stage_stop
             return _stop_lens(spec, stage_stop, skipped=False)
@@ -301,6 +303,15 @@ def execute_unit(request, worker, *, required_runner=None, dynamic_runner=None,
         request, worker, specs, normalize_result=normalize,
         failed_result=_failed_lens, skipped_result=skip_lens,
         max_workers=max_workers, environ=environ,
+    )
+    # Completion timing must not choose the supervisor's STOP. All in-flight
+    # peers have joined now, so select by the trusted declared lens order and
+    # rewrite only pending-lens skip envelopes settled by an earlier STOP.
+    stop = next((stops_by_lens[spec.name] for spec in specs
+                 if spec.name in stops_by_lens), None)
+    outcomes = tuple(
+        _stop_lens(spec, stop, skipped=True) if outcome.state == "skipped" else outcome
+        for spec, outcome in zip(specs, outcomes)
     )
     for spec, outcome in zip(specs, outcomes):
         if outcome.state == "stopped":
