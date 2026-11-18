@@ -32,6 +32,7 @@ import sys
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
 EXECUTOR = os.path.join(_ROOT, "examples", "test-check", "test_check")
+POLICY = os.path.join(_ROOT, "scripts", "rg_final_env.py")
 PROBE_ROOT = ".test-check-probes"
 
 sys.path.insert(0, os.path.join(_ROOT, "scripts"))
@@ -428,6 +429,7 @@ def test_contract_through_the_gate_runner(tmp_path, monkeypatch):
     exe = work / "scripts" / "rg_test_check"
     exe.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(EXECUTOR, exe)
+    shutil.copyfile(POLICY, exe.parent / "rg_final_env.py")
     exe.chmod(0o755)
     cmd, _count = _stub_selector(
         tmp_path, {"existing_tests": ["tests/test_dsl.py"], "probes": []})
@@ -551,6 +553,7 @@ def test_gate_merges_executor_telemetry_into_command_checks(
     exe = work / "scripts" / "rg_test_check"
     exe.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(EXECUTOR, exe)
+    shutil.copyfile(POLICY, exe.parent / "rg_final_env.py")
     exe.chmod(0o755)
     tip = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(work),
                          capture_output=True, text=True, check=True).stdout.strip()

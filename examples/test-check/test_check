@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Reference test-check executor (SPEC-15.5): a selector-driven test runner.
 
-A gated repo copies this executable in (e.g. ``scripts/rg_test_check``) and
-declares it as a command check in ``.ocr/config.json`` (see README.md next to
-this file):
+A gated repo copies this executable and ``rg_final_env.py`` in together
+(e.g. ``scripts/rg_test_check`` and ``scripts/rg_final_env.py``) and declares
+the executor as a command check in ``.ocr/config.json`` (see README.md next
+to this file):
 
     "test-check": {"command": "scripts/rg_test_check", "globs": [...],
                    "parallel": true, "timeout": 600, "mode": "block"}
@@ -63,6 +64,7 @@ Four phases:
 
 Python 3, stdlib only. POSIX (probe run_cmd goes through /bin/sh).
 """
+import importlib.util
 import json
 import os
 import re
@@ -71,6 +73,34 @@ import shutil
 import subprocess
 import sys
 import tempfile
+
+
+def _load_credential_scrubber():
+    """Load the portable sibling policy, or this checkout's canonical copy.
+
+    A copied installation has no review-gate checkout to fall back to. Missing
+    policy is therefore a hard startup error, never permission to run subjects
+    with an inherited environment or a second locally maintained scrub loop.
+    """
+    here = os.path.dirname(os.path.realpath(__file__))
+    sibling = os.path.join(here, "rg_final_env.py")
+    checkout = os.path.abspath(os.path.join(
+        here, os.pardir, os.pardir, "scripts", "rg_final_env.py"))
+    for candidate in (sibling, checkout):
+        if not os.path.isfile(candidate):
+            continue
+        spec = importlib.util.spec_from_file_location("rg_final_env", candidate)
+        if spec is None or spec.loader is None:
+            continue
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.scrub_environment
+    raise RuntimeError(
+        "test_check requires rg_final_env.py alongside the executable; "
+        "install both files as documented (credential scrubbing is mandatory)")
+
+
+scrub_environment = _load_credential_scrubber()
 
 # The selector model pin (grilling decision: cheap, one-shot -- a selection
 # failure must never slow the pipeline).
@@ -420,23 +450,7 @@ def _subject_environment():
     process.  Tests receive neither it nor publication/provider credentials.
     Non-secret test knobs such as FLAKE_STATE remain available to fixtures.
     """
-    env = dict(os.environ)
-    sensitive = ("TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "COOKIE",
-                 "PRIVATE_KEY", "ASKPASS", "AUTH")
-    model = ("ANTHROPIC_", "CLAUDE_", "KIMI_", "OPENAI_", "PI_", "KIMCHI_")
-    for key in list(env):
-        upper = key.upper()
-        provider = any(part in upper for part in
-                       ("GITLAB", "GITHUB", "GLAB_", "GH_",
-                        "PUBLICATION", "PUBLISH"))
-        if provider or upper.startswith(model) or any(
-                part in upper for part in sensitive):
-            env.pop(key, None)
-    for key in ("SSH_AUTH_SOCK", "GIT_ASKPASS", "SSH_ASKPASS",
-                "GIT_CONFIG_COUNT", "OCR_TEST_SELECTOR_CMD"):
-        env.pop(key, None)
-    env["RG_FINAL_CREDENTIAL_FREE"] = "1"
-    return env
+    return scrub_environment()
 
 
 def _runner_for(path):

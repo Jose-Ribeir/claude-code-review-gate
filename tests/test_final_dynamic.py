@@ -87,7 +87,11 @@ def _selector(tmp_path, selection):
         "    fh.write(json.dumps({'cwd': os.getcwd(), 'manifest': manifest, "
         "'publication_secret': os.environ.get('PUBLICATION_SECRET'), "
         "'gitlab_token': os.environ.get('GITLAB_TOKEN'), "
-        "'model_credential': os.environ.get('OPENAI_API_KEY')}) + '\\n')\n"
+        "'model_credential': os.environ.get('OPENAI_API_KEY'), "
+        "'retained_names': sorted(k for k in os.environ if k in {"
+        "'ANTHROPIC_WORKSPACE_TOKEN', 'CLAUDE_CODE_MESSAGING_TOKEN', "
+        "'GENERIC_API_KEY', 'CI_REPOSITORY_URL', 'GIT_TRACE2_EVENT', "
+        "'GIT_DIR', 'OCR_TEST_SELECTOR_CMD', 'KIMI_API_KEY'})}) + '\\n')\n"
         "selection = (here / 'selection.json').read_text(encoding='utf-8')\n"
         "sys.stdout.write(selection)\n",
         encoding="utf-8",
@@ -118,6 +122,13 @@ def _environment(tmp_path, selection, **extra):
         "PUBLICATION_SECRET": "must-not-reach-tests",
         "GITLAB_TOKEN": "must-not-reach-selector-or-tests",
         "OPENAI_API_KEY": "selector-only-model-credential",
+        "KIMI_API_KEY": "second-selector-model-credential",
+        "ANTHROPIC_WORKSPACE_TOKEN": "must-not-reach-selector",
+        "CLAUDE_CODE_MESSAGING_TOKEN": "must-not-reach-selector",
+        "GENERIC_API_KEY": "must-not-reach-selector-or-tests",
+        "CI_REPOSITORY_URL": "https://oauth2:token@gitlab.example/group/repo.git",
+        "GIT_TRACE2_EVENT": "/tmp/vanished-trace",
+        "GIT_DIR": "/tmp/source/.git",
     })
     env.update({key: str(value) for key, value in extra.items()})
     return env
@@ -198,6 +209,8 @@ def test_public_seam_reproduces_existing_failure_in_its_own_clean_clone(
     assert [item["path"] for item in selector_run["manifest"]] == ["dsl.py"]
     assert selector_run["gitlab_token"] is None
     assert selector_run["publication_secret"] is None
+    assert selector_run["model_credential"] == "selector-only-model-credential"
+    assert selector_run["retained_names"] == ["KIMI_API_KEY", "OCR_TEST_SELECTOR_CMD"]
     assert _snapshot(repo) == before
 
     with FinalStore(tmp_path / "final.sqlite3") as store:
@@ -241,7 +254,8 @@ def test_ephemeral_failure_is_clean_credential_free_and_visibly_uncovered(
         "import os, sys\n"
         f"# {source_sentinel}\n"
         "leaked = [key for key in ('PUBLICATION_SECRET', 'GITLAB_TOKEN', "
-        "'OPENAI_API_KEY') if os.environ.get(key)]\n"
+        "'OPENAI_API_KEY', 'KIMI_API_KEY', 'GENERIC_API_KEY', "
+        "'CI_REPOSITORY_URL', 'GIT_TRACE2_EVENT', 'GIT_DIR') if os.environ.get(key)]\n"
         "if leaked:\n"
         "    print('credential leak: ' + ','.join(leaked))\n"
         "    sys.exit(9)\n"

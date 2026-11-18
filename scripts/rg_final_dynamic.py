@@ -21,6 +21,7 @@ import os
 from pathlib import Path, PurePosixPath
 import subprocess
 
+from rg_final_env import scrub_environment
 from rg_final_materialize import materialize_review
 
 
@@ -29,14 +30,6 @@ DEFAULT_TIMEOUT_S = 600.0
 DEFAULT_EXECUTOR = Path(__file__).resolve().parents[1] / "examples" / "test-check" / "test_check"
 PROBE_ROOT = ".test-check-probes"
 _EVIDENCE_SOURCES = frozenset(("existing_test", "ephemeral_test"))
-_MODEL_AUTH_PREFIXES = ("ANTHROPIC_", "CLAUDE_", "KIMI_", "OPENAI_", "PI_")
-_SENSITIVE_PARTS = (
-    "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "COOKIE", "PRIVATE_KEY",
-    "ASKPASS", "AUTH",
-)
-_PROVIDER_PARTS = ("GITLAB", "GITHUB", "GLAB_", "GH_", "PUBLICATION", "PUBLISH")
-
-
 def _sha256(text):
     return hashlib.sha256(str(text).encode("utf-8", "surrogateescape")).hexdigest()
 
@@ -83,19 +76,7 @@ def _executor_environment(environ):
     repository tests or probes, removing model credentials as well.  Provider
     and write/publication material is removed before *either* process starts.
     """
-    source = os.environ if environ is None else environ
-    child = dict(source)
-    for key in list(child):
-        upper = key.upper()
-        provider = any(part in upper for part in _PROVIDER_PARTS)
-        secret = any(part in upper for part in _SENSITIVE_PARTS)
-        model_auth = upper.startswith(_MODEL_AUTH_PREFIXES)
-        if provider or (secret and not model_auth):
-            child.pop(key, None)
-    for key in ("SSH_AUTH_SOCK", "GIT_ASKPASS", "SSH_ASKPASS", "GIT_CONFIG_COUNT"):
-        child.pop(key, None)
-    child["RG_FINAL_CREDENTIAL_FREE"] = "1"
-    return child
+    return scrub_environment(environ, preserve_model_auth=True)
 
 
 def _changed_paths(repository, merge_base, head_sha):

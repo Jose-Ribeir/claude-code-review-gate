@@ -25,12 +25,20 @@ the next push gets a different content anchor and is judged fresh.
 
 ## Install into a gated repository
 
-1. Copy the executor into your repo and commit it:
+1. Copy the executor and its portable credential-policy helper into your repo
+   and commit both files:
 
    ```console
    $ cp examples/test-check/test_check /path/to/repo/scripts/test_check
+   $ cp scripts/rg_final_env.py /path/to/repo/scripts/rg_final_env.py
    $ chmod +x /path/to/repo/scripts/test_check
    ```
+
+   The executor loads `rg_final_env.py` beside itself. Neither installed file
+   imports Kimchi, reads neutral final-review storage, or needs a review-gate
+   checkout at runtime. If the helper is absent, startup fails closed before
+   selector, repository-test, or probe execution; there is no inherited-env
+   fallback.
 
 2. Declare the command check in `/path/to/repo/.ocr/config.json`:
 

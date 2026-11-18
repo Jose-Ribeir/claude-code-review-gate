@@ -30,6 +30,7 @@ from rg_final_context import collect_review_context
 from rg_final_graph import discover_linear_graph, record_graph_observation
 from rg_final_gitlab import GitLabProvider
 from rg_final_dynamic import run_dynamic_checks
+from rg_final_env import scrub_environment
 from rg_final_memory import (
     carry_forward,
     finding_memory_for_unit,
@@ -171,21 +172,7 @@ def worker_environment(environ=None):
     askpass helpers, generic tokens and unrelated secret material do not cross
     the trusted-supervisor/untrusted-worker boundary.
     """
-    source = os.environ if environ is None else environ
-    child = dict(source)
-    model_auth = ("ANTHROPIC_", "CLAUDE_", "KIMI_", "OPENAI_", "PI_")
-    sensitive = ("TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "COOKIE",
-                 "PRIVATE_KEY", "ASKPASS", "AUTH")
-    for key in list(child):
-        upper = key.upper()
-        provider = any(part in upper for part in ("GITLAB", "GITHUB", "GLAB_", "GH_"))
-        generic_secret = any(part in upper for part in sensitive)
-        if provider or (generic_secret and not upper.startswith(model_auth)):
-            child.pop(key, None)
-    for key in ("SSH_AUTH_SOCK", "GIT_ASKPASS", "SSH_ASKPASS", "GIT_CONFIG_COUNT"):
-        child.pop(key, None)
-    child["RG_FINAL_CREDENTIAL_FREE"] = "1"
-    return child
+    return scrub_environment(environ, preserve_model_auth=True)
 
 
 def _default_worker_command(request_path, repo_root, environ, request):
