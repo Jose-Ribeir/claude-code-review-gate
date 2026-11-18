@@ -101,12 +101,20 @@ def _suite(source: str, name: str, command: str) -> dict:
     return {"name": name, "command": command, "source": source, "timeout": 60}
 
 
+def _unassessable(source: str, name: str, reason: str) -> dict:
+    return {
+        **_suite(source, name, None),
+        "state": "unassessable",
+        "error": f"required declaration {name!r} is unassessable: {reason}",
+    }
+
+
 def _github_declarations(source: str, raw: str) -> list[dict]:
     """Extract literal required step commands; no Actions runner emulation.
 
     Diagnostic-only and explicitly non-blocking steps are not required suites.
-    Matrix expressions and other unresolved runner syntax remain in the command:
-    if they cannot execute they become incomplete evidence, never a guessed pass.
+    Actions, reusable workflows, matrices, and unresolved expressions become
+    explicit unassessable declarations rather than guessed passes or failures.
     """
     lines = raw.splitlines()
     try:
@@ -127,6 +135,19 @@ def _github_declarations(source: str, raw: str) -> list[dict]:
         block = lines[start + 1:job_end]
         if any(re.match(r"^    continue-on-error:\s*true\s*$", line) for line in block):
             continue
+        reusable = next((match for line in block
+                         if (match := re.match(r"^    uses:\s*(.*?)\s*$", line))), None)
+        if reusable is not None:
+            declarations.append(_unassessable(
+                source, f"{Path(source).stem}:{job}",
+                f"reusable workflow {_yaml_scalar(reusable.group(1))!r} "
+                "cannot be expanded locally"))
+            continue
+        if any(re.match(r"^      matrix:\s*", line) for line in block):
+            declarations.append(_unassessable(
+                source, f"{Path(source).stem}:{job}",
+                "matrix expansion cannot be faithfully reproduced locally"))
+            continue
         try:
             steps_at = next(i for i in range(start + 1, job_end)
                             if re.match(r"^    steps:\s*$", lines[i]))
@@ -142,6 +163,15 @@ def _github_declarations(source: str, raw: str) -> list[dict]:
                    or re.search(r"\bif:\s*(?:failure|always|cancelled)\s*\(", line)
                    for line in step):
                 continue
+            name = f"{Path(source).stem}:{job}:step-{step_number}"
+            action = next((re.match(r"^\s*(?:-\s*)?uses:\s*(.*?)\s*$", line)
+                           for line in step
+                           if re.match(r"^\s*(?:-\s*)?uses:\s*(.*?)\s*$", line)), None)
+            if action is not None:
+                declarations.append(_unassessable(
+                    source, name,
+                    f"action invocation {_yaml_scalar(action.group(1))!r} cannot be executed locally"))
+                continue
             for offset, line in enumerate(step):
                 match = re.match(r"^(\s*)(?:-\s*)?run:\s*(.*?)\s*$", line)
                 if not match:
@@ -156,15 +186,30 @@ def _github_declarations(source: str, raw: str) -> list[dict]:
                         body.append(following.strip())
                     command = (" " if command.startswith(">") else "\n").join(body)
                 if command:
-                    name = f"{Path(source).stem}:{job}:step-{step_number}"
-                    declarations.append(_suite(source, name, command))
+                    if "${{" in command:
+                        declarations.append(_unassessable(
+                            source, name,
+                            "GitHub expression syntax cannot be resolved locally"))
+                    else:
+                        declarations.append(_suite(source, name, command))
                 break
     return declarations
 
 
 def _gitlab_declarations(source: str, raw: str) -> list[dict]:
-    """Extract commands from required jobs' literal before_script/script lists."""
+    """Extract literal job commands, preserving unsupported CI as evidence."""
     lines = raw.splitlines()
+    include_at = next((i for i, line in enumerate(lines)
+                       if re.match(r"^include:\s*", line)), None)
+    if include_at is not None:
+        include_end = next((i for i in range(include_at + 1, len(lines))
+                            if lines[i] and not lines[i][0].isspace()), len(lines))
+        include = " ".join([lines[include_at].split(":", 1)[1].strip()]
+                           + [line.strip() for line in lines[include_at + 1:include_end]])
+        if include.strip() not in ("", "[]", "{}", "null", "Null", "NULL", "~"):
+            return [_unassessable(
+                source, "gitlab:include",
+                f"include {_yaml_scalar(include)!r} cannot be expanded locally")]
     reserved = {"default", "include", "stages", "variables", "workflow"}
     headings = [(i, match.group(1)) for i, line in enumerate(lines)
                 if (match := re.match(r"^([A-Za-z0-9_.-]+):\s*$", line))
@@ -173,7 +218,21 @@ def _gitlab_declarations(source: str, raw: str) -> list[dict]:
     for position, (start, job) in enumerate(headings):
         end = headings[position + 1][0] if position + 1 < len(headings) else len(lines)
         block = lines[start + 1:end]
+        if job.startswith("."):
+            continue
         if any(re.match(r"^  allow_failure:\s*true\s*$", line) for line in block):
+            continue
+        extends = next((match for line in block
+                        if (match := re.match(r"^  extends:\s*(.*?)\s*$", line))), None)
+        if extends is not None:
+            declarations.append(_unassessable(
+                source, f"gitlab:{job}",
+                f"extends {_yaml_scalar(extends.group(1))!r} cannot be expanded locally"))
+            continue
+        if any(re.match(r"^    matrix:\s*", line) for line in block):
+            declarations.append(_unassessable(
+                source, f"gitlab:{job}",
+                "matrix expansion cannot be faithfully reproduced locally"))
             continue
         for key in ("before_script", "script"):
             for offset, line in enumerate(block):
@@ -256,6 +315,15 @@ def _fingerprint(commit: str, declaration: dict, attempts: list[dict]) -> str:
 
 def _run_suite(repository: Path, commit: str, declaration: dict) -> dict:
     """Execute one declaration in its own pinned clone and always clean up."""
+    if declaration.get("state") == "unassessable":
+        return {
+            **declaration,
+            "kind": "required",
+            "blocking": False,
+            "output": "",
+            "attempts": [],
+            "evidence_fingerprint": _fingerprint(commit, declaration, []),
+        }
     outputs = []
     attempts = []
     state = "incomplete"

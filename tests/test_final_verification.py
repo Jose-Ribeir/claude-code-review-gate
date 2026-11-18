@@ -303,3 +303,141 @@ def test_timeout_is_incomplete_and_disposable_clone_is_still_removed(tmp_path):
     assert result["suites"][0]["attempts"] == []
     assert "timed out" in result["warnings"][0]
     assert not Path(clone_path.read_text(encoding="utf-8")).exists()
+
+
+def test_github_action_invocation_is_discovered_as_unassessable(tmp_path):
+    workflow = """jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+"""
+    repo, commit = _repo(tmp_path / "source", {
+        ".github/workflows/verify.yml": workflow,
+    })
+
+    declarations = verification.discover_required_verification(repo, commit)
+    result = verification.run_required_verification(repo, commit)
+
+    assert len(declarations) == 1
+    assert declarations[0]["state"] == "unassessable"
+    assert "actions/checkout@v4" in declarations[0]["error"]
+    assert result["status"] == "incomplete"
+    assert result["status"] != "absent"
+    assert result["suites"][0]["state"] == "unassessable"
+    assert result["suites"][0]["attempts"] == []
+    assert result["blocking"] is False
+    assert result["findings"] == []
+    assert "actions/checkout@v4" in result["warnings"][0]
+
+
+def test_github_matrix_makes_its_required_commands_unassessable(tmp_path):
+    workflow = """jobs:
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.11', '3.12']
+    steps:
+      - run: tools/must-not-run
+"""
+    repo, commit = _repo(tmp_path / "source", {
+        ".github/workflows/verify.yml": workflow,
+        "tools/must-not-run": "#!/bin/sh\nexit 99\n",
+    })
+
+    result = verification.run_required_verification(repo, commit)
+
+    assert result["status"] == "incomplete"
+    assert len(result["suites"]) == 1
+    assert result["suites"][0]["state"] == "unassessable"
+    assert result["suites"][0]["attempts"] == []
+    assert "matrix" in result["warnings"][0]
+
+
+def test_github_reusable_workflow_job_is_not_mistaken_for_absent_ci(tmp_path):
+    workflow = """jobs:
+  verify:
+    uses: example/required/.github/workflows/tests.yml@v1
+"""
+    repo, commit = _repo(tmp_path / "source", {
+        ".github/workflows/verify.yaml": workflow,
+    })
+
+    result = verification.run_required_verification(repo, commit)
+
+    assert result["status"] == "incomplete"
+    assert len(result["suites"]) == 1
+    assert result["suites"][0]["state"] == "unassessable"
+    assert result["suites"][0]["attempts"] == []
+    assert "reusable workflow" in result["warnings"][0]
+    assert "example/required" in result["warnings"][0]
+
+
+def test_unresolved_github_expression_is_unassessable_not_a_shell_failure(tmp_path):
+    workflow = """jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - run: printf '%s\\n' '${{ github.sha }}'
+"""
+    repo, commit = _repo(tmp_path / "source", {
+        ".github/workflows/verify.yml": workflow,
+    })
+
+    result = verification.run_required_verification(repo, commit)
+
+    assert result["status"] == "incomplete"
+    assert result["blocking"] is False
+    assert result["suites"][0]["state"] == "unassessable"
+    assert result["suites"][0]["attempts"] == []
+    assert "expression" in result["warnings"][0]
+
+
+def test_gitlab_include_is_unassessable_instead_of_absent(tmp_path):
+    pipeline = """include:
+  - remote: https://example.invalid/required-tests.yml
+"""
+    repo, commit = _repo(tmp_path / "source", {".gitlab-ci.yml": pipeline})
+
+    declarations = verification.discover_required_verification(repo, commit)
+    result = verification.run_required_verification(repo, commit)
+
+    assert len(declarations) == 1
+    assert declarations[0]["state"] == "unassessable"
+    assert result["status"] == "incomplete"
+    assert result["suites"][0]["attempts"] == []
+    assert result["blocking"] is False
+    assert "include" in result["warnings"][0]
+    assert "https://example.invalid/required-tests.yml" in result["warnings"][0]
+
+
+def test_gitlab_setup_and_matrix_constructs_are_unassessable(tmp_path):
+    pipeline = """.required_setup:
+  script:
+    - tools/must-not-run
+extended_tests:
+  extends: .required_setup
+  script:
+    - tools/must-not-run
+matrix_tests:
+  parallel:
+    matrix:
+      - PYTHON: ['3.11', '3.12']
+  script:
+    - tools/must-not-run
+"""
+    repo, commit = _repo(tmp_path / "source", {
+        ".gitlab-ci.yml": pipeline,
+        "tools/must-not-run": "#!/bin/sh\nexit 99\n",
+    })
+
+    result = verification.run_required_verification(repo, commit)
+
+    assert result["status"] == "incomplete"
+    assert result["blocking"] is False
+    assert len(result["suites"]) == 2
+    assert all(suite["state"] == "unassessable" for suite in result["suites"])
+    assert all(suite["attempts"] == [] for suite in result["suites"])
+    assert any("extends" in warning for warning in result["warnings"])
+    assert any("matrix" in warning for warning in result["warnings"])
