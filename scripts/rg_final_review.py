@@ -53,7 +53,9 @@ from rg_final_lenses import (
     CROSS_ITEM_CONTRACTS,
     INTEGRATION_BEHAVIOR,
     REQUIRED_LENS_NAMES,
+    REQUIRED_LENSES,
     _sanitize_lens_text,
+    build_lens_request,
     failed_lens_aggregation,
     lens_method_record,
 )
@@ -352,12 +354,8 @@ def worker_environment(environ=None):
     return scrub_environment(environ, preserve_model_auth=True)
 
 
-def _default_worker_command(request_path, repo_root, environ, request):
-    selection = ocr_profile.select_backend(env=environ, repo_root=repo_root)
-    executable = shutil.which(selection.name, path=environ.get("PATH"))
-    if not executable:
-        raise WorkerError(f"selected review backend {selection.name!r} is not on PATH")
-    prompt = (
+def _worker_prompt(request, request_path):
+    return (
         f"Perform one independent {request['lens']} static review. Read the JSON request at "
         f"{request_path}. Its repository.path is a complete immutable checkout and its "
         "diff is the complete merge-base patch. Iteratively inspect unchanged code, "
@@ -392,6 +390,14 @@ def _default_worker_command(request_path, repo_root, environ, request):
         "evidence.revalidation with the same independent-proof contract. Only close a named "
         "prior finding when current pinned-tree and executed evidence supports that conclusion."
     )
+
+
+def _default_worker_command(request_path, repo_root, environ, request):
+    selection = ocr_profile.select_backend(env=environ, repo_root=repo_root)
+    executable = shutil.which(selection.name, path=environ.get("PATH"))
+    if not executable:
+        raise WorkerError(f"selected review backend {selection.name!r} is not on PATH")
+    prompt = _worker_prompt(request, request_path)
     if selection.name == "claude":
         args = [
             "--output-format", "stream-json", "--verbose", "--setting-sources", "",
@@ -1203,7 +1209,8 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
                      worker=None, environ=None, execute_checks=False,
                      required_runner=None, dynamic_runner=None, dynamic_kwargs=None,
                      context_kwargs=None, publish=False, publication_runner=None,
-                     report_url=None, local_waivers=(), current_root_sha=None):
+                     report_url=None, local_waivers=(), current_root_sha=None,
+                     native_host=None):
     """Run one complete standalone individual+combined final review.
 
     Every explicit invocation first validates the provider's actual open-item
@@ -1262,6 +1269,7 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
         closure_outcomes = {}
         context_complete = intent_complete = False
         merge_base = None
+        native_execution = None
         try:
             source_repository = source.get("http_url") or source["url"]
             target_repository = target.get("http_url") or target["url"]
@@ -1315,6 +1323,66 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
                     {"standalone": True, "source_unit_id": unit_id},
                 )
 
+                requests = {}
+                unit_priors = {}
+
+                def enrich_request(lens_request, unit_key):
+                    if unit_key == "combined":
+                        lens_request["capabilities"] = list(dict.fromkeys(
+                            [*lens_request.get("capabilities", ()),
+                             CROSS_ITEM_CONTRACTS, INTEGRATION_BEHAVIOR]))
+                        lens_request["review_duty"] += (
+                            " Review cross-item contracts and actual integration behavior."
+                        )
+                    return lens_request
+
+                for current_id, unit_key in ((unit_id, "individual:1"), (combined_id, "combined")):
+                    unit_priors[current_id] = finding_memory_for_unit(prior, unit_key)
+                    public_item = _public_item(item)
+                    if unit_key == "combined":
+                        public_item.update({
+                            "id": "combined", "title": "Standalone combined review",
+                            "description": "Review the complete one-item integration behavior.",
+                        })
+                    requests[current_id] = {
+                        "schema": WORKER_REQUEST_SCHEMA, "stage": COMPLETE_STAGE,
+                        "run_id": run_id, "unit_id": current_id, "unit_key": unit_key,
+                        "store_instance_id": identity["store_instance_id"],
+                        "contract_version": identity["contract_version"],
+                        "revision_tuple": revisions, "item": public_item,
+                        "repository": {
+                            "path": str(materialized.path), "access": "full_tree",
+                            "head_sha": materialized.head_sha,
+                            "target_sha": materialized.target_sha,
+                            "merge_base_sha": materialized.merge_base_sha,
+                            "submodules": list(materialized.submodules),
+                            "lfs_files": list(materialized.lfs_files),
+                            "lfs_complete": materialized.lfs_complete,
+                        },
+                        "diff": materialized.diff,
+                        "review_context": deepcopy(review_context),
+                        "finding_memory": unit_priors[current_id],
+                    }
+
+                transport = str(environ.get("RG_FINAL_REVIEW_TRANSPORT", "")).strip().lower()
+                if transport not in ("", "legacy", "native"):
+                    raise ValueError(f"unsupported final-review transport {transport!r}")
+                if transport == "native":
+                    from rg_final_native import NativeStandaloneExecution
+                    from rg_native_executor import KimchiNativeHost
+
+                    host = native_host or KimchiNativeHost.checked(environ=environ)
+                    native_execution = NativeStandaloneExecution(
+                        store, host, environ=environ, run_id=run_id,
+                        prompt_factory=_worker_prompt,
+                    )
+                    native_execution.prepare([
+                        enrich_request(build_lens_request(requests[current_id], spec), unit_key)
+                        for current_id, unit_key in (
+                            (unit_id, "individual:1"), (combined_id, "combined"))
+                        for spec in REQUIRED_LENSES
+                    ])
+
                 for current_id, unit_key in ((unit_id, "individual:1"), (combined_id, "combined")):
                     if executions[unit_id] is not None and executions[unit_id].stop is not None:
                         executions[current_id] = skipped_execution(
@@ -1348,13 +1416,9 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
                     }
 
                     def isolated_worker(lens_request, unit_key=unit_key):
-                        if unit_key == "combined":
-                            lens_request["capabilities"] = list(dict.fromkeys(
-                                [*lens_request.get("capabilities", ()),
-                                 CROSS_ITEM_CONTRACTS, INTEGRATION_BEHAVIOR]))
-                            lens_request["review_duty"] += (
-                                " Review cross-item contracts and actual integration behavior."
-                            )
+                        lens_request = enrich_request(lens_request, unit_key)
+                        if native_execution is not None:
+                            return native_execution.worker(lens_request)
                         return invoke_worker(
                             lens_request, command=worker, repo_root=repo_root,
                             environ=environ,
@@ -1373,6 +1437,16 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
                         request=request)
                     _carry_observed_findings(
                         store, run_id, current_id, unit_prior, observations)
+                    if native_execution is not None:
+                        record_execution_tests(store, current_id, executions[current_id])
+                        for rejected in executions[current_id].rejected_stops:
+                            store.record_warning(
+                                current_id, "structured-stop-rejected", rejected["error"],
+                                rejected["stage"], rejected,
+                            )
+
+                if native_execution is not None:
+                    native_execution.close()
 
                 individual_execution = executions[unit_id]
                 combined_execution = executions[combined_id]
@@ -1381,7 +1455,7 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
                         combined_execution.skipped_work))
                     individual_execution.stop_id = _record_execution_evidence(
                         store, unit_id, individual_execution, materialized.diff,
-                        affected_units=unit_ids)
+                        affected_units=unit_ids, record_tests=native_execution is None)
                     record_execution_tests(store, combined_id, combined_execution)
                     aggregations[combined_id] = combined_execution.aggregation
                     _record_lens_aggregation(
@@ -1389,9 +1463,11 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
                         request=request)
                 else:
                     _record_execution_evidence(
-                        store, unit_id, individual_execution, materialized.diff)
+                        store, unit_id, individual_execution, materialized.diff,
+                        record_tests=native_execution is None)
                     combined_execution.stop_id = _record_execution_evidence(
-                        store, combined_id, combined_execution, materialized.diff)
+                        store, combined_id, combined_execution, materialized.diff,
+                        record_tests=native_execution is None)
                 # Claims were collected before tests, but cannot finalize until
                 # the independently executed evidence exists in this same run.
                 for current_id, unit_key in ((unit_id, "individual:1"),
@@ -1402,6 +1478,8 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
                         executions[current_id], materialized,
                     )
         except Exception as exc:
+            if native_execution is not None:
+                native_execution.abort()
             for current_id in unit_ids:
                 if current_id not in aggregations:
                     aggregations[current_id] = failed_lens_aggregation(exc)

@@ -1,7 +1,6 @@
 """Global event-driven scheduling for native review tasks."""
 from __future__ import annotations
 
-from copy import deepcopy
 from dataclasses import dataclass, replace
 import threading
 import time
@@ -40,6 +39,7 @@ class ScheduledResult:
 class _Entry:
     definition: SchedulerTask
     on_finalize: Optional[Callable[[ScheduledResult], None]]
+    on_complete: Optional[Callable[[ScheduledResult], None]]
     state: str = "queued"
     handle: object = None
     artifact: Optional[NativeArtifact] = None
@@ -75,7 +75,7 @@ class NativeScheduler:
         self._runs = {}
         self._lock = threading.RLock()
 
-    def submit(self, definition: SchedulerTask, *, on_finalize=None):
+    def submit(self, definition: SchedulerTask, *, on_finalize=None, on_complete=None):
         task = definition.task
         with self._lock:
             run = self._runs.setdefault(task.run_id, {
@@ -94,7 +94,7 @@ class NativeScheduler:
             if any(self._entries[task_id].definition.task.run_id != task.run_id
                    for task_id in definition.dependencies):
                 raise ValueError("native task dependencies must belong to the same run")
-            entry = _Entry(definition, on_finalize)
+            entry = _Entry(definition, on_finalize, on_complete)
             entry.eligible = all(
                 self._entries[task_id].eligible for task_id in definition.dependencies
             )
@@ -152,18 +152,9 @@ class NativeScheduler:
         except StopRequestError as exc:
             payload = _rejected_result(artifact.payload, exc)
             return replace(artifact, payload=payload), None
-        if stop is None:
-            return artifact, None
-        payload = deepcopy(artifact.payload)
-        payload["status"] = "completed_with_warnings"
-        payload["findings"] = list(payload.get("findings") or []) + [stop["finding"]]
-        payload["warnings"] = list(payload.get("warnings") or []) + [{
-            "code": "structured-stop",
-            "message": stop["reason"],
-            "scope": "execution",
-            "details": deepcopy(stop),
-        }]
-        return replace(artifact, payload=payload), stop
+        # Preserve a valid STOP envelope for execute_unit's deterministic,
+        # lens-order-aware handling. Rejected STOPs are downgraded above.
+        return artifact, stop
 
     def _apply_stop(self, source, stop):
         del stop  # Scheduler eligibility uses only trusted graph ancestry, never worker scope.
@@ -221,7 +212,10 @@ class NativeScheduler:
             self._active[entry.definition.resource] -= 1
         if stop is not None and entry.eligible:
             self._apply_stop(entry, stop)
+        on_complete = entry.on_complete
         self._drain()
+        if on_complete is not None:
+            on_complete(entry.result())
         self._maybe_finalize(entry.definition.task.run_id)
 
     def _maybe_finalize(self, run_id):
