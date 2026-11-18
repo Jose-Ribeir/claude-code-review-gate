@@ -158,6 +158,60 @@ call its recording methods at real supervisor/store seams and persist the
 snapshot with the corresponding run. Until then integrated production telemetry
 is not claimed, and acceptance-harness output does not imply runtime emission.
 
+### 7. Configuration and operator-surface decision matrix
+
+The new configuration key is deliberately an addition to command checks, not a
+new check kind or a change to pre-push's defaults. The general settings loader
+and final-review's pinned discovery have different failure duties and must not
+be conflated.
+
+| Surface | Decision and default | Degradation and scope |
+| --- | --- | --- |
+| `checks.<name>.required` | Boolean command-check option, default `false`. The layered settings loader accepts the existing boolean/0/1/on/off/yes/no switch forms. An invalid value keeps the current layered value and emits a load note (fail-soft, observable). | The key alone does not enable an incremental pre-push duty or alter that duty's `enabled`, `mode`, or `globs` behavior. |
+| Final required-suite declaration | Discovery reads `.ocr/config.json` from each immutable reviewed commit, not the caller's working tree or global config. A suite requires literal JSON `"required": true`, must not have `"enabled": false`, and must name a non-empty `command`; `timeout` defaults to 60 seconds. | Neither `mode` nor diff `globs` changes final-suite selection. Malformed pinned JSON, a non-object `checks` value, or a selected declaration without an executable command makes required evidence incomplete (fail-closed), rather than silently omitting it. Other `required` values do not opt in. |
+| Required execution | Every executed individual, combined, and prospective unit discovers and runs its declarations in a disposable pinned clone with an explicit credential-free environment. An initial pass passes; the same ordinary failure on the initial run and its one clean rerun produces a blocking finding with output evidence. | Exit 126/127, timeout, an execution/discovery error, or fail-once/pass-once produces `incomplete`, not pass. No declaration produces recorded `absent` plus a warning, not a fictitious passing suite. This required-stage fail-closed behavior does not change best-effort dynamic checks' warning/telemetry fail-soft behavior. |
+
+**LocalRead** below means reading and rendering local evidence without a
+provider mutation or a new verdict/acceptance decision. **Trusted-write** is
+the separate least-privilege provider-status capability. Local store/report
+writes by `final-review`, and an explicitly requested export file, do not make
+an untrusted worker a trusted writer. Opening a view may initialize or migrate
+the selected local store schema, but does not create review or acceptance
+results.
+
+| Command | Selected evidence and output | Boundary and failure behavior |
+| --- | --- | --- |
+| `review-gate.py final-review <ref>…` | One reference is the standalone individual-plus-combined form. Multiple references must be canonical HTTP(S) provider references in explicit base-first order; graph discovery pins revisions and runs individual, combined, and prospective evidence. | The trusted supervisor reads provider metadata and writes the local store/reports; workers and test executors receive no provider-write tokens. The one-reference CLI requests trusted publication, but only for a complete passing run. The current multi-reference CLI does not request publication and therefore remains local-only even on a pass. |
+| `review-gate.py contract show [--version V] [--json]` | Shows the installed current contract by default, or exact historical rules and decision log when `--version` is supplied. | LocalRead. An uninstalled selection is an error, not an empty success. |
+| `review-gate.py acceptance list [--version V] [--json]` | Lists the current or exact historical scenario registry, expected states, required evidence, and cleanup/warning/trust assertions; it does not imply execution. | LocalRead. An uninstalled registry version is an error. |
+| `review-gate.py acceptance status <scenario-id> [--version V] [--review-run-id R] [--json]` | Selects the latest retained attempt matching the scenario and optional filters and shows its definition and result, if any. | LocalRead. Exactly one of the positional scenario ID or `--acceptance-run-id ID` is required; the latter selects one exact attempt. Missing matches and filter/version mismatches are errors. |
+| `review-gate.py acceptance history [scenario-id] [--version V] [--review-run-id R] [--json]` | Shows retained attempts oldest first, including attempts without results; an unexecuted scenario is not a pass. | LocalRead. Empty filtered history is an error, not successful proof of absence or passage. |
+| `review-gate.py final-report list [--stack KEY] [--json]` | Lists runs with original contract/acceptance versions, exact revisions, unit identities, and same-store supersession. | LocalRead. No runs in the selected scope is an error. |
+| `review-gate.py final-report show RUN [--unit UNIT] [--json]` | Renders the exact run or one unit as Markdown by default or its machine manifest with `--json`, retaining that run's historical contract and audit evidence. | LocalRead. Unknown runs, or units not belonging to the run, are errors. |
+| `review-gate.py final-report export RUN [--unit UNIT] [--format json\|markdown] [--output PATH\|-]` | Exports the same selected report; format defaults to `json` and output defaults to stdout (`-`). | LocalRead plus the explicitly named local file write. It refuses to overwrite the selected final-review store; selection or output I/O errors are nonzero and perform no provider write. |
+
+Every view leaf accepts `--store PATH`; without it the command selects
+`final-review.sqlite3` under the external store root. View selections,
+store/value/SQLite/I/O errors exit 1 with a diagnostic (argument-parser usage
+errors exit 2). They do not turn an empty selection into success or invoke a
+provider. The final-review result exits **0** for `pass`, **1** for `findings`,
+**2** for `incomplete` and usage/discovery/orchestration failures, and **3**
+for `stale`. Publication permission or transport failure preserves the review
+state and exit result but degrades trust to local-only/unenforced; it cannot
+manufacture or destroy review evidence.
+
+`store_instance_id` is part of the trust context for both execution and every
+view. The first run for a stack in a store is marked independent; finding
+memory and supersession require prior stack history in that store. Acceptance
+history and monotonic run sequence are also scoped to the selected persistent
+store, never shared with another database. A different `--store` is not an
+alternate view of that history and cannot promote an independent result to
+official green. A newer same-store run supersedes the older stack run for
+publication while reports retain both. Consequently a local `pass` and an
+enforced provider green remain separate facts, and publication denial,
+independence, staleness, or supersession never gets hidden by a successful
+report read or export.
+
 ## Consequences
 
 - Whole-stack review is intentionally expensive; exhaustion cannot silently
