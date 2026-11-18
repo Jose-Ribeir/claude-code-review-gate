@@ -53,7 +53,9 @@ from rg_final_lenses import (
     CROSS_ITEM_CONTRACTS,
     INTEGRATION_BEHAVIOR,
     REQUIRED_LENS_NAMES,
+    _sanitize_lens_text,
     failed_lens_aggregation,
+    lens_method_record,
 )
 from rg_final_materialize import materialize_review
 from rg_final_provider import RevisionChangedError, revision_tuple, select_provider
@@ -361,16 +363,25 @@ def _default_worker_command(request_path, repo_root, environ, request):
         "diff is the complete merge-base patch. Iteratively inspect unchanged code, "
         "docs, callers and tests as needed. Your assigned evidence duty is: "
         f"{request['review_duty']} Do not use or wait for another lens's conclusions. "
-        f"Return only one JSON object of the exact ordinary-completion shape "
-        f"{{\"schema\":\"{WORKER_RESULT_SCHEMA}\",\"status\":\"success\","
-        "\"summary\":\"...\",\"findings\":[],\"warnings\":[],\"unreviewed\":[]}. "
+        f"Return only one JSON object with \"schema\":\"{WORKER_RESULT_SCHEMA}\" and "
+        "\"status\":\"success\" plus summary, findings, warnings, and unreviewed fields. "
         "The ordinary status enum is exactly \"success\" | \"completed\" | "
         "\"completed_with_warnings\": success and completed both mean the assigned review "
         "completed successfully; completed_with_warnings means the assigned review completed "
         "with explicit warnings or unreviewed limitations to preserve. These three are the "
         "only successful completion values; do not invent another status spelling. summary "
-        "must be a string, findings and warnings must be arrays, and unreviewed must be an "
-        "array when present. Do not trust your own verdict field to determine the gate result. "
+        "must be evidence-specific, naming relevant inspected repository files or the precise "
+        "basis for a no-finding conclusion; empty text, ellipses, and angle-bracket templates "
+        "are rejected and make the required lens incomplete. findings and warnings must be "
+        "arrays, and unreviewed must be an array when present. Optionally disclose actual "
+        "inspection with sources_read entries containing repository-relative path and concise "
+        "rationale, and evidence_references entries containing repository-relative path, "
+        "concise location (for example a line range), and rationale. Disclose only what you "
+        "actually inspected; these lists support audit but are not treated as independently "
+        "verified tool-call or memory-closure proof. Never include host-absolute paths, home "
+        "paths, credentials, source dumps, or other lenses' responses. Do not prescribe a "
+        "finding merely to populate these fields. Do not trust your own verdict field to "
+        "determine the gate result. "
         "If finding_memory contains prior findings, omission never resolves them. Explicit "
         "closure may use finding_resolutions entries with finding_id, content_anchor, "
         "resolution_evidence.source (path, start_line, end_line, exact body, unit_key, head_sha) "
@@ -598,6 +609,13 @@ def invoke_worker(request, *, command=None, repo_root=None, environ=None, timeou
                 f"{details['received_status']!r}",
                 details=details,
             )
+        # This is a transport diagnostic, not evidence that the model actually
+        # called tools. Normalization uses it for rejected-summary auditing and
+        # persists only its bounded/sanitized allowlisted subset.
+        result["_worker_diagnostics"] = _worker_diagnostics(
+            source, reason="response-received", return_code=process.returncode,
+            stdout=process.stdout,
+        )
     return result
 
 
@@ -658,12 +676,49 @@ def _record_finding(store, unit_id, finding, key, diff):
     return {"finding_id": finding_id, "content_anchor": anchors[0]["anchor"]}
 
 
-def _record_lens_aggregation(store, unit_id, aggregation, materialized=None):
+def _stored_worker_evidence(outcome):
+    """Project normalized worker diagnostics into a bounded report-only shape."""
+    supplied = outcome.worker_evidence if isinstance(outcome.worker_evidence, dict) else {}
+    details = next((warning.get("details", {}) for warning in outcome.warnings
+                    if warning.get("code") == "required-lens-failed"), {})
+    details = details if isinstance(details, dict) else {}
+    received_status = supplied.get("received_status") or details.get("received_status") or ""
+    received_summary = supplied.get("received_summary") or outcome.summary
+    diagnostics = dict(supplied.get("diagnostics") or {})
+    for key in ("reason", "return_code", "stdout_tail"):
+        if key not in diagnostics and details.get(key) is not None:
+            diagnostics[key] = details[key]
+    clean_diagnostics = {}
+    if diagnostics.get("reason"):
+        clean_diagnostics["reason"] = _sanitize_lens_text(diagnostics["reason"], 80)
+    if isinstance(diagnostics.get("return_code"), int) \
+            and not isinstance(diagnostics.get("return_code"), bool):
+        clean_diagnostics["return_code"] = diagnostics["return_code"]
+    if diagnostics.get("stdout_tail"):
+        safe_tail = _sanitize_worker_diagnostic(diagnostics["stdout_tail"], {})
+        clean_diagnostics["stdout_tail"] = _sanitize_lens_text(safe_tail, 512)
+    disclosure = supplied.get("disclosure") or (
+        "worker-result-rejected" if outcome.state == "incomplete" else "worker-not-returned")
+    return {
+        "received_status": _sanitize_lens_text(received_status, 128),
+        "received_summary": _sanitize_lens_text(received_summary, 1000),
+        "sources_read": deepcopy(supplied.get("sources_read") or ()),
+        "evidence_references": deepcopy(supplied.get("evidence_references") or ()),
+        "rejected": deepcopy(supplied.get("rejected") or ()),
+        "diagnostics": clean_diagnostics,
+        "disclosure": disclosure,
+        "verification": "worker-declared-not-independently-verified",
+        "tool_calls_verified": False,
+    }
+
+
+def _record_lens_aggregation(store, unit_id, aggregation, materialized=None, request=None):
     """Persist every lens completion and every normalized warning/findings stream."""
     common = {
         "request_schema": WORKER_REQUEST_SCHEMA,
         "result_schema": WORKER_RESULT_SCHEMA,
         "repository_access": "full_tree",
+        "unit_id": unit_id,
     }
     if materialized is not None:
         common.update({
@@ -677,6 +732,8 @@ def _record_lens_aggregation(store, unit_id, aggregation, materialized=None):
     used = set()
     recorded_findings = []
     for outcome in aggregation.outcomes:
+        method = lens_method_record(request, outcome.name)
+        method["unit_id"] = unit_id
         evidence = {
             **common,
             "summary": outcome.summary,
@@ -687,6 +744,8 @@ def _record_lens_aggregation(store, unit_id, aggregation, materialized=None):
             "capabilities": list(outcome.capabilities),
             "independent_context": True,
             "error": outcome.error,
+            "method": method,
+            "worker_evidence": _stored_worker_evidence(outcome),
         }
         store.record_lens(unit_id, outcome.name, outcome.state, outcome.summary, evidence)
         store.record_coverage(unit_id, f"lens:{outcome.name}", outcome.state,
@@ -905,7 +964,8 @@ def _run_static_final_review(reference, *, repo_root=None, provider=None, store_
                 aggregation = execution.aggregation
                 finding_verdict = (execution.finding_verdict if execute_checks
                                    else aggregation.finding_verdict)
-                _record_lens_aggregation(store, unit_id, aggregation, materialized)
+                _record_lens_aggregation(
+                    store, unit_id, aggregation, materialized, request=request)
                 execution.stop_id = _record_execution_evidence(
                     store, unit_id, execution, materialized.diff)
                 lenses_recorded = True
@@ -1309,7 +1369,8 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
                     )
                     aggregations[current_id] = executions[current_id].aggregation
                     observations = _record_lens_aggregation(
-                        store, current_id, executions[current_id].aggregation, materialized)
+                        store, current_id, executions[current_id].aggregation, materialized,
+                        request=request)
                     _carry_observed_findings(
                         store, run_id, current_id, unit_prior, observations)
 
@@ -1324,7 +1385,8 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
                     record_execution_tests(store, combined_id, combined_execution)
                     aggregations[combined_id] = combined_execution.aggregation
                     _record_lens_aggregation(
-                        store, combined_id, combined_execution.aggregation, materialized)
+                        store, combined_id, combined_execution.aggregation, materialized,
+                        request=request)
                 else:
                     _record_execution_evidence(
                         store, unit_id, individual_execution, materialized.diff)
@@ -1679,7 +1741,8 @@ def _run_stack_unit(store, identity, graph, unit_key, unit_id, *, item=None,
                 dynamic_kwargs=dynamic_kwargs, environ=environ,
             )
             aggregation = execution.aggregation
-            _record_lens_aggregation(store, unit_id, aggregation, materialized)
+            _record_lens_aggregation(
+                store, unit_id, aggregation, materialized, request=request)
             record_execution_tests(store, unit_id, execution)
             for rejected in execution.rejected_stops:
                 store.record_warning(unit_id, "structured-stop-rejected", rejected["error"],

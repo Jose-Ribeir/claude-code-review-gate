@@ -215,6 +215,9 @@ def test_lens_execution_retains_coverage_counts_not_worker_prose():
     assert (event["findings"], event["warnings"], event["unreviewed"]) == (1, 2, 0)
     assert "summary" not in event
     assert "content" not in event
+    assert "sources_read" not in event
+    assert "evidence_references" not in event
+    assert "stdout_tail" not in event
 
 
 @pytest.mark.parametrize(

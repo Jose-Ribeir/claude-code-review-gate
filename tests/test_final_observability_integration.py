@@ -82,6 +82,52 @@ def test_real_standalone_persists_graph_run_lens_and_test_observability(standalo
         _assert_bounded_sanitized_detached(store_path, output["run_id"], report)
 
 
+def test_worker_disclosures_persist_per_lens_without_entering_telemetry(standalone):
+    secret = "glpat-not-in-reports-or-telemetry"
+
+    def disclosed_worker(request, **kwargs):
+        result = worker_result()
+        result.update({
+            "summary": "Inspected app.py and AGENTS.md for the assigned evidence duty",
+            "sources_read": [
+                {"path": "app.py", "rationale": "Changed implementation"},
+                {"path": "AGENTS.md", "rationale": "Binding instructions"},
+            ],
+            "evidence_references": [{
+                "path": "app.py", "location": "line 2",
+                "rationale": f"Return contract checked; token={secret}",
+            }],
+        })
+        return result
+
+    standalone.monkeypatch.setattr(rg_final_review, "invoke_worker", disclosed_worker)
+    store_path = standalone.tmp_path / "worker-evidence-observability.sqlite3"
+
+    output = run_standalone(standalone, StandaloneProvider(), store_path)
+
+    assert output["state"] == "pass"
+    with FinalStore(store_path) as final_store:
+        report = final_store.machine_report(output["run_id"])
+        lenses = [lens for unit in report["units"] for lens in unit["lenses"]]
+        assert len(lenses) == 14
+        for lens in lenses:
+            evidence = lens["evidence"]["worker_evidence"]
+            method = lens["evidence"]["method"]
+            assert [entry["path"] for entry in evidence["sources_read"]] == [
+                "app.py", "AGENTS.md",
+            ]
+            assert evidence["evidence_references"][0]["location"] == "line 2"
+            assert evidence["disclosure"] == "sources-declared"
+            assert evidence["tool_calls_verified"] is False
+            assert method["unit_id"]
+            assert [entry["path"] for entry in method["documents"]] == ["AGENTS.md"]
+        encoded = json.dumps(report)
+        assert secret not in encoded
+        assert "/Users/" not in encoded
+        assert "source_excerpt" not in encoded
+        _assert_bounded_sanitized_detached(store_path, output["run_id"], report)
+
+
 def test_real_stack_persists_stale_freshness_and_bounded_run_snapshot(tmp_path):
     harness = StackHarness(tmp_path)
     original_root = harness.items[0]["target"]["sha"]

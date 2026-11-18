@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
 from pathlib import Path
 import sys
 import threading
@@ -258,6 +259,104 @@ def test_invalid_worker_result_is_not_a_warning_only_success(tmp_path):
     assert aggregate.finding_verdict is None
 
 
+@pytest.mark.parametrize("placeholder", [None, "", "   ", "...", "<summary>", "{{summary}}"])
+def test_placeholder_summary_is_incomplete_without_dropping_valid_findings(
+        tmp_path, placeholder):
+    finding = {
+        "path": "app.py", "start_line": 2, "end_line": 2,
+        "severity": "high", "confidence": 0.99, "content": "Caller contract is broken",
+    }
+
+    def worker(request):
+        if request["lens"] == "correctness":
+            response = _response(findings=[finding], summary=placeholder)
+            if placeholder is None:
+                del response["summary"]
+            return response
+        return _response(summary="Inspected app.py and found no issue in this lens")
+
+    aggregate = run_independent_lenses(_request(tmp_path), worker, max_workers=1)
+
+    outcome = aggregate.outcomes[0]
+    assert outcome.state == "incomplete"
+    assert outcome.error
+    assert outcome.findings[0]["content"] == "Caller contract is broken"
+    assert aggregate.findings == outcome.findings
+    assert aggregate.complete is False
+    assert aggregate.finding_verdict is None
+    rejection = outcome.warnings[-1]
+    assert rejection["code"] == "required-lens-failed"
+    assert rejection["details"]["received_status"] == "success"
+    assert rejection["details"]["summary_rejection"]
+    assert outcome.worker_evidence["rejected"][-1]["field"] == "summary"
+
+
+def test_non_english_evidence_summary_is_not_rejected_for_language(tmp_path):
+    aggregate = run_independent_lenses(
+        _request(tmp_path),
+        lambda request: _response(summary="已检查 app.py 及调用方，未发现该变更引入的缺陷"),
+        max_workers=1,
+    )
+
+    assert aggregate.complete is True
+    assert aggregate.finding_verdict == "pass"
+    assert all("app.py" in outcome.summary for outcome in aggregate.outcomes)
+
+
+def test_worker_evidence_is_bounded_anchored_and_sanitized(tmp_path):
+    secret = "glpat-never-record-this-token"
+    sources = [
+        "/Users/alice/private/app.py", "../outside.py", "~/.ssh/id_rsa",
+        "C:\\private\\app.py", {"path": "src/app.py", "ignored": "source dump"},
+    ]
+    sources.extend({"path": f"src/file-{index}.py"} for index in range(30))
+    response = _response(
+        summary=f"Inspected src/app.py; host=/Users/alice/repo token={secret}",
+        sources_read=sources,
+        evidence_references=[{
+            "path": "src/app.py", "location": "lines 10-12",
+            "rationale": (f"Caller return contract; credential={secret}; "
+                          "client_secret=plain-evidence-secret; /Users/alice/repo/app.py"),
+            "source_excerpt": "do not persist this arbitrary code excerpt",
+        }, {
+            "path": "/home/alice/other.py", "location": "line 1",
+        }],
+    )
+
+    outcome = rg_final_lenses.normalize_worker_result(response, REQUIRED_LENSES[0])
+    evidence = outcome.worker_evidence
+    serialized = json.dumps(evidence)
+
+    assert outcome.state == "completed_with_warnings"
+    assert 0 < len(evidence["sources_read"]) <= rg_final_lenses.MAX_WORKER_EVIDENCE_ITEMS
+    assert 0 < len(evidence["rejected"]) <= rg_final_lenses.MAX_WORKER_EVIDENCE_REJECTIONS
+    assert evidence["sources_read"][0] == {"path": "src/app.py"}
+    assert evidence["evidence_references"][0]["path"] == "src/app.py"
+    assert evidence["evidence_references"][0]["location"] == "lines 10-12"
+    assert evidence["disclosure"] == "sources-declared"
+    assert evidence["tool_calls_verified"] is False
+    assert "not-independently-verified" in evidence["verification"]
+    for forbidden in (secret, "plain-evidence-secret", "/Users/alice", "/home/alice",
+                      ".ssh", "source_excerpt", "source dump", "C:\\private"):
+        assert forbidden not in serialized
+    assert "[redacted]" in serialized
+    assert "[host-path]" in serialized
+    assert outcome.warnings[0]["code"] == "worker-evidence-rejected"
+    assert all(len(entry["path"]) <= rg_final_lenses.MAX_WORKER_EVIDENCE_PATH
+               for entry in evidence["sources_read"])
+
+
+def test_references_without_read_disclosure_stay_distinct_from_no_disclosure(tmp_path):
+    references = [{"path": "app.py", "location": "line 2", "rationale": "Changed return"}]
+    referenced = rg_final_lenses.normalize_worker_result(
+        _response(evidence_references=references), REQUIRED_LENSES[0])
+    empty = rg_final_lenses.normalize_worker_result(_response(), REQUIRED_LENSES[0])
+
+    assert referenced.worker_evidence["disclosure"] == "references-without-sources-read"
+    assert empty.worker_evidence["disclosure"] == "no-sources-declared"
+    assert referenced.worker_evidence["tool_calls_verified"] is False
+
+
 def test_intent_falsification_filter_applies_to_every_lens_and_is_visible(tmp_path):
     def worker(request):
         if request["lens"] == "change-intent":
@@ -441,7 +540,10 @@ def orchestrated(tmp_path, monkeypatch):
                 "review_mode": "complete-repository",
                 "search_roots": [str(repository)],
                 "diff": review.diff,
-                "documents": [],
+                "documents": [
+                    {"path": "README.md", "kind": "instructions", "unchanged": True},
+                    {"path": "docs/ADR.md", "kind": "adr", "unchanged": True},
+                ],
                 "files": {"all": ["app.py"], "implementation": ["app.py"], "tests": []},
                 "intent": {
                     "description": {"text": item["description"], "source": "provider"},
@@ -541,6 +643,96 @@ def test_standalone_records_all_lens_results_before_finding_aggregation(orchestr
     assert manifest["units"][1]["state"] == "findings"
 
 
+def test_standalone_persists_bounded_worker_evidence_for_individual_and_combined(
+        orchestrated):
+    secret = "glpat-worker-evidence-must-not-escape"
+
+    def worker(request):
+        if request["lens"] == "correctness":
+            return _response(
+                summary=f"Inspected app.py and its return contract; token={secret}",
+                sources_read=[
+                    {"path": "app.py", "rationale": "Changed implementation and return caller"},
+                    {"path": "/Users/alice/app.py", "rationale": "host path must be rejected"},
+                ],
+                evidence_references=[{
+                    "path": "app.py", "location": "line 2",
+                    "rationale": "Checked the changed return value against its caller",
+                }],
+            )
+        return _response(summary="Inspected app.py and found no defect for this evidence duty")
+
+    output, manifest = orchestrated.run(worker)
+
+    assert output["state"] == "pass"
+    assert output["exit_code"] == 0
+    assert len(orchestrated.requests) == 14
+    serialized = json.dumps(manifest)
+    assert secret not in serialized
+    assert "/Users/alice" not in serialized
+    for unit in manifest["units"]:
+        lenses = {lens["name"]: lens for lens in unit["lenses"]}
+        assert len(lenses) == 7
+        for lens in lenses.values():
+            record = lens["evidence"]["worker_evidence"]
+            method = lens["evidence"]["method"]
+            assert record["received_status"] == "success"
+            assert record["verification"] == "worker-declared-not-independently-verified"
+            assert record["tool_calls_verified"] is False
+            assert method["unit_id"] == unit["unit_id"]
+            assert method["changed_paths"] == ["app.py"]
+            assert [document["path"] for document in method["documents"]] == [
+                "README.md", "docs/ADR.md",
+            ]
+            assert "review_duty" in method["instruction_keys"]
+        disclosed = lenses["correctness"]["evidence"]["worker_evidence"]
+        assert disclosed["sources_read"] == [{
+            "path": "app.py", "rationale": "Changed implementation and return caller",
+        }]
+        assert disclosed["evidence_references"][0]["location"] == "line 2"
+        assert disclosed["rejected"][0]["reason"] == "path-not-repo-relative"
+        assert disclosed["disclosure"] == "sources-declared"
+        assert all(lenses[name]["evidence"]["worker_evidence"]["disclosure"] ==
+                   "no-sources-declared" for name in LENS_NAMES if name != "correctness")
+
+
+def test_standalone_placeholder_summary_preserves_finding_and_return_diagnostics(
+        orchestrated, monkeypatch):
+    def worker(request):
+        if request["lens"] == "correctness":
+            response = _response(
+                summary="...",
+                findings=[{
+                    "path": "app.py", "start_line": 2, "end_line": 2,
+                    "severity": "high", "confidence": 0.99,
+                    "content": "The changed return violates its caller",
+                }],
+            )
+            response["_worker_diagnostics"] = {
+                "reason": "response-received", "return_code": 0,
+                "stdout_tail": "bounded scripted response",
+            }
+            return response
+        return _response(summary="Inspected app.py; no defect found for this lens")
+
+    output, manifest = orchestrated.run(worker)
+
+    assert output["state"] == "incomplete"
+    assert output["finding_verdict"] is None
+    individual = manifest["units"][0]
+    correctness = next(lens for lens in individual["lenses"]
+                       if lens["name"] == "correctness")
+    record = correctness["evidence"]["worker_evidence"]
+    assert correctness["state"] == "incomplete"
+    assert individual["findings"][0]["content"] == "The changed return violates its caller"
+    assert record["received_status"] == "success"
+    assert record["received_summary"] == "..."
+    assert record["diagnostics"]["return_code"] == 0
+    assert record["diagnostics"]["stdout_tail"] == "bounded scripted response"
+    assert record["rejected"][-1]["reason"] == "placeholder-only"
+    assert "worker-result-rejected" not in record["disclosure"]
+
+
 def test_standalone_required_failure_persists_partial_evidence_but_never_passes(orchestrated):
     def worker(request):
         if request["lens"] == "security":
@@ -569,6 +761,35 @@ def test_standalone_required_failure_persists_partial_evidence_but_never_passes(
     assert any(warning["code"] == "required-lens-failed" and
                warning["details"]["lens"] == "security" for warning in unit["warnings"])
     assert unit["findings"][0]["content"] == "Pinned defect"
+
+
+def test_rejected_worker_status_is_retained_in_bounded_lens_evidence(orchestrated):
+    def worker(request):
+        if request["lens"] == "security":
+            raise rg_final_review.WorkerError(
+                "security worker returned unsupported completion status 'finished'",
+                details={
+                    "reason": "invalid-status", "received_status": "finished",
+                    "return_code": 0, "stdout_tail": "bounded unsupported-status response",
+                },
+            )
+        return _response(summary="Inspected app.py and completed this lens without findings")
+
+    output, manifest = orchestrated.run(worker)
+
+    assert output["state"] == "incomplete"
+    for unit in manifest["units"]:
+        security = next(lens for lens in unit["lenses"] if lens["name"] == "security")
+        record = security["evidence"]["worker_evidence"]
+        assert record["received_status"] == "finished"
+        assert record["disclosure"] == "worker-result-rejected"
+        assert record["diagnostics"] == {
+            "reason": "invalid-status", "return_code": 0,
+            "stdout_tail": "bounded unsupported-status response",
+        }
+        assert record["sources_read"] == []
+        assert record["evidence_references"] == []
+        assert record["tool_calls_verified"] is False
 
 
 def test_materialization_failure_records_every_required_lens_as_incomplete(orchestrated):

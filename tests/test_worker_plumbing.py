@@ -28,6 +28,7 @@ from test_process_groups import _wait_gone  # noqa: E402
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
 import rg_final_review as final_review  # noqa: E402
+import rg_final_lenses as final_lenses  # noqa: E402
 
 _FAKE_KIMI = "/fake/bin/kimchi"
 
@@ -263,6 +264,12 @@ def test_default_final_worker_prompt_states_exact_success_status_contract(
     assert "success and completed both mean" in prompt
     assert "completed_with_warnings means" in prompt
     assert "only successful completion values" in prompt
+    assert '"summary":"..."' not in prompt
+    assert "angle-bracket templates" in prompt
+    assert "sources_read" in prompt
+    assert "evidence_references" in prompt
+    assert "repository-relative path" in prompt
+    assert "not treated as independently verified" in prompt
 
 
 def _final_request(tmp_path):
@@ -271,6 +278,38 @@ def _final_request(tmp_path):
         "repository": {"path": str(tmp_path)},
         "diff": "diff --git a/app.py b/app.py\n",
     }
+
+
+def test_echoed_placeholder_summary_is_incomplete_with_transport_diagnostics(tmp_path):
+    script = tmp_path / "echo-placeholder.py"
+    request_path_record = tmp_path / "completed-request-path"
+    script.write_text(
+        "import json, pathlib, sys\n"
+        f"pathlib.Path({str(request_path_record)!r}).write_text(sys.argv[-1])\n"
+        "print(json.dumps({'schema':'final-review-worker-result/v1','status':'success',"
+        "'summary':'...','findings':[{'path':'app.py','start_line':2,'end_line':2,"
+        "'severity':'high','confidence':0.99,'content':'A genuine retained defect'}],"
+        "'warnings':[],'unreviewed':[]}))\n",
+        encoding="utf-8",
+    )
+
+    raw = final_review.invoke_worker(
+        _final_request(tmp_path), command=[sys.executable, str(script)],
+        environ={"PATH": os.environ.get("PATH", "")},
+    )
+    outcome = final_lenses.normalize_worker_result(raw, final_lenses.REQUIRED_LENSES[0])
+
+    assert outcome.state == "incomplete"
+    assert outcome.findings[0]["content"] == "A genuine retained defect"
+    assert outcome.worker_evidence["received_status"] == "success"
+    assert outcome.worker_evidence["received_summary"] == "..."
+    assert outcome.worker_evidence["diagnostics"]["return_code"] == 0
+    assert 0 < len(outcome.worker_evidence["diagnostics"]["stdout_tail"]) <= 512
+    assert outcome.warnings[-1]["details"]["summary_rejection"] == "placeholder-only"
+    assert outcome.warnings[-1]["details"]["return_code"] == 0
+    request_path = Path(request_path_record.read_text())
+    assert not request_path.exists(), "raw request survived the sanitized evidence hand-off"
+    assert not request_path.parent.exists(), "raw request directory was not cleaned"
 
 
 def test_final_worker_rejection_has_bounded_sanitized_structured_diagnostics(tmp_path):
