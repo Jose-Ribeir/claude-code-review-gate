@@ -309,29 +309,102 @@ def _gitlab_script_declarations(
     return suites
 
 
+def _gitlab_top_level_entry(line: str) -> tuple[str, str]:
+    """Decode one literal mapping key without constructing arbitrary YAML objects."""
+    if line.startswith(("'", '"')):
+        quote = line[0]
+        cursor = 1
+        while cursor < len(line):
+            char = line[cursor]
+            if quote == '"' and char == "\\":
+                cursor += 2
+                continue
+            if char == quote:
+                if quote == "'" and line[cursor + 1:cursor + 2] == "'":
+                    cursor += 2
+                    continue
+                break
+            cursor += 1
+        else:
+            raise ValueError("quoted mapping key is unterminated")
+        raw_key = line[:cursor + 1]
+        remainder = line[cursor + 1:]
+        separator = len(remainder) - len(remainder.lstrip())
+        if remainder[separator:separator + 1] != ":":
+            raise ValueError("quoted mapping key is not followed by a mapping colon")
+        value = remainder[separator + 1:]
+        if value and not value[0].isspace():
+            raise ValueError("mapping colon must be followed by whitespace")
+        if quote == "'":
+            key = raw_key[1:-1].replace("''", "'")
+        else:
+            try:
+                key = json.loads(raw_key)
+            except ValueError as exc:
+                raise ValueError(
+                    f"double-quoted mapping key is unsupported: {exc}") from exc
+    else:
+        match = re.search(r":(?=\s|$)", line)
+        if match is None:
+            raise ValueError("top-level line is not a supported mapping entry")
+        key = line[:match.start()].strip()
+        value = line[match.end():]
+        if key.startswith(("[", "{", "!", "&", "*", "|", ">", "?")):
+            raise ValueError("tagged, anchored, aliased, and flow mapping keys are unsupported")
+        if re.search(r"\s#", key):
+            raise ValueError("mapping key contains a comment before its colon")
+    value = value.strip()
+    if not key:
+        raise ValueError("mapping key is empty")
+    return key, value
+
+
 def _gitlab_declarations(source: str, raw: str) -> list[dict]:
     """Extract literal job commands, preserving unsupported CI as evidence."""
     lines = raw.splitlines()
-    include_at = next((i for i, line in enumerate(lines)
-                       if re.match(r"^include:\s*", line)), None)
-    if include_at is not None:
-        include_end = next((i for i in range(include_at + 1, len(lines))
-                            if lines[i] and not lines[i][0].isspace()), len(lines))
-        include = " ".join([lines[include_at].split(":", 1)[1].strip()]
-                           + [line.strip() for line in lines[include_at + 1:include_end]])
-        if include.strip() not in ("", "[]", "{}", "null", "Null", "NULL", "~"):
+    headings = []
+    for index, line in enumerate(lines):
+        if (not line or line[0].isspace() or line.startswith("#")
+                or re.match(r"^(?:---|\.\.\.)(?:\s+#.*)?$", line)
+                or re.match(r"^%(?:YAML|TAG)\s", line)):
+            continue
+        try:
+            job, value = _gitlab_top_level_entry(line)
+            headings.append((index, job, value, ""))
+        except ValueError as exc:
+            headings.append((index, None, "", str(exc)))
+
+    for position, (start, job, value, error) in enumerate(headings):
+        end = headings[position + 1][0] if position + 1 < len(headings) else len(lines)
+        if job != "include" or error:
+            continue
+        initial = "" if value.startswith("#") else value
+        include = " ".join([initial] + [
+            line.strip() for line in lines[start + 1:end]
+            if line.strip() and not line.lstrip().startswith("#")
+        ]).strip()
+        if include not in ("", "[]", "{}", "null", "Null", "NULL", "~"):
             return [_unassessable(
                 source, "gitlab:include",
                 f"include {_yaml_scalar(include)!r} cannot be expanded locally")]
+
     reserved = {"default", "include", "stages", "variables", "workflow"}
-    headings = [(i, match.group(1)) for i, line in enumerate(lines)
-                if (match := re.match(r"^([A-Za-z0-9_.-]+):\s*$", line))
-                and match.group(1) not in reserved]
     declarations = []
-    for position, (start, job) in enumerate(headings):
+    for position, (start, job, value, error) in enumerate(headings):
         end = headings[position + 1][0] if position + 1 < len(headings) else len(lines)
+        section = "\n".join(lines[start:end]).strip()
+        if job is None:
+            declarations.append(_unassessable(
+                source, f"gitlab:line-{start + 1}",
+                f"{error}; declared content {section!r}"))
+            continue
+        if job in reserved or job.startswith("."):
+            continue
         block = lines[start + 1:end]
-        if job.startswith("."):
+        if value and not value.startswith("#"):
+            declarations.append(_unassessable(
+                source, f"gitlab:{job}",
+                f"inline job mappings are unsupported; declared content {section!r}"))
             continue
         if any((match := re.match(r"^  allow_failure:\s*(.*?)\s*$", line))
                and _yaml_scalar(match.group(1)).lower() == "true" for line in block):
@@ -354,6 +427,12 @@ def _gitlab_declarations(source: str, raw: str) -> list[dict]:
                 if declaration_match is not None:
                     declarations.extend(_gitlab_script_declarations(
                         source, job, key, block, offset, declaration_match.group(1)))
+    if not headings and any(
+            line.strip() and not line.lstrip().startswith(("#", "---", "..."))
+            for line in lines):
+        declarations.append(_unassessable(
+            source, "gitlab:document",
+            f"no supported top-level mapping entry; declared content {raw.strip()!r}"))
     return declarations
 
 

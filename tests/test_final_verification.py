@@ -595,6 +595,13 @@ def test_gitlab_optional_hidden_and_non_script_jobs_do_not_create_suites(tmp_pat
     exit 98
 trigger_only:
   trigger: example/other-project
+"optional quoted tests":
+  allow_failure: true
+  script: exit 97
+'.hidden quoted template':
+  script: exit 96
+variables:
+  REQUIRED_FLAG: '1'
 """
     repo, commit = _repo(tmp_path / "source", {".gitlab-ci.yml": pipeline})
 
@@ -604,3 +611,94 @@ trigger_only:
     assert result["blocking"] is False
     assert result["suites"] == []
     assert result["findings"] == []
+
+
+def test_gitlab_quoted_and_whitespace_job_names_run_simple_commands(tmp_path):
+    pipeline = """"required tests":
+  script: printf 'double-inline-ok\\n'
+'unit tests':
+  script:
+    - printf 'single-list-ok\\n'
+required integration tests:
+  script: |
+    printf 'bare-block-ok\\n'
+"""
+    repo, commit = _repo(tmp_path / "source", {".gitlab-ci.yml": pipeline})
+
+    result = verification.run_required_verification(repo, commit)
+
+    assert result["status"] == "pass", result
+    assert [(suite["name"], suite["command"], suite["output"])
+            for suite in result["suites"]] == [
+        ("gitlab:required tests:script-1", "printf 'double-inline-ok\\n'",
+         "double-inline-ok\n"),
+        ("gitlab:unit tests:script-1", "printf 'single-list-ok\\n'",
+         "single-list-ok\n"),
+        ("gitlab:required integration tests:script-1", "printf 'bare-block-ok\\n'",
+         "bare-block-ok\n"),
+    ]
+
+
+def test_gitlab_quoted_jobs_retain_unassessable_construct_evidence(tmp_path):
+    pipeline = """.required_setup:
+  script: exit 99
+"extended tests":
+  extends: .required_setup
+  script: exit 98
+'flow tests':
+  script: [echo flow-must-not-run]
+"""
+    repo, commit = _repo(tmp_path / "source", {".gitlab-ci.yml": pipeline})
+
+    result = verification.run_required_verification(repo, commit)
+
+    assert result["status"] == "incomplete", result
+    assert len(result["suites"]) == 2
+    assert all(suite["state"] == "unassessable" for suite in result["suites"])
+    assert all(suite["attempts"] == [] for suite in result["suites"])
+    evidence = "\n".join(result["warnings"])
+    assert "extended tests" in evidence
+    assert "extends" in evidence
+    assert "flow tests" in evidence
+    assert "flow-must-not-run" in evidence
+
+
+def test_gitlab_unparseable_required_looking_key_is_not_absent(tmp_path):
+    pipeline = '"required tests:\n  script: exit 99\n'
+    repo, commit = _repo(tmp_path / "source", {".gitlab-ci.yml": pipeline})
+
+    result = verification.run_required_verification(repo, commit)
+
+    assert result["status"] == "incomplete", result
+    assert result["status"] != "absent"
+    assert len(result["suites"]) == 1
+    assert result["suites"][0]["state"] == "unassessable"
+    assert result["suites"][0]["attempts"] == []
+    assert '"required tests:' in result["warnings"][0]
+    assert "script: exit 99" in result["warnings"][0]
+
+
+def test_gitlab_quoted_failure_blocks_instead_of_passing_as_absent(tmp_path):
+    repo, commit = _repo(tmp_path / "source", {
+        ".gitlab-ci.yml": '"true":\n  script: exit 99\n',
+    })
+
+    result = verification.run_required_verification(repo, commit)
+
+    assert result["status"] == "block", result
+    assert result["suites"][0]["name"] == "gitlab:true:script-1"
+    assert result["suites"][0]["state"] == "fail"
+    unit = execution.execute_unit(
+        {"repository": {
+            "path": str(repo), "head_sha": commit, "access": "full_tree",
+        }, "diff": ""},
+        worker=lambda _request: {
+            "schema": "final-review-worker-result/v1",
+            "status": "success", "summary": "lens complete",
+            "findings": [], "warnings": [], "unreviewed": [],
+        },
+        required_runner=verification.run_required_verification,
+    ).as_dict()
+    assert unit["required_verification"]["status"] == "block"
+    assert unit["complete"] is True
+    assert unit["finding_verdict"] == "block"
