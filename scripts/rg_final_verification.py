@@ -196,6 +196,119 @@ def _github_declarations(source: str, raw: str) -> list[dict]:
     return declarations
 
 
+def _gitlab_block_scalar(
+        block: list[str], offset: int, header: str, parent_indent: int = 2
+) -> tuple[str | None, int, str]:
+    body = []
+    end = len(block)
+    for index in range(offset + 1, len(block)):
+        line = block[index]
+        if line.strip() and len(line) - len(line.lstrip()) <= parent_indent:
+            end = index
+            break
+        body.append(line)
+    content_indent = next((len(line) - len(line.lstrip()) for line in body if line.strip()), 0)
+    if content_indent <= parent_indent:
+        return "", end, ""
+    if any(line.strip() and len(line) - len(line.lstrip()) < content_indent
+           for line in body):
+        return None, end, "block scalar indentation is inconsistent"
+    lines = [line[content_indent:] if line.strip() else "" for line in body]
+    if header.startswith(">"):
+        meaningful = list(lines)
+        while meaningful and not meaningful[-1]:
+            meaningful.pop()
+        if any(not line for line in meaningful) or any(
+                line[:1].isspace() for line in meaningful):
+            return None, end, ("only a single-paragraph, uniformly indented folded "
+                               "block scalar can be reproduced faithfully")
+        lines = meaningful
+    command = ("\n" if header.startswith("|") else " ").join(lines)
+    return command, end, ""
+
+
+def _gitlab_literal(raw: str) -> str:
+    value = raw.strip()
+    if value.startswith(("[", "{", "!", "&", "*")):
+        raise ValueError("flow collections, YAML tags, anchors, and aliases are unsupported")
+    scalar = _yaml_scalar(value)
+    if value.startswith(("|", ">")) and scalar not in ("|", ">", "|-", ">-"):
+        raise ValueError(f"block scalar header {value!r} is unsupported")
+    return scalar
+
+
+def _gitlab_script_declarations(
+        source: str, job: str, key: str, block: list[str], offset: int, raw: str) -> list[dict]:
+    content_end = len(block)
+    for index in range(offset + 1, len(block)):
+        line = block[index]
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent < 2 or (indent == 2 and not re.match(r"^  -(?:\s|$)", line)):
+            content_end = index
+            break
+    section = "\n".join(block[offset:content_end]).strip()
+    name = f"gitlab:{job}:{key}"
+
+    def unsupported(reason: str) -> list[dict]:
+        return [_unassessable(
+            source, name, f"{reason}; declared content {section!r}")]
+
+    try:
+        inline = _gitlab_literal(raw) if raw.strip() else ""
+    except ValueError as exc:
+        return unsupported(str(exc))
+    value = raw.strip()
+    if inline in ("|", ">", "|-", ">-") and not value.startswith(("'", '"')):
+        command, _, error = _gitlab_block_scalar(block, offset, inline)
+        if error:
+            return unsupported(error)
+        if not command or not command.strip():
+            return unsupported("the block scalar declares no executable command")
+        return [_suite(source, f"{name}-1", command)]
+    if value:
+        if not inline.strip():
+            return unsupported("the scalar declares no executable command")
+        return [_suite(source, f"{name}-1", inline)]
+
+    suites = []
+    command_at = offset + 1
+    item_indent = None
+    while command_at < content_end:
+        command_line = block[command_at]
+        if not command_line.strip() or command_line.lstrip().startswith("#"):
+            command_at += 1
+            continue
+        match = re.match(r"^(\s+)-(?:\s+(.*?))?\s*$", command_line)
+        if match is None or not match.group(2):
+            return unsupported("the value is not a supported nonempty command sequence")
+        current_indent = len(match.group(1))
+        if item_indent is None:
+            item_indent = current_indent
+        if current_indent != item_indent:
+            return unsupported("command sequence indentation is inconsistent")
+        item_raw = match.group(2)
+        try:
+            command = _gitlab_literal(item_raw)
+        except ValueError as exc:
+            return unsupported(str(exc))
+        if command in ("|", ">", "|-", ">-") and not item_raw.strip().startswith(("'", '"')):
+            command, command_at, error = _gitlab_block_scalar(
+                block, command_at, command, item_indent)
+            if error:
+                return unsupported(error)
+        else:
+            command_at += 1
+        if not command or not command.strip():
+            return unsupported("a command sequence item declares no executable command")
+        number = len(suites) + 1
+        suites.append(_suite(source, f"{name}-{number}", command))
+    if not suites:
+        return unsupported("no executable command sequence is declared")
+    return suites
+
+
 def _gitlab_declarations(source: str, raw: str) -> list[dict]:
     """Extract literal job commands, preserving unsupported CI as evidence."""
     lines = raw.splitlines()
@@ -220,7 +333,8 @@ def _gitlab_declarations(source: str, raw: str) -> list[dict]:
         block = lines[start + 1:end]
         if job.startswith("."):
             continue
-        if any(re.match(r"^  allow_failure:\s*true\s*$", line) for line in block):
+        if any((match := re.match(r"^  allow_failure:\s*(.*?)\s*$", line))
+               and _yaml_scalar(match.group(1)).lower() == "true" for line in block):
             continue
         extends = next((match for line in block
                         if (match := re.match(r"^  extends:\s*(.*?)\s*$", line))), None)
@@ -236,19 +350,10 @@ def _gitlab_declarations(source: str, raw: str) -> list[dict]:
             continue
         for key in ("before_script", "script"):
             for offset, line in enumerate(block):
-                if not re.match(rf"^  {key}:\s*$", line):
-                    continue
-                number = 0
-                for command_line in block[offset + 1:]:
-                    if command_line.strip() and len(command_line) - len(command_line.lstrip()) <= 2:
-                        break
-                    match = re.match(r"^\s+-\s*(.*?)\s*$", command_line)
-                    if match:
-                        command = _yaml_scalar(match.group(1))
-                        if command and command not in ("|", ">", "|-", ">-"):
-                            number += 1
-                            declarations.append(_suite(
-                                source, f"gitlab:{job}:{key}-{number}", command))
+                declaration_match = re.match(rf"^  {key}:\s*(.*?)\s*$", line)
+                if declaration_match is not None:
+                    declarations.extend(_gitlab_script_declarations(
+                        source, job, key, block, offset, declaration_match.group(1)))
     return declarations
 
 

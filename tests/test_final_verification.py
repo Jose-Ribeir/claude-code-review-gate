@@ -9,6 +9,7 @@ _SCRIPTS = _HERE.parent / "scripts"
 sys.path.insert(0, str(_SCRIPTS))
 
 import rg_config  # noqa: E402
+import rg_final_execution as execution  # noqa: E402
 import rg_final_verification as verification  # noqa: E402
 
 
@@ -441,3 +442,165 @@ matrix_tests:
     assert all(suite["attempts"] == [] for suite in result["suites"])
     assert any("extends" in warning for warning in result["warnings"])
     assert any("matrix" in warning for warning in result["warnings"])
+
+
+def test_gitlab_inline_required_script_failure_blocks_end_to_end(tmp_path):
+    pipeline = """required_tests:
+  script: exit 99
+"""
+    repo, commit = _repo(tmp_path / "source", {".gitlab-ci.yml": pipeline})
+
+    result = verification.run_required_verification(repo, commit)
+
+    assert result["status"] == "block", result
+    assert result["blocking"] is True
+    assert len(result["suites"]) == 1
+    suite = result["suites"][0]
+    assert suite["name"] == "gitlab:required_tests:script-1"
+    assert suite["command"] == "exit 99"
+    assert suite["state"] == "fail"
+    assert [attempt["returncode"] for attempt in suite["attempts"]] == [99, 99]
+    assert len(result["findings"]) == 1
+    finding = result["findings"][0]
+    assert finding["name"] == suite["name"]
+    assert finding["evidence_fingerprint"] == suite["evidence_fingerprint"]
+
+    unit = execution.execute_unit(
+        {"repository": {
+            "path": str(repo), "head_sha": commit, "access": "full_tree",
+        }, "diff": ""},
+        worker=lambda _request: {
+            "schema": "final-review-worker-result/v1",
+            "status": "success", "summary": "lens complete",
+            "findings": [], "warnings": [], "unreviewed": [],
+        },
+        required_runner=verification.run_required_verification,
+    ).as_dict()
+    assert unit["required_verification"]["status"] == "block"
+    assert unit["complete"] is True
+    assert unit["finding_verdict"] == "block"
+    assert len(unit["required_verification"]["findings"]) == 1
+
+
+def test_gitlab_literal_block_before_script_and_script_run(tmp_path):
+    pipeline = """required_tests:
+  before_script: |
+    printf 'before-ok\\n'
+  script: |
+    printf 'script-ok\\n'
+"""
+    repo, commit = _repo(tmp_path / "source", {".gitlab-ci.yml": pipeline})
+
+    result = verification.run_required_verification(repo, commit)
+
+    assert result["status"] == "pass", result
+    assert [(suite["name"], suite["command"], suite["output"])
+            for suite in result["suites"]] == [
+        ("gitlab:required_tests:before_script-1", "printf 'before-ok\\n'", "before-ok\n"),
+        ("gitlab:required_tests:script-1", "printf 'script-ok\\n'", "script-ok\n"),
+    ]
+    assert all(len(suite["attempts"]) == 1 for suite in result["suites"])
+
+
+def test_gitlab_list_block_scalar_runs_its_literal_body(tmp_path):
+    pipeline = """required_tests:
+  script:
+    - |
+      printf 'list-'
+      printf 'block-ok\\n'
+"""
+    repo, commit = _repo(tmp_path / "source", {".gitlab-ci.yml": pipeline})
+
+    result = verification.run_required_verification(repo, commit)
+
+    assert result["status"] == "pass", result
+    assert len(result["suites"]) == 1
+    suite = result["suites"][0]
+    assert suite["command"] == "printf 'list-'\nprintf 'block-ok\\n'"
+    assert suite["output"] == "list-block-ok\n"
+    assert len(suite["attempts"]) == 1
+
+
+def test_gitlab_folded_blocks_run_simple_cases_and_retain_complex_evidence(tmp_path):
+    pipeline = """folded_tests:
+  before_script: >
+    printf 'before-folded-ok\\n' &&
+    true
+  script: >
+    printf 'script-folded-ok\\n' &&
+    true
+complex_folded_tests:
+  script: >
+    printf 'complex-must-not-run\\n'
+
+    printf 'also-must-not-run\\n'
+"""
+    repo, commit = _repo(tmp_path / "source", {".gitlab-ci.yml": pipeline})
+
+    result = verification.run_required_verification(repo, commit)
+
+    assert result["status"] == "incomplete", result
+    by_name = {suite["name"]: suite for suite in result["suites"]}
+    assert len(by_name) == 3
+    before = by_name["gitlab:folded_tests:before_script-1"]
+    script = by_name["gitlab:folded_tests:script-1"]
+    assert before["command"] == "printf 'before-folded-ok\\n' && true"
+    assert before["output"] == "before-folded-ok\n"
+    assert script["command"] == "printf 'script-folded-ok\\n' && true"
+    assert script["output"] == "script-folded-ok\n"
+    complex_suite = by_name["gitlab:complex_folded_tests:script"]
+    assert complex_suite["state"] == "unassessable"
+    assert complex_suite["attempts"] == []
+    assert "complex-must-not-run" in result["warnings"][0]
+    assert "also-must-not-run" in result["warnings"][0]
+
+
+def test_gitlab_unsupported_nonempty_scripts_are_unassessable_never_executed(tmp_path):
+    pipeline = """flow_tests:
+  script: [echo flow-must-not-run]
+nested_tests:
+  script:
+    unexpected: echo nested-must-not-run
+tagged_tests:
+  script: !!str echo tagged-must-not-run
+explicit_indent_tests:
+  script: |2
+    echo indent-must-not-run
+"""
+    repo, commit = _repo(tmp_path / "source", {".gitlab-ci.yml": pipeline})
+
+    result = verification.run_required_verification(repo, commit)
+
+    assert result["status"] == "incomplete", result
+    assert result["status"] != "absent"
+    assert result["blocking"] is False
+    assert result["findings"] == []
+    assert len(result["suites"]) == 4
+    assert all(suite["state"] == "unassessable" for suite in result["suites"])
+    assert all(suite["command"] is None for suite in result["suites"])
+    assert all(suite["attempts"] == [] for suite in result["suites"])
+    evidence = "\n".join(result["warnings"])
+    assert "flow-must-not-run" in evidence
+    assert "nested-must-not-run" in evidence
+    assert "tagged-must-not-run" in evidence
+    assert "indent-must-not-run" in evidence
+
+
+def test_gitlab_optional_hidden_and_non_script_jobs_do_not_create_suites(tmp_path):
+    pipeline = """optional_tests:
+  allow_failure: TRUE # explicitly diagnostic
+  script: exit 99
+.hidden_template:
+  script: |
+    exit 98
+trigger_only:
+  trigger: example/other-project
+"""
+    repo, commit = _repo(tmp_path / "source", {".gitlab-ci.yml": pipeline})
+
+    result = verification.run_required_verification(repo, commit)
+
+    assert result["status"] == "absent", result
+    assert result["blocking"] is False
+    assert result["suites"] == []
+    assert result["findings"] == []

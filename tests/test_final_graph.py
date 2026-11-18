@@ -3,6 +3,7 @@ import copy
 import json
 import os
 import sys
+from urllib.parse import unquote
 
 import pytest
 
@@ -314,6 +315,20 @@ class ScriptedGlab:
         endpoint = argv[-1]
         if "merge_requests?state=opened" in endpoint:
             return json.dumps([{"web_url": item["url"]} for item in self.items.values()]), None
+        if "/repository/branches/" in endpoint:
+            prefix, encoded_branch = endpoint.rsplit("/repository/branches/", 1)
+            project_id = int(prefix.rsplit("/", 1)[1])
+            branch = unquote(encoded_branch)
+            side = next(
+                item["source"] if project_id == item["source"]["project_id"] and
+                branch == item["source"]["branch"] else item["target"]
+                for item in self.items.values()
+                if (project_id, branch) in (
+                    (item["source"]["project_id"], item["source"]["branch"]),
+                    (item["target"]["project_id"], item["target"]["branch"]),
+                )
+            )
+            return json.dumps({"name": branch, "commit": {"id": side["sha"]}}), None
         if "/merge_requests/" in endpoint:
             iid = int(endpoint.rsplit("/", 1)[1])
             item = self.items[iid]

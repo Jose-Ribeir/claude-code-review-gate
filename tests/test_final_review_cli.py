@@ -120,6 +120,8 @@ def make_standalone_fixture(tmp_path, monkeypatch, *, domain_contract=False, sta
         "target_branch": "main",
         "sha": head,
         "diff_refs": {"base_sha": base, "head_sha": head, "start_sha": target},
+        "source_branch_head": head,
+        "target_branch_head": target,
     }
     calls = tmp_path / "provider-calls.json"
     script = tmp_path / "provider-script.json"
@@ -240,6 +242,8 @@ def _make_two_item_stack(standalone):
         "source_branch": "contributor/stack-base", "sha": root_tip,
         "diff_refs": {"base_sha": standalone.target, "head_sha": root_tip,
                       "start_sha": standalone.target},
+        "source_branch_head": root_tip,
+        "target_branch_head": standalone.target,
     })
     descendant = json.loads(json.dumps(root))
     descendant.update({
@@ -251,6 +255,8 @@ def _make_two_item_stack(standalone):
         "sha": tip,
         "diff_refs": {"base_sha": root_tip, "head_sha": tip,
                       "start_sha": root_tip},
+        "source_branch_head": tip,
+        "target_branch_head": root_tip,
     })
     scripted = json.loads(standalone.script.read_text(encoding="utf-8"))
     scripted["merge_requests"] = [root, descendant]
@@ -409,10 +415,12 @@ def test_standalone_reviews_full_immutable_tree_and_persists_complete_result(sta
     discovery_endpoint = (
         "projects/111/merge_requests?state=opened&scope=all&per_page=100&page=1"
     )
+    source_branch_endpoint = "projects/111/repository/branches/contributor%2Ffeature"
+    target_branch_endpoint = "projects/111/repository/branches/main"
     assert [call["argv"][-1] for call in provider_calls] == [
-        item_endpoint, target_endpoint,  # graph: initial item and target metadata
+        item_endpoint, target_endpoint, source_branch_endpoint, target_branch_endpoint,
         discovery_endpoint,              # graph: open-item completeness
-        item_endpoint, target_endpoint,  # freshness: revalidate the same pins
+        item_endpoint, target_endpoint, source_branch_endpoint, target_branch_endpoint,
     ]
     assert all("--method" not in call["argv"] for call in provider_calls)
     assert all(call["provider_token_available"] for call in provider_calls)
@@ -554,6 +562,7 @@ def test_revision_movement_is_stale_and_preserves_worker_evidence(standalone):
     moved = "d" * 40
     changed["sha"] = moved
     changed["diff_refs"] = dict(changed["diff_refs"], head_sha=moved)
+    changed["source_branch_head"] = moved
     scripted["revalidated_merge_request"] = changed
     standalone.script.write_text(json.dumps(scripted), encoding="utf-8")
     _script_final_result(standalone, {
@@ -600,7 +609,7 @@ def test_numeric_reference_and_arbitrary_fork_use_provider_repository_identity(s
     assert calls[0]["argv"][-1] == "projects/:fullpath/merge_requests/17"
     assert any(call["argv"][-1] == "projects/222" for call in calls)
     assert any("merge_requests?state=opened" in call["argv"][-1] for call in calls)
-    assert len(calls) == 7
+    assert len(calls) == 11
 
 
 @pytest.mark.parametrize(("finding", "expected_verdict", "expected_exit", "unit_state"), [
@@ -682,6 +691,7 @@ def test_binary_merge_base_diff_reaches_the_worker_without_utf8_loss(standalone)
     scripted = json.loads(standalone.script.read_text(encoding="utf-8"))
     scripted["merge_request"]["sha"] = head
     scripted["merge_request"]["diff_refs"]["head_sha"] = head
+    scripted["merge_request"]["source_branch_head"] = head
     standalone.script.write_text(json.dumps(scripted), encoding="utf-8")
 
     output = _result(_gate("final-review", standalone.ref), 0)
@@ -698,6 +708,7 @@ def test_materialization_failure_has_auditable_output_and_no_leftover_clone(stan
     absent = "e" * 40
     scripted["merge_request"]["sha"] = absent
     scripted["merge_request"]["diff_refs"]["head_sha"] = absent
+    scripted["merge_request"]["source_branch_head"] = absent
     standalone.script.write_text(json.dumps(scripted), encoding="utf-8")
 
     output = _result(_gate("final-review", standalone.ref), 2)

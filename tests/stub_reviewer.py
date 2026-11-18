@@ -92,6 +92,7 @@ import os
 from pathlib import Path
 import sys
 import time
+from urllib.parse import unquote
 
 
 # SPEC-16 standalone final-review test doubles.  These modes return before the
@@ -140,6 +141,43 @@ if len(sys.argv) > 1 and sys.argv[1] == "--glab":
         else:
             key = "revalidated_merge_request" if prior else "merge_request"
             payload = scripted.get(key) or scripted["merge_request"]
+    elif "/repository/branches/" in endpoint:
+        prefix, encoded_branch = endpoint.rsplit("/repository/branches/", 1)
+        project_id = int(prefix.rsplit("/", 1)[1])
+        branch = unquote(encoded_branch)
+        merge_requests = scripted.get("merge_requests")
+        if merge_requests:
+            candidates = merge_requests
+        else:
+            prior_reads = sum(
+                "/merge_requests/" in call["argv"][-1]
+                for call in calls[:-1]
+            )
+            key = ("revalidated_merge_request"
+                   if prior_reads >= 2 and scripted.get("revalidated_merge_request")
+                   else "merge_request")
+            candidates = [scripted[key]]
+        selected = None
+        for merge_request in candidates:
+            for side, head_field in (
+                    ("source", "source_branch_head"),
+                    ("target", "target_branch_head")):
+                if (project_id == merge_request[f"{side}_project_id"]
+                        and branch == merge_request[f"{side}_branch"]):
+                    selected = (merge_request, head_field)
+                    break
+            if selected is not None:
+                break
+        if selected is None:
+            sys.stderr.write(
+                f"unknown scripted glab branch: {project_id}/{branch}\n")
+            sys.exit(1)
+        merge_request, head_field = selected
+        head = merge_request.get(head_field)
+        if not isinstance(head, str) or not head:
+            sys.stderr.write(f"missing scripted branch head: {head_field}\n")
+            sys.exit(1)
+        payload = {"name": branch, "commit": {"id": head}}
     elif endpoint == "projects/111":
         payload = scripted["target_project"]
     elif endpoint == "projects/222":

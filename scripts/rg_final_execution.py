@@ -56,10 +56,16 @@ class UnitExecution:
         findings = list(self.aggregation.findings)
         for result in (self.required, self.dynamic):
             findings.extend(deepcopy((result or {}).get("findings") or []))
-        return ocr_verdict.compute_verdict({
+        verdict = ocr_verdict.compute_verdict({
             "findings": findings,
             "unreviewed": list(self.aggregation.unreviewed),
         })
+        if (self.required or {}).get("blocking") is True and \
+                self.required.get("status") == "block":
+            # Reproduced required evidence is complete and independently blocking;
+            # unlike a model finding it needs no source-line location to act on it.
+            return "block"
+        return verdict
 
     @property
     def checks_complete(self):
