@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -354,3 +355,310 @@ def test_final_worker_timeout_kills_grandchild_and_cleans_request(tmp_path):
                 os.kill(grandchild, signal.SIGKILL)
             except OSError:
                 pass
+
+
+# --- R11: redact complete response credentials before diagnostic truncation ---
+
+@pytest.mark.parametrize("text,secrets", [
+    ('{"access_token":"json-token-value","client_secret":"json-secret-value"}',
+     ("json-token-value", "json-secret-value")),
+    ("access_token='whole token with spaces'; client_secret=plain-secret",
+     ("whole token with spaces", "plain-secret")),
+    ("aws_secret_access_key=underscored-secret proxy_authorization=proxy-secret",
+     ("underscored-secret", "proxy-secret")),
+    ("Authorization: Basic dXNlcjpwYXNz and Authorization: Bearer bearer.token.value",
+     ("dXNlcjpwYXNz", "bearer.token.value")),
+    ("https://alice:url-password@example.test/path?client_secret=url-secret",
+     ("url-password", "url-secret")),
+])
+def test_response_diagnostic_redacts_actual_credential_formats(text, secrets):
+    sanitized = final_review._sanitize_worker_diagnostic(
+        text + " diagnostic-marker", {"UNRELATED": "not-expanded"},
+    )
+    for secret in secrets:
+        assert secret not in sanitized
+    assert "[redacted]" in sanitized
+    assert sanitized.endswith("diagnostic-marker")
+
+
+def test_response_diagnostics_redact_status_and_complete_values_before_truncate(tmp_path):
+    secrets = {
+        "access": "access-token-status-secret",
+        "tail": "complete tail secret with spaces",
+        "client": "truncated-client-secret",
+        "basic": "ZmluYWwtcmV2aWV3OnNlY3JldA==",
+        "url": "url-user-password",
+        "known": "known-provider-secret-that-must-not-expand",
+    }
+    script = tmp_path / "credential-status.py"
+    script.write_text(
+        "import json\n"
+        f"secrets = {secrets!r}\n"
+        "payload = {'schema':'final-review-worker-result/v1',"
+        " 'status':'finished access_token=' + secrets['access'], 'findings':[], 'warnings':[],"
+        " 'summary':('padding-' * 150) + ' access_token=\"' + secrets['tail'] + '\"'"
+        " + ' client_secret=' + secrets['client']"
+        " + ' Authorization: Basic ' + secrets['basic']"
+        " + ' https://alice:' + secrets['url'] + '@example.test/'"
+        " + ' known=' + secrets['known']}\n"
+        "print(json.dumps(payload))\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(final_review.WorkerError) as captured:
+        final_review.invoke_worker(
+            _final_request(tmp_path), command=[sys.executable, str(script)],
+            environ={"PATH": os.environ.get("PATH", ""),
+                     "OPENAI_API_KEY": secrets["known"]},
+        )
+    details = captured.value.details
+    serialized = json.dumps(details)
+    for secret in secrets.values():
+        assert secret not in serialized
+    assert "access_token" in details["received_status"]
+    assert 0 < len(details["stdout_tail"]) <= 512
+    assert details["received_status"].endswith("[redacted]")
+    assert set(details) == {
+        "reason", "received_status", "return_code", "stdout_tail", "expected_status",
+    }
+
+
+def test_unverified_timeout_retains_worker_request_and_exposes_incomplete_cleanup(
+        tmp_path, monkeypatch):
+    command_seen = []
+    cleanup = {
+        "status": "incomplete", "complete": False, "direct_child_reaped": True,
+        "tree_termination_verified": False, "pipe_drain_completed": False,
+        "termination_method": "direct-child", "errors": ["taskkill-invocation:OSError"],
+    }
+
+    def timed_out(command, **_kwargs):
+        command_seen.append(command)
+        assert Path(command[-1]).exists()
+        error = subprocess.TimeoutExpired(command, 1, output=b"partial-timeout-output")
+        error.returncode = -9
+        error.cleanup = cleanup
+        raise error
+
+    monkeypatch.setattr(final_review, "run_owned_process", timed_out)
+    with pytest.raises(final_review.WorkerError) as captured:
+        final_review.invoke_worker(_final_request(tmp_path), command=["worker"], environ={})
+    assert captured.value.details["reason"] == "timeout"
+    assert captured.value.details["cleanup"] == cleanup
+    assert "partial-timeout-output" in captured.value.details["stdout_tail"]
+    request = Path(command_seen[0][-1])
+    assert request.exists(), "unverified descendants must not race request deletion"
+    request.unlink()
+    request.parent.rmdir()
+
+
+def test_simulation_does_not_delete_clones_while_descendants_are_unverified(
+        tmp_path, monkeypatch):
+    import sim_harness as simulation_harness
+
+    monkeypatch.setattr(simulation_harness, "repo_snapshot", lambda _root: {"same": True})
+    monkeypatch.setattr(simulation_harness, "selected_inference_backend", lambda *_a, **_k: {
+        "name": "claude", "reason": "simulated", "executable": None, "notes": [],
+    })
+    abandoned = tmp_path / "simulation" / "state" / "clones" / "abc-final-timeout"
+    abandoned.mkdir(parents=True)
+    cleanup = {
+        "status": "incomplete", "complete": False, "direct_child_reaped": True,
+        "tree_termination_verified": False, "pipe_drain_completed": False,
+        "errors": ["taskkill-timeout"],
+    }
+
+    def runner(*_args, **_kwargs):
+        error = subprocess.TimeoutExpired("worker", 1, output=b"partial")
+        error.cleanup = cleanup
+        raise error
+
+    report = simulation_harness.run_final_review_simulation(
+        "ref", repo_root=tmp_path, artifact_dir=tmp_path / "simulation",
+        environ={}, runner=runner,
+    )
+    assert abandoned.exists()
+    assert report["state"] == "incomplete"
+    assert report["cleanup"]["process"] == cleanup
+    assert report["cleanup"]["clean"] is False
+    assert report["cleanup"]["registered_clones_removed_after_timeout"] == []
+
+
+# --- R11: simulated Windows failures; only POSIX below proves real tree kills ---
+
+class _SimulatedPipe:
+    def __init__(self):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+class _SimulatedWindowsProcess:
+    def __init__(self, drain_hangs):
+        self.pid = 7319
+        self.returncode = None
+        self.drain_hangs = drain_hangs
+        self.communicate_calls = []
+        self.stdout = _SimulatedPipe()
+        self.stderr = _SimulatedPipe()
+        self.kill_called = False
+
+    def communicate(self, timeout=None):
+        self.communicate_calls.append(timeout)
+        if len(self.communicate_calls) == 1:
+            raise subprocess.TimeoutExpired(
+                ["worker"], timeout, output=b"initial-", stderr=b"initial-err",
+            )
+        if self.drain_hangs:
+            raise subprocess.TimeoutExpired(
+                ["worker"], timeout, output=b"partial-stdout", stderr=b"partial-stderr",
+            )
+        return "partial-stdout", "partial-stderr"
+
+    def poll(self):
+        return self.returncode
+
+    def kill(self):
+        self.kill_called = True
+        self.returncode = -9
+
+    def wait(self, timeout=None):
+        assert timeout is not None
+        return self.returncode
+
+
+def _simulate_windows_process(monkeypatch, process, taskkill_outcome):
+    popen_options = {}
+    taskkill_options = {}
+
+    def popen(_command, **options):
+        popen_options.update(options)
+        return process
+
+    def run(_command, **options):
+        taskkill_options.update(options)
+        if isinstance(taskkill_outcome, BaseException):
+            raise taskkill_outcome
+        return taskkill_outcome
+
+    monkeypatch.setattr(final_review.os, "name", "nt")
+    monkeypatch.setattr(final_review.subprocess, "CREATE_NEW_PROCESS_GROUP", 512, raising=False)
+    monkeypatch.setattr(final_review.subprocess, "Popen", popen)
+    monkeypatch.setattr(final_review.subprocess, "run", run)
+    monkeypatch.setattr(final_review, "_TASKKILL_TIMEOUT", 0.01)
+    monkeypatch.setattr(final_review, "_REAP_TIMEOUT", 0.01)
+    monkeypatch.setattr(final_review, "_PIPE_CLOSE_TIMEOUT", 0.01)
+    return popen_options, taskkill_options
+
+
+@pytest.mark.parametrize("taskkill_outcome", [
+    SimpleNamespace(returncode=1),
+    FileNotFoundError("simulated missing taskkill"),
+    subprocess.TimeoutExpired(["taskkill"], 0.01),
+])
+def test_windows_failed_tree_kill_is_incomplete_and_pipe_drains_are_bounded(
+        monkeypatch, taskkill_outcome):
+    process = _SimulatedWindowsProcess(drain_hangs=True)
+    popen_options, taskkill_options = _simulate_windows_process(
+        monkeypatch, process, taskkill_outcome,
+    )
+    with pytest.raises(subprocess.TimeoutExpired) as captured:
+        final_review.run_owned_process(
+            ["worker"], cwd=".", env={}, timeout=0.01,
+        )
+    error = captured.value
+    cleanup = error.cleanup
+    assert process.kill_called
+    assert process.stdout.closed and process.stderr.closed
+    assert all(timeout is not None for timeout in process.communicate_calls)
+    assert taskkill_options["timeout"] == 0.01
+    assert popen_options["creationflags"] == 512
+    assert "start_new_session" not in popen_options
+    assert error.output == b"partial-stdout"
+    assert error.stderr == b"partial-stderr"
+    assert cleanup["status"] == "incomplete"
+    assert cleanup["complete"] is False
+    assert cleanup["direct_child_reaped"] is True
+    assert cleanup["tree_termination_verified"] is False
+    assert cleanup["pipe_drain_completed"] is False
+    assert error.tree_termination_verified is False
+
+
+def test_windows_direct_child_only_success_is_not_reported_as_tree_cleanup(monkeypatch):
+    process = _SimulatedWindowsProcess(drain_hangs=False)
+    _simulate_windows_process(monkeypatch, process, FileNotFoundError("missing"))
+    with pytest.raises(subprocess.TimeoutExpired) as captured:
+        final_review.run_owned_process(["worker"], cwd=".", env={}, timeout=0.01)
+    cleanup = captured.value.cleanup
+    assert cleanup["direct_child_reaped"] is True
+    assert cleanup["pipe_drain_completed"] is True
+    assert cleanup["tree_termination_verified"] is False
+    assert cleanup["status"] == "incomplete"
+
+
+def test_windows_taskkill_success_still_requires_reap_and_pipe_evidence(monkeypatch):
+    process = _SimulatedWindowsProcess(drain_hangs=False)
+    _simulate_windows_process(monkeypatch, process, SimpleNamespace(returncode=0))
+    with pytest.raises(subprocess.TimeoutExpired) as captured:
+        final_review.run_owned_process(["worker"], cwd=".", env={}, timeout=0.01)
+    cleanup = captured.value.cleanup
+    assert cleanup == {
+        "status": "complete", "termination_method": "taskkill-tree+direct-child",
+        "direct_child_reaped": True, "tree_termination_verified": True,
+        "pipe_drain_completed": True, "errors": [], "taskkill_returncode": 0,
+        "complete": True,
+    }
+
+
+@pytest.mark.skipif(os.name != "posix", reason="real POSIX nested process-group proof")
+def test_posix_timeout_reaps_nested_pipe_holders_and_preserves_partial_output(tmp_path):
+    marker = tmp_path / "nested-survived"
+    child_pid_file = tmp_path / "child.pid"
+    nested_pid_file = tmp_path / "nested.pid"
+    script = tmp_path / "nested-worker.py"
+    nested_code = (
+        "import pathlib,sys,time; time.sleep(1); "
+        f"pathlib.Path({str(marker)!r}).write_text('survived'); time.sleep(120)"
+    )
+    child_code = (
+        "import pathlib,subprocess,sys,time; "
+        f"p=subprocess.Popen([sys.executable,'-c',{nested_code!r}]); "
+        f"pathlib.Path({str(nested_pid_file)!r}).write_text(str(p.pid)); time.sleep(120)"
+    )
+    script.write_text(
+        "import pathlib,subprocess,sys,time\n"
+        f"child = subprocess.Popen([sys.executable, '-c', {child_code!r}])\n"
+        f"pathlib.Path({str(child_pid_file)!r}).write_text(str(child.pid))\n"
+        f"for _ in range(100):\n"
+        f"    if pathlib.Path({str(nested_pid_file)!r}).exists(): break\n"
+        "    time.sleep(0.01)\n"
+        "print('nested-ready', flush=True)\n"
+        "time.sleep(120)\n",
+        encoding="utf-8",
+    )
+    pids = []
+    try:
+        with pytest.raises(subprocess.TimeoutExpired) as captured:
+            final_review.run_owned_process(
+                [sys.executable, str(script)], cwd=str(tmp_path),
+                env={"PATH": os.environ.get("PATH", "")}, timeout=0.5,
+            )
+        output = captured.value.output
+        if isinstance(output, bytes):
+            output = output.decode("utf-8", "replace")
+        assert "nested-ready" in output
+        cleanup = captured.value.cleanup
+        assert cleanup["status"] == "complete"
+        assert cleanup["direct_child_reaped"] is True
+        assert cleanup["tree_termination_verified"] is True
+        pids = [int(path.read_text()) for path in (child_pid_file, nested_pid_file)]
+        assert all(_wait_gone(pid) for pid in pids)
+        time.sleep(1.1)
+        assert not marker.exists()
+    finally:
+        for pid in pids:
+            if not _wait_gone(pid, timeout=0.1):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass

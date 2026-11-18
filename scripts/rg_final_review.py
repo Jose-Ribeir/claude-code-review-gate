@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+from contextlib import contextmanager
 import os
 from copy import deepcopy
 from pathlib import Path
@@ -25,6 +26,8 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import ocr_profile
 from rg_final_compose import compose_stack
 from rg_final_context import collect_review_context
@@ -123,46 +126,145 @@ class WorkerError(RuntimeError):
         self.details = deepcopy(details) if isinstance(details, dict) else {}
 
 
+_TASKKILL_TIMEOUT = 5.0
+_REAP_TIMEOUT = 2.0
+_PIPE_CLOSE_TIMEOUT = 1.0
+
+
+def _process_cleanup(method):
+    return {
+        "status": "incomplete",
+        "termination_method": method,
+        "direct_child_reaped": False,
+        "tree_termination_verified": False,
+        "pipe_drain_completed": False,
+        "errors": [],
+    }
+
+
+def _kill_direct_child(process, cleanup):
+    try:
+        if process.poll() is None:
+            process.kill()
+    except ProcessLookupError:
+        pass
+    except OSError as exc:
+        cleanup["errors"].append(f"direct-child-kill:{type(exc).__name__}")
+
+
 def _kill_owned_process(process):
-    """Kill only the tree owned by ``run_owned_process`` and never our group."""
+    """Start bounded termination of the exact owned child/tree and report proof."""
     if os.name == "posix":
+        cleanup = _process_cleanup("process-group")
+        cleanup["tree_termination_verified"] = True
         try:
             # start_new_session=True makes the child PID its process-group ID.
             # The explicit inequality prevents an accidental kill of the caller.
             if process.pid == os.getpgrp():
-                if process.poll() is None:
-                    process.kill()
-                return
+                cleanup["tree_termination_verified"] = False
+                cleanup["termination_method"] = "direct-child"
+                cleanup["errors"].append("owned-process-group-unavailable")
+                _kill_direct_child(process, cleanup)
+                return cleanup
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        except OSError:
-            if process.poll() is None:
-                process.kill()
-    elif os.name == "nt":
+        except OSError as exc:
+            cleanup["tree_termination_verified"] = False
+            cleanup["termination_method"] = "process-group+direct-child"
+            cleanup["errors"].append(f"process-group-kill:{type(exc).__name__}")
+            _kill_direct_child(process, cleanup)
+        return cleanup
+    if os.name == "nt":
+        cleanup = _process_cleanup("taskkill-tree+direct-child")
         try:
             # /T includes descendants; invoke it before reaping the direct child.
-            subprocess.run(
+            completed = subprocess.run(
                 ["taskkill", "/F", "/T", "/PID", str(process.pid)],
                 stdin=subprocess.DEVNULL, capture_output=True, check=False,
+                timeout=_TASKKILL_TIMEOUT,
             )
-        except OSError:
-            # Safe Windows fallback when taskkill is unavailable: reap the owned
-            # direct child rather than risking any unrelated process/group.
-            if process.poll() is None:
-                process.kill()
-    elif process.poll() is None:
-        # Explicit conservative fallback on unknown platforms.
-        process.kill()
+        except subprocess.TimeoutExpired:
+            cleanup["errors"].append("taskkill-timeout")
+        except OSError as exc:
+            cleanup["errors"].append(f"taskkill-invocation:{type(exc).__name__}")
+        else:
+            cleanup["taskkill_returncode"] = completed.returncode
+            if completed.returncode == 0:
+                # This is taskkill evidence, not a Job Object guarantee.  A failed
+                # drain below retracts it because inherited handles may belong to
+                # surviving descendants.
+                cleanup["tree_termination_verified"] = True
+            else:
+                cleanup["errors"].append(f"taskkill-exit:{completed.returncode}")
+        _kill_direct_child(process, cleanup)
+        return cleanup
+    cleanup = _process_cleanup("direct-child")
+    _kill_direct_child(process, cleanup)
+    return cleanup
+
+
+def _close_owned_pipes(process):
+    """Close abandoned inherited pipes without letting close/join hang cleanup."""
+    pipes = [pipe for pipe in (process.stdout, process.stderr) if pipe is not None]
+    failures = []
+
+    def close(pipe):
+        try:
+            pipe.close()
+        except (OSError, ValueError) as exc:
+            failures.append(type(exc).__name__)
+
+    threads = [threading.Thread(target=close, args=(pipe,), daemon=True) for pipe in pipes]
+    for thread in threads:
+        thread.start()
+    deadline = time.monotonic() + _PIPE_CLOSE_TIMEOUT
+    for thread in threads:
+        thread.join(max(0.0, deadline - time.monotonic()))
+    return not failures and all(not thread.is_alive() for thread in threads)
+
+
+def _bounded_reap(process, cleanup, partial):
+    """Reap the direct child and retain output, bounding inherited-pipe EOF waits."""
+    stdout, stderr = partial
+    try:
+        stdout, stderr = process.communicate(timeout=_REAP_TIMEOUT)
+        cleanup["pipe_drain_completed"] = True
+    except subprocess.TimeoutExpired as exc:
+        cleanup["errors"].append("pipe-drain-timeout")
+        if exc.output is not None:
+            stdout = exc.output
+        if exc.stderr is not None:
+            stderr = exc.stderr
+    except (OSError, subprocess.SubprocessError) as exc:
+        cleanup["errors"].append(f"pipe-drain:{type(exc).__name__}")
+    if not cleanup["pipe_drain_completed"]:
+        try:
+            process.wait(timeout=_REAP_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            cleanup["errors"].append("direct-child-wait-timeout")
+        except OSError as exc:
+            cleanup["errors"].append(f"direct-child-wait:{type(exc).__name__}")
+        if not _close_owned_pipes(process):
+            cleanup["errors"].append("pipe-close-incomplete")
+    cleanup["direct_child_reaped"] = getattr(process, "returncode", None) is not None
+    if not cleanup["direct_child_reaped"] or not cleanup["pipe_drain_completed"]:
+        cleanup["tree_termination_verified"] = False
+    cleanup["complete"] = bool(
+        cleanup["direct_child_reaped"] and cleanup["tree_termination_verified"]
+        and cleanup["pipe_drain_completed"]
+    )
+    cleanup["status"] = "complete" if cleanup["complete"] else "incomplete"
+    return stdout, stderr
 
 
 def run_owned_process(command, *, cwd, env, timeout):
-    """Run a captured text subprocess whose deadline owns its descendant tree.
+    """Run a captured subprocess and bound every post-deadline cleanup wait.
 
-    Timeout re-raises ``TimeoutExpired`` with the exact captured partial output
-    and an additional ``returncode`` attribute after the direct child is reaped.
-    POSIX uses a new session/process group. Windows uses a new process group and
-    taskkill's tree mode, with direct-child-only fallback if taskkill is absent.
+    Timeout re-raises ``TimeoutExpired`` with obtainable partial output,
+    ``returncode`` and structured ``cleanup`` evidence. POSIX owns a separate
+    process group. Windows records taskkill evidence conservatively; direct-child
+    fallback never implies that descendants were terminated.
     """
     options = {"start_new_session": True} if os.name == "posix" else {}
     if os.name == "nt":
@@ -175,16 +277,18 @@ def run_owned_process(command, *, cwd, env, timeout):
     try:
         stdout, stderr = process.communicate(timeout=float(timeout))
     except subprocess.TimeoutExpired as exc:
-        _kill_owned_process(process)
-        stdout, stderr = process.communicate()
+        cleanup = _kill_owned_process(process)
+        stdout, stderr = _bounded_reap(process, cleanup, (exc.output, exc.stderr))
         timeout_error = subprocess.TimeoutExpired(
             command, timeout, output=stdout, stderr=stderr,
         )
-        timeout_error.returncode = process.returncode
+        timeout_error.returncode = getattr(process, "returncode", None)
+        timeout_error.cleanup = cleanup
+        timeout_error.tree_termination_verified = cleanup["tree_termination_verified"]
         raise timeout_error from exc
     except BaseException:
-        _kill_owned_process(process)
-        process.communicate()
+        cleanup = _kill_owned_process(process)
+        _bounded_reap(process, cleanup, (None, None))
         raise
     return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
@@ -337,18 +441,38 @@ def _object_from_text(text):
 
 WORKER_COMPLETION_STATUSES = ("success", "completed", "completed_with_warnings")
 _STDOUT_DIAGNOSTIC_LIMIT = 512
+# Credential names are commonly underscore-delimited (``access_token`` and
+# ``client_secret``). Start at the sensitive component rather than using ``\b``
+# before it: the
+# prefix (``access_``, ``client_``, and so on) may safely remain in diagnostics.
+# This also avoids scanning an arbitrary key prefix on attacker-sized output.
+_SENSITIVE_KEY = (
+    r"(?:api[_-]?key|token|secret|password|credential|authorization|auth)"
+    r"[A-Za-z0-9_.-]*"
+)
 _SENSITIVE_DIAGNOSTIC = re.compile(
-    r"(?i)(\b(?:api[_-]?key|token|secret|password|credential|authorization)\b"
-    r"[\"']?\s*[:=]\s*[\"']?)([^\s,\"'\}\]]+)",
+    rf"(?i)({_SENSITIVE_KEY}\s*[\"']?\s*[:=]\s*)"
+    r"(?!(?:basic|bearer)\s+\[redacted\])"
+    r"(?:(\\?[\"'])(.*?)\2|([^\s,;\"'\}\]&]+))",
+    re.DOTALL,
+)
+_AUTHORIZATION_DIAGNOSTIC = re.compile(
+    r"(?i)(?<![A-Za-z0-9_])([A-Za-z0-9_-]{0,128}authorization"
+    r"[\"']?\s*[:=]\s*[\"']?)(basic|bearer)(\s+)([^\s,\"'\}\]]+)",
 )
 _BEARER_DIAGNOSTIC = re.compile(r"(?i)(\bbearer\s+)[^\s,\"']+")
 _URI_CREDENTIAL_DIAGNOSTIC = re.compile(
-    r"([A-Za-z][A-Za-z0-9+.-]*://)[^\s/?#@]+@"
+    r"([A-Za-z][A-Za-z0-9+.-]{0,31}://)[^\s/?#@]+@"
 )
 
 
+def _redact_sensitive_assignment(match):
+    quote = match.group(2) or ""
+    return match.group(1) + quote + "[redacted]" + quote
+
+
 def _sanitize_worker_diagnostic(value, environ):
-    """Return a bounded tail with credential-shaped and known secret text removed."""
+    """Redact complete credential values first, then return a bounded safe tail."""
     if isinstance(value, bytes):
         value = value.decode("utf-8", "replace")
     text = str(value or "")
@@ -364,29 +488,48 @@ def _sanitize_worker_diagnostic(value, environ):
     for secret in sorted(set(known), key=len, reverse=True):
         text = text.replace(secret, "[redacted]")
     text = _URI_CREDENTIAL_DIAGNOSTIC.sub(r"\1[redacted]@", text)
+    text = _AUTHORIZATION_DIAGNOSTIC.sub(r"\1\2\3[redacted]", text)
     text = _BEARER_DIAGNOSTIC.sub(r"\1[redacted]", text)
-    text = _SENSITIVE_DIAGNOSTIC.sub(r"\1[redacted]", text)
+    text = _SENSITIVE_DIAGNOSTIC.sub(_redact_sensitive_assignment, text)
     text = "".join(
         char if char.isprintable() or char in "\n\t" else " " for char in text
     )
     return text[-_STDOUT_DIAGNOSTIC_LIMIT:]
 
 
-def _worker_diagnostics(source, *, reason, status=None, return_code=None, stdout=None):
+def _worker_diagnostics(source, *, reason, status=None, return_code=None, stdout=None,
+                        cleanup=None):
     received = _sanitize_worker_diagnostic(status, source)[-128:] if status is not None else None
-    return {
+    details = {
         "reason": reason,
         "received_status": received,
         "return_code": return_code,
         "stdout_tail": _sanitize_worker_diagnostic(stdout, source),
         "expected_status": list(WORKER_COMPLETION_STATUSES),
     }
+    if cleanup is not None:
+        details["cleanup"] = deepcopy(cleanup)
+    return details
+
+
+@contextmanager
+def _worker_request_directory(process_cleanup):
+    directory = tempfile.mkdtemp(prefix="review-gate-final-request-")
+    try:
+        yield directory
+    finally:
+        cleanup = process_cleanup.get("process")
+        if cleanup is None or cleanup.get("complete", False):
+            shutil.rmtree(directory, ignore_errors=True)
+        # Otherwise a surviving descendant may still have the request open. Keep
+        # the directory rather than presenting recursive deletion as tree cleanup.
 
 
 def invoke_worker(request, *, command=None, repo_root=None, environ=None, timeout=900):
     """Execute one credential-isolated worker and decode its contracted result."""
     source = os.environ if environ is None else environ
-    with tempfile.TemporaryDirectory(prefix="review-gate-final-request-") as directory:
+    process_cleanup = {}
+    with _worker_request_directory(process_cleanup) as directory:
         request_path = Path(directory) / "request.json"
         request_path.write_text(json.dumps(request, ensure_ascii=False), encoding="utf-8")
         try:
@@ -411,9 +554,10 @@ def invoke_worker(request, *, command=None, repo_root=None, environ=None, timeou
                 env=worker_environment(source), timeout=float(timeout),
             )
         except subprocess.TimeoutExpired as exc:
+            process_cleanup["process"] = getattr(exc, "cleanup", None)
             details = _worker_diagnostics(
                 source, reason="timeout", return_code=getattr(exc, "returncode", None),
-                stdout=exc.output,
+                stdout=exc.output, cleanup=process_cleanup["process"],
             )
             raise WorkerError(
                 f"{request['lens']} worker timed out after {float(timeout):g}s",

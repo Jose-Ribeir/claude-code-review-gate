@@ -679,6 +679,7 @@ def run_final_review_simulation(reference, *, repo_root, artifact_dir, environ=N
     error = ""
     stdout = stderr = ""
     returncode = None
+    process_cleanup = None
     try:
         if runner is None:
             # Bounded independent lens waves fit inside the existing two-hour
@@ -696,6 +697,7 @@ def run_final_review_simulation(reference, *, repo_root, artifact_dir, environ=N
         stdout = exc.output or ""
         stderr = exc.stderr or ""
         returncode = getattr(exc, "returncode", None)
+        process_cleanup = getattr(exc, "cleanup", None)
     except (OSError, subprocess.SubprocessError) as exc:
         error = f"real-model final-review invocation unavailable: {type(exc).__name__}: {exc}"
     if process is not None:
@@ -721,10 +723,20 @@ def run_final_review_simulation(reference, *, repo_root, artifact_dir, environ=N
     if provider["provider_writes"]:
         error = "recorded provider audit contains a forbidden provider mutation"
     cleanup = _simulation_cleanup(root, result)
-    if process is None and "TimeoutExpired" in error:
-        # subprocess.run killed the CLI, whose finally blocks cannot then run.
+    if process_cleanup is not None:
+        cleanup["process"] = process_cleanup
+        cleanup["clean"] = bool(
+            cleanup["clean"] and process_cleanup.get("status") == "complete"
+        )
+    cleanup_verified = process_cleanup is None or bool(
+        process_cleanup.get("direct_child_reaped")
+        and process_cleanup.get("tree_termination_verified")
+        and process_cleanup.get("status") == "complete"
+    )
+    if process is None and "TimeoutExpired" in error and cleanup_verified:
         # Only registered clones inside this simulation's private state root
-        # are eligible for harness cleanup; never touch the caller's store.
+        # are eligible for harness cleanup; never touch the caller's store. An
+        # unverified Windows descendant tree keeps its directories as evidence.
         removed = []
         clone_root = (root / "state" / "clones").resolve()
         for registered in cleanup["registered_scratch_clones"]:
@@ -733,7 +745,11 @@ def run_final_review_simulation(reference, *, repo_root, artifact_dir, environ=N
                 shutil.rmtree(path, ignore_errors=True)
                 removed.append(str(path))
         cleanup = _simulation_cleanup(root, result)
+        if process_cleanup is not None:
+            cleanup["process"] = process_cleanup
         cleanup["registered_clones_removed_after_timeout"] = removed
+    elif process is None and "TimeoutExpired" in error and process_cleanup is not None:
+        cleanup["registered_clones_removed_after_timeout"] = []
     report = {
         "schema": "spec16-real-model-simulation/v1",
         "kind": "final-review",
