@@ -537,7 +537,7 @@ def test_unwarned_dynamic_degradation_cannot_manufacture_complete_evidence(stand
     assert output["execution_complete"] is False
 
 
-def test_worker_resolution_retires_real_prior_finding_during_finalization(standalone):
+def test_worker_only_resolution_evidence_cannot_retire_a_prior_finding(standalone):
     store_path = standalone.tmp_path / "resolution.sqlite3"
     provider = Provider()
 
@@ -577,22 +577,17 @@ def test_worker_resolution_retires_real_prior_finding_during_finalization(standa
     standalone.monkeypatch.setattr(rg_final_review, "invoke_worker", resolving_worker)
     second = run(standalone, provider, store_path)
 
-    assert second["state"] == "pass"
-    assert second["complete"] is True
-    assert second["finding_verdict"] == "pass"
-    assert second["finding_memory"]["clear_allowed"] is True
-    assert second["finding_memory"]["pending_thread_ids"] == []
-    assert second["finding_closures"][0]["state"] == "recorded"
-    assert second["finding_closures"][0]["event_type"] == "resolved"
+    assert second["state"] == "incomplete"
+    assert second["complete"] is False
+    assert second["finding_verdict"] == "block"
+    assert second["finding_memory"]["clear_allowed"] is False
+    assert second["finding_memory"]["pending_thread_ids"] == [resolved["thread_id"]]
+    assert second["finding_closures"][0]["state"] == "rejected"
     with FinalStore(store_path) as store:
         history = store.finding_history(resolved["thread_id"])
-        assert [event["event_type"] for event in history["events"]] == [
-            "observed", "resolved"]
-        closure = history["events"][-1]
-        assert closure["resolution_evidence"]["current_diff"]
-        assert closure["revalidation"]["test"] == "test_return_contract"
-        assert closure["previous_evidence_anchor"] != closure["evidence_anchor"]
-        assert store.official_findings(second["run_id"]) == []
+        assert [event["event_type"] for event in history["events"]] == ["observed"]
+        assert store.official_findings(second["run_id"])[0]["thread_id"] == \
+            resolved["thread_id"]
 
 
 def test_memory_is_carried_explicitly_and_a_quiet_rerun_is_not_clean(standalone):

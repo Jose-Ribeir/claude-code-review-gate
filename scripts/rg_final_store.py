@@ -1436,6 +1436,20 @@ class FinalStore:
             )
         return test_id
 
+    def test_evidence_for_unit(self, unit_id):
+        """Return detached test rows for supervisor closure corroboration."""
+        with self._lock:
+            self._unit_row(unit_id)
+            return [
+                {"test_id": row["test_id"], "name": row["name"], "kind": row["kind"],
+                 "state": row["state"], "output": row["output"],
+                 "evidence_fingerprint": row["evidence_fingerprint"],
+                 "details": _loads(row["details_json"]), "recorded_at": row["recorded_at"]}
+                for row in self._rows(
+                    "SELECT * FROM test_evidence WHERE unit_id = ? "
+                    "ORDER BY recorded_at, test_id", (unit_id,))
+            ]
+
     def _insert_finding_row(self, unit_id, finding_key, content, severity, confidence,
                             state, lens, path, line, anchors, evidence):
         finding_id = _identifier()
@@ -1717,9 +1731,73 @@ class FinalStore:
             raise ValueError("finding thread is not open at this run")
         return thread, unit, events
 
+    @staticmethod
+    def _closure_source_proof(evidence, unit):
+        if not isinstance(evidence, dict) or not isinstance(evidence.get("source"), dict):
+            raise ValueError("closure requires independently verified current-tree evidence")
+        verification = evidence.get("verification") or {}
+        source = evidence["source"]
+        if (verification.get("schema") != rg_final_memory.CLOSURE_VERIFICATION_SCHEMA
+                or verification.get("independent_tree_inspection") is not True):
+            raise ValueError("current-tree evidence lacks independent supervisor verification")
+        if (source.get("unit_key") != unit["unit_key"]
+                or source.get("head_sha") != unit["head_sha"]
+                or verification.get("unit_key") != unit["unit_key"]
+                or verification.get("head_sha") != unit["head_sha"]):
+            raise ValueError("current-tree evidence unit or SHA does not match its closure unit")
+        if not isinstance(source.get("path"), str) or not source["path"]:
+            raise ValueError("current-tree evidence requires a source path")
+        start, end = source.get("start_line"), source.get("end_line")
+        if (not isinstance(start, int) or isinstance(start, bool) or start < 1
+                or not isinstance(end, int) or isinstance(end, bool) or end < start):
+            raise ValueError("current-tree evidence requires an exact source line range")
+        body = source.get("body")
+        if not isinstance(body, str) or not body.strip():
+            raise ValueError("current-tree evidence requires its exact source body")
+        if source.get("body_sha256") != hashlib.sha256(body.encode("utf-8")).hexdigest():
+            raise ValueError("current-tree source body fingerprint is invalid")
+        if not re.fullmatch(r"[0-9a-f]{64}", str(source.get("file_sha256") or "")):
+            raise ValueError("current-tree source file fingerprint is missing")
+        return source
+
+    def _closure_test_proof(self, revalidation, unit):
+        if not isinstance(revalidation, dict):
+            raise ValueError("positive closure requires independently executed test evidence")
+        verification = revalidation.get("verification") or {}
+        if (verification.get("schema") != rg_final_memory.CLOSURE_VERIFICATION_SCHEMA
+                or verification.get("independently_executed") is not True):
+            raise ValueError("revalidation lacks independent supervisor execution proof")
+        if (revalidation.get("unit_key") != unit["unit_key"]
+                or revalidation.get("head_sha") != unit["head_sha"]
+                or verification.get("unit_key") != unit["unit_key"]
+                or verification.get("head_sha") != unit["head_sha"]):
+            raise ValueError("revalidation unit or SHA does not match its closure unit")
+        row = self._conn.execute(
+            "SELECT t.* FROM test_evidence t JOIN units u ON u.unit_id = t.unit_id "
+            "WHERE t.test_id = ? AND t.unit_id = ? AND u.run_id = ?",
+            (revalidation.get("test_id"), unit["unit_id"], unit["run_id"]),
+        ).fetchone()
+        if row is None or row["kind"] not in ("required", "existing_test", "ephemeral_test"):
+            raise ValueError("revalidation does not identify a known test in the current unit")
+        if row["state"].strip().lower() not in ("pass", "passed", "success", "succeeded"):
+            raise ValueError("positive closure requires a successful independently executed test")
+        if not row["evidence_fingerprint"]:
+            raise ValueError("revalidation test has no actual evidence fingerprint")
+        expected = {
+            "test": row["name"], "kind": row["kind"], "state": row["state"],
+            "output": row["output"], "evidence_fingerprint": row["evidence_fingerprint"],
+        }
+        for field, actual in expected.items():
+            claimed = revalidation.get(field)
+            if field == "state":
+                claimed = str(claimed or "").strip().lower()
+                actual = actual.strip().lower()
+            if claimed != actual:
+                raise ValueError(f"revalidation {field} does not match recorded test evidence")
+
     def resolve_finding(self, run_id, thread_id, *, anchors, resolution_evidence,
                         revalidation):
-        """Append positive closure only for changed anchors and real revalidation."""
+        """Append positive closure only with independently bound tree/test proof."""
         with self._transaction():
             thread, unit, events = self._closure_scope(run_id, thread_id)
             original = self._finding_by_id(thread["origin_finding_id"])
@@ -1731,17 +1809,11 @@ class FinalStore:
             current_anchor = rg_final_memory.finding_evidence_anchor(normalized, finding=original)
             if current_anchor == previous["evidence_anchor"]:
                 raise ValueError("positive resolution requires changed code or evidence anchors")
-            if not self._evidence_present(resolution_evidence):
-                raise ValueError("positive resolution requires resolution evidence")
-            if not isinstance(revalidation, dict) or not revalidation:
-                raise ValueError("positive resolution requires revalidation evidence")
-            status = str(revalidation.get("status") or "").strip().lower()
-            successful = status in (
-                "pass", "passed", "success", "succeeded", "completed",
-                "revalidated", "not_reproduced",
-            ) or revalidation.get("revalidated") is True
-            if not successful:
-                raise ValueError("positive resolution requires successful revalidation")
+            source = self._closure_source_proof(resolution_evidence, unit)
+            expected_anchor = rg_final_memory.current_source_anchor(source)
+            if not any(anchor == expected_anchor for anchor in normalized):
+                raise ValueError("resolution source anchor was not independently computed")
+            self._closure_test_proof(revalidation, unit)
             latest = self._latest_finding_event(events)
             self._insert_event(
                 thread_id, run_id, unit["unit_id"], latest["finding_id"], "resolved",
@@ -1751,17 +1823,27 @@ class FinalStore:
         return self.finding_history(thread_id)
 
     def falsify_finding(self, run_id, thread_id, rationale, *, evidence=None):
-        """Append explicit falsification; no anchor movement is required."""
-        if not str(rationale or "").strip():
-            raise ValueError("finding falsification requires a non-empty rationale")
+        """Append falsification only with clear rationale and independent proof."""
+        rationale = str(rationale or "").strip()
+        if len(rationale) < 20:
+            raise ValueError("finding falsification requires a clear non-empty rationale")
         with self._transaction():
             thread, unit, events = self._closure_scope(run_id, thread_id)
+            if not isinstance(evidence, dict):
+                raise ValueError("finding falsification requires independent evidence")
+            if evidence.get("source") is not None:
+                self._closure_source_proof(evidence, unit)
+            if evidence.get("revalidation") is not None:
+                self._closure_test_proof(evidence["revalidation"], unit)
+            if evidence.get("source") is None and evidence.get("revalidation") is None:
+                raise ValueError(
+                    "finding falsification requires verified tree or executed-test evidence")
             previous = events[-1]
             latest = self._latest_finding_event(events)
             self._insert_event(
                 thread_id, run_id, unit["unit_id"], latest["finding_id"], "falsified",
                 _loads(previous["anchors_json"]), previous["evidence_anchor"],
-                previous["evidence_anchor"], evidence=evidence, rationale=str(rationale).strip(),
+                previous["evidence_anchor"], evidence=evidence, rationale=rationale,
             )
         return self.finding_history(thread_id)
 

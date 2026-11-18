@@ -6,6 +6,7 @@ atabases and providers are scripted read-only doubles.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -107,6 +108,50 @@ def record_open(store, identity, evidence=OLD_EVIDENCE):
     )
 
 
+def verified_source_evidence(store, identity):
+    unit = store.manifest(identity["run_id"])["units"][0]
+    body = "return transaction_wrapper.save(value)"
+    source = {
+        "path": "widget.py", "start_line": 17, "end_line": 17, "body": body,
+        "body_sha256": hashlib.sha256(body.encode()).hexdigest(),
+        "file_sha256": "a" * 64, "unit_key": unit["unit_key"],
+        "head_sha": unit["head_sha"],
+    }
+    return {
+        "claim": "The current source performs the required save.", "source": source,
+        "verification": {
+            "schema": memory.CLOSURE_VERIFICATION_SCHEMA,
+            "independent_tree_inspection": True,
+            "unit_key": unit["unit_key"], "head_sha": unit["head_sha"],
+        },
+    }
+
+
+def verified_resolution(store, identity):
+    unit_id = identity["unit_ids"]["individual:1"]
+    evidence = verified_source_evidence(store, identity)
+    test_id = store.record_test(
+        unit_id, "test_save", "required", "passed", output="1 passed",
+        evidence_fingerprint=NEW_EVIDENCE,
+    )
+    unit = store.manifest(identity["run_id"])["units"][0]
+    return {
+        "anchors": [anchors()[0], memory.current_source_anchor(evidence["source"])],
+        "resolution_evidence": evidence,
+        "revalidation": {
+            "test": "test_save", "test_id": test_id, "kind": "required",
+            "state": "passed", "status": "passed", "output": "1 passed",
+            "evidence_fingerprint": NEW_EVIDENCE,
+            "unit_key": unit["unit_key"], "head_sha": unit["head_sha"],
+            "verification": {
+                "schema": memory.CLOSURE_VERIFICATION_SCHEMA,
+                "independently_executed": True,
+                "unit_key": unit["unit_key"], "head_sha": unit["head_sha"],
+            },
+        },
+    }
+
+
 def test_quiet_rerun_never_clears_an_unresolved_prior_finding(store):
     first = begin(store)
     original_id = record_open(store, first)
@@ -186,34 +231,32 @@ def test_positive_resolution_requires_changed_evidence_and_revalidation(store):
     second = begin(store, provider_item(source_sha="f" * 40))
     pending = memory.rerun_context(store, second["run_id"])["findings"][0]
     memory.carry_forward(
-        store, second["run_id"], second["unit_ids"]["individual:1"],
-        pending["thread_id"],
+        store, second["run_id"], second["unit_ids"]["individual:1"], pending["thread_id"],
     )
 
     with pytest.raises(ValueError, match="changed code or evidence"):
         memory.resolve_finding(
             store, second["run_id"], pending["thread_id"], anchors=anchors(),
-            resolution_evidence={"test": "test_save now covers persistence"},
-            revalidation={"status": "passed", "evidence_fingerprint": NEW_EVIDENCE},
+            resolution_evidence={"claim": "fixed"}, revalidation={"status": "passed"},
         )
-    with pytest.raises(ValueError, match="revalidation"):
+    with pytest.raises(ValueError, match="independently verified current-tree"):
         memory.resolve_finding(
-            store, second["run_id"], pending["thread_id"], anchors=anchors(NEW_EVIDENCE),
-            resolution_evidence={"test": "test_save now covers persistence"},
-            revalidation={},
+            store, second["run_id"], pending["thread_id"],
+            anchors=[anchors()[0], memory.current_source_anchor(
+                verified_source_evidence(store, second)["source"])],
+            resolution_evidence={"claim": "fixed"}, revalidation={"status": "passed"},
         )
-    with pytest.raises(ValueError, match="successful revalidation"):
-        memory.resolve_finding(
-            store, second["run_id"], pending["thread_id"], anchors=anchors(NEW_EVIDENCE),
-            resolution_evidence={"test": "test_save now covers persistence"},
-            revalidation={"status": "failed", "evidence_fingerprint": NEW_EVIDENCE},
-        )
+    missing_test = verified_resolution(store, second)
+    missing_test["revalidation"] = {}
+    with pytest.raises(ValueError, match="independent supervisor execution"):
+        memory.resolve_finding(store, second["run_id"], pending["thread_id"], **missing_test)
+    wrong_test = verified_resolution(store, second)
+    wrong_test["revalidation"]["state"] = "failed"
+    with pytest.raises(ValueError, match="revalidation state"):
+        memory.resolve_finding(store, second["run_id"], pending["thread_id"], **wrong_test)
 
     memory.resolve_finding(
-        store, second["run_id"], pending["thread_id"], anchors=anchors(NEW_EVIDENCE),
-        resolution_evidence={"test": "test_save now covers persistence"},
-        revalidation={"status": "passed", "evidence_fingerprint": NEW_EVIDENCE},
-    )
+        store, second["run_id"], pending["thread_id"], **verified_resolution(store, second))
 
     status = store.memory_status(second["run_id"])
     assert status["unresolved_thread_ids"] == []
@@ -228,7 +271,7 @@ def test_positive_resolution_requires_changed_evidence_and_revalidation(store):
     assert history["events"][-1]["finding"]["finding_id"] == original_id or \
         history["events"][-1]["finding"] is not None
     assert history["events"][-1]["revalidation"]["status"] == "passed"
-    assert history["events"][-1]["resolution_evidence"]["test"]
+    assert history["events"][-1]["resolution_evidence"]["source"]["body"]
     assert history["events"][-1]["previous_evidence_anchor"] != \
         history["events"][-1]["evidence_anchor"]
     assert history["events"][0]["finding"]["finding_id"] == original_id
@@ -243,10 +286,18 @@ def test_falsification_is_explicit_rationaled_and_does_not_need_a_code_change(st
     with pytest.raises(ValueError, match="rationale"):
         memory.falsify_finding(store, second["run_id"], pending["thread_id"], "  ")
 
+    with pytest.raises(ValueError, match="verified tree or executed-test"):
+        memory.falsify_finding(
+            store, second["run_id"], pending["thread_id"],
+            "The configured transaction wrapper persists before this method returns",
+            evidence={"inspection": "widget.py:41-48"},
+        )
+    assert store.memory_status(second["run_id"])["clear_allowed"] is False
+
     memory.falsify_finding(
         store, second["run_id"], pending["thread_id"],
         "The configured transaction wrapper persists before this method returns",
-        evidence={"inspection": "widget.py:41-48"},
+        evidence=verified_source_evidence(store, second),
     )
 
     assert store.memory_status(second["run_id"])["clear_allowed"] is True
@@ -313,10 +364,15 @@ def test_closure_processing_binds_id_anchor_and_unit_before_persisting(store):
             "evidence": {"inspection": "widget.py:41-48"},
         }],
     )
-    assert recorded[0]["state"] == "recorded"
-    assert recorded[0]["event_type"] == "falsified"
-    assert recorded[0]["history"]["events"][-1]["rationale"].startswith(
-        "The configured wrapper")
+    assert recorded[0]["state"] == "rejected"
+    assert "verified tree or executed-test" in recorded[0]["reason"]
+    assert store.memory_status(second["run_id"])["clear_allowed"] is False
+
+    memory.falsify_finding(
+        store, second["run_id"], pending["thread_id"],
+        "The configured wrapper persists before returning",
+        evidence=verified_source_evidence(store, second),
+    )
     assert store.memory_status(second["run_id"])["clear_allowed"] is True
     with pytest.raises(ValueError, match="not open"):
         store.resolve_finding(
@@ -332,9 +388,8 @@ def test_a_resolved_defect_reopening_preserves_the_whole_thread(store):
     second = begin(store, provider_item(source_sha="f" * 40))
     pending = memory.rerun_context(store, second["run_id"])["findings"][0]
     memory.resolve_finding(
-        store, second["run_id"], pending["thread_id"], anchors=anchors(NEW_EVIDENCE),
-        resolution_evidence={"fix": "assign the supplied value"},
-        revalidation={"status": "passed", "test": "test_save"},
+        store, second["run_id"], pending["thread_id"],
+        **verified_resolution(store, second),
     )
     third = begin(store, provider_item(source_sha="9" * 40))
 

@@ -6,9 +6,10 @@ module deliberately accepts that public store seam rather than maintaining a
 second memory.  Provider access is read-only and injected, so tests and later
 orchestration can supply scripted revision providers.
 
-A finding is never retired because a later reviewer omitted it.  Only an
-explicit resolution with changed anchors and positive revalidation evidence,
-or an explicit falsification with a rationale, closes its thread.  Existing
+A finding is never retired because a later reviewer omitted it. Resolution
+requires independently inspected current-tree proof plus an exact successful
+test executed by the supervisor in the same run; falsification requires a
+clear rationale and independently inspected or executed evidence. Existing
 pre-push waiver ledgers are accepted only as detached operator context.
 """
 from __future__ import annotations
@@ -16,9 +17,14 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+from pathlib import Path, PurePosixPath
+import subprocess
 
 RERUN_CONTEXT_SCHEMA = "final-review-rerun-context/v1"
 FRESHNESS_SCHEMA = "final-review-freshness/v1"
+CLOSURE_VERIFICATION_SCHEMA = "final-review-closure-verification/v1"
+_SUCCESSFUL_TEST_STATES = frozenset(("pass", "passed", "success", "succeeded"))
+_CLOSURE_TEST_KINDS = frozenset(("required", "existing_test", "ephemeral_test"))
 CARRY_FORWARD_INSTRUCTION = (
     "Explicitly carry this unresolved finding into the new run and revalidate it. "
     "Do not treat omission as resolution. Retirement requires changed code/evidence "
@@ -355,14 +361,212 @@ def _recorded_evidence(value):
     return bool(value.strip()) if isinstance(value, str) else bool(value)
 
 
-def process_finding_closures(store, run_id, unit_id, prior, closures):
-    """Validate and persist explicit worker/provider closure claims.
+def _closure_coordinates(context):
+    if not isinstance(context, dict):
+        raise ValueError("closure requires trusted materialization context")
+    unit_key = str(context.get("unit_key") or "")
+    head_sha = str(context.get("head_sha") or "")
+    if not unit_key or len(head_sha) != 40 or any(
+            character not in "0123456789abcdefABCDEF" for character in head_sha):
+        raise ValueError("closure context requires the current unit and head SHA")
+    return unit_key, head_sha
 
-    Only findings present in this unit's inherited ``rerun_context`` are
-    eligible. Unknown IDs, current-run findings, anchor mismatches, and
-    cross-unit requests become visible rejected claims and cannot erase any
-    finding. Store APIs perform the final open-state, changed-evidence, and
-    positive-revalidation checks before appending an immutable event.
+
+def current_source_anchor(source):
+    """Construct the only source anchor accepted by the closure store API."""
+    identity = {
+        "path": source["path"], "start_line": source["start_line"],
+        "end_line": source["end_line"], "body_sha256": source["body_sha256"],
+        "file_sha256": source["file_sha256"], "unit_key": source["unit_key"],
+        "head_sha": source["head_sha"],
+    }
+    return {
+        "anchor_type": "current_source", "anchor": _digest(identity),
+        "evidence_fingerprint": source["file_sha256"],
+        "details": copy.deepcopy(source),
+    }
+
+
+def _source_proof(evidence, prior_finding, context):
+    """Independently bind a claimed excerpt to the live trusted materialization."""
+    unit_key, head_sha = _closure_coordinates(context)
+    if not isinstance(evidence, dict) or not isinstance(evidence.get("source"), dict):
+        raise ValueError("closure requires current-tree source evidence")
+    supplied = evidence["source"]
+    if supplied.get("unit_key") != unit_key:
+        raise ValueError("closure source unit does not match the current unit")
+    if supplied.get("head_sha") != head_sha:
+        raise ValueError("closure source SHA does not match the current materialization")
+    path = supplied.get("path")
+    if not isinstance(path, str) or not path:
+        raise ValueError("closure source requires a path")
+    relative = PurePosixPath(path)
+    if relative.is_absolute() or str(relative) != path or ".." in relative.parts:
+        raise ValueError("closure source path must be a normalized repository-relative path")
+    original_paths = {prior_finding.get("path")}
+    original_paths.update(
+        (anchor.get("details") or {}).get("path")
+        for anchor in prior_finding.get("anchors") or ()
+    )
+    if path not in original_paths - {None, ""}:
+        raise ValueError("closure source must inspect the original finding path")
+    start = supplied.get("start_line")
+    end = supplied.get("end_line")
+    if (not isinstance(start, int) or isinstance(start, bool) or
+            not isinstance(end, int) or isinstance(end, bool) or start < 1 or end < start):
+        raise ValueError("closure source requires a positive line range")
+    body = supplied.get("body")
+    if not isinstance(body, str) or not body.strip():
+        raise ValueError("closure source requires a non-empty exact body")
+    try:
+        root = Path(context.get("path") or "").resolve(strict=True)
+        candidate = (root / Path(*relative.parts)).resolve(strict=True)
+        candidate.relative_to(root)
+        if not root.is_dir() or not candidate.is_file():
+            raise ValueError("closure source is not a materialized regular file")
+        current = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=root, capture_output=True,
+            text=True, timeout=30, check=False,
+        )
+        if current.returncode or current.stdout.strip() != head_sha:
+            raise ValueError("materialized HEAD does not match the closure source SHA")
+        pinned = subprocess.run(
+            ["git", "--no-replace-objects", "show", f"{head_sha}:{path}"],
+            cwd=root, capture_output=True, timeout=30, check=False,
+        )
+        if pinned.returncode:
+            raise ValueError("closure source is absent from the pinned current tree")
+        data = pinned.stdout
+        actual_lines = data.decode("utf-8").splitlines()
+        actual_body = "\n".join(actual_lines[start - 1:end])
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError(f"closure source could not be inspected: {exc}") from exc
+    if end > len(actual_lines) or actual_body != body:
+        raise ValueError("closure source body does not match the current tree")
+    source = {
+        "path": path, "start_line": start, "end_line": end, "body": actual_body,
+        "body_sha256": hashlib.sha256(actual_body.encode("utf-8")).hexdigest(),
+        "file_sha256": hashlib.sha256(data).hexdigest(),
+        "unit_key": unit_key, "head_sha": head_sha,
+    }
+    return {
+        "claim": str(evidence.get("claim") or "").strip(),
+        "source": source,
+        "verification": {
+            "schema": CLOSURE_VERIFICATION_SCHEMA,
+            "independent_tree_inspection": True,
+            "unit_key": unit_key, "head_sha": head_sha,
+        },
+    }
+
+
+def _actual_test(test, kind):
+    if not isinstance(test, dict):
+        return None
+    name = str(test.get("name") or "")
+    state = str(test.get("state") or "").strip().lower()
+    fingerprint = str(test.get("evidence_fingerprint") or "")
+    if (kind not in _CLOSURE_TEST_KINDS or not name or state not in _SUCCESSFUL_TEST_STATES
+            or not fingerprint or "output" not in test):
+        return None
+    return {
+        "name": name, "kind": kind, "state": state,
+        "output": str(test.get("output") or ""),
+        "evidence_fingerprint": fingerprint,
+    }
+
+
+def _executed_tests(execution, unit_key, head_sha):
+    """Read only supervisor execution products, never worker revalidation claims."""
+    if execution is None:
+        return []
+    tests = []
+    required = execution.required or {}
+    if str(required.get("commit") or "") == head_sha:
+        tests.extend(
+            actual for suite in required.get("suites") or ()
+            if (actual := _actual_test(suite, "required")) is not None
+        )
+    dynamic = execution.dynamic or {}
+    revisions = dynamic.get("revisions") or {}
+    if (dynamic.get("schema") == "final-review-dynamic-result/v1"
+            and dynamic.get("unit_key") == unit_key
+            and revisions.get("head_sha") == head_sha):
+        for test in dynamic.get("tests") or ():
+            kind = str(test.get("kind") or "") if isinstance(test, dict) else ""
+            actual = _actual_test(test, kind)
+            if actual is not None:
+                tests.append(actual)
+    return tests
+
+
+def _test_proof(claim, store, unit_id, execution, context):
+    """Match an exact claim to this run's executed and already-persisted test."""
+    unit_key, head_sha = _closure_coordinates(context)
+    if not isinstance(claim, dict):
+        raise ValueError("positive closure requires exact revalidation evidence")
+    if claim.get("unit_key") != unit_key or claim.get("head_sha") != head_sha:
+        raise ValueError("revalidation unit or SHA does not match the current unit")
+    name = str(claim.get("test") or "")
+    expected = {
+        "name": name, "state": str(claim.get("state") or "").strip().lower(),
+        "output": claim.get("output"),
+        "evidence_fingerprint": claim.get("evidence_fingerprint"),
+    }
+    if not name or "output" not in claim or not claim.get("evidence_fingerprint"):
+        raise ValueError("revalidation requires exact test name, state, output, and fingerprint")
+    executed = [
+        test for test in _executed_tests(execution, unit_key, head_sha)
+        if all(test[field] == expected[field] for field in expected)
+    ]
+    if claim.get("kind") is not None:
+        executed = [test for test in executed if test["kind"] == claim["kind"]]
+    if len(executed) != 1:
+        raise ValueError("revalidation does not uniquely match an independently executed test")
+    actual = executed[0]
+    persisted = [
+        test for test in store.test_evidence_for_unit(unit_id)
+        if all(test[field] == actual[field] for field in actual)
+    ]
+    if len(persisted) != 1:
+        raise ValueError("revalidation test was not recorded before closure finalization")
+    return {
+        "test": actual["name"], "test_id": persisted[0]["test_id"],
+        "kind": actual["kind"], "state": actual["state"], "status": "passed",
+        "output": actual["output"],
+        "evidence_fingerprint": actual["evidence_fingerprint"],
+        "unit_key": unit_key, "head_sha": head_sha,
+        "verification": {
+            "schema": CLOSURE_VERIFICATION_SCHEMA,
+            "independently_executed": True,
+            "unit_key": unit_key, "head_sha": head_sha,
+        },
+    }
+
+
+def _closure_anchors(prior_finding, source):
+    original = next((anchor for anchor in prior_finding.get("anchors") or ()
+                     if anchor.get("anchor_type") == "content"
+                     and anchor.get("anchor") == prior_finding["content_anchor"]), None)
+    if original is None:
+        original = {
+            "anchor_type": "content", "anchor": prior_finding["content_anchor"],
+            "evidence_fingerprint": "",
+            "details": {"path": prior_finding.get("path"),
+                        "line": prior_finding.get("line")},
+        }
+    return [copy.deepcopy(original), current_source_anchor(source)]
+
+
+def process_finding_closures(store, run_id, unit_id, prior, closures, *,
+                             verification_context=None, execution=None):
+    """Finalize claims only after independent tree/test corroboration.
+
+    Worker anchors, status fields, reviewer confidence, and fingerprints are
+    claims only. The supervisor reads the live materialization and matches a
+    persisted test from this same unit/run before appending an immutable event.
     """
     prior_by_id = {
         str(finding.get("finding_id")): finding
@@ -384,16 +588,31 @@ def process_finding_closures(store, run_id, unit_id, prior, closures):
             thread_id = prior_finding["thread_id"]
             closure_type = str(closure.get("closure_type") or "").strip().lower()
             if closure_type == "resolved":
+                resolution = _source_proof(
+                    closure.get("resolution_evidence"), prior_finding, verification_context)
+                revalidation = _test_proof(
+                    closure.get("revalidation"), store, unit_id, execution,
+                    verification_context)
                 history = resolve_finding(
                     store, run_id, thread_id,
-                    anchors=closure.get("anchors"),
-                    resolution_evidence=closure.get("resolution_evidence"),
-                    revalidation=closure.get("revalidation"),
+                    anchors=_closure_anchors(prior_finding, resolution["source"]),
+                    resolution_evidence=resolution, revalidation=revalidation,
                 )
             elif closure_type == "falsified":
-                evidence = closure.get("evidence")
-                if not _recorded_evidence(evidence):
+                supplied_evidence = closure.get("evidence")
+                if not _recorded_evidence(supplied_evidence):
                     raise ValueError("finding falsification requires recorded evidence")
+                evidence = {"claim": str(supplied_evidence.get("claim") or "")}
+                if supplied_evidence.get("source") is not None:
+                    evidence = _source_proof(
+                        supplied_evidence, prior_finding, verification_context)
+                if supplied_evidence.get("revalidation") is not None:
+                    evidence["revalidation"] = _test_proof(
+                        supplied_evidence["revalidation"], store, unit_id, execution,
+                        verification_context)
+                if "source" not in evidence and "revalidation" not in evidence:
+                    raise ValueError(
+                        "finding falsification requires verified tree or executed-test evidence")
                 history = falsify_finding(
                     store, run_id, thread_id, closure.get("rationale"), evidence=evidence)
             else:

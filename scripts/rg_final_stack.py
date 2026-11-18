@@ -153,6 +153,7 @@ def _run_unit(store, identity, graph, unit_key, unit_id, *, item=None, composed=
     kind = "individual" if item is not None else unit_key
     aggregation = None
     execution = None
+    finding_closures = []
     lenses_recorded = False
     context_complete = intent_complete = False
     merge_base = None
@@ -251,6 +252,12 @@ def _run_unit(store, identity, graph, unit_key, unit_id, *, item=None, composed=
             standalone._carry_observed_findings(
                 store, identity["run_id"], unit_id, unit_prior, observations)
             record_execution_tests(store, unit_id, execution)
+            # Finalize only after this unit's actual tests have been persisted,
+            # while the trusted current tree is still available for inspection.
+            finding_closures = standalone._process_unit_finding_closures(
+                store, identity["run_id"], unit_id, unit_key, unit_prior,
+                execution, materialized,
+            )
     except Exception as exc:
         if not lenses_recorded:
             aggregation = aggregation or failed_lens_aggregation(exc)
@@ -276,6 +283,7 @@ def _run_unit(store, identity, graph, unit_key, unit_id, *, item=None, composed=
         merge_base_sha=merge_base, composition_complete=composition_complete,
         composition_errors=composition_errors,
     )
+    output["finding_closures"] = finding_closures
     for lens in output["lenses"]:
         lens["capabilities"] = list(capabilities)
     return output
@@ -541,11 +549,12 @@ def run_final_stack(references, *, repo_root=None, provider=None, store_path=Non
                 store.record_warning(unit["unit_id"], "freshness-check", str(exc), "freshness")
 
         for unit in units:
-            unit["finding_closures"] = standalone._process_unit_finding_closures(
-                store, run_id, unit["unit_id"],
-                standalone.finding_memory_for_unit(prior, unit["unit_key"]),
-                unit["_execution"],
-            )
+            if "finding_closures" not in unit:
+                unit["finding_closures"] = standalone._process_unit_finding_closures(
+                    store, run_id, unit["unit_id"], unit["unit_key"],
+                    standalone.finding_memory_for_unit(prior, unit["unit_key"]),
+                    unit["_execution"],
+                )
 
         static_complete = all(unit["static_lenses_complete"] for unit in units)
         checks_complete = bool(

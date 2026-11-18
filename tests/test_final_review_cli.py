@@ -30,6 +30,7 @@ LENS_NAMES = (
 )
 sys.path.insert(0, str(ROOT / "scripts"))
 import rg_store  # noqa: E402
+import rg_final_review  # noqa: E402
 from rg_final_store import FinalStore  # noqa: E402
 
 
@@ -798,3 +799,47 @@ def test_final_comment_and_testing_standards_are_both_visible(tmp_path, monkeypa
         assert "Every public function" not in request["diff"]
         assert request["repository"]["access"] == "full_tree"
         assert not Path(request["repository"]["path"]).exists()
+
+
+@pytest.mark.parametrize(("arguments", "expected_reference", "expected_publish"), [
+    (["17"], "17", True),
+    (["--publish", "!17"], "!17", True),
+    (["--no-publish", "17"], "17", False),
+    (["17", "18"], ["17", "18"], True),
+    (["17", "--no-publish", "https://gitlab.example.test/mr/18"],
+     ["17", "https://gitlab.example.test/mr/18"], False),
+    (["https://github.com/group/project/pull/17", "--publish", "18"],
+     ["https://github.com/group/project/pull/17", "18"], True),
+])
+def test_final_review_publication_flags_are_consistent_for_one_and_many_refs(
+        monkeypatch, capsys, arguments, expected_reference, expected_publish):
+    calls = []
+
+    def selected(reference, **kwargs):
+        calls.append((reference, kwargs))
+        return {
+            "complete": True, "state": "pass", "stage": "S16-07",
+            "finding_verdict": "pass", "run_id": "run-1", "exit_code": 0,
+        }
+
+    monkeypatch.setattr(rg_final_review, "run_final_review", selected)
+
+    assert rg_final_review.main(["final-review", *arguments]) == 0
+    assert len(calls) == 1
+    reference, options = calls[0]
+    assert reference == expected_reference
+    assert options["publish"] is expected_publish
+    assert json.loads(capsys.readouterr().out)["run_id"] == "run-1"
+
+
+def test_final_review_rejects_unknown_or_conflicting_publication_flags(monkeypatch, capsys):
+    monkeypatch.setattr(
+        rg_final_review, "run_final_review",
+        lambda *args, **kwargs: pytest.fail("an invalid CLI selection must not run"),
+    )
+
+    assert rg_final_review.main(["final-review", "--unknown", "17"]) == 2
+    assert rg_final_review.main([
+        "final-review", "17", "--publish", "18", "--no-publish",
+    ]) == 2
+    assert "--unknown" in capsys.readouterr().err

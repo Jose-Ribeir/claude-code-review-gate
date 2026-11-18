@@ -546,3 +546,225 @@ def test_critical_stop_skips_dependents_preserves_safe_evidence_and_never_publis
             ))
             assert unit["findings"] == []
         assert report["publications"] == []
+
+
+def _memory_worker(target_unit, closure_type, *, valid=False, observed=None):
+    """Return a worker which first reports, then claims to close, one finding."""
+    observed = observed if observed is not None else {}
+
+    def invoke(request, **kwargs):
+        result = {
+            "schema": "final-review-worker-result/v1", "status": "success",
+            "summary": "lens complete", "findings": [], "warnings": [], "unreviewed": [],
+        }
+        if request["lens"] != "correctness" or request["unit_key"] != target_unit:
+            return result
+        prior = request["finding_memory"]["findings"]
+        if not prior:
+            result["findings"] = [{
+                "id": "closure-regression", "path": "app.txt",
+                "start_line": 2, "end_line": 2, "severity": "high",
+                "confidence": 0.99, "content": "The caller contract is broken.",
+                "evidence": "The current line must satisfy the caller contract.",
+            }]
+            return result
+        pending = prior[0]
+        observed.update(pending)
+        anchors = deepcopy(pending["anchors"])
+        for anchor in anchors:
+            anchor["evidence_fingerprint"] = "fabricated-changed-anchor"
+        if closure_type == "falsified":
+            evidence = {"claim": "trust the reviewer", "confidence": 1.0}
+            if valid:
+                lines = (Path(request["repository"]["path"]) / "app.txt").read_text(
+                    encoding="utf-8").splitlines()
+                evidence = {
+                    "claim": "Pinned source proves the reported behavior is intentional.",
+                    "source": {
+                        "path": "app.txt", "start_line": 2, "end_line": 2,
+                        "body": lines[1], "unit_key": target_unit,
+                        "head_sha": request["repository"]["head_sha"],
+                    },
+                }
+            result["finding_falsifications"] = [{
+                "finding_id": pending["finding_id"],
+                "content_anchor": pending["content_anchor"],
+                "rationale": "The exact pinned source disproves the original contract claim.",
+                "evidence": evidence,
+            }]
+            return result
+        resolution = {
+            "finding_id": pending["finding_id"],
+            "content_anchor": pending["content_anchor"],
+            "anchors": anchors,
+            "resolution_evidence": {"claim": "fixed"},
+            "revalidation": {"status": "passed", "revalidated": True},
+        }
+        if valid:
+            lines = (Path(request["repository"]["path"]) / "app.txt").read_text(
+                encoding="utf-8").splitlines()
+            head_sha = request["repository"]["head_sha"]
+            resolution["resolution_evidence"] = {
+                "claim": "The caller contract now has exact current-tree and test proof.",
+                "source": {
+                    "path": "app.txt", "start_line": 2, "end_line": 2,
+                    "body": lines[1], "unit_key": target_unit, "head_sha": head_sha,
+                },
+            }
+            resolution["revalidation"] = {
+                "test": "stack-required", "state": "pass", "output": "required OK",
+                "evidence_fingerprint": "required-" + head_sha,
+                "unit_key": target_unit, "head_sha": head_sha,
+            }
+        result["finding_resolutions"] = [resolution]
+        return result
+
+    return invoke
+
+
+def _single_item_run(harness, store_path):
+    harness.provider = Provider(harness.items[:1])
+    return rg_final_review.run_final_review(
+        harness.items[0]["url"], provider=harness.provider, repo_root=harness.repo,
+        store_path=store_path, environ=harness.environ,
+        required_runner=harness.required, dynamic_runner=harness.dynamic,
+        context_kwargs={"intent_fetcher": harness.intent},
+    )
+
+
+@pytest.mark.parametrize("closure_type", ["resolved", "falsified"])
+def test_standalone_orchestrator_rejects_fabricated_closure_evidence(
+        tmp_path, monkeypatch, closure_type):
+    harness = Harness(tmp_path)
+    store_path = tmp_path / f"standalone-fabricated-{closure_type}.sqlite3"
+    observed = {}
+    monkeypatch.setattr(
+        rg_final_review, "invoke_worker",
+        _memory_worker("individual:1", closure_type, observed=observed),
+    )
+
+    first = _single_item_run(harness, store_path)
+    second = _single_item_run(harness, store_path)
+
+    assert first["state"] == "findings"
+    assert second["state"] == "incomplete"
+    assert second["finding_memory"]["clear_allowed"] is False
+    assert second["finding_memory"]["pending_thread_ids"] == [observed["thread_id"]]
+    assert second["finding_closures"][0]["state"] == "rejected"
+    with FinalStore(store_path) as store:
+        assert [
+            event["event_type"]
+            for event in store.finding_history(observed["thread_id"])["events"]
+        ] == ["observed"]
+
+
+@pytest.mark.parametrize("target_unit", [
+    "individual:1", "individual:2", "individual:3", "combined", "prospective",
+])
+def test_every_stack_unit_rejects_worker_only_resolution_evidence(
+        tmp_path, monkeypatch, target_unit):
+    harness = Harness(tmp_path)
+    store_path = tmp_path / f"fabricated-{target_unit.replace(':', '-')}.sqlite3"
+    observed = {}
+    monkeypatch.setattr(
+        rg_final_review, "invoke_worker",
+        _memory_worker(target_unit, "resolved", observed=observed),
+    )
+
+    first = harness.run(store_path)
+    second = harness.run(store_path)
+
+    assert first["state"] == "findings"
+    assert second["state"] == "incomplete"
+    assert second["finding_memory"]["clear_allowed"] is False
+    assert second["finding_memory"]["pending_thread_ids"] == [observed["thread_id"]]
+    assert second["finding_closures"][0]["state"] == "rejected"
+    with FinalStore(store_path) as store:
+        assert len(store.finding_history(observed["thread_id"])["events"]) == 1
+
+
+def test_standalone_orchestrator_records_exact_current_tree_and_test_proof(
+        tmp_path, monkeypatch):
+    harness = Harness(tmp_path)
+    store_path = tmp_path / "standalone-verified-resolution.sqlite3"
+    observed = {}
+    monkeypatch.setattr(
+        rg_final_review, "invoke_worker",
+        _memory_worker("individual:1", "resolved", valid=True, observed=observed),
+    )
+
+    first = _single_item_run(harness, store_path)
+    second = _single_item_run(harness, store_path)
+
+    assert first["state"] == "findings"
+    assert second["state"] == "pass"
+    assert second["finding_memory"]["clear_allowed"] is True
+    assert second["finding_closures"][0]["state"] == "recorded"
+    with FinalStore(store_path) as store:
+        event = store.finding_history(observed["thread_id"])["events"][-1]
+        assert event["event_type"] == "resolved"
+        assert event["resolution_evidence"]["source"]["body"] == "item 1"
+        assert event["resolution_evidence"]["source"]["file_sha256"]
+        assert event["revalidation"]["test"] == "stack-required"
+        assert event["revalidation"]["test_id"]
+
+
+def test_standalone_orchestrator_falsifies_only_with_verified_tree_evidence(
+        tmp_path, monkeypatch):
+    harness = Harness(tmp_path)
+    store_path = tmp_path / "standalone-verified-falsification.sqlite3"
+    observed = {}
+    monkeypatch.setattr(
+        rg_final_review, "invoke_worker",
+        _memory_worker("individual:1", "falsified", valid=True, observed=observed),
+    )
+
+    first = _single_item_run(harness, store_path)
+    second = _single_item_run(harness, store_path)
+
+    assert first["state"] == "findings"
+    assert second["state"] == "pass"
+    assert second["finding_closures"][0]["state"] == "recorded"
+    with FinalStore(store_path) as store:
+        event = store.finding_history(observed["thread_id"])["events"][-1]
+        assert event["event_type"] == "falsified"
+        assert event["evidence"]["source"]["body"] == "item 1"
+        assert event["evidence"]["verification"]["independent_tree_inspection"] is True
+        assert event["evidence"]["verification"]["head_sha"] == \
+            first["revisions"]["source_sha"]
+
+
+@pytest.mark.parametrize(("section", "field", "value"), [
+    ("revalidation", "test", "unrelated-passing-test"),
+    ("revalidation", "output", "unrelated passing output"),
+    ("revalidation", "evidence_fingerprint", "unrelated-fingerprint"),
+    ("revalidation", "unit_key", "combined"),
+    ("resolution_evidence", "body", "fabricated current body"),
+    ("resolution_evidence", "head_sha", "0" * 40),
+])
+def test_orchestrator_rejects_mismatched_source_or_test_identity(
+        tmp_path, monkeypatch, section, field, value):
+    harness = Harness(tmp_path)
+    store_path = tmp_path / f"mismatch-{section}-{field}.sqlite3"
+    observed = {}
+    valid_worker = _memory_worker("individual:1", "resolved", valid=True, observed=observed)
+
+    def mismatched_worker(request, **kwargs):
+        result = valid_worker(request, **kwargs)
+        for resolution in result.get("finding_resolutions") or ():
+            target = resolution[section]
+            if section == "resolution_evidence":
+                target = target["source"]
+            target[field] = value
+        return result
+
+    monkeypatch.setattr(rg_final_review, "invoke_worker", mismatched_worker)
+    first = _single_item_run(harness, store_path)
+    second = _single_item_run(harness, store_path)
+
+    assert first["state"] == "findings"
+    assert second["state"] == "incomplete"
+    assert second["finding_closures"][0]["state"] == "rejected"
+    assert second["finding_memory"]["clear_allowed"] is False
+    with FinalStore(store_path) as store:
+        assert len(store.finding_history(observed["thread_id"])["events"]) == 1

@@ -196,13 +196,21 @@ def test_composed_worker_resolution_closes_only_its_inherited_unit_finding(tmp_p
         " and request['lens'] == 'correctness':\n"
         "    pending = prior[0]\n"
         "    anchors = pending['anchors']\n"
-        "    for anchor in anchors: anchor['evidence_fingerprint'] = 'fixed-composed-tree'\n"
+        "    for anchor in anchors: anchor['evidence_fingerprint'] = 'ignored-worker-claim'\n"
+        "    head_sha = request['repository']['head_sha']\n"
+        "    body = (pathlib.Path(request['repository']['path']) / 'app.txt')"
+        ".read_text().splitlines()[1]\n"
+        "    source = {'path': 'app.txt', 'start_line': 2, 'end_line': 2,"
+        " 'body': body, 'unit_key': 'combined', 'head_sha': head_sha}\n"
         "    result['finding_resolutions'] = [{"
         " 'finding_id': pending['finding_id'],"
         " 'content_anchor': pending['content_anchor'],"
         " 'thread_id': pending['thread_id'], 'anchors': anchors,"
-        " 'resolution_evidence': {'composition': 'combined caller contract restored'},"
-        " 'revalidation': {'status': 'passed', 'test': 'composed_required_suite'}}]\n"
+        " 'resolution_evidence': {'claim': 'composition caller contract restored',"
+        " 'source': source},"
+        " 'revalidation': {'test': 'stack-required', 'state': 'pass',"
+        " 'output': 'required OK', 'evidence_fingerprint': 'required-' + head_sha,"
+        " 'unit_key': 'combined', 'head_sha': head_sha}}]\n"
         "print(json.dumps(result))\n",
         encoding="utf-8",
     )
@@ -228,8 +236,8 @@ def test_composed_worker_resolution_closes_only_its_inherited_unit_finding(tmp_p
         history = store.finding_history(pending["thread_id"])
         assert [event["event_type"] for event in history["events"]] == [
             "observed", "resolved"]
-        assert history["events"][-1]["revalidation"]["test"] == \
-            "composed_required_suite"
+        assert history["events"][-1]["revalidation"]["test"] == "stack-required"
+        assert history["events"][-1]["resolution_evidence"]["source"]["body"] == "item 1"
         assert store.official_findings(second["run_id"]) == []
 
 

@@ -189,10 +189,14 @@ def _default_worker_command(request_path, repo_root, environ, request):
         f"Return only a {WORKER_RESULT_SCHEMA} JSON object with status, summary, findings "
         "and warnings; do not trust your own verdict field to determine the gate result. "
         "If finding_memory contains prior findings, omission never resolves them. Explicit "
-        "closure may use finding_resolutions entries with finding_id, content_anchor, anchors, "
-        "resolution_evidence and successful revalidation, or finding_falsifications entries "
-        "with finding_id, content_anchor, rationale and evidence. Only close a named prior "
-        "finding when the current pinned-tree evidence supports that conclusion."
+        "closure may use finding_resolutions entries with finding_id, content_anchor, "
+        "resolution_evidence.source (path, start_line, end_line, exact body, unit_key, head_sha) "
+        "and revalidation (exact test name, state, output, evidence_fingerprint, unit_key, "
+        "head_sha) copied from an actually executed required/existing/ephemeral test. A "
+        "status/revalidated declaration alone is ignored. finding_falsifications require "
+        "finding_id, content_anchor, a specific rationale, and evidence.source or "
+        "evidence.revalidation with the same independent-proof contract. Only close a named "
+        "prior finding when current pinned-tree and executed evidence supports that conclusion."
     )
     if selection.name == "claude":
         args = [
@@ -814,11 +818,19 @@ def _carry_observed_findings(store, run_id, unit_id, prior, observations):
             )
 
 
-def _process_unit_finding_closures(store, run_id, unit_id, unit_prior, execution):
+def _process_unit_finding_closures(store, run_id, unit_id, unit_key, unit_prior,
+                                   execution, materialized=None):
     if execution is None:
         return []
+    context = None
+    if materialized is not None:
+        context = {
+            "path": str(materialized.path), "head_sha": materialized.head_sha,
+            "unit_key": unit_key,
+        }
     return process_finding_closures(
-        store, run_id, unit_id, unit_prior, execution.aggregation.finding_closures)
+        store, run_id, unit_id, unit_prior, execution.aggregation.finding_closures,
+        verification_context=context, execution=execution)
 
 
 def run_final_review(reference, *, repo_root=None, provider=None, store_path=None,
@@ -881,6 +893,7 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
         prior = rerun_context(store, run_id)
         executions = {unit_id: None, combined_id: None}
         aggregations = {}
+        closure_outcomes = {}
         context_complete = intent_complete = False
         merge_base = None
         try:
@@ -1011,6 +1024,15 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
                         store, unit_id, individual_execution, materialized.diff)
                     combined_execution.stop_id = _record_execution_evidence(
                         store, combined_id, combined_execution, materialized.diff)
+                # Claims were collected before tests, but cannot finalize until
+                # the independently executed evidence exists in this same run.
+                for current_id, unit_key in ((unit_id, "individual:1"),
+                                             (combined_id, "combined")):
+                    closure_outcomes[unit_key] = _process_unit_finding_closures(
+                        store, run_id, current_id, unit_key,
+                        finding_memory_for_unit(prior, unit_key),
+                        executions[current_id], materialized,
+                    )
         except Exception as exc:
             for current_id in unit_ids:
                 if current_id not in aggregations:
@@ -1037,12 +1059,12 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
             for current_id in unit_ids:
                 store.record_warning(current_id, "freshness-check", str(exc), "freshness")
 
-        closure_outcomes = {}
         for current_id, unit_key in ((unit_id, "individual:1"), (combined_id, "combined")):
-            closure_outcomes[unit_key] = _process_unit_finding_closures(
-                store, run_id, current_id, finding_memory_for_unit(prior, unit_key),
-                executions[current_id],
-            )
+            if unit_key not in closure_outcomes:
+                closure_outcomes[unit_key] = _process_unit_finding_closures(
+                    store, run_id, current_id, unit_key,
+                    finding_memory_for_unit(prior, unit_key), executions[current_id],
+                )
 
         execution_list = [executions[unit_id], executions[combined_id]]
         stopped = any(execution and execution.stop for execution in execution_list)
@@ -1765,8 +1787,38 @@ def execute_final_stack(references, **kwargs):
     return run_final_stack(references, **kwargs)
 
 
+def _parse_main_arguments(args):
+    """Parse publication guards without mistaking any positional ref for a flag.
+
+    SPEC-16's explicit operator command requests guarded publication by default
+    for both standalone and complete-stack forms. ``--no-publish`` is the local-
+    only escape hatch; ``--publish`` states the default explicitly.
+    """
+    publish = None
+    references = []
+    position = 0
+    while position < len(args):
+        argument = args[position]
+        if argument == "--":
+            references.extend(args[position + 1:])
+            break
+        if argument in ("--publish", "--no-publish"):
+            selected = argument == "--publish"
+            if publish is not None and publish != selected:
+                raise ValueError("--publish and --no-publish are mutually exclusive")
+            publish = selected
+        elif argument.startswith("--"):
+            raise ValueError(f"unknown final-review option: {argument}")
+        else:
+            references.append(argument)
+        position += 1
+    if not references:
+        raise ValueError("requires at least one explicit ref")
+    return references, True if publish is None else publish
+
+
 def main(argv=None):
-    """Run the standalone ``final-review`` operator command."""
+    """Run final review with guarded publication on by default for all ref counts."""
     args = list(sys.argv[1:] if argv is None else argv)
     if args and args[0] == "final-review":
         args = args[1:]
@@ -1778,7 +1830,9 @@ def main(argv=None):
     try:
         # Numeric shorthand and canonical URLs share provider selection, graph
         # validation, and the complete standalone/stack publication lifecycle.
-        result = run_final_review(args if len(args) > 1 else args[0], publish=True)
+        references, publish = _parse_main_arguments(args)
+        result = run_final_review(
+            references if len(references) > 1 else references[0], publish=publish)
     except Exception as exc:
         sys.stderr.write(f"review-gate final-review failed: {exc}\n")
         return 2
