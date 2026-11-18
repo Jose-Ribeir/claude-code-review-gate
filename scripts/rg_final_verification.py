@@ -6,10 +6,14 @@ the pinned commit, not the caller's mutable working tree.
 """
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
+import math
 import os
 import re
+import shlex
+import shutil
 import subprocess
 from pathlib import Path
 import tempfile
@@ -79,6 +83,7 @@ def _required_check_declarations(repository: Path, commit: str) -> list[dict]:
             "command": command,
             "source": ".ocr/config.json",
             "timeout": declaration.get("timeout", 60),
+            "timeout_source": "declaration" if "timeout" in declaration else "default",
         })
     return suites
 
@@ -97,25 +102,222 @@ def _yaml_scalar(raw: str) -> str:
     return value
 
 
-def _suite(source: str, name: str, command: str) -> dict:
-    return {"name": name, "command": command, "source": source, "timeout": 60}
+def _suite(
+        source: str, name: str, command: str, python_version=None, matrix=None) -> dict:
+    suite = {
+        "name": name, "command": command, "source": source,
+        "timeout": 60, "timeout_source": "default",
+    }
+    if python_version is not None:
+        suite["python_version"] = python_version
+    if matrix:
+        suite["matrix"] = dict(matrix)
+    return suite
 
 
-def _unassessable(source: str, name: str, reason: str) -> dict:
+def _unassessable(
+        source: str, name: str, reason: str, python_version=None, matrix=None) -> dict:
     return {
-        **_suite(source, name, None),
+        **_suite(source, name, None, python_version=python_version, matrix=matrix),
         "state": "unassessable",
         "error": f"required declaration {name!r} is unassessable: {reason}",
     }
 
 
-def _github_declarations(source: str, raw: str) -> list[dict]:
-    """Extract literal required step commands; no Actions runner emulation.
+def _bounded_timeout(value) -> float:
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value) or value <= 0):
+        raise VerificationError("required suite timeout must be a positive finite number")
+    return max(1, min(3600, value))
 
-    Diagnostic-only and explicitly non-blocking steps are not required suites.
-    Actions, reusable workflows, matrices, and unresolved expressions become
-    explicit unassessable declarations rather than guessed passes or failures.
-    """
+
+def _github_matrix_values(raw: str) -> list[str]:
+    value = raw.strip()
+    if not (value.startswith("[") and value.endswith("]")):
+        raise ValueError("matrix values must be finite inline or block sequences")
+    try:
+        parsed = ast.literal_eval(value)
+    except (SyntaxError, ValueError):
+        parsed = [part.strip() for part in value[1:-1].split(",")]
+    if not isinstance(parsed, list) or any(not isinstance(item, str) for item in parsed):
+        raise ValueError("matrix sequences must contain only literal scalar values")
+    values = [_yaml_scalar(item) for item in parsed]
+    if any(not item or "${{" in item for item in values):
+        raise ValueError("matrix values must be nonempty literal scalars, not expressions")
+    return values
+
+
+def _github_matrix_contexts(block: list[str]) -> list[dict]:
+    matrix_at = next((i for i, line in enumerate(block)
+                      if re.match(r"^      matrix:(?:\s|$)", line)), None)
+    if matrix_at is None:
+        return [{}]
+    if not re.match(r"^      matrix:\s*$", block[matrix_at]):
+        raise ValueError("only block-form literal matrix mappings are supported")
+    matrix_end = next((i for i in range(matrix_at + 1, len(block))
+                       if re.match(r"^    \S", block[i])), len(block))
+    axes = []
+    index = matrix_at + 1
+    while index < matrix_end:
+        line = block[index]
+        if not line.strip() or line.lstrip().startswith("#"):
+            index += 1
+            continue
+        match = re.match(r"^        ([A-Za-z_][A-Za-z0-9_-]*):\s*(.*?)\s*$", line)
+        if match is None:
+            raise ValueError("only literal matrix key/value mappings are supported")
+        key, value = match.groups()
+        if key in ("include", "exclude"):
+            raise ValueError("matrix include/exclude rewriting is unsupported")
+        if any(existing == key for existing, _ in axes):
+            raise ValueError(f"matrix key {key!r} is declared more than once")
+        if value:
+            values = _github_matrix_values(value)
+            index += 1
+        else:
+            index += 1
+            values = []
+            while index < matrix_end:
+                item = re.match(r"^          -\s*(.*?)\s*$", block[index])
+                if item is None:
+                    break
+                literal = _yaml_scalar(item.group(1))
+                if not literal or "${{" in literal:
+                    raise ValueError("matrix values must be nonempty literal scalars")
+                values.append(literal)
+                index += 1
+            if not values:
+                raise ValueError(f"matrix key {key!r} has no literal values")
+        axes.append((key, values))
+    if not axes:
+        raise ValueError("matrix must declare at least one literal axis")
+    combination_count = 1
+    for _, values in axes:
+        combination_count *= len(values)
+        if combination_count > 64:
+            raise ValueError("literal matrix exceeds the 64-combination safety limit")
+    contexts = []
+
+    def expand(position, current):
+        if position == len(axes):
+            contexts.append(dict(current))
+            return
+        key, values = axes[position]
+        for value in values:
+            current[key] = value
+            expand(position + 1, current)
+        current.pop(key, None)
+
+    expand(0, {})
+    return contexts
+
+
+def _matrix_expression(value: str, matrix: dict) -> str:
+    def replace(match):
+        return matrix.get(match.group(1), match.group(0))
+
+    return re.sub(r"\$\{\{\s*matrix\.([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}",
+                  replace, value)
+
+
+def _matrix_suite_name(base: str, matrix: dict) -> str:
+    if not matrix:
+        return base
+    values = ",".join(f"{key}={value}" for key, value in matrix.items())
+    return f"{base}[{values}]"
+
+
+def _github_step_declarations(source, job, steps, matrix):
+    declarations = []
+    python_version = None
+    for step_number, step in enumerate(steps, 1):
+        if any(re.search(r"\bcontinue-on-error:\s*true\s*$", line)
+               or re.search(r"\bif:\s*(?:failure|always|cancelled)\s*\(", line)
+               for line in step):
+            continue
+        name = _matrix_suite_name(
+            f"{Path(source).stem}:{job}:step-{step_number}", matrix)
+        condition = next((re.match(r"^(?:      -\s+|        )if:\s*(.*?)\s*$", line)
+                          for line in step
+                          if re.match(r"^(?:      -\s+|        )if:\s*(.*?)\s*$", line)),
+                         None)
+        if condition is not None:
+            declarations.append(_unassessable(
+                source, name,
+                "GitHub expression syntax in step conditions cannot be resolved locally: "
+                f"{condition.group(1)!r}", python_version=python_version, matrix=matrix))
+            continue
+        action = next((re.match(r"^\s*(?:-\s*)?uses:\s*(.*?)\s*$", line)
+                       for line in step
+                       if re.match(r"^\s*(?:-\s*)?uses:\s*(.*?)\s*$", line)), None)
+        if action is not None:
+            action_name = _matrix_expression(_yaml_scalar(action.group(1)), matrix)
+            if action_name.startswith("actions/checkout@"):
+                # The pinned clone is already materialized; a second checkout
+                # would be both redundant and less faithful to the commit.
+                continue
+            if action_name.startswith("actions/setup-python@"):
+                declared = next((re.match(r"^\s+python-version:\s*(.*?)\s*$", line)
+                                 for line in step
+                                 if re.match(r"^\s+python-version:\s*(.*?)\s*$", line)), None)
+                version = _matrix_expression(
+                    _yaml_scalar(declared.group(1)), matrix) if declared else ""
+                if not re.fullmatch(r"[0-9]+\.[0-9]+", version):
+                    declarations.append(_unassessable(
+                        source, name,
+                        "setup-python requires one literal major.minor python-version",
+                        matrix=matrix))
+                else:
+                    python_version = version
+                continue
+            declarations.append(_unassessable(
+                source, name, f"action invocation {action_name!r} cannot be executed locally",
+                python_version=python_version, matrix=matrix))
+            continue
+        for offset, line in enumerate(step):
+            match = re.match(r"^(\s*)(?:-\s*)?run:\s*(.*?)\s*$", line)
+            if not match:
+                continue
+            command = _yaml_scalar(match.group(2))
+            if command in ("|", ">", "|-", ">-"):
+                run_indent = len(match.group(1))
+                body = []
+                for following in step[offset + 1:]:
+                    if following.strip() and len(following) - len(following.lstrip()) <= run_indent:
+                        break
+                    body.append(following)
+                content_indent = min(
+                    (len(line) - len(line.lstrip()) for line in body if line.strip()),
+                    default=0,
+                )
+                body = [line[content_indent:] if line.strip() else "" for line in body]
+                if command.startswith(">"):
+                    while body and not body[-1]:
+                        body.pop()
+                    if any(not line or line[:1].isspace() for line in body):
+                        declarations.append(_unassessable(
+                            source, name,
+                            "only a single-paragraph, uniformly indented folded "
+                            "block scalar can be reproduced faithfully",
+                            python_version=python_version, matrix=matrix))
+                        break
+                command = (" " if command.startswith(">") else "\n").join(body)
+            command = _matrix_expression(command, matrix)
+            if command:
+                if "${{" in command:
+                    declarations.append(_unassessable(
+                        source, name, "GitHub expression syntax cannot be resolved locally",
+                        python_version=python_version, matrix=matrix))
+                else:
+                    declarations.append(_suite(
+                        source, name, command,
+                        python_version=python_version, matrix=matrix))
+            break
+    return declarations
+
+
+def _github_declarations(source: str, raw: str) -> list[dict]:
+    """Extract literal required commands without emulating arbitrary Actions."""
     lines = raw.splitlines()
     try:
         jobs_at = next(i for i, line in enumerate(lines) if line == "jobs:")
@@ -143,10 +345,11 @@ def _github_declarations(source: str, raw: str) -> list[dict]:
                 f"reusable workflow {_yaml_scalar(reusable.group(1))!r} "
                 "cannot be expanded locally"))
             continue
-        if any(re.match(r"^      matrix:\s*", line) for line in block):
+        try:
+            matrices = _github_matrix_contexts(block)
+        except ValueError as exc:
             declarations.append(_unassessable(
-                source, f"{Path(source).stem}:{job}",
-                "matrix expansion cannot be faithfully reproduced locally"))
+                source, f"{Path(source).stem}:{job}", str(exc)))
             continue
         try:
             steps_at = next(i for i in range(start + 1, job_end)
@@ -155,58 +358,12 @@ def _github_declarations(source: str, raw: str) -> list[dict]:
             continue
         step_starts = [i for i in range(steps_at + 1, job_end)
                        if re.match(r"^      -\s+", lines[i])]
-        for step_number, step_at in enumerate(step_starts, 1):
-            step_end = (step_starts[step_number]
-                        if step_number < len(step_starts) else job_end)
-            step = lines[step_at:step_end]
-            if any(re.search(r"\bcontinue-on-error:\s*true\s*$", line)
-                   or re.search(r"\bif:\s*(?:failure|always|cancelled)\s*\(", line)
-                   for line in step):
-                continue
-            name = f"{Path(source).stem}:{job}:step-{step_number}"
-            action = next((re.match(r"^\s*(?:-\s*)?uses:\s*(.*?)\s*$", line)
-                           for line in step
-                           if re.match(r"^\s*(?:-\s*)?uses:\s*(.*?)\s*$", line)), None)
-            if action is not None:
-                declarations.append(_unassessable(
-                    source, name,
-                    f"action invocation {_yaml_scalar(action.group(1))!r} cannot be executed locally"))
-                continue
-            for offset, line in enumerate(step):
-                match = re.match(r"^(\s*)(?:-\s*)?run:\s*(.*?)\s*$", line)
-                if not match:
-                    continue
-                command = _yaml_scalar(match.group(2))
-                if command in ("|", ">", "|-", ">-"):
-                    run_indent = len(match.group(1))
-                    body = []
-                    for following in step[offset + 1:]:
-                        if following.strip() and len(following) - len(following.lstrip()) <= run_indent:
-                            break
-                        body.append(following)
-                    content_indent = min(
-                        (len(line) - len(line.lstrip()) for line in body if line.strip()),
-                        default=0,
-                    )
-                    body = [line[content_indent:] if line.strip() else "" for line in body]
-                    if command.startswith(">"):
-                        while body and not body[-1]:
-                            body.pop()
-                        if any(not line or line[:1].isspace() for line in body):
-                            declarations.append(_unassessable(
-                                source, name,
-                                "only a single-paragraph, uniformly indented folded "
-                                "block scalar can be reproduced faithfully"))
-                            break
-                    command = (" " if command.startswith(">") else "\n").join(body)
-                if command:
-                    if "${{" in command:
-                        declarations.append(_unassessable(
-                            source, name,
-                            "GitHub expression syntax cannot be resolved locally"))
-                    else:
-                        declarations.append(_suite(source, name, command))
-                break
+        steps = [lines[step_at:(step_starts[number + 1]
+                                if number + 1 < len(step_starts) else job_end)]
+                 for number, step_at in enumerate(step_starts)]
+        for matrix in matrices:
+            declarations.extend(_github_step_declarations(
+                source, job, steps, matrix))
     return declarations
 
 
@@ -510,10 +667,88 @@ def _fingerprint(commit: str, declaration: dict, attempts: list[dict]) -> str:
         "name": declaration["name"],
         "command": declaration["command"],
         "source": declaration["source"],
+        "timeout": declaration.get("timeout"),
+        "matrix": declaration.get("matrix"),
+        "python_version": declaration.get("python_version"),
         "attempts": attempts,
     }
     encoded = json.dumps(evidence, sort_keys=True, ensure_ascii=False).encode("utf-8")
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _environment_result(
+        commit: str, declaration: dict, missing_tools: list[dict],
+        attempts=None, output="") -> dict:
+    attempts = list(attempts or [])
+    remediations = [tool["remediation"] for tool in missing_tools]
+    names = ", ".join(tool["name"] for tool in missing_tools)
+    error = (f"required suite {declaration['name']!r} cannot execute because "
+             f"required tooling is unavailable: {names}. " + " ".join(remediations))
+    return {
+        **declaration,
+        "kind": "required",
+        "state": "environment",
+        "failure_type": "environment",
+        "blocking": True,
+        "output": output,
+        "attempts": attempts,
+        "error": error,
+        "missing_tools": missing_tools,
+        "evidence_fingerprint": _fingerprint(commit, declaration, attempts),
+    }
+
+
+def _missing_command_tool(command: str, checkout: Path, env: dict) -> list[dict]:
+    try:
+        words = shlex.split(command, posix=True)
+    except ValueError:
+        return []
+    while words and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[0]):
+        words.pop(0)
+    if not words:
+        return []
+    builtins = {
+        ".", ":", "[", "break", "cd", "command", "continue", "eval", "exec",
+        "exit", "export", "if", "printf", "readonly", "return", "set", "shift",
+        "test", "times", "trap", "umask", "unset", "wait", "while",
+    }
+    tool = words[0]
+    if tool in builtins or any(character in tool for character in "$*?~`"):
+        return []
+    if "/" in tool:
+        executable = Path(tool) if Path(tool).is_absolute() else checkout / tool
+        available = executable.is_file() and os.access(executable, os.X_OK)
+    else:
+        executable = shutil.which(tool, path=env["PATH"])
+        available = executable is not None
+    if available:
+        is_python = re.fullmatch(r"python(?:[0-9]+(?:\.[0-9]+)*)?", Path(tool).name)
+        module = words[2] if len(words) > 2 and words[1] == "-m" else ""
+        if is_python and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", module):
+            probe = (
+                "import importlib.util, sys; "
+                "raise SystemExit(importlib.util.find_spec(sys.argv[1]) is None)"
+            )
+            try:
+                available_module = subprocess.run(
+                    [str(executable), "-c", probe, module], cwd=checkout, env=env,
+                    capture_output=True, text=True, check=False, timeout=5,
+                )
+            except (OSError, subprocess.SubprocessError):
+                available_module = None
+            if available_module is None or available_module.returncode:
+                remediation = (
+                    f"Install Python module {module!r} for the selected Python interpreter "
+                    "before required verification, expose that environment on PATH, then rerun."
+                )
+                return [{
+                    "name": f"python-module:{module}", "version": None,
+                    "remediation": remediation,
+                }]
+        return []
+    remediation = (f"Provide required executable {tool!r} in the pinned checkout "
+                   "or on PATH, then rerun required verification.")
+    return [{"name": tool, "version": None, "remediation": remediation}]
 
 
 def _run_suite(repository: Path, commit: str, declaration: dict) -> dict:
@@ -527,6 +762,38 @@ def _run_suite(repository: Path, commit: str, declaration: dict) -> dict:
             "attempts": [],
             "evidence_fingerprint": _fingerprint(commit, declaration, []),
         }
+    python_version = declaration.get("python_version")
+    if python_version is not None:
+        lookup_env = _safe_environment(Path(tempfile.gettempdir()))
+        executable = shutil.which(f"python{python_version}", path=lookup_env["PATH"])
+        declaration = {**declaration, "python_executable": executable}
+        if executable is None:
+            remediation = (f"Install Python {python_version} and expose "
+                           f"python{python_version} on PATH, then rerun required verification.")
+            return _environment_result(commit, declaration, [{
+                "name": f"python{python_version}",
+                "version": python_version,
+                "remediation": remediation,
+            }])
+        version_probe = "import sys; print('.'.join(map(str, sys.version_info[:2])))"
+        try:
+            inspected = subprocess.run(
+                [executable, "-c", version_probe], cwd=tempfile.gettempdir(),
+                env=lookup_env, capture_output=True, text=True, check=False, timeout=5,
+            )
+            detected = inspected.stdout.strip() if inspected.returncode == 0 else "unavailable"
+        except (OSError, subprocess.SubprocessError):
+            detected = "unavailable"
+        if detected != python_version:
+            remediation = (
+                f"Install Python {python_version} and expose python{python_version} on PATH; "
+                f"the selected interpreter reports {detected}. Rerun required verification "
+                "after correcting the interpreter."
+            )
+            return _environment_result(commit, declaration, [{
+                "name": f"python{python_version}", "version": python_version,
+                "detected_version": detected, "remediation": remediation,
+            }])
     outputs = []
     attempts = []
     state = "incomplete"
@@ -539,26 +806,52 @@ def _run_suite(repository: Path, commit: str, declaration: dict) -> dict:
         home.mkdir()
         env = _safe_environment(home)
         try:
+            if python_version is not None:
+                runners = root / "python-bin"
+                runners.mkdir()
+                for runner_name in ("python", "python3"):
+                    (runners / runner_name).symlink_to(declaration["python_executable"])
+                env["PATH"] = str(runners) + os.pathsep + env["PATH"]
             _git(repository, "clone", "--no-hardlinks", "--no-checkout", "--quiet",
                  str(repository.resolve()), str(clone), env=env)
             _git(clone, "checkout", "--detach", "--quiet", commit, env=env)
+            missing_tools = _missing_command_tool(declaration["command"], clone, env)
+            if missing_tools:
+                return _environment_result(commit, declaration, missing_tools)
             for number in (1, 2):
                 if number == 2:
                     # A failed command may modify its checkout. Every rerun starts
                     # from exactly the same immutable tree as the initial run.
                     _git(clone, "reset", "--hard", "--quiet", commit, env=env)
                     _git(clone, "clean", "-ffdx", "--quiet", env=env)
-                proc = subprocess.run(
-                    declaration["command"], cwd=clone, env=env, shell=True,
-                    capture_output=True, text=True, check=False,
-                    timeout=declaration["timeout"],
-                )
+                try:
+                    proc = subprocess.run(
+                        declaration["command"], cwd=clone, env=env, shell=True,
+                        capture_output=True, text=True, check=False,
+                        timeout=declaration["timeout"],
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    stdout = (exc.stdout.decode("utf-8", errors="replace")
+                              if isinstance(exc.stdout, bytes) else exc.stdout or "")
+                    stderr = (exc.stderr.decode("utf-8", errors="replace")
+                              if isinstance(exc.stderr, bytes) else exc.stderr or "")
+                    outputs.extend((stdout, stderr))
+                    attempts.append({
+                        "number": number, "returncode": None,
+                        "stdout": stdout, "stderr": stderr,
+                        "timeout": declaration["timeout"], "timed_out": True,
+                    })
+                    error = (f"required suite {declaration['name']!r} timed out after "
+                             f"{declaration['timeout']} seconds")
+                    break
                 outputs.extend((proc.stdout, proc.stderr))
                 attempts.append({
                     "number": number,
                     "returncode": proc.returncode,
                     "stdout": proc.stdout,
                     "stderr": proc.stderr,
+                    "timeout": declaration["timeout"],
+                    "timed_out": False,
                 })
                 if proc.returncode == 0:
                     state = "pass" if number == 1 else "incomplete"
@@ -567,9 +860,18 @@ def _run_suite(repository: Path, commit: str, declaration: dict) -> dict:
                                  "but the failure was not reproduced on its one rerun")
                     break
                 if proc.returncode in (126, 127):
-                    error = (f"required suite {declaration['name']!r} is not executable "
-                             f"(exit code {proc.returncode})")
-                    break
+                    missing = next((match.group(1) for line in proc.stderr.splitlines()
+                                    if (match := re.search(
+                                        r"([A-Za-z0-9_./+@-]+): (?:command not found|not found)",
+                                        line))), "unresolved-executable")
+                    remediation = (
+                        f"Provide required executable {missing!r} in the pinned checkout "
+                        "or on PATH, then rerun required verification; inspect the retained "
+                        "command diagnostic for details."
+                    )
+                    return _environment_result(commit, declaration, [{
+                        "name": missing, "version": None, "remediation": remediation,
+                    }], attempts=attempts, output="".join(outputs))
                 if number == 2:
                     state = "fail"
                     blocking = True
@@ -587,11 +889,41 @@ def _run_suite(repository: Path, commit: str, declaration: dict) -> dict:
     }
 
 
-def run_required_verification(repository, commit: str) -> dict:
+def run_required_verification(
+        repository, commit: str, *, default_timeout=60, timeout=None) -> dict:
     """Discover and run required verification, returning store-ready evidence."""
     repository = Path(repository)
     commit = commit.lower()
-    declarations = discover_required_verification(repository, commit)
+    default = _bounded_timeout(default_timeout)
+    override = _bounded_timeout(timeout) if timeout is not None else None
+    timeout_policy = {
+        "default": default, "override": override, "minimum": 1, "maximum": 3600,
+    }
+    try:
+        declarations = discover_required_verification(repository, commit)
+    except VerificationError as exc:
+        cause = exc.__cause__
+        if not isinstance(cause, FileNotFoundError) or cause.filename != "git":
+            raise
+        remediation = "Install Git and expose git on PATH, then rerun required verification."
+        suite = _environment_result(commit, {
+            "name": "required-discovery", "command": None, "source": "repository",
+            "timeout": default, "timeout_source": "default",
+        }, [{"name": "git", "version": None, "remediation": remediation}])
+        return {
+            "status": "incomplete", "blocking": True, "commit": commit,
+            "suites": [suite], "findings": [], "warnings": [suite["error"]],
+            "timeout_policy": timeout_policy,
+        }
+    prepared = []
+    for declaration in declarations:
+        source = "override" if override is not None else declaration["timeout_source"]
+        selected = (override if override is not None else declaration["timeout"]
+                    if source == "declaration" else default)
+        prepared.append({
+            **declaration, "timeout": _bounded_timeout(selected), "timeout_source": source,
+        })
+    declarations = prepared
     if not declarations:
         return {
             "status": "absent",
@@ -600,9 +932,11 @@ def run_required_verification(repository, commit: str) -> dict:
             "suites": [],
             "findings": [],
             "warnings": [_ABSENT_WARNING],
+            "timeout_policy": timeout_policy,
         }
     suites = [_run_suite(repository, commit, declaration) for declaration in declarations]
     blocking = any(suite["blocking"] for suite in suites)
+    failed = any(suite["state"] == "fail" for suite in suites)
     findings = [{
         "category": "required-verification",
         "severity": "high",
@@ -611,8 +945,8 @@ def run_required_verification(repository, commit: str) -> dict:
         "content": (f"required verification {suite['name']!r} failed on its initial run "
                     "and one rerun"),
         "evidence_fingerprint": suite["evidence_fingerprint"],
-    } for suite in suites if suite["blocking"]]
-    status = "block" if blocking else (
+    } for suite in suites if suite["state"] == "fail"]
+    status = "block" if failed else (
         "pass" if all(suite["state"] == "pass" for suite in suites) else "incomplete"
     )
     return {
@@ -622,4 +956,5 @@ def run_required_verification(repository, commit: str) -> dict:
         "suites": suites,
         "findings": findings,
         "warnings": [suite["error"] for suite in suites if suite["error"]],
+        "timeout_policy": timeout_policy,
     }
