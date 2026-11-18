@@ -630,6 +630,45 @@ def _real_dynamic_unavailable_reason(result):
     return ""
 
 
+def _dynamic_diagnostic_runner(artifact_dir):
+    """Opt the reference executor into this simulation's private side channel."""
+    capture = Path(artifact_dir).resolve() / "selector-diagnostics.json"
+
+    def execute(repository, target_sha, head_sha, **kwargs):
+        import rg_final_dynamic
+
+        environ = dict(kwargs.get("environ") or {})
+        environ["OCR_TEST_DIAGNOSTICS_FILE"] = str(capture)
+        kwargs["environ"] = environ
+        try:
+            result = rg_final_dynamic.run_dynamic_checks(
+                repository, target_sha, head_sha, **kwargs,
+            )
+            if capture.is_file() and capture.stat().st_size <= 100000:
+                diagnostics = json.loads(capture.read_text(encoding="utf-8"))
+                if diagnostics.get("schema") == "test-check-selector-diagnostics/v1":
+                    result["selector_diagnostics"] = diagnostics
+            return result
+        finally:
+            try:
+                capture.unlink()
+            except FileNotFoundError:
+                pass
+
+    return execute
+
+
+def _reproduced_probe_diagnostics(result):
+    diagnostics = result.get("selector_diagnostics") or {}
+    for probe in diagnostics.get("probes") or []:
+        runs = probe.get("runs") or []
+        if (probe.get("outcome") == "finding" and len(runs) == 2
+                and all(run.get("returncode") not in (0, None) for run in runs)
+                and all(run.get("output") for run in runs)):
+            return True
+    return False
+
+
 def _real_model_dynamic(call):
     with pytest.MonkeyPatch.context() as monkeypatch:
         _scrub_git_trace(monkeypatch)
@@ -653,22 +692,42 @@ def _real_model_dynamic_scrubbed(call):
             fixture_module._git(repo, "checkout", "-q", "feature")
             fixture_module._git(repo, "rebase", "-q", "main")
             (repo / "dsl.py").write_text(
-                "import threading\n\ndef verdict():\n"
-                "    # Deliberate unsynchronized read/modify/write race.\n"
-                "    global counter\n    counter = 0\n"
-                "    def worker():\n        global counter\n"
-                "        for _ in range(2000):\n            counter += 1\n"
-                "    threads = [threading.Thread(target=worker) for _ in range(8)]\n"
+                "import threading\n\n"
+                "def verdict():\n"
+                "    # Both workers read before either writes, then both perform\n"
+                "    # an unsynchronized write of the same stale value. The two\n"
+                "    # barriers make that lost update deterministic, not luck.\n"
+                "    global counter\n"
+                "    counter = 0\n"
+                "    rendezvous = threading.Barrier(2)\n"
+                "    def worker():\n"
+                "        global counter\n"
+                "        for _ in range(20):\n"
+                "            observed = counter\n"
+                "            rendezvous.wait(timeout=5)\n"
+                "            counter = observed + 1\n"
+                "            rendezvous.wait(timeout=5)\n"
+                "    threads = [threading.Thread(target=worker) for _ in range(2)]\n"
                 "    for thread in threads: thread.start()\n"
                 "    for thread in threads: thread.join()\n"
-                "    return 'race' if counter != 16000 else 'ok'\n",
+                "    return counter\n",
                 encoding="utf-8",
             )
             head = fixture_module._commit(repo, "introduce uncovered regression probe subject")
-        report = sim.run_dynamic_simulation(
-            repo, target, head, artifact_dir=root / "execution", environ=os.environ.copy(),
-            timeout=float((call.get("context") or {}).get("real_model_timeout", 600)),
-        )
+        # Restricted diagnostics are an explicit acceptance-simulation opt-in,
+        # not a default gate/prepush log. The sidecar is folded into the normal
+        # dynamic-simulation result and removed before that artifact is stored.
+        previous_umask = os.umask(0o077)
+        try:
+            report = sim.run_dynamic_simulation(
+                repo, target, head, artifact_dir=root / "execution",
+                environ=os.environ.copy(),
+                timeout=float((call.get("context") or {}).get("real_model_timeout", 600)),
+                dynamic_runner=_dynamic_diagnostic_runner(root / "execution"),
+            )
+        finally:
+            os.umask(previous_umask)
+        os.chmod(report["artifact"]["artifact"], 0o600)
     except sim.SimError as exc:
         return _incomplete_real_model(call, str(exc))
     except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
@@ -718,10 +777,12 @@ def _real_model_dynamic_scrubbed(call):
         "backend": report["backend"], "simulation_artifact": artifact,
         "source_repository_unchanged": report["source_unchanged"], "cleanup": report["cleanup"],
     }
-    if not selected or result.get("state") != "findings" or (probe and not coverage_warning):
+    if (not selected or result.get("state") != "findings"
+            or (probe and not coverage_warning)
+            or (probe and not _reproduced_probe_diagnostics(result))):
         return {
             "state": "error",
-            "error": f"real-model dynamic selector/executor did not reproduce the required {source} evidence",
+            "error": f"real-model dynamic selector/executor did not reproduce the required {source} evidence with sanitized execute/retry diagnostics",
             "evidence": evidence, "details": details,
         }
     return {"state": "findings", "evidence": evidence, "details": details}

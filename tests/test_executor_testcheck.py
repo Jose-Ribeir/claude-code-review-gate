@@ -629,3 +629,188 @@ def test_executor_subject_timeout_is_a_warning_without_a_second_run(
     (warning,) = warnings
     assert "timed out" in warning["message"]
     assert "tests/slow.py" in warning["message"]
+
+
+# ---------------------------------------------------------------------------
+# SPEC-16: deterministic real-race acceptance and opt-in selector diagnostics
+# ---------------------------------------------------------------------------
+
+
+def _run_spec16_dynamic_with_selector(tmp_path, monkeypatch, probe_source,
+                                      run_id="race-evidence"):
+    """Run the real acceptance fixture/executor with only inference doubled."""
+    import rg_final_dynamic
+    import sim_scenarios_spec16 as scenarios
+
+    cmd, _count = _stub_selector(tmp_path, {
+        "existing_tests": [],
+        "probes": [{
+            "name": "direct-race-oracle", "language": "python",
+            "source": probe_source,
+            "run_cmd": '"%s" {probe_file}' % _PY,
+            "path": "dsl.py",
+        }],
+    })
+    real_simulation = scenarios.sim.run_dynamic_simulation
+    monkeypatch.setattr(scenarios.sim, "selected_inference_backend",
+                        lambda *args, **kwargs: {
+                            "name": "kimchi", "reason": "mocked inference",
+                            "executable": "/bin/kimchi", "notes": [],
+                        })
+
+    def simulated(repository, target_sha, head_sha, **kwargs):
+        supplied_runner = kwargs.get("dynamic_runner")
+
+        def runner(*args, **run_kwargs):
+            environ = dict(run_kwargs.get("environ") or {})
+            environ["OCR_TEST_SELECTOR_CMD"] = cmd
+            run_kwargs["environ"] = environ
+            execute = supplied_runner or rg_final_dynamic.run_dynamic_checks
+            return execute(*args, **run_kwargs)
+
+        kwargs["dynamic_runner"] = runner
+        return real_simulation(repository, target_sha, head_sha, **kwargs)
+
+    monkeypatch.setattr(scenarios.sim, "run_dynamic_simulation", simulated)
+    call = {
+        "scenario": {
+            "scenario_id": "spec16-09-ephemeral-probe-attribution-cleanup",
+            "dispatch_key": "ephemeral_probe_attribution_cleanup",
+        },
+        "acceptance_run_id": run_id,
+        "context": {"test_tmp_path": str(tmp_path)},
+    }
+    result = scenarios._real_model_dynamic(call)
+    artifact = result["evidence"]["reproduced_failure"]["simulation_artifact"]
+    persisted = json.loads(open(artifact["artifact"], encoding="utf-8").read())
+    return result, persisted
+
+
+def test_correct_direct_probe_deterministically_reproduces_planted_race(
+        tmp_path, monkeypatch):
+    """Two barrier-rendezvoused workers perform 40 logical increments.
+
+    The independent oracle therefore requires 40 on every fresh invocation;
+    a deterministic lost-update interleaving observes 20, and the executor
+    must execute that real assertion failure twice before blocking.
+    """
+    probe = (
+        "import os, sys\n"
+        "sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(\n"
+        "    os.path.abspath(__file__)))))\n"
+        "from dsl import verdict\n"
+        "expected = 2 * 20\n"
+        "observations = [verdict() for _ in range(6)]\n"
+        "assert observations == [expected] * len(observations), (\n"
+        "    f'lost updates: expected {expected} per independent run, '\n"
+        "    f'observed {observations}')\n"
+    )
+    result, persisted = _run_spec16_dynamic_with_selector(
+        tmp_path, monkeypatch, probe)
+
+    assert result["state"] == "findings", result
+    finding = result["evidence"]["reproduced_failure"]["findings"][0]
+    assert finding["evidence_source"] == "ephemeral_test"
+    assert "observed [20, 20, 20, 20, 20, 20]" in finding["content"]
+    assert "expected 40" in finding["content"]
+    assert persisted["result"]["telemetry"]["runs"] == 2
+    assert persisted["result"]["telemetry"]["reproduce_results"] == {
+        "fail": 1, "pass": 0, "flake": 0, "build": 0, "error": 0,
+    }
+    assert persisted["cleanup"]["clean"] is True
+    diagnostics = persisted["result"]["selector_diagnostics"]
+    assert diagnostics["schema"] == "test-check-selector-diagnostics/v1"
+    assert diagnostics["selector"]["valid"] is True
+    assert "direct-race-oracle" in diagnostics["selector"]["raw_response"]
+    assert '"existing_tests"' in diagnostics["selector"]["json"]
+    (probe_record,) = diagnostics["probes"]
+    assert "from dsl import verdict" in probe_record["source_excerpt"]
+    assert "expected = 2 * 20" in probe_record["source_excerpt"]
+    assert probe_record["source_sha256"]
+    assert probe_record["run_command"].endswith("probe_test.py")
+    assert _PY not in probe_record["run_command"]
+    assert probe_record["outcome"] == "finding"
+    assert [run["returncode"] for run in probe_record["runs"]] == [1, 1]
+    assert all("observed [20, 20, 20, 20, 20, 20]" in run["output"]
+               for run in probe_record["runs"])
+    assert diagnostics["cleanup"] == {"probe_root_removed": True}
+    assert str(tmp_path) not in json.dumps(diagnostics)
+    artifact = result["evidence"]["reproduced_failure"]["simulation_artifact"]
+    artifact_path = os.path.realpath(artifact["artifact"])
+    assert os.stat(artifact_path).st_mode & 0o777 == 0o600
+    assert not os.path.exists(os.path.join(
+        os.path.dirname(artifact_path), "selector-diagnostics.json"))
+
+
+def test_repeated_print_only_probe_cannot_satisfy_race_scenario(
+        tmp_path, monkeypatch):
+    """Observing the defective result without an oracle is not test evidence."""
+    probe = (
+        "import os, sys\n"
+        "sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(\n"
+        "    os.path.abspath(__file__)))))\n"
+        "from dsl import verdict\n"
+        "print('bounded observations:', [verdict() for _ in range(6)])\n"
+    )
+    result, persisted = _run_spec16_dynamic_with_selector(
+        tmp_path, monkeypatch, probe, run_id="smoke-is-not-evidence")
+
+    assert result["state"] == "error"
+    assert "did not reproduce" in result["error"]
+    assert persisted["result"]["findings"] == []
+    assert persisted["result"]["telemetry"]["runs"] == 1
+    assert persisted["result"]["telemetry"]["reproduce_results"]["pass"] == 1
+    (probe_record,) = persisted["result"]["selector_diagnostics"]["probes"]
+    assert probe_record["outcome"] == "pass"
+    assert len(probe_record["runs"]) == 1
+    assert "bounded observations: [20, 20, 20, 20, 20, 20]" in \
+        probe_record["runs"][0]["output"]
+    assert persisted["cleanup"]["clean"] is True
+
+
+def test_selector_prompt_requires_behavioral_oracles_and_bounded_race_evidence():
+    prompt = " ".join(test_check._SELECTOR_PROMPT.split())
+    for requirement in (
+            "directly call the changed public API",
+            "independently derived expected value or invariant",
+            "never compare an API result with itself",
+            "Import-only, print-only, and exit-without-assertion probes are invalid",
+            "multiple independent invocations",
+            "shared-state and interleaving invariants",
+            "bounded observation/counter output",
+            "Do not invent concurrency or races outside the changed behavior"):
+        assert requirement in prompt
+
+
+def test_selector_diagnostics_are_opt_in_bounded_sanitized_and_clean(tmp_path):
+    """Only the acceptance harness's explicit path enables diagnostics."""
+    work = _repo(tmp_path, [{"app.py": "x = 1\n"}])
+    secret = "diagnostic-model-secret"
+    malformed = ("not-json " + secret + " /home/private-runner/source/app.py "
+                 + "x" * 12000)
+    cmd, _count = _stub_selector(tmp_path, malformed)
+    proc = _run_executor(work, ["app.py"], _env(
+        OCR_TEST_SELECTOR_CMD=cmd, OPENAI_API_KEY=secret))
+    assert _answer(proc)["warnings"] == [
+        {"file": None, "message": "selector failed; no tests selected"}]
+    assert not list(work.rglob("*diagnostic*")), "default runs persist no logs"
+
+    capture = tmp_path / "selector-diagnostics.json"
+    proc = _run_executor(work, ["app.py"], _env(
+        OCR_TEST_SELECTOR_CMD=cmd, OPENAI_API_KEY=secret,
+        OCR_TEST_DIAGNOSTICS_FILE=str(capture)))
+    assert _answer(proc)["warnings"] == [
+        {"file": None, "message": "selector failed; no tests selected"}]
+    diagnostics = json.loads(capture.read_text(encoding="utf-8"))
+    raw = diagnostics["selector"]["raw_response"]
+    assert diagnostics["selector"]["valid"] is False
+    assert diagnostics["selector"]["json"] is None
+    assert 0 < len(raw) <= 6000
+    assert diagnostics["probes"] == []
+    assert diagnostics["cleanup"] == {"probe_root_removed": True}
+    serialized = json.dumps(diagnostics)
+    assert secret not in serialized
+    assert "/home/private-runner" not in serialized
+    assert str(tmp_path) not in serialized
+    assert capture.stat().st_mode & 0o777 == 0o600
+    assert not (work / PROBE_ROOT).exists()

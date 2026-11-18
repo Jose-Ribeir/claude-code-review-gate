@@ -64,6 +64,7 @@ Four phases:
 
 Python 3, stdlib only. POSIX (probe run_cmd goes through /bin/sh).
 """
+import hashlib
 import importlib.util
 import json
 import os
@@ -146,6 +147,12 @@ MAX_PROBES = 10
 # A finding quotes verbatim output, trimmed -- and capped so a chatty test
 # suite cannot balloon the review stream.
 CONTENT_CAP = 8000
+# Simulation-only, explicit opt-in diagnostics. No path means no log file.
+DIAGNOSTICS_ENV = "OCR_TEST_DIAGNOSTICS_FILE"
+DIAGNOSTIC_RAW_CAP = 6000
+DIAGNOSTIC_SOURCE_CAP = 2048
+DIAGNOSTIC_COMMAND_CAP = 1000
+DIAGNOSTIC_OUTPUT_CAP = 2000
 # Probes live only here, inside the executor's own clone, and are removed
 # when the run ends (SPEC-15 "No gate-authored tests in the user's tree").
 PROBE_ROOT = ".test-check-probes"
@@ -206,7 +213,23 @@ shell -> probe.sh) and run_cmd executes with that directory as its cwd; the
 placeholder {{probe_file}} in run_cmd is replaced with the written file's
 name. Example probe: a Go test file exercising the changed behavior with the
 race detector, run_cmd "go test -race -count=1 ." (the probe directory lives
-inside the repo's module, so repo packages can be imported).
+inside the repo's module, so repo packages can be imported). The probe file
+is two scratch-directory levels below the clone root; resolve imports to that
+root rather than assuming the probe's cwd is the repository root.
+Every probe must directly call the changed public API with concrete inputs
+and assert behavior with an independently derived expected value or invariant
+from the contract, inputs, or operation counts. A sentinel such as 'ok' is an
+oracle only when that contract independently requires it; never compare an
+API result with itself, accept any non-None/truthy result, or turn the observed
+buggy value into the expectation. Import-only, print-only, and
+exit-without-assertion probes are invalid.
+When the changed behavior itself involves concurrency, use multiple
+independent invocations and assert shared-state and interleaving invariants,
+not one fortunate scheduler execution. Prefer deterministic test-owned
+barriers/events or the toolchain race detector where appropriate, keep all
+waits bounded, and emit only bounded observation/counter output (for example,
+a short list of exact final counts) that makes the failed invariant visible.
+Do not invent concurrency or races outside the changed behavior.
 Deterministic coverage rule, enforced by the executor: existing_tests OR
 probes, NEVER both. When existing_tests is non-empty, every probe in this
 reply is DISCARDED unauthored and unrun; probes execute only when
@@ -215,6 +238,65 @@ exists -- a partial existing test beats a probe: list it and drop the probe.
 Author a probe ONLY for changed behavior no existing test covers, and return
 an empty existing_tests array with it. Return both arrays empty when nothing
 is worth running."""
+
+
+_DIAGNOSTIC_SECRET = re.compile(
+    r"(?i)((?:api[_-]?key|token|secret|password|credential|authorization)"
+    r"[a-z0-9_.-]*\s*[\"']?\s*[:=]\s*[\"']?)[^\s,;\"'}]+")
+_DIAGNOSTIC_POSIX_PATH = re.compile(
+    r"(?<![A-Za-z0-9_.-])/(?:[^/\s\"']+/)+[^/\s\"']*")
+_DIAGNOSTIC_WINDOWS_PATH = re.compile(
+    r"(?i)[a-z]:[\\/](?:[^\\/\s\"']+[\\/])+[^\\/\s\"']*")
+
+
+def _diagnostic_text(value, cap):
+    """Bound and sanitize one untrusted diagnostic string."""
+    text = str(value or "")
+    sensitive = ("TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "COOKIE",
+                 "PRIVATE_KEY", "API_KEY", "ASKPASS", "AUTHORIZATION", "AUTH")
+    known = [value for key, value in os.environ.items()
+             if len(value) >= 4 and any(part in key.upper() for part in sensitive)]
+    for secret in sorted(set(known), key=len, reverse=True):
+        text = text.replace(secret, "[redacted]")
+    text = _DIAGNOSTIC_SECRET.sub(r"\1[redacted]", text)
+    text = _DIAGNOSTIC_WINDOWS_PATH.sub("<path>", text)
+    text = _DIAGNOSTIC_POSIX_PATH.sub("<path>", text)
+    text = "".join(char if char.isprintable() or char in "\n\t" else " "
+                   for char in text)
+    if len(text) <= cap:
+        return text
+    marker = "\n[...diagnostic truncated...]"
+    return text[:cap - len(marker)] + marker
+
+
+def _diagnostics_path():
+    path = os.environ.get(DIAGNOSTICS_ENV, "").strip()
+    return path if path and os.path.isabs(path) else ""
+
+
+def _write_diagnostics(path, diagnostics):
+    """Best-effort restricted capture; a log failure never affects the gate."""
+    if not path:
+        return
+    diagnostics["cleanup"] = {"probe_root_removed": not os.path.exists(PROBE_ROOT)}
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            os.fchmod(descriptor, 0o600)
+            json.dump(diagnostics, handle, sort_keys=True)
+            handle.write("\n")
+    except OSError as exc:
+        _note("diagnostics unavailable: %s" % type(exc).__name__)
+
+
+def _capture_run(capture, returncode, output, note=None):
+    if capture is not None:
+        capture.append({
+            "returncode": returncode,
+            "output": _diagnostic_text(output or note or "", DIAGNOSTIC_OUTPUT_CAP),
+        })
 
 
 def _note(message):
@@ -362,7 +444,7 @@ def _validate_selection(data):
     return existing, probes
 
 
-def call_selector(manifest):
+def call_selector(manifest, diagnostics=None):
     """ONE selector attempt: (existing_tests, probes, failed). ``failed``
     collapses every degrade path -- exec error, timeout, nonzero exit,
     unparseable or schema-invalid reply -- into a single flag; the caller
@@ -386,6 +468,9 @@ def call_selector(manifest):
             return None, None, True
         rc, reply, note = _run(argv, os.getcwd(), _selector_timeout(),
                                stdin=payload)
+        if diagnostics is not None:
+            diagnostics["selector"]["raw_response"] = _diagnostic_text(
+                reply, DIAGNOSTIC_RAW_CAP)
         if rc != 0 or note:
             _note("selector stub failed (exit %s)" % rc)
             return None, None, True
@@ -403,6 +488,9 @@ def call_selector(manifest):
                     "--mcp-config", tmp_path]
             _note("selector: %s (model %s)" % (binary, MODEL))
             rc, reply, note = _run(argv, os.getcwd(), _selector_timeout())
+            if diagnostics is not None:
+                diagnostics["selector"]["raw_response"] = _diagnostic_text(
+                    reply, DIAGNOSTIC_RAW_CAP)
             if rc != 0 or note:
                 _note("selector failed (exit %s)" % rc)
                 return None, None, True
@@ -413,6 +501,9 @@ def call_selector(manifest):
                 pass
     try:
         data = json.loads(reply)
+        if diagnostics is not None:
+            diagnostics["selector"]["json"] = _diagnostic_text(
+                json.dumps(data, sort_keys=True), DIAGNOSTIC_RAW_CAP)
     except ValueError:
         _note("selector reply is not JSON")
         return None, None, True
@@ -421,6 +512,8 @@ def call_selector(manifest):
         _note("selector reply failed schema validation")
         return None, None, True
     existing, probes = selection
+    if diagnostics is not None:
+        diagnostics["selector"]["valid"] = True
     _note("selector: %d existing test(s), %d probe(s)"
           % (len(existing), len(probes)))
     return existing, probes, False
@@ -450,7 +543,9 @@ def _subject_environment():
     process.  Tests receive neither it nor publication/provider credentials.
     Non-secret test knobs such as FLAKE_STATE remain available to fixtures.
     """
-    return scrub_environment()
+    environment = scrub_environment()
+    environment.pop(DIAGNOSTICS_ENV, None)
+    return environment
 
 
 def _runner_for(path):
@@ -481,7 +576,7 @@ def _looks_like_build_error(output):
     return any(marker in lowered for marker in _BUILD_ERROR_MARKERS)
 
 
-def _execute_subject(argv, cwd, label, env=None, counts=None):
+def _execute_subject(argv, cwd, label, env=None, counts=None, capture=None):
     """Run once, classify, and re-run a failure EXACTLY once (the
     reproduce-then-block rule). Returns (outcome, first_output) with
     outcome in {"pass", "finding", "flake", "build", "error", "timeout"}:
@@ -494,6 +589,7 @@ def _execute_subject(argv, cwd, label, env=None, counts=None):
     * timeout     -- a subject exceeded its bound: dynamic evidence is unknown.
     """
     rc, out, note = _run(argv, cwd, _run_timeout(), env=env)
+    _capture_run(capture, rc, out, note)
     _bump(counts, "runs")
     _note("run %s -> exit %s" % (label, rc))
     if rc is None and note:
@@ -511,6 +607,7 @@ def _execute_subject(argv, cwd, label, env=None, counts=None):
         _bump(counts, "reproduce_results", "build")
         return "build", out
     rc2, _out2, note2 = _run(argv, cwd, _run_timeout(), env=env)
+    _capture_run(capture, rc2, _out2, note2)
     _bump(counts, "runs")
     _note("re-run %s -> exit %s" % (label, rc2))
     if rc2 is None and note2:
@@ -603,6 +700,22 @@ def _slug(name):
 
 
 def run(matched):
+    """Execute with diagnostics only when the acceptance harness opted in."""
+    path = _diagnostics_path()
+    diagnostics = None
+    if path:
+        diagnostics = {
+            "schema": "test-check-selector-diagnostics/v1",
+            "selector": {"raw_response": "", "json": None, "valid": False},
+            "probes": [],
+        }
+    try:
+        return _run_with_diagnostics(matched, diagnostics)
+    finally:
+        _write_diagnostics(path, diagnostics)
+
+
+def _run_with_diagnostics(matched, diagnostics):
     """The whole executor, fail-soft: returns (findings, warnings,
     telemetry) -- telemetry is the SPEC-15.4 counts object the gate merges
     into the check's command_checks entry: actual counts (selector
@@ -617,7 +730,7 @@ def run(matched):
     _note("manifest: %d file(s), %d byte(s)"
           % (len(manifest), len(json.dumps(manifest))))
     counts["selector_attempts"] += 1   # exactly one, never retried
-    existing, probes, failed = call_selector(manifest)
+    existing, probes, failed = call_selector(manifest, diagnostics=diagnostics)
     if failed:
         warnings.append({"file": None,
                          "message": "selector failed; no tests selected"})
@@ -661,11 +774,11 @@ def run(matched):
         outcome, out = _execute_subject(argv, cwd, path, env=env, counts=counts)
         _handle(outcome, out, "existing test", path, path,
                 "existing_test", findings, warnings)
-    _run_probes(probes, matched, findings, warnings, counts)
+    _run_probes(probes, matched, findings, warnings, counts, diagnostics)
     return findings, warnings, counts
 
 
-def _run_probes(probes, matched, findings, warnings, counts=None):
+def _run_probes(probes, matched, findings, warnings, counts=None, diagnostics=None):
     """Phase 3 + the probe half of phase 4. Probe sources are materialized
     ONLY inside ``.test-check-probes/`` under the executor's own cwd (the
     throwaway clone), run there, and destroyed afterwards -- nothing is
@@ -689,6 +802,20 @@ def _run_probes(probes, matched, findings, warnings, counts=None):
             name = _slug(probe["name"])
             language = probe["language"].strip().lower()
             filename = PROBE_FILENAMES.get(language)
+            record = {
+                "name": name, "language": language,
+                "source_excerpt": _diagnostic_text(
+                    probe["source"], DIAGNOSTIC_SOURCE_CAP),
+                "source_sha256": hashlib.sha256(
+                    probe["source"].encode("utf-8")).hexdigest(),
+                "source_chars": len(probe["source"]),
+                "run_command": _diagnostic_text(
+                    probe["run_cmd"].replace("{probe_file}", filename or ""),
+                    DIAGNOSTIC_COMMAND_CAP),
+                "outcome": "skipped", "runs": [],
+            }
+            if diagnostics is not None:
+                diagnostics["probes"].append(record)
             if filename is None:
                 warnings.append({"file": default_path,
                                  "message": "probe %s skipped: unknown "
@@ -708,7 +835,8 @@ def _run_probes(probes, matched, findings, warnings, counts=None):
                 path = default_path or name
             outcome, out = _execute_subject(
                 ["/bin/sh", "-c", run_cmd], directory, name,
-                env=_subject_environment(), counts=counts)
+                env=_subject_environment(), counts=counts, capture=record["runs"])
+            record["outcome"] = outcome
             _handle(outcome, out, "ephemeral probe", name, path,
                     "ephemeral_test", findings, warnings)
     finally:
