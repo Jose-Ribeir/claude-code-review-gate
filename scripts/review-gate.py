@@ -3928,9 +3928,13 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
             _register_child(proc)
             try:
                 out_text, err_text = proc.communicate(timeout=_run_timeout)
-            except subprocess.TimeoutExpired:
-                _kill_child(proc)
-                partial = proc.communicate()
+            except subprocess.TimeoutExpired as exc:
+                from rg_final_review import _bounded_reap, _kill_owned_process
+                cleanup = _kill_owned_process(proc)
+                partial = _bounded_reap(proc, cleanup, (exc.output, exc.stderr))
+                exc.output, exc.stderr = partial
+                exc.returncode = getattr(proc, "returncode", None)
+                exc.cleanup = cleanup
                 # What the reviewer had done before it was cut off is the most
                 # useful timing there is: where did the timeout go.
                 _note_call_stats(partial[0] if isinstance(partial, tuple) and partial else "",
@@ -3957,7 +3961,7 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
                     f"end child_pid={proc.pid} outcome=rc{proc.returncode} "
                     f"duration_s={time.monotonic()-started_mono:.1f}"
                 )
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
         knob = _timeout_knob(timeout, _run_timeout)
         if mode == "hook":
             # This process is the detached supervisor, which inherits Claude
@@ -3977,12 +3981,14 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
         else:
             escalation = f"  Give Claude more time : {knob}={_run_timeout * 2} git push ..."
         used = _run_timeout
-        raise ReviewGateError(
+        error = ReviewGateError(
             f"review timed out after {used}s - blocking commit to preserve gate integrity.\n"
             f"{escalation}\n"
             f"{bypass}",
             is_timeout=True,
         )
+        error.cleanup = getattr(exc, "cleanup", None)
+        raise error from exc
     except Exception as exc:
         raise ReviewGateError(
             f"review process error ({exc}) - blocking commit to preserve gate integrity.\n"

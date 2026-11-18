@@ -13,6 +13,9 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import rg_final_store as final_store  # noqa: E402
 from rg_final_store import FinalStore, StoreError  # noqa: E402
+from rg_native_executor import NativeExecutor, NativeTask  # noqa: E402
+from rg_run_lifecycle import RunDeadline  # noqa: E402
+from test_native_executor import _DeadlineTimer, _FakeHost  # noqa: E402
 
 
 def review_stack(source_sha="a" * 40, target_sha="b" * 40):
@@ -303,3 +306,45 @@ def test_artifact_commit_rolls_back_partial_state_and_preserves_lens_evidence(tm
         assert task["artifacts"] == [committed["artifact"]]
         assert len(task["artifact_messages"]) == 1
         assert after["units"] == before["units"]
+
+
+def test_executor_records_expiry_cancellation_through_existing_native_store(tmp_path):
+    with FinalStore(tmp_path / "executor-events.sqlite3") as store:
+        started = store.start_run(review_stack())
+        run_id = started["run_id"]
+        task = NativeTask(
+            run_id=run_id,
+            task_id="task-correctness",
+            session_name="review-task-correctness",
+            unit_id=started["unit_ids"]["individual:1"],
+            stage="individual",
+            lens="correctness",
+            revision_tuple=("b" * 40, "a" * 40, "b" * 40),
+            input_sha256="a" * 64,
+            backend="kimchi",
+            model="kimi-k3.1-pro",
+            deadline_at_unix=200.0,
+            prompt="Return the contracted result.",
+            repo_root=tmp_path,
+            artifact_path=tmp_path / "result.json",
+        )
+        timer = _DeadlineTimer()
+        deadline = RunDeadline(run_id, 30, timer_factory=timer)
+        executor = NativeExecutor(_FakeHost(), deadline=deadline, store=store)
+        deadline.start()
+
+        executor.start(task, lambda _completion: None)
+        timer.fire()
+
+        events = store.manifest(run_id)["native_tasks"][0]["events"]
+        assert [event["event_type"] for event in events] == [
+            "queued", "started", "cancelled",
+        ]
+        assert events[0]["details"]["run_timeout_seconds"] == 30.0
+        assert events[0]["details"]["watchdog"]["warnings"]
+        assert events[-1]["details"] == {
+            "reason": "run-deadline-exceeded",
+            "expiry_count": 1,
+            "cancellation_status": "native-handle-signalled",
+        }
+        assert not task.artifact_path.exists()
