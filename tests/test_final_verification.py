@@ -51,6 +51,28 @@ def test_repository_without_declared_required_suite_is_explicitly_absent(tmp_pat
     assert not (repo / ".git" / "verification-clones").exists()
 
 
+def test_missing_git_is_actionable_blocking_environmental_evidence(
+        monkeypatch, tmp_path):
+    repo, commit = _repo(tmp_path / "source", {"app.py": "VALUE = 1\n"})
+    monkeypatch.setenv("PATH", str(tmp_path / "without-git"))
+
+    result = verification.run_required_verification(repo, commit)
+
+    assert result["status"] == "incomplete"
+    assert result["blocking"] is True
+    assert result["findings"] == []
+    assert len(result["suites"]) == 1
+    suite = result["suites"][0]
+    assert suite["name"] == "required-discovery"
+    assert suite["state"] == "environment"
+    assert suite["attempts"] == []
+    remediation = "Install Git and expose git on PATH, then rerun required verification."
+    assert suite["missing_tools"] == [{
+        "name": "git", "version": None, "remediation": remediation,
+    }]
+    assert result["warnings"][0].endswith(remediation)
+
+
 def test_declared_required_check_passes_in_a_disposable_clone(tmp_path):
     script = "#!/bin/sh\nprintf 'required-ok %s %s\\n' \"$PWD\" \"$(git rev-parse HEAD)\"\n"
     repo, commit = _repo(tmp_path / "source", {
@@ -247,13 +269,69 @@ def test_unexecutable_declared_suite_is_incomplete_and_not_rerun(tmp_path):
     result = verification.run_required_verification(repo, commit)
 
     assert result["status"] == "incomplete"
-    assert result["blocking"] is False
+    assert result["blocking"] is True
     assert result["findings"] == []
-    attempt = result["suites"][0]["attempts"]
-    assert len(attempt) == 1
-    assert attempt[0]["returncode"] == 127
-    assert result["suites"][0]["state"] == "incomplete"
-    assert "not executable" in result["warnings"][0]
+    suite = result["suites"][0]
+    assert suite["state"] == "environment"
+    assert suite["attempts"] == []
+    remediation = (
+        "Provide required executable 'tools/does-not-exist' in the pinned "
+        "checkout or on PATH, then rerun required verification."
+    )
+    assert suite["missing_tools"] == [{
+        "name": "tools/does-not-exist", "version": None,
+        "remediation": remediation,
+    }]
+    assert remediation in suite["error"]
+    assert any(remediation in warning for warning in result["warnings"])
+
+
+def test_missing_python_module_is_environment_not_an_ordinary_test_failure(tmp_path):
+    module = "definitely_missing_required_review_module"
+    repo, commit = _repo(tmp_path / "source", {
+        ".ocr/config.json": json.dumps({"checks": {"missing-python-module": {
+            "command": f"python3 -m {module}", "required": True,
+        }}}),
+    })
+
+    result = verification.run_required_verification(repo, commit)
+
+    assert result["status"] == "incomplete"
+    assert result["blocking"] is True
+    assert result["findings"] == []
+    suite = result["suites"][0]
+    assert suite["state"] == "environment"
+    assert suite["attempts"] == []
+    assert suite["missing_tools"][0]["name"] == f"python-module:{module}"
+    remediation = suite["missing_tools"][0]["remediation"]
+    assert module in remediation
+    assert "before required verification" in remediation
+    assert "selected Python interpreter" in remediation
+
+
+def test_nested_command_not_found_keeps_attempt_and_is_environment(tmp_path):
+    missing = "definitely_absent_required_shell_tool"
+    repo, commit = _repo(tmp_path / "source", {
+        ".ocr/config.json": json.dumps({"checks": {"nested-missing-tool": {
+            "command": "tools/required-check", "required": True,
+        }}}),
+        "tools/required-check": f"#!/bin/sh\n{missing}\n",
+    })
+
+    result = verification.run_required_verification(repo, commit)
+
+    assert result["status"] == "incomplete"
+    assert result["blocking"] is True
+    assert result["findings"] == []
+    suite = result["suites"][0]
+    assert suite["state"] == "environment"
+    assert len(suite["attempts"]) == 1
+    assert suite["attempts"][0]["returncode"] == 127
+    assert suite["attempts"][0]["timed_out"] is False
+    assert missing in suite["attempts"][0]["stderr"]
+    assert suite["missing_tools"][0]["name"] == missing
+    assert missing in suite["missing_tools"][0]["remediation"]
+    assert missing in suite["output"]
 
 
 def test_failure_not_reproduced_on_the_single_rerun_is_incomplete_not_a_pass(tmp_path):
@@ -301,59 +379,285 @@ def test_timeout_is_incomplete_and_disposable_clone_is_still_removed(tmp_path):
     assert result["status"] == "incomplete"
     assert result["blocking"] is False
     assert result["suites"][0]["state"] == "incomplete"
-    assert result["suites"][0]["attempts"] == []
+    assert result["suites"][0]["attempts"] == [{
+        "number": 1, "returncode": None, "stdout": "", "stderr": "",
+        "timeout": 1, "timed_out": True,
+    }]
     assert "timed out" in result["warnings"][0]
     assert not Path(clone_path.read_text(encoding="utf-8")).exists()
 
 
-def test_github_action_invocation_is_discovered_as_unassessable(tmp_path):
-    workflow = """jobs:
+def test_required_timeout_default_declaration_and_override_are_bounded_and_recorded(
+        tmp_path):
+    repo, commit = _repo(tmp_path / "source", {
+        ".ocr/config.json": json.dumps({"checks": {
+            "defaulted": {"command": "tools/required-check", "required": True},
+            "declared": {
+                "command": "tools/required-check", "required": True, "timeout": 12,
+            },
+        }}),
+        "tools/required-check": "#!/bin/sh\nprintf 'fast-ok\\n'\n",
+    })
+
+    defaulted = verification.run_required_verification(
+        repo, commit, default_timeout=0.25)
+    overridden = verification.run_required_verification(
+        repo, commit, default_timeout=30, timeout=10000)
+
+    assert defaulted["status"] == "pass"
+    assert defaulted["timeout_policy"] == {
+        "default": 1, "override": None, "minimum": 1, "maximum": 3600,
+    }
+    by_name = {suite["name"]: suite for suite in defaulted["suites"]}
+    assert by_name["defaulted"]["timeout"] == 1
+    assert by_name["defaulted"]["timeout_source"] == "default"
+    assert by_name["declared"]["timeout"] == 12
+    assert by_name["declared"]["timeout_source"] == "declaration"
+    assert all(suite["attempts"][0]["timeout"] == suite["timeout"]
+               for suite in defaulted["suites"])
+    assert all(suite["attempts"][0]["timed_out"] is False
+               for suite in defaulted["suites"])
+    assert overridden["timeout_policy"]["override"] == 3600
+    assert all(suite["timeout"] == 3600 for suite in overridden["suites"])
+    assert all(suite["timeout_source"] == "override"
+               for suite in overridden["suites"])
+
+
+def test_materialized_checkout_needs_no_action_and_unknown_actions_are_unassessable(
+        tmp_path):
+    checkout_only, checkout_commit = _repo(tmp_path / "checkout", {
+        ".github/workflows/verify.yml": """jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-"""
-    repo, commit = _repo(tmp_path / "source", {
-        ".github/workflows/verify.yml": workflow,
+""",
+    })
+    unknown, unknown_commit = _repo(tmp_path / "unknown", {
+        ".github/workflows/verify.yml": """jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: example/required-action@v1
+""",
     })
 
-    declarations = verification.discover_required_verification(repo, commit)
-    result = verification.run_required_verification(repo, commit)
+    checkout = verification.run_required_verification(checkout_only, checkout_commit)
+    result = verification.run_required_verification(unknown, unknown_commit)
 
-    assert len(declarations) == 1
-    assert declarations[0]["state"] == "unassessable"
-    assert "actions/checkout@v4" in declarations[0]["error"]
+    assert checkout["status"] == "absent"
     assert result["status"] == "incomplete"
-    assert result["status"] != "absent"
     assert result["suites"][0]["state"] == "unassessable"
     assert result["suites"][0]["attempts"] == []
     assert result["blocking"] is False
     assert result["findings"] == []
-    assert "actions/checkout@v4" in result["warnings"][0]
+    assert "example/required-action@v1" in result["warnings"][0]
 
 
-def test_github_matrix_makes_its_required_commands_unassessable(tmp_path):
+def test_setup_python_uses_an_installed_versioned_interpreter_without_python_on_path(
+        monkeypatch, tmp_path):
+    version = f"{sys.version_info.major}.{sys.version_info.minor}"
+    tools = tmp_path / "installed-tools"
+    tools.mkdir()
+    (tools / f"python{version}").symlink_to(sys.executable)
+    decoy = tools / "python"
+    decoy.write_text("#!/bin/sh\nexit 97\n", encoding="utf-8")
+    decoy.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tools}:/usr/bin:/bin")
+    workflow = f"""jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: \"{version}\"
+      - run: python -c \"import sys; print('python-' + '.'.join(map(str, sys.version_info[:2])))\"
+      - run: python3 -c "import sys; print('python3-' + '.'.join(map(str, sys.version_info[:2])))"
+"""
+    repo, commit = _repo(tmp_path / "source", {
+        ".github/workflows/verify.yml": workflow,
+    })
+
+    result = verification.run_required_verification(repo, commit)
+
+    assert result["status"] == "pass", result
+    assert [suite["output"].strip() for suite in result["suites"]] == [
+        f"python-{version}", f"python3-{version}",
+    ]
+    assert all(suite["python_version"] == version for suite in result["suites"])
+    assert all(suite["python_executable"] == str(tools / f"python{version}")
+               for suite in result["suites"])
+
+
+def test_github_literal_matrix_expands_and_substitutes_only_declared_values(
+        monkeypatch, tmp_path):
+    version = f"{sys.version_info.major}.{sys.version_info.minor}"
+    tools = tmp_path / "matrix-tools"
+    tools.mkdir()
+    (tools / f"python{version}").symlink_to(sys.executable)
+    monkeypatch.setenv("PATH", f"{tools}:/usr/bin:/bin")
+    workflow = f"""jobs:
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: [\"{version}\"]
+        suite: [unit, integration]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{{{ matrix.python-version }}}}
+      - run: |
+          printf 'matrix-%s\\n' '${{{{ matrix.suite }}}}'
+          python -c "print('python-{version}')"
+"""
+    repo, commit = _repo(tmp_path / "source", {
+        ".github/workflows/verify.yml": workflow,
+    })
+
+    result = verification.run_required_verification(repo, commit)
+
+    assert result["status"] == "pass", result
+    assert [suite["matrix"] for suite in result["suites"]] == [
+        {"python-version": version, "suite": "unit"},
+        {"python-version": version, "suite": "integration"},
+    ]
+    assert [suite["name"] for suite in result["suites"]] == [
+        f"verify:verify:step-3[python-version={version},suite=unit]",
+        f"verify:verify:step-3[python-version={version},suite=integration]",
+    ]
+    assert [suite["output"] for suite in result["suites"]] == [
+        f"matrix-unit\npython-{version}\n",
+        f"matrix-integration\npython-{version}\n",
+    ]
+    assert all(suite["python_version"] == version for suite in result["suites"])
+
+
+def test_unsupported_matrix_and_condition_forms_are_unassessable_never_executed(tmp_path):
+    marker = tmp_path / "unexpected-execution"
     workflow = """jobs:
+  inline_matrix:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: {python-version: ['3.12']}
+    steps:
+      - run: tools/must-not-run inline-matrix
+  conditional:
+    runs-on: ubuntu-latest
+    steps:
+      - if: ${{ github.ref == 'refs/heads/main' }}
+        run: tools/must-not-run condition
+"""
+    repo, commit = _repo(tmp_path / "source", {
+        ".github/workflows/verify.yml": workflow,
+        "tools/must-not-run": (
+            "#!/bin/sh\n"
+            f"printf '%s\\n' \"$1\" >> '{marker}'\n"
+        ),
+    })
+
+    result = verification.run_required_verification(repo, commit)
+
+    assert result["status"] == "incomplete", result
+    assert not marker.exists()
+    assert len(result["suites"]) == 2
+    assert all(suite["state"] == "unassessable" for suite in result["suites"])
+    assert all(suite["attempts"] == [] for suite in result["suites"])
+    assert "matrix" in result["warnings"][0]
+    assert "expression" in result["warnings"][1]
+
+
+def test_missing_matrix_python_is_blocking_environment_and_independent_work_continues(
+        monkeypatch, tmp_path):
+    installed = f"{sys.version_info.major}.{sys.version_info.minor}"
+    tools = tmp_path / "partial-matrix-tools"
+    tools.mkdir()
+    (tools / f"python{installed}").symlink_to(sys.executable)
+    monkeypatch.setenv("PATH", f"{tools}:/usr/bin:/bin")
+    workflow = f"""jobs:
   verify:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python: ['3.11', '3.12']
+        python-version: [\"{installed}\", \"0.99\"]
     steps:
-      - run: tools/must-not-run
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{{{ matrix.python-version }}}}
+      - run: python -c "print('matrix-python-ok')"
 """
     repo, commit = _repo(tmp_path / "source", {
+        ".ocr/config.json": json.dumps({"checks": {"independent": {
+            "command": "tools/independent-check", "required": True,
+        }}}),
         ".github/workflows/verify.yml": workflow,
-        "tools/must-not-run": "#!/bin/sh\nexit 99\n",
+        "tools/independent-check": "#!/bin/sh\nprintf 'independent-ok\\n'\n",
     })
 
     result = verification.run_required_verification(repo, commit)
 
     assert result["status"] == "incomplete"
-    assert len(result["suites"]) == 1
-    assert result["suites"][0]["state"] == "unassessable"
-    assert result["suites"][0]["attempts"] == []
-    assert "matrix" in result["warnings"][0]
+    assert result["blocking"] is True
+    assert result["findings"] == []
+    independent = next(suite for suite in result["suites"]
+                       if suite["name"] == "independent")
+    assert independent["state"] == "pass"
+    assert independent["output"] == "independent-ok\n"
+    available = next(suite for suite in result["suites"]
+                     if suite.get("matrix", {}).get("python-version") == installed)
+    assert available["state"] == "pass"
+    missing = next(suite for suite in result["suites"]
+                   if suite.get("matrix", {}).get("python-version") == "0.99")
+    assert missing["state"] == "environment"
+    assert missing["blocking"] is True
+    assert missing["attempts"] == []
+    assert missing["python_executable"] is None
+    remediation = (
+        "Install Python 0.99 and expose python0.99 on PATH, "
+        "then rerun required verification."
+    )
+    assert missing["missing_tools"] == [{
+        "name": "python0.99", "version": "0.99", "remediation": remediation,
+    }]
+    assert remediation in missing["error"]
+    assert any(remediation in warning for warning in result["warnings"])
+
+
+def test_setup_python_rejects_a_versioned_name_backed_by_the_wrong_interpreter(
+        monkeypatch, tmp_path):
+    actual = f"{sys.version_info.major}.{sys.version_info.minor}"
+    tools = tmp_path / "mislabelled-python"
+    tools.mkdir()
+    (tools / "python0.99").symlink_to(sys.executable)
+    monkeypatch.setenv("PATH", f"{tools}:/usr/bin:/bin")
+    repo, commit = _repo(tmp_path / "source", {
+        ".github/workflows/verify.yml": """jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "0.99"
+      - run: python -c "print('must-not-run')"
+""",
+    })
+
+    result = verification.run_required_verification(repo, commit)
+
+    assert result["status"] == "incomplete"
+    assert result["blocking"] is True
+    assert result["findings"] == []
+    suite = result["suites"][0]
+    assert suite["state"] == "environment"
+    assert suite["attempts"] == []
+    assert suite["missing_tools"][0]["name"] == "python0.99"
+    assert suite["missing_tools"][0]["detected_version"] == actual
+    assert "0.99" in suite["missing_tools"][0]["remediation"]
+    assert actual in suite["missing_tools"][0]["remediation"]
 
 
 def test_github_reusable_workflow_job_is_not_mistaken_for_absent_ci(tmp_path):
@@ -393,6 +697,78 @@ def test_unresolved_github_expression_is_unassessable_not_a_shell_failure(tmp_pa
     assert result["suites"][0]["state"] == "unassessable"
     assert result["suites"][0]["attempts"] == []
     assert "expression" in result["warnings"][0]
+
+
+def test_github_literal_block_preserves_nested_python_heredoc_indentation(tmp_path):
+    workflow = """jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          for path in Path('.').glob('*.json'):
+              try:
+                  payload = json.loads(path.read_text(encoding='utf-8'))
+              except ValueError as error:
+                  raise SystemExit(f'{path}: {error}')
+              assert payload['valid'] is True
+          print('nested-heredoc-ok')
+          PY
+"""
+    repo, commit = _repo(tmp_path / "source", {
+        ".github/workflows/verify.yml": workflow,
+        "data.json": '{"valid": true}\n',
+    })
+
+    result = verification.run_required_verification(repo, commit)
+
+    assert result["status"] == "pass", result
+    assert result["suites"][0]["output"] == "nested-heredoc-ok\n"
+    assert result["suites"][0]["attempts"][0]["returncode"] == 0
+
+
+def test_github_block_content_preserves_literal_lines_and_rejects_complex_folding(
+        tmp_path):
+    workflow = """jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          printf 'literal-start\\n'
+
+          if true; then
+            printf 'literal-nested\\n'
+          fi
+      - run: printf 'next-step\\n'
+      - run: >
+          printf 'folded-must-not-run\\n'
+
+          printf 'also-must-not-run\\n'
+"""
+    repo, commit = _repo(tmp_path / "source", {
+        ".github/workflows/verify.yml": workflow,
+    })
+
+    result = verification.run_required_verification(repo, commit)
+
+    assert result["status"] == "incomplete", result
+    assert [suite["command"] for suite in result["suites"][:2]] == [
+        "printf 'literal-start\\n'\n\nif true; then\n"
+        "  printf 'literal-nested\\n'\nfi",
+        "printf 'next-step\\n'",
+    ]
+    assert [suite["output"] for suite in result["suites"][:2]] == [
+        "literal-start\nliteral-nested\n",
+        "next-step\n",
+    ]
+    folded = result["suites"][2]
+    assert folded["state"] == "unassessable"
+    assert folded["command"] is None
+    assert folded["attempts"] == []
+    assert "folded-must-not-run" not in result["suites"][0]["output"]
+    assert "also-must-not-run" not in result["suites"][1]["output"]
 
 
 def test_gitlab_root_docker_and_global_settings_are_not_jobs(tmp_path):
