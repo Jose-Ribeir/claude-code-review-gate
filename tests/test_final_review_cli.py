@@ -46,7 +46,7 @@ def _commit(repo, message):
     return _git(repo, "rev-parse", "HEAD")
 
 
-def _repository(tmp_path):
+def _repository(tmp_path, *, domain_contract=False, standards=False):
     repo = tmp_path / "source"
     repo.mkdir(parents=True)
     _git(repo, "init", "-q", "-b", "main")
@@ -58,7 +58,19 @@ def _repository(tmp_path):
         _git(repo, "config", key, value)
     (repo / "README.md").write_text("base\n", encoding="utf-8")
     (repo / "docs").mkdir()
-    (repo / "docs" / "ADR.md").write_text("unchanged binding decision\n", encoding="utf-8")
+    adr = (
+        "# ADR-001: Return contract\n\n"
+        "`value()` MUST return the integer 2 so the billing caller remains correct.\n"
+        if domain_contract else "unchanged binding decision\n"
+    )
+    (repo / "docs" / "ADR.md").write_text(adr, encoding="utf-8")
+    if standards:
+        (repo / "AGENTS.md").write_text(
+            "# Repository standards\n"
+            "Every public function must have an accurate docstring.\n"
+            "Every behavior change must add a permanent regression test.\n",
+            encoding="utf-8",
+        )
     base = _commit(repo, "base")
     (repo / "target.txt").write_text("target only\n", encoding="utf-8")
     target = _commit(repo, "target")
@@ -82,9 +94,16 @@ def _project(project_id, path, repo):
     }
 
 
-@pytest.fixture
-def standalone(tmp_path, monkeypatch):
-    repo, base, target, head = _repository(tmp_path)
+def make_standalone_fixture(tmp_path, monkeypatch, *, domain_contract=False, standards=False):
+    """Build the recorded read-only provider fixture for pytest or simulation.
+
+    ``RG_FINAL_WORKER`` remains a scripted double here; the real-model harness
+    explicitly removes it and every other reviewer/selector override before it
+    invokes the selected backend through the same public CLI.
+    """
+    repo, base, target, head = _repository(
+        tmp_path, domain_contract=domain_contract, standards=standards,
+    )
     target_project = _project(111, "group/project", repo)
     source_project = _project(222, "arbitrary-contributor/fork", repo)
     merge_request = {
@@ -154,6 +173,11 @@ def standalone(tmp_path, monkeypatch):
         merge_request=merge_request, script=script, calls=calls,
         trace=tmp_path / "worker-trace.json", store_path=tmp_path / "state" / "final-review.sqlite3",
     )
+
+
+@pytest.fixture
+def standalone(tmp_path, monkeypatch):
+    return make_standalone_fixture(tmp_path, monkeypatch)
 
 
 def _gate(*args, cwd=None):
@@ -589,3 +613,77 @@ def test_materialization_failure_has_auditable_output_and_no_leftover_clone(stan
     assert not list(Path(rg_store.clones_dir()).glob("*-final-*"))
     assert (standalone.repo / "local-only.txt").read_text(encoding="utf-8") == \
         "uncommitted local secret\n"
+
+
+def test_unchanged_domain_contract_reaches_documentation_lens(tmp_path, monkeypatch):
+    standalone = make_standalone_fixture(tmp_path, monkeypatch, domain_contract=True)
+    _script_final_result(standalone, {
+        "findings": [{
+            "id": "adr-return-contract",
+            "path": "app.py", "start_line": 2, "end_line": 2,
+            "severity": "high", "confidence": 0.99,
+            "content": "The implementation returns 1 although unchanged ADR-001 mandates 2.",
+            "existing_code": "return 1",
+            "evidence": "docs/ADR.md is unchanged and binding on the complete tree.",
+        }],
+    }, lens="documentation/domain")
+
+    output = _result(_gate("final-review", standalone.ref), 1)
+    machine, _ = _reports(output)
+    traces = _worker_traces(standalone)
+    documentation = next(trace for trace in traces if trace["request"]["lens"] == "documentation/domain")
+    request = documentation["request"]
+    individual = machine["units"][0]
+
+    assert output["state"] == "findings"
+    assert individual["findings"][0]["lens"] == "documentation/domain"
+    assert "ADR-001" in individual["findings"][0]["content"]
+    assert documentation["unchanged_adr"] == (
+        "# ADR-001: Return contract\n\n"
+        "`value()` MUST return the integer 2 so the billing caller remains correct.\n"
+    )
+    assert "ADR-001" not in request["diff"]
+    assert request["review_context"]["review_mode"] == "complete-repository"
+    assert request["repository"]["path"] in request["review_context"]["search_roots"]
+    assert request["repository"]["access"] == "full_tree"
+    assert not Path(request["repository"]["path"]).exists()
+
+
+def test_final_comment_and_testing_standards_are_both_visible(tmp_path, monkeypatch):
+    standalone = make_standalone_fixture(tmp_path, monkeypatch, standards=True)
+    common = {
+        "path": "app.py", "start_line": 2, "end_line": 2,
+        "severity": "high", "confidence": 0.99,
+        "existing_code": "return 1",
+    }
+    monkeypatch.setenv("STUB_FINAL_RESULT_FOR", json.dumps({
+        "repository-standards": {
+            "findings": [{
+                **common, "id": "missing-function-docstring",
+                "content": "The changed public function violates AGENTS.md: its docstring is absent.",
+            }],
+        },
+        "testing": {
+            "findings": [{
+                **common, "id": "missing-permanent-regression-test",
+                "content": "AGENTS.md requires a permanent regression test for this behavior change.",
+            }],
+        },
+    }))
+
+    output = _result(_gate("final-review", standalone.ref), 1)
+    machine, _ = _reports(output)
+    traces = _worker_traces(standalone)
+    individual = machine["units"][0]
+    by_lens = {finding["lens"]: finding for finding in individual["findings"]}
+
+    assert output["state"] == "findings"
+    assert "docstring" in by_lens["repository-standards"]["content"]
+    assert "regression test" in by_lens["testing"]["content"]
+    for lens in ("repository-standards", "testing"):
+        request = next(trace["request"] for trace in traces if trace["request"]["lens"] == lens)
+        documents = {entry["path"]: entry for entry in request["review_context"]["documents"]}
+        assert documents["AGENTS.md"]["unchanged"] is True
+        assert "Every public function" not in request["diff"]
+        assert request["repository"]["access"] == "full_tree"
+        assert not Path(request["repository"]["path"]).exists()
