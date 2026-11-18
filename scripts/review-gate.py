@@ -3877,6 +3877,7 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
             raw_tag=raw_tag, resolve_file=resolve_file, timeout=_run_timeout,
             run_id=run_id, common_dir=common_dir, child_env=child_env,
             launch=launch, bypass=bypass, started_at=started_at,
+            paths_file=paths_file,
         )
     try:
         with subprocess.Popen(
@@ -4240,10 +4241,128 @@ def _run_native_process(kimi, prompt, repo_root, head_sha, push_range, timeout,
     )
 
 
+def _run_native_decomposed_review(kimi, prompt, manifest, paths_file, repo_root,
+                                  mode, git_dir, head_sha, push_range, raw_tag,
+                                  timeout, run_id, common_dir, child_env, launch,
+                                  bypass, started_at):
+    from rg_legacy_deep import DeepExecutionError, execute_deep_review
+
+    native_run_id = run_id or f"deep-{os.getpid()}-{int(started_at * 1000)}"
+    async_dir = _async_dir(common_dir or git_dir or repo_root)
+    stream_counts = {}
+    session_states = {}
+    session_lock = threading.Lock()
+
+    def progress(event):
+        stream = event.get("stream") or "?"
+        with session_lock:
+            key = (stream, event.get("native_session_id"))
+            stream_counts[key] = stream_counts.get(key, 0) + 1
+            count = stream_counts[key]
+        if count <= 4 or count % 64 == 0:
+            _supervisor_event(
+                native_run_id, "stream-progress", stream=stream, chunks=count,
+                bytes=event.get("bytes") or 0,
+                native_session_id=event.get("native_session_id") or "?",
+            )
+
+    def log_completion(completion):
+        details = completion.details
+        duration = (
+            completion.artifact.duration_seconds if completion.artifact is not None
+            else time.time() - started_at
+        )
+        _supervisor_event(
+            native_run_id, "native-session-" + completion.state,
+            task_id=completion.handle.task.task_id,
+            native_session_id=completion.handle.native_session_id,
+            transport=completion.handle.transport,
+            duration_s=round(duration, 3),
+            cleanup_status=(details.get("cleanup") or {}).get("status") or "",
+        )
+        if completion.state != "completed":
+            _supervisor_event(
+                native_run_id, "native-diagnostic-tail",
+                task_id=completion.handle.task.task_id,
+                stdout_tail=details.get("stdout_tail") or "",
+                stderr_tail=details.get("stderr_tail") or "",
+            )
+
+    def session_started(handle):
+        with session_lock:
+            state = session_states.setdefault(handle.task.task_id, {"terminal": None})
+            state["started"] = True
+            _supervisor_event(
+                native_run_id, "native-session-started",
+                task_id=handle.task.task_id,
+                native_session_id=handle.native_session_id,
+                transport=handle.transport, timeout_s=timeout,
+            )
+            if state["terminal"] is None:
+                _register_native_handle(handle)
+            else:
+                log_completion(state["terminal"])
+
+    def session_completed(completion):
+        task_id = completion.handle.task.task_id
+        with session_lock:
+            state = session_states.setdefault(task_id, {"started": False})
+            state["terminal"] = completion
+            if state["started"]:
+                _unregister_native_handle(completion.handle)
+                log_completion(completion)
+
+    def expired(details):
+        _supervisor_event(
+            native_run_id, "deadline-exceeded",
+            expiry_count=details.get("expiry_count") or 0,
+            owned_cancellation_count=details.get("owned_cancellation_count") or 0,
+        )
+
+    try:
+        result, raw = execute_deep_review(
+            prompt, manifest, paths_file, kimi=kimi, repo_root=repo_root,
+            run_id=native_run_id, async_dir=async_dir, head_sha=head_sha,
+            push_range=push_range, timeout=timeout, model=_read_tier2_model(),
+            child_env=child_env, started_at=started_at,
+            result_parser=lambda text: (
+                _extract_from_stream_json(text) or _extract_json(text)
+            ),
+            merge_results=_merge_chunk_results, verdict=compute_verdict,
+            extensions=(_DENY_EXT,), progress=progress,
+            on_start=session_started, on_completion=session_completed,
+            on_expire=expired,
+        )
+    except DeepExecutionError as exc:
+        if exc.is_timeout:
+            raise _review_timeout_error(
+                mode, launch, bypass, timeout, timeout, exc,
+            ) from exc
+        raise ReviewGateError(
+            f"legacy deep native review incomplete: {exc}\n{bypass}"
+        ) from exc
+    raw_name = _save_raw_output(git_dir, raw, head_sha, raw_tag)
+    return result, True, raw_name
+
+
 def _run_native_review_once(kimi, prompt, repo_root, mode, git_dir, head_sha,
                             push_range, *, raw_tag, resolve_file, timeout, run_id,
-                            common_dir, child_env, launch, bypass, started_at):
+                            common_dir, child_env, launch, bypass, started_at,
+                            paths_file=None):
     _supervisor_event(run_id or "deep", "phase", phase="deep-review")
+    if paths_file and not resolve_file:
+        try:
+            manifest = json.loads(Path(paths_file).read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise ReviewGateError(f"could not read deep-review manifest: {exc}") from exc
+        from rg_legacy_deep import DEEP_FILE_TASK_LIMIT
+        if manifest.get("deep_review") is True \
+                and len(manifest.get("paths") or []) > DEEP_FILE_TASK_LIMIT:
+            return _run_native_decomposed_review(
+                kimi, prompt, manifest, paths_file, repo_root, mode, git_dir,
+                head_sha, push_range, raw_tag, timeout, run_id, common_dir,
+                child_env, launch, bypass, started_at,
+            )
     try:
         return_code, out_text, err_text = _run_native_process(
             kimi, prompt, repo_root, head_sha, push_range, timeout, run_id,

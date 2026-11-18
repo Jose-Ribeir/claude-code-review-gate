@@ -294,6 +294,14 @@ manifest JSON. The manifest fields are:
   the gate's risk gate escalated this push to the tier-2 slow lane: meet §3's
   escalation rule with it. `deep_reasons` (list of strings, one per matched
   risk glob) tells the deep-reviewer why the push is here.
+- `native_deep_task` — (bounded native deep reviews only) the trusted assignment
+  `{task_id, kind: "subsystem"|"global", duties, context_files}` and the sibling
+  `manifest_sha256`. Review every path in `manifest.paths` exactly once and perform
+  every named duty. A `global` task deliberately has no owned paths: use
+  `context_files`/`other_changed` only to perform its cross-file and global duties;
+  do not re-collect every whole-file diff or declare the task skipped merely because
+  `paths` is empty. Pass the assignment verbatim to the deep reviewer and the
+  evidence identity to the §6 formatter as directed by the trusted task prompt.
 - `tier2_model` — (v2 t10) the model to spawn the §3 deep-reviewer subagent
   with when the escalation rule fires; the allowlist cannot read
   `OCR_TIER2_MODEL`. Also present on deep manifests is `risk_threshold`, the
@@ -831,7 +839,8 @@ a low spotter score NEVER downgrades a `deep_review: true` manifest back to
 the fast lane. In the deep lane, spawn **one `deep-reviewer` subagent
 INSTEAD of the `code-reviewer`** below (model `manifest.tier2_model`,
 otherwise `OCR_TIER2_MODEL`, default `kimi-k3`), with the same prompt
-fields as below plus the manifest's `deep_reasons` — *instead-of* because
+fields as below plus the manifest's `deep_reasons` and, when present, its
+`native_deep_task` assignment — *instead-of* because
 the deep-reviewer is a strict superset of the tier-1 reviewer (same inputs,
 same output contract, plus repo-browsing time), so an additional
 `code-reviewer` pass would only duplicate cost. Everything downstream is
@@ -1145,6 +1154,8 @@ Inputs (verbatim):
 [IMPACT_VERDICTS]: <the reviewer's merged map, or omit>
 [DEP_VERDICTS]: <the per-task map, or omit>
 [STATUS_INPUTS]: <subagent errored: yes|no; warning count: N; files reviewable: K>
+[NATIVE_DEEP_EVIDENCE]: <the trusted task_id, input_sha256, manifest_sha256,
+reviewed_paths and completed_duties, or omit when no native_deep_task was assigned>
 
 The object — EXACTLY these keys, no others:
 {"status": "success|completed_with_warnings|completed_with_errors|skipped",
@@ -1163,6 +1174,11 @@ Rules:
   re-rank them. Keep each finding's impact_site / sibling_of fields.
 - Append "cross_file_context_summary", "impact_verdicts", "dep_verdicts"
   keys when those inputs were given.
+- When NATIVE_DEEP_EVIDENCE is given, append exactly one `native_deep_evidence`
+  object with exactly `task_id`, `input_sha256`, `manifest_sha256`,
+  `reviewed_paths`, `completed_duties`. Copy all values verbatim. A completed
+  global-duty task with `reviewed_paths: []` is `success`, not `skipped`; report
+  a duty only after the reviewer actually performed it.
 ```
 
 Your final message = the formatter's output, relayed verbatim (print it;
