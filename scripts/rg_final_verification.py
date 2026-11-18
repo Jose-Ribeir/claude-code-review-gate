@@ -388,7 +388,12 @@ def _gitlab_declarations(source: str, raw: str) -> list[dict]:
                 source, "gitlab:include",
                 f"include {_yaml_scalar(include)!r} cannot be expanded locally")]
 
-    reserved = {"default", "include", "stages", "variables", "workflow"}
+    # Root-only keywords and deprecated global job defaults are settings, not
+    # inline jobs, regardless of whether their values look like shell commands.
+    reserved = {
+        "after_script", "before_script", "cache", "default", "image", "include",
+        "services", "spec", "stages", "types", "variables", "workflow",
+    }
     declarations = []
     for position, (start, job, value, error) in enumerate(headings):
         end = headings[position + 1][0] if position + 1 < len(headings) else len(lines)

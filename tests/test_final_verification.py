@@ -395,6 +395,71 @@ def test_unresolved_github_expression_is_unassessable_not_a_shell_failure(tmp_pa
     assert "expression" in result["warnings"][0]
 
 
+def test_gitlab_root_docker_and_global_settings_are_not_jobs(tmp_path):
+    pipeline = """image: ruby:3.2
+types: [test]
+services:
+  - name: docker:24.0-dind
+    command: ["printf", "service-command-is-not-a-job"]
+variables:
+  DOCKER_HOST: tcp://docker:2376
+  ENTRYPOINT: "printf 'variable-command-is-not-a-job\\n'"
+cache:
+  key: docker-cache
+  paths: [vendor/]
+before_script: printf 'global-before-is-not-a-job\\n'
+after_script:
+  - printf 'global-after-is-not-a-job\\n'
+"required tests":
+  script: printf 'quoted-required-ok\\n'
+'integration tests':
+  script:
+    - printf 'single-quoted-required-ok\\n'
+"""
+    repo, commit = _repo(tmp_path / "source", {".gitlab-ci.yml": pipeline})
+
+    result = verification.run_required_verification(repo, commit)
+
+    assert result["status"] == "pass", result
+    assert result["warnings"] == []
+    assert [(suite["name"], suite["command"], suite["output"])
+            for suite in result["suites"]] == [
+        ("gitlab:required tests:script-1", "printf 'quoted-required-ok\\n'",
+         "quoted-required-ok\n"),
+        ("gitlab:integration tests:script-1", "printf 'single-quoted-required-ok\\n'",
+         "single-quoted-required-ok\n"),
+    ]
+
+
+def test_gitlab_unknown_and_inline_job_commands_remain_unassessable(tmp_path):
+    pipeline = """image: ruby:3.2
+unsupported_root: printf 'unsupported-root-evidence\\n'
+"inline tests": {script: "printf 'inline-job-evidence\\n'"}
+'required tests':
+  script: printf 'quoted-required-ok\\n'
+"""
+    repo, commit = _repo(tmp_path / "source", {".gitlab-ci.yml": pipeline})
+
+    result = verification.run_required_verification(repo, commit)
+
+    assert result["status"] == "incomplete", result
+    assert result["status"] != "absent"
+    assert result["blocking"] is False
+    assert len(result["suites"]) == 3
+    by_name = {suite["name"]: suite for suite in result["suites"]}
+    assert by_name["gitlab:required tests:script-1"]["state"] == "pass"
+    assert by_name["gitlab:required tests:script-1"]["output"] == "quoted-required-ok\n"
+    unsupported = by_name["gitlab:unsupported_root"]
+    inline = by_name["gitlab:inline tests"]
+    assert unsupported["state"] == "unassessable"
+    assert inline["state"] == "unassessable"
+    assert unsupported["attempts"] == []
+    assert inline["attempts"] == []
+    evidence = "\n".join(result["warnings"])
+    assert "unsupported-root-evidence" in evidence
+    assert "inline-job-evidence" in evidence
+
+
 def test_gitlab_include_is_unassessable_instead_of_absent(tmp_path):
     pipeline = """include:
   - remote: https://example.invalid/required-tests.yml
