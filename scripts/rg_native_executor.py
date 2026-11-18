@@ -177,13 +177,21 @@ class NativeExecutor:
         self._deadline = deadline
         self._store = store
 
+    @property
+    def store(self):
+        return self._store
+
+    @property
+    def transport(self):
+        return self._host.transport
+
     def _record(self, task, event_type, occurred, *, native_session_id=None,
                 started=None, finished=None, details=None):
         if self._store is None:
             return
         self._store.record_native_event({
             "schema": "native-review-event/v1",
-            "event_id": "executor:" + event_type,
+            "event_id": f"executor:{task.task_id}:{event_type}",
             "event_type": event_type,
             "identity": task.identity(),
             "transport": self._host.transport,
