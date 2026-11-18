@@ -7,9 +7,11 @@ content is used, and the clone is removed on every exit path.
 """
 from contextlib import contextmanager
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import re
 import subprocess
+import tempfile
 import uuid
 
 import rg_store
@@ -35,12 +37,50 @@ class MaterializedReview:
     lfs_irrelevance: tuple = ()
 
 
-def _git(repo, *args, input_bytes=None):
+def _git_environment(home):
+    """A minimal Git environment that cannot inherit host authentication."""
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": str(home),
+        "XDG_CACHE_HOME": str(home / ".cache"),
+        "XDG_CONFIG_HOME": str(home / ".config"),
+        "XDG_DATA_HOME": str(home / ".local" / "share"),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_ASKPASS": os.devnull,
+        "SSH_ASKPASS": os.devnull,
+        "SSH_ASKPASS_REQUIRE": "never",
+        "GIT_SSH_COMMAND": "ssh -oBatchMode=yes",
+        "CI": "1",
+    }
+    for name in ("LANG", "LC_ALL", "LC_CTYPE", "SYSTEMROOT", "COMSPEC",
+                 "PATHEXT", "TMPDIR", "TEMP", "TMP"):
+        value = os.environ.get(name)
+        if value is not None:
+            env[name] = value
+    return env
+
+
+def _git(repo, *args, input_bytes=None, extra_config=()):
+    """Run Git without ambient config, credential recovery, or interaction."""
+    # Command scope overrides repository/submodule-local config and propagates
+    # through Git's submodule and LFS child processes.
+    command = [
+        "git",
+        "-c", "credential.helper=",
+        "-c", f"core.askPass={os.devnull}",
+        "-c", "credential.interactive=false",
+    ]
+    for setting in extra_config:
+        command.extend(("-c", setting))
+    command.extend(args)
     try:
-        proc = subprocess.run(
-            ["git", *args], cwd=str(repo), input=input_bytes,
-            capture_output=True, timeout=300, check=False,
-        )
+        with tempfile.TemporaryDirectory(prefix="review-gate-final-git-") as directory:
+            proc = subprocess.run(
+                command, cwd=str(repo), input=input_bytes, capture_output=True,
+                timeout=300, check=False, env=_git_environment(Path(directory)),
+            )
     except (OSError, subprocess.SubprocessError) as exc:
         raise MaterializationError(f"git {args[0]} failed: {exc}") from exc
     if proc.returncode:
@@ -53,7 +93,7 @@ def _git(repo, *args, input_bytes=None):
 
 def _recursive_submodules(path):
     _git(path, "submodule", "update", "--init", "--recursive", "--force",
-         "--checkout")
+         "--checkout", extra_config=("protocol.file.allow=always",))
     output = _git(path, "submodule", "status", "--recursive").decode(
         "utf-8", "surrogateescape")
     paths = []
@@ -192,17 +232,10 @@ def materialize_review(repository, target_sha, head_sha, *, target_repository=No
     run_id = f"final-{uuid.uuid4().hex}"
     clone_path = rg_store.clones_dir() / f"{head[:12]}-{run_id}"
     try:
-        made = rg_store.make_review_clone(str(repository), head, run_id)
-        if not made:
-            raise MaterializationError(
-                f"could not clone and check out immutable head {head}"
-            )
-        path = Path(made)
-        # The pre-push clone convenience symlinks local node_modules and scrubs
-        # tracked tsconfig files. Final evidence permits neither alteration.
-        node_modules = path / "node_modules"
-        if node_modules.is_symlink():
-            node_modules.unlink()
+        _git(clone_path.parent, "clone", "--no-hardlinks", "--quiet", "--no-checkout",
+             str(repository), str(clone_path))
+        path = clone_path
+        _git(path, "checkout", "--quiet", "--detach", head)
         _git(path, "reset", "--hard", "--quiet", head)
         _git(path, "clean", "-ffdx", "--quiet")
         actual = _git(path, "rev-parse", "HEAD").decode("ascii").strip()

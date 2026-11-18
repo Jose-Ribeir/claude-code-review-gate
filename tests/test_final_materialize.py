@@ -1,8 +1,11 @@
 """SPEC-16 immutable final-review materialization, through its public seam."""
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
 import subprocess
 import sys
 from pathlib import Path
+import threading
 
 import pytest
 
@@ -11,6 +14,7 @@ _SCRIPTS = _HERE.parent / "scripts"
 sys.path.insert(0, str(_SCRIPTS))
 
 import rg_store  # noqa: E402
+import rg_final_materialize as materialization  # noqa: E402
 from rg_final_materialize import MaterializationError, materialize_review  # noqa: E402
 
 
@@ -52,6 +56,115 @@ def _repository(tmp_path):
     head = _commit(repo, "feature two")
     _git(repo, "checkout", "-q", "main")
     return repo, base, target, head
+
+
+def _credential_helper(tmp_path):
+    marker = tmp_path / "credential-helper-invoked"
+    helper = tmp_path / "malicious-credential-helper"
+    helper.write_text(
+        f"#!{sys.executable}\n"
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('credentials recovered', encoding='utf-8')\n"
+        "print('username=attacker')\n"
+        "print('password=recovered-secret')\n",
+        encoding="utf-8",
+    )
+    helper.chmod(0o755)
+    return helper, marker
+
+
+@contextmanager
+def _authentication_required_server():
+    class RejectAuthentication(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", 'Basic realm="materialization-test"')
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, _format, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), RejectAuthentication)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}/repository.git"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def _isolate_global_git_config(monkeypatch, tmp_path, helper=None):
+    config = tmp_path / "global.gitconfig"
+    value = f"[credential]\n\thelper = {helper}\n" if helper else ""
+    config.write_text(value, encoding="utf-8")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("GIT_TERMINAL_PROMPT", "0")
+
+
+def test_git_invocation_has_explicit_credential_and_prompt_policy(tmp_path, monkeypatch):
+    calls = []
+
+    def record(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(materialization.subprocess, "run", record)
+    monkeypatch.setenv("GITHUB_TOKEN", "must-not-cross")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "must-not-cross-either")
+    materialization._git(tmp_path, "fetch", "origin", "0" * 40)
+
+    command, kwargs = calls[0]
+    assert command[:7] == [
+        "git", "-c", "credential.helper=", "-c", "core.askPass=" + os.devnull,
+        "-c", "credential.interactive=false",
+    ]
+    assert command[7:] == ["fetch", "origin", "0" * 40]
+    assert kwargs["env"]["GIT_CONFIG_NOSYSTEM"] == "1"
+    assert kwargs["env"]["GIT_CONFIG_GLOBAL"] == os.devnull
+    assert kwargs["env"]["GIT_TERMINAL_PROMPT"] == "0"
+    assert kwargs["env"]["GIT_ASKPASS"] == os.devnull
+    assert kwargs["env"]["SSH_ASKPASS"] == os.devnull
+    assert kwargs["env"]["GIT_SSH_COMMAND"] == "ssh -oBatchMode=yes"
+    assert kwargs["env"]["SSH_ASKPASS_REQUIRE"] == "never"
+    assert "GITHUB_TOKEN" not in kwargs["env"]
+    assert "AWS_SECRET_ACCESS_KEY" not in kwargs["env"]
+
+
+def test_clone_cannot_recover_credentials_from_global_environment(
+        tmp_path, monkeypatch):
+    helper, marker = _credential_helper(tmp_path)
+    _isolate_global_git_config(monkeypatch, tmp_path, helper)
+    with _authentication_required_server() as url:
+        with pytest.raises(MaterializationError, match="clone"):
+            with materialize_review(url, "0" * 40, "1" * 40):
+                pass
+
+    assert not marker.exists(), "an inherited global credential helper was executed"
+
+
+@pytest.mark.parametrize("checkout", ["repository", "submodule"])
+def test_local_checkout_config_cannot_restore_credential_helpers(
+        tmp_path, monkeypatch, checkout):
+    helper, marker = _credential_helper(tmp_path)
+    _isolate_global_git_config(monkeypatch, tmp_path)
+    repo = _leaf_repository(tmp_path / checkout, "content.txt", "content\n")
+    if checkout == "submodule":
+        parent = _leaf_repository(tmp_path / "parent", "parent.txt", "parent\n")
+        _git(parent, "-c", "protocol.file.allow=always", "submodule", "add",
+             str(repo), "vendor/child")
+        repo = parent / "vendor/child"
+    _git(repo, "config", "credential.helper", str(helper))
+    with _authentication_required_server() as url:
+        _git(repo, "config", f"credential.{url}.helper", str(helper))
+        with pytest.raises(MaterializationError, match="fetch"):
+            materialization._git(repo, "fetch", "--no-tags", url)
+
+    assert not marker.exists(), f"{checkout}-local credential helper was executed"
 
 
 def test_materializes_only_pinned_tree_and_complete_merge_base_diff(tmp_path):
