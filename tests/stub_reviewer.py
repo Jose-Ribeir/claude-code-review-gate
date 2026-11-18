@@ -124,10 +124,22 @@ if len(sys.argv) > 1 and sys.argv[1] == "--glab":
         "provider_token_available": bool(os.environ.get("GLAB_TOKEN")),
     })
     calls_path.write_text(json.dumps(calls), encoding="utf-8")
-    if "/merge_requests/" in endpoint:
-        prior = sum("/merge_requests/" in call["argv"][-1] for call in calls[:-1])
-        key = "revalidated_merge_request" if prior else "merge_request"
-        payload = scripted.get(key) or scripted["merge_request"]
+    if "/merge_requests?" in endpoint:
+        payload = scripted.get("open_merge_requests") or [{
+            "web_url": scripted["merge_request"]["web_url"],
+        }]
+    elif "/merge_requests/" in endpoint:
+        iid = int(endpoint.rsplit("/", 1)[1])
+        prior = sum(
+            call["argv"][-1].endswith(f"/merge_requests/{iid}")
+            for call in calls[:-1]
+        )
+        merge_requests = scripted.get("merge_requests")
+        if merge_requests:
+            payload = next(mr for mr in merge_requests if mr["iid"] == iid)
+        else:
+            key = "revalidated_merge_request" if prior else "merge_request"
+            payload = scripted.get(key) or scripted["merge_request"]
     elif endpoint == "projects/111":
         payload = scripted["target_project"]
     elif endpoint == "projects/222":

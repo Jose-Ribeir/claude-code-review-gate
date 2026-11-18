@@ -18,7 +18,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import rg_final_review  # noqa: E402
+from rg_final_graph import GraphOmissionError  # noqa: E402
 from rg_final_lenses import REQUIRED_LENS_NAMES  # noqa: E402
+from rg_final_provider import ProviderReadError  # noqa: E402
 from rg_final_publish import STATUS_CONTEXT  # noqa: E402
 from rg_final_store import FinalStore  # noqa: E402
 
@@ -123,18 +125,26 @@ def dynamic_result(state="not_applicable", *, complete=True, findings=(), tests=
 
 
 class Provider:
-    def __init__(self, current=None):
+    def __init__(self, current=None, related=()):
         self.current = deepcopy(current or item())
+        self.related = {
+            related_item["url"]: deepcopy(related_item) for related_item in related
+        }
         self.reads = []
         self.revalidations = []
+        self.open_reads = []
 
     def read(self, reference, repo_root=None):
         self.reads.append((reference, repo_root))
-        return deepcopy(self.current)
+        return deepcopy(self.related.get(reference, self.current))
+
+    def list_open(self, pinned, repo_root=None):
+        self.open_reads.append((deepcopy(pinned), repo_root))
+        return [self.current["url"], *self.related]
 
     def revalidate(self, pinned, repo_root=None):
         self.revalidations.append(deepcopy(pinned))
-        return deepcopy(self.current)
+        return deepcopy(self.related.get(pinned["url"], self.current))
 
 
 class StatusWriter:
@@ -606,22 +616,95 @@ def test_fresh_store_pass_is_local_and_untrusted_even_when_publication_is_reques
     assert writer.calls == []
 
 
-def test_multiref_stack_default_execution_contract_is_unchanged(standalone, monkeypatch):
+def test_multi_numeric_refs_reach_complete_provider_selected_stack_execution(
+        standalone, monkeypatch):
     captured = {}
+    provider = Provider()
 
     def stack_runner(references, **kwargs):
         captured["references"] = references
         captured.update(kwargs)
-        return {"state": "incomplete", "stage": "S16-06B"}
+        return {"state": "pass", "complete": True}
 
     monkeypatch.setattr(rg_final_review, "run_final_stack", stack_runner)
-    output = rg_final_review.run_final_review(["one", "two"], environ={})
+    output = rg_final_review.run_final_review(
+        ["17", "18"], provider=provider, environ={},
+        required_runner=standalone.required, dynamic_runner=standalone.dynamic,
+    )
 
-    assert output["stage"] == "S16-06B"
-    assert captured["references"] == ["one", "two"]
-    assert captured["execute_checks"] is False
-    assert captured["required_runner"] is None
-    assert captured["dynamic_runner"] is None
+    assert output["state"] == "pass"
+    assert captured["references"] == ["17", "18"]
+    assert captured["provider"] is provider
+    assert captured["complete"] is True
+    assert captured["required_runner"] is standalone.required
+    assert captured["dynamic_runner"] is standalone.dynamic
+
+
+def _stacked_provider():
+    ancestor = item()
+    ancestor.update({
+        "id": "gitlab:111!16", "iid": 16,
+        "url": "https://gitlab.example.test/group/project/-/merge_requests/16",
+    })
+    ancestor["source"] = dict(ancestor["source"], project_id=111,
+                              project_path="group/project", branch="feature-base")
+    descendant = item()
+    descendant["source"] = dict(descendant["source"], project_id=111,
+                                project_path="group/project", branch="feature")
+    descendant["target"] = dict(descendant["target"], branch="feature-base")
+    return Provider(descendant, related=[ancestor])
+
+
+def test_single_element_reference_list_uses_isolated_standalone_semantics(standalone):
+    provider = Provider()
+
+    output = rg_final_review.run_final_review(
+        [item()["url"]], provider=provider,
+        store_path=standalone.tmp_path / "single-list.sqlite3",
+        required_runner=standalone.required, dynamic_runner=standalone.dynamic,
+        environ={},
+    )
+
+    assert output["state"] == "pass"
+    assert [unit["unit_key"] for unit in output["units"]] == ["individual:1", "combined"]
+    assert len(provider.open_reads) == 1
+
+
+def test_omitted_relative_supplied_alone_fails_before_worker_or_publication(standalone):
+    provider = _stacked_provider()
+    writer = StatusWriter()
+
+    with pytest.raises(GraphOmissionError) as captured:
+        run(standalone, provider, standalone.tmp_path / "omitted.sqlite3",
+            publish=True, publication_runner=writer)
+
+    error = captured.value
+    assert error.omitted_ancestors == ["gitlab:111!16"]
+    assert error.omitted_descendants == []
+    assert error.corrected_argv[-2:] == (
+        "https://gitlab.example.test/group/project/-/merge_requests/16",
+        item()["url"],
+    )
+    assert standalone.requests == []
+    assert standalone.stages == []
+    assert standalone.cleaned == []
+    assert writer.calls == []
+
+
+def test_unavailable_open_graph_is_an_error_not_an_isolated_pass(standalone):
+    class UnavailableProvider(Provider):
+        def list_open(self, pinned, repo_root=None):
+            raise ProviderReadError("open-item metadata unavailable")
+
+    writer = StatusWriter()
+    with pytest.raises(ProviderReadError, match="metadata unavailable"):
+        run(standalone, UnavailableProvider(), standalone.tmp_path / "unknown.sqlite3",
+            publish=True, publication_runner=writer)
+
+    assert standalone.requests == []
+    assert standalone.stages == []
+    assert standalone.cleaned == []
+    assert writer.calls == []
 
 
 def test_publication_permission_loss_preserves_complete_local_unenforced_result(standalone):

@@ -792,13 +792,18 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
                      report_url=None, local_waivers=(), current_root_sha=None):
     """Run one complete standalone individual+combined final review.
 
+    Every explicit invocation first validates the provider's actual open-item
+    graph. A single reference is standalone only when that graph is isolated;
+    omitted relatives fail with the graph's complete corrected command.
     Freshness, finding memory, and publication remain store-owned authorities.
     ``publish=True`` explicitly authorizes the trusted status seam; permission
-    failures preserve complete local-only evidence. Multi-ref behavior is
-    delegated unchanged to the existing stack entry point.
+    failures preserve complete local-only evidence. Multiple references use
+    the same provider-selected complete stack lifecycle as the operator CLI.
     """
     repo_root = str(repo_root or os.getcwd())
     provider = _selected_provider(reference, provider, repo_root)
+    if isinstance(reference, (list, tuple)) and len(reference) == 1:
+        reference = reference[0]
     if isinstance(reference, (list, tuple)):
         return run_final_stack(
             reference, repo_root=repo_root, provider=provider, store_path=store_path,
@@ -815,7 +820,14 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
     if configured_executor:
         standalone_dynamic_kwargs.setdefault("executor", shlex.split(configured_executor))
     standalone_dynamic_kwargs.setdefault("environ", environ)
-    item, telemetry = _read_standalone_observed(provider, reference, repo_root)
+    telemetry = FinalReviewTelemetry()
+    graph = _discover_observed(
+        discover_linear_graph, [reference], provider=provider, repo_root=repo_root,
+        telemetry=telemetry,
+    )
+    # Graph discovery raises GraphOmissionError for every related open item;
+    # a successful one-reference discovery is therefore genuinely isolated.
+    item = graph["items"][0]
     revisions = list(revision_tuple(item))
     source = item["source"]
     target = item["target"]
@@ -1718,21 +1730,10 @@ def main(argv=None):
     if not args:
         sys.stderr.write("review-gate final-review requires at least one explicit ref.\n")
         return 2
-    if len(args) > 1 and not all(reference.startswith(("https://", "http://"))
-                                 for reference in args):
-        # Preserve the unambiguous legacy shorthand contract. Graph discovery
-        # emits canonical provider URLs for corrected multi-item commands.
-        sys.stderr.write(
-            "review-gate final-review requires exactly one numeric ref; multiple numeric "
-            "refs are reserved. Use canonical provider URLs for stack orchestration.\n"
-        )
-        return 2
     try:
-        # Multi-item CLI integration retains the earlier public composition
-        # contract until the dedicated operator-command integration stage.
-        # The complete C14 API is multi-ref run_final_review above.
-        result = (run_final_review(args[0], publish=True) if len(args) == 1
-                  else run_final_stack(args))
+        # Numeric shorthand and canonical URLs share provider selection, graph
+        # validation, and the complete standalone/stack publication lifecycle.
+        result = run_final_review(args if len(args) > 1 else args[0], publish=True)
     except Exception as exc:
         sys.stderr.write(f"review-gate final-review failed: {exc}\n")
         return 2

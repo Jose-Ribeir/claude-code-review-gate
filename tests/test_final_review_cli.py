@@ -222,14 +222,86 @@ def _coverage(unit):
     return {entry["kind"]: entry for entry in unit["coverage"]}
 
 
-def test_final_review_rejects_multiple_refs_as_reserved_for_stack_orchestration():
-    result = _gate("final-review", "17", "18")
+def _make_two_item_stack(standalone):
+    _git(standalone.repo, "checkout", "-qf", "-b", "stack-base", standalone.target)
+    (standalone.repo / "app.py").write_text("def value():\n    return 1\n", encoding="utf-8")
+    _git(standalone.repo, "add", "app.py")
+    _git(standalone.repo, "commit", "-q", "-m", "stack base")
+    root_tip = _git(standalone.repo, "rev-parse", "HEAD")
+    _git(standalone.repo, "checkout", "-q", "-b", "feature-head")
+    (standalone.repo / "app.py").write_text("def value():\n    return 2\n", encoding="utf-8")
+    _git(standalone.repo, "add", "app.py")
+    _git(standalone.repo, "commit", "-q", "-m", "stacked headline")
+    tip = _git(standalone.repo, "rev-parse", "HEAD")
+    root = json.loads(json.dumps(standalone.merge_request))
+    root.update({
+        "source_branch": "contributor/stack-base", "sha": root_tip,
+        "diff_refs": {"base_sha": standalone.target, "head_sha": root_tip,
+                      "start_sha": standalone.target},
+    })
+    descendant = json.loads(json.dumps(root))
+    descendant.update({
+        "id": 9018, "iid": 18,
+        "title": "Review the stacked headline",
+        "web_url": "https://gitlab.example.test/group/project/-/merge_requests/18",
+        "source_branch": "contributor/feature-head",
+        "target_branch": root["source_branch"],
+        "sha": tip,
+        "diff_refs": {"base_sha": root_tip, "head_sha": tip,
+                      "start_sha": root_tip},
+    })
+    scripted = json.loads(standalone.script.read_text(encoding="utf-8"))
+    scripted["merge_requests"] = [root, descendant]
+    scripted["open_merge_requests"] = [
+        {"web_url": root["web_url"]}, {"web_url": descendant["web_url"]},
+    ]
+    standalone.script.write_text(json.dumps(scripted), encoding="utf-8")
+    return root, descendant, tip
+
+
+@pytest.mark.parametrize("reference_kind", ["numeric", "canonical-url"])
+def test_multi_numeric_or_url_refs_run_complete_provider_selected_stack(
+        standalone, reference_kind):
+    root, descendant, _tip = _make_two_item_stack(standalone)
+    references = (["17", "18"] if reference_kind == "numeric"
+                  else [root["web_url"], descendant["web_url"]])
+
+    output = _result(_gate("final-review", *references, cwd=standalone.repo), 0)
+
+    assert output["stage"] == "S16-07"
+    assert output["complete"] is True
+    assert output["execution_complete"] is True
+    assert output["state"] == "pass"
+    assert output["item_keys"] == ["gitlab:111!17", "gitlab:111!18"]
+    assert [unit["unit_key"] for unit in output["units"]] == [
+        "individual:1", "individual:2", "combined", "prospective",
+    ]
+    assert all(unit["execution_complete"] for unit in output["units"])
+    assert len(_worker_traces(standalone)) == 4 * len(LENS_NAMES)
+    provider_calls = json.loads(standalone.calls.read_text(encoding="utf-8"))
+    assert all(call["argv"][:2] == ["--glab", "api"] for call in provider_calls)
+    if reference_kind == "numeric":
+        assert provider_calls[0]["argv"][-1] == "projects/:fullpath/merge_requests/17"
+        assert any(call["argv"][-1] == "projects/:fullpath/merge_requests/18"
+                   for call in provider_calls)
+
+
+@pytest.mark.parametrize("reference_kind", ["numeric", "canonical-url"])
+def test_omitted_relative_alone_fails_before_any_worker_or_status_write(
+        standalone, reference_kind):
+    root, descendant, _tip = _make_two_item_stack(standalone)
+    reference = "18" if reference_kind == "numeric" else descendant["web_url"]
+
+    result = _gate("final-review", reference, cwd=standalone.repo)
 
     assert result.returncode == 2
-    assert "exactly one" in result.stderr
-    assert "reserved" in result.stderr
-    assert "multiple" in result.stderr.lower()
     assert not result.stdout
+    assert "omitted" in result.stderr
+    assert "corrected command" in result.stderr
+    assert root["web_url"] in result.stderr
+    assert descendant["web_url"] in result.stderr
+    assert not standalone.trace.exists()
+    assert not standalone.calls.with_name("publication.json").exists()
 
 
 def test_standalone_reviews_full_immutable_tree_and_persists_complete_result(standalone):
@@ -323,7 +395,9 @@ def test_standalone_reviews_full_immutable_tree_and_persists_complete_result(sta
         "STUB_FINAL_TRACE": str(standalone.trace),
     }
     provider_calls = json.loads(standalone.calls.read_text(encoding="utf-8"))
-    assert len(provider_calls) == 4
+    assert len(provider_calls) == 5
+    assert any("merge_requests?state=opened" in call["argv"][-1]
+               for call in provider_calls)
     assert all(call["provider_token_available"] for call in provider_calls)
     assert all(call["argv"][:2] == ["--glab", "api"] for call in provider_calls)
     assert "Completion: COMPLETE" in human
@@ -383,7 +457,10 @@ def test_blocking_correctness_finding_is_normalized_and_never_an_official_pass(s
         "speculative-concern", "reviewer-warning", "required-verification",
     ]
     assert unit["warnings"][1]["message"] == "plain reviewer warning"
-    assert machine["publications"] == []
+    assert [publication["status"] for publication in machine["publications"]] == [
+        "local_only",
+    ]
+    assert output["publication"]["status"] == "local_only"
     assert not standalone.calls.with_name("publication.json").exists()
     assert "The implementation ignores" in human
     assert not Path(_worker_trace(standalone)["request"]["repository"]["path"]).exists()
@@ -480,7 +557,9 @@ def test_revision_movement_is_stale_and_preserves_worker_evidence(standalone):
                for warning in machine["units"][0]["warnings"])
     assert machine["revisions"]["items"][0]["source_sha"] == standalone.head
     assert moved not in json.dumps(machine["revisions"])
-    assert machine["publications"] == []
+    assert [publication["status"] for publication in machine["publications"]] == [
+        "local_only",
+    ]
     assert not Path(_worker_trace(standalone)["request"]["repository"]["path"]).exists()
 
 
@@ -502,7 +581,8 @@ def test_numeric_reference_and_arbitrary_fork_use_provider_repository_identity(s
     calls = json.loads(standalone.calls.read_text(encoding="utf-8"))
     assert calls[0]["argv"][-1] == "projects/:fullpath/merge_requests/17"
     assert any(call["argv"][-1] == "projects/222" for call in calls)
-    assert len(calls) == 6
+    assert any("merge_requests?state=opened" in call["argv"][-1] for call in calls)
+    assert len(calls) == 7
 
 
 @pytest.mark.parametrize(("finding", "expected_verdict", "expected_exit", "unit_state"), [
@@ -548,7 +628,9 @@ def test_revalidation_read_failure_is_incomplete_not_stale_or_a_pass(standalone)
     assert unit["lenses"][0]["state"] == "completed"
     assert any(warning["code"] == "freshness-check" for warning in unit["warnings"])
     assert not any(warning["code"] == "revision-stale" for warning in unit["warnings"])
-    assert machine["publications"] == []
+    assert [publication["status"] for publication in machine["publications"]] == [
+        "local_only",
+    ]
     assert not Path(_worker_trace(standalone)["request"]["repository"]["path"]).exists()
 
 

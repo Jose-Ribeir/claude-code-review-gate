@@ -329,6 +329,9 @@ def stack_pr(number, source_branch, target_branch):
     payload["html_url"] = f"https://github.com/group/project/pull/{number}"
     payload["title"] = f"Stack item {number}"
     payload["body"] = "Provider edges, not prose dependencies."
+    # Every link is a same-repository branch dependency: a child's base repo
+    # must be the actual repository owning its parent's head branch.
+    payload["head"]["repo"] = repository_payload(111, "group/project")
     payload["head"]["ref"] = source_branch
     payload["head"]["sha"] = f"{number:040d}"
     payload["base"]["ref"] = target_branch
@@ -384,7 +387,7 @@ def test_real_github_adapter_discovers_same_base_most_linear_graph_and_revision_
     assert graph["revisions"] == [{
         "item_key": f"github:111#{pull['number']}",
         "revision_tuple": [
-            222, pull["head"]["ref"], pull["head"]["sha"],
+            111, pull["head"]["ref"], pull["head"]["sha"],
             111, pull["base"]["ref"], pull["base"]["sha"],
             f"{pull['number'] + 2000:040d}",
         ],
