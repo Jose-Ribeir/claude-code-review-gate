@@ -13,6 +13,9 @@ environment variables so one command line serves every scenario:
                      (racy when chunks run in parallel: use STUB_CHUNK_VERDICT)
   STUB_CHUNK_VERDICT JSON {chunk_index: verdict} -- STUB_VERDICT for that chunk only
   STUB_CHUNK_SLEEP   JSON {chunk_index: seconds} -- sleep that long in that chunk only
+  STUB_CHUNK_TOUCH   JSON {chunk_index: file} -- touch the file at the rendezvous
+  STUB_CHUNK_WAIT    JSON {chunk_index: file} -- wait for the file before answering;
+                     60 s timeout, for deterministic cross-process rendezvous/cancellation
   STUB_VERDICT_FOR   path — the chunk containing this path returns block
   STUB_FINDINGS_FOR  JSON mapping path → {severity, content, confidence?} for
                      path-scripted verdicts (confidence is severity-tier-aware)
@@ -375,9 +378,21 @@ def _by_chunk(var):
         return None
 
 
+_chunk_touch = _by_chunk("STUB_CHUNK_TOUCH")
+if _chunk_touch:
+    Path(_chunk_touch).touch()
 _chunk_sleep = _by_chunk("STUB_CHUNK_SLEEP")
 if _chunk_sleep:
     time.sleep(float(_chunk_sleep))
+_chunk_wait = _by_chunk("STUB_CHUNK_WAIT")
+if _chunk_wait:
+    # The deadline only contains a broken rendezvous; synchronization is by the file.
+    deadline = time.monotonic() + 60
+    while not os.path.exists(_chunk_wait):
+        if time.monotonic() >= deadline:
+            sys.stderr.write(f"stub: timed out waiting for {_chunk_wait}\n")
+            sys.exit(1)
+        time.sleep(0.05)
 
 def emit(payload):
     """Write the reply: bare JSON, or a stream-json transcript when STUB_STREAM is set."""
@@ -490,6 +505,12 @@ if verdict == "garbage":
     sys.stdout.write("I could not review this.\n")
     sys.exit(0)
 if verdict == "limit":
+    if trace:
+        with open(trace, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({
+                "event": "limit_reported", "ts": time.time(),
+                "chunk_index": (manifest or {}).get("chunk_index"),
+            }) + "\n")
     # Real limit output captured 2026-09-23.
     sys.stdout.write("You've hit your session limit · resets 3:20pm (Europe/Lisbon)\n")
     sys.exit(1)
