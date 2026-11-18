@@ -395,6 +395,78 @@ def test_unresolved_github_expression_is_unassessable_not_a_shell_failure(tmp_pa
     assert "expression" in result["warnings"][0]
 
 
+def test_github_literal_block_preserves_nested_python_heredoc_indentation(tmp_path):
+    workflow = """jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          for path in Path('.').glob('*.json'):
+              try:
+                  payload = json.loads(path.read_text(encoding='utf-8'))
+              except ValueError as error:
+                  raise SystemExit(f'{path}: {error}')
+              assert payload['valid'] is True
+          print('nested-heredoc-ok')
+          PY
+"""
+    repo, commit = _repo(tmp_path / "source", {
+        ".github/workflows/verify.yml": workflow,
+        "data.json": '{"valid": true}\n',
+    })
+
+    result = verification.run_required_verification(repo, commit)
+
+    assert result["status"] == "pass", result
+    assert result["suites"][0]["output"] == "nested-heredoc-ok\n"
+    assert result["suites"][0]["attempts"][0]["returncode"] == 0
+
+
+def test_github_block_content_preserves_literal_lines_and_rejects_complex_folding(
+        tmp_path):
+    workflow = """jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          printf 'literal-start\\n'
+
+          if true; then
+            printf 'literal-nested\\n'
+          fi
+      - run: printf 'next-step\\n'
+      - run: >
+          printf 'folded-must-not-run\\n'
+
+          printf 'also-must-not-run\\n'
+"""
+    repo, commit = _repo(tmp_path / "source", {
+        ".github/workflows/verify.yml": workflow,
+    })
+
+    result = verification.run_required_verification(repo, commit)
+
+    assert result["status"] == "incomplete", result
+    assert [suite["command"] for suite in result["suites"][:2]] == [
+        "printf 'literal-start\\n'\n\nif true; then\n"
+        "  printf 'literal-nested\\n'\nfi",
+        "printf 'next-step\\n'",
+    ]
+    assert [suite["output"] for suite in result["suites"][:2]] == [
+        "literal-start\nliteral-nested\n",
+        "next-step\n",
+    ]
+    folded = result["suites"][2]
+    assert folded["state"] == "unassessable"
+    assert folded["command"] is None
+    assert folded["attempts"] == []
+    assert "folded-must-not-run" not in result["suites"][0]["output"]
+    assert "also-must-not-run" not in result["suites"][1]["output"]
+
+
 def test_gitlab_root_docker_and_global_settings_are_not_jobs(tmp_path):
     pipeline = """image: ruby:3.2
 types: [test]
