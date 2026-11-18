@@ -6,12 +6,94 @@ failures; provider adapters turn them into explicit exceptions rather than
 silently reviewing incomplete metadata.
 """
 import json
+import re
 import subprocess
 from typing import Protocol
 from urllib.parse import quote, urlsplit
 
 
 FETCH_TIMEOUT = 10
+
+_LOCAL_NUMERIC = re.compile(r"[1-9][0-9]*$")
+_GITHUB_PULL_PATH = re.compile(r"^/[^/]+/[^/]+/pull/[1-9][0-9]*/?$")
+_GITLAB_MR_PATH = re.compile(r"^/.+/-/merge_requests/[1-9][0-9]*/?$")
+
+
+def _github_remote(repo_root):
+    """Recognize only github.com origins; never contact the remote."""
+    try:
+        process = subprocess.run(
+            ["git", "-C", str(repo_root or "."), "remote", "get-url", "origin"],
+            capture_output=True, text=True, timeout=3, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if process.returncode:
+        return False
+    remote = process.stdout.strip()
+    if "://" in remote:
+        return (urlsplit(remote).hostname or "").lower() == "github.com"
+    match = re.fullmatch(r"(?:[^@]+@)?([^:]+):.+", remote)
+    return bool(match and match.group(1).lower() == "github.com")
+
+
+def provider_name_for_references(references, repo_root=None):
+    """Select a forge from canonical refs, sigils, or a local GitHub origin.
+
+    Unknown references retain the historical GitLab default and are validated
+    by that adapter. Bare numerics select GitHub only for a github.com origin;
+    this keeps existing GitLab numeric callers unchanged elsewhere.
+    """
+    if isinstance(references, str):
+        references = [references]
+    else:
+        references = list(references)
+    selected = set()
+    bare_numeric = bool(references)
+    for reference in references:
+        if not isinstance(reference, str):
+            bare_numeric = False
+            continue
+        value = reference.strip()
+        if re.fullmatch(r"#[1-9][0-9]*", value):
+            selected.add("github")
+            bare_numeric = False
+        elif re.fullmatch(r"![1-9][0-9]*", value):
+            selected.add("gitlab")
+            bare_numeric = False
+        elif not _LOCAL_NUMERIC.fullmatch(value):
+            bare_numeric = False
+        if "://" not in value:
+            continue
+        parsed = urlsplit(value)
+        if parsed.netloc.lower() == "github.com" and _GITHUB_PULL_PATH.fullmatch(parsed.path):
+            selected.add("github")
+        elif _GITLAB_MR_PATH.fullmatch(parsed.path):
+            selected.add("gitlab")
+    if len(selected) > 1:
+        raise ProviderReferenceError("final-review references contain mixed GitHub and GitLab providers")
+    if selected:
+        return selected.pop()
+    if bare_numeric and _github_remote(repo_root):
+        return "github"
+    return "gitlab"
+
+
+def select_provider(references, *, provider=None, repo_root=None,
+                    gitlab_factory=None, github_factory=None):
+    """Instantiate the selected adapter, always preserving injection precedence."""
+    if provider is not None:
+        return provider
+    name = provider_name_for_references(references, repo_root=repo_root)
+    if name == "github":
+        if github_factory is None:
+            from rg_final_github import GitHubProvider
+            github_factory = GitHubProvider
+        return github_factory()
+    if gitlab_factory is None:
+        from rg_final_gitlab import GitLabProvider
+        gitlab_factory = GitLabProvider
+    return gitlab_factory()
 
 
 class ProviderError(RuntimeError):

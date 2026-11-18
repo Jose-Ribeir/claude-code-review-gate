@@ -2,7 +2,12 @@
 import re
 import shlex
 
-from rg_final_provider import ProviderError, list_open_references, revision_tuple
+from rg_final_provider import (
+    ProviderError,
+    list_open_references,
+    revision_tuple,
+    select_provider,
+)
 
 
 GRAPH_SCHEMA = "final-review-graph/v1"
@@ -210,8 +215,9 @@ def _linear_component(supplied, items):
     return ordered
 
 
-def discover_linear_graph(references, *, provider, repo_root=None):
+def discover_linear_graph(references, *, provider=None, repo_root=None):
     """Return provider-pinned items in their explicit base-most-first order."""
+    provider = select_provider(references, provider=provider, repo_root=repo_root)
     references = normalize_base_most_references(references)
     supplied = []
     supplied_ids = set()

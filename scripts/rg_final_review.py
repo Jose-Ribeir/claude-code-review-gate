@@ -45,7 +45,7 @@ from rg_final_lenses import (
     failed_lens_aggregation,
 )
 from rg_final_materialize import materialize_review
-from rg_final_provider import RevisionChangedError, revision_tuple
+from rg_final_provider import RevisionChangedError, revision_tuple, select_provider
 from rg_final_store import FinalStore
 
 
@@ -67,6 +67,14 @@ EXECUTION_STAGE = "S16-04B"
 EXECUTION_MISSING_STAGES = ["composition", "provider_publication"]
 EXECUTION_STACK_MISSING_STAGES = ["provider_publication"]
 COMPLETE_STAGE = "S16-07"
+
+
+def _selected_provider(reference, provider, repo_root):
+    """Dispatch by ref while retaining the patchable legacy GitLab factory."""
+    return select_provider(
+        reference, provider=provider, repo_root=repo_root,
+        gitlab_factory=lambda: GitLabProvider(),
+    )
 
 
 class WorkerError(RuntimeError):
@@ -460,14 +468,14 @@ def _run_static_final_review(reference, *, repo_root=None, provider=None, store_
     for scripted or alternate workers.  The default uses ``RG_FINAL_WORKER`` or
     the selected normal review backend.  No provider mutation method is called.
     """
+    repo_root = str(repo_root or os.getcwd())
+    provider = _selected_provider(reference, provider, repo_root)
     if isinstance(reference, (list, tuple)):
         return run_final_stack(
             reference, repo_root=repo_root, provider=provider, store_path=store_path,
             worker=worker, environ=environ,
         )
     environ = os.environ if environ is None else environ
-    repo_root = str(repo_root or os.getcwd())
-    provider = provider or GitLabProvider()
     stage = EXECUTION_STAGE if execute_checks else STAGE
     missing_stages = EXECUTION_MISSING_STAGES if execute_checks else MISSING_STAGES
     item = provider.read(reference, repo_root=repo_root)
@@ -757,6 +765,8 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
     failures preserve complete local-only evidence. Multi-ref behavior is
     delegated unchanged to the existing stack entry point.
     """
+    repo_root = str(repo_root or os.getcwd())
+    provider = _selected_provider(reference, provider, repo_root)
     if isinstance(reference, (list, tuple)):
         return run_final_stack(
             reference, repo_root=repo_root, provider=provider, store_path=store_path,
@@ -768,8 +778,6 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
             local_waivers=local_waivers, complete=True,
         )
     environ = os.environ if environ is None else environ
-    repo_root = str(repo_root or os.getcwd())
-    provider = provider or GitLabProvider()
     standalone_dynamic_kwargs = dict(dynamic_kwargs or {})
     configured_executor = environ.get("RG_FINAL_DYNAMIC_EXECUTOR", "").strip()
     if configured_executor:
@@ -1434,7 +1442,7 @@ def run_final_stack(references, *, repo_root=None, provider=None, store_path=Non
         )
     environ = os.environ if environ is None else environ
     repo_root = str(repo_root or os.getcwd())
-    provider = provider or GitLabProvider()
+    provider = _selected_provider(references, provider, repo_root)
     stage = EXECUTION_STAGE if execute_checks else STACK_STAGE
     missing_stages = EXECUTION_STACK_MISSING_STAGES if execute_checks else STACK_MISSING_STAGES
     graph = discover_linear_graph(references, provider=provider, repo_root=repo_root)

@@ -1,4 +1,4 @@
-"""Trusted, least-privilege GitLab commit statuses for SPEC-16 final review.
+"""Trusted, least-privilege GitLab/GitHub commit statuses for final review.
 
 This module is the only final-review provider-write seam. Review workers,
 test executors, and untrusted callers must not instantiate an authorized
@@ -7,18 +7,18 @@ without it the public API records local-only evidence and never invokes its
 transport. Production uses the existing ``run_cli`` runner, while tests inject
 scripted ``(argv, cwd, timeout) -> (stdout, note)`` doubles.
 
-Each invocation makes at most one ``POST projects/:id/statuses/:sha`` request
-for one source/fork commit. No token is read or copied by this module. The
-caller must provision only the GitLab permission needed to create commit
-statuses on participating projects. Provider failures degrade trust and leave
-all durable review evidence available locally.
+Each invocation makes at most one canonical commit-status POST for one
+source/fork commit. No token is read or copied by this module. The caller must
+provision only the provider permission needed to create commit statuses on
+participating projects. Provider failures degrade trust and leave all durable
+review evidence available locally.
 """
 from __future__ import annotations
 
 import json
 from urllib.parse import quote, urlsplit
 
-from rg_final_provider import FETCH_TIMEOUT, run_cli
+from rg_final_provider import FETCH_TIMEOUT, provider_name_for_references, run_cli
 from rg_final_store import PUBLICATION_STATUS_CONTEXT
 
 
@@ -82,13 +82,30 @@ class FinalPublisher:
             if not self.trusted_orchestrator:
                 decision["status_blockers"].append("untrusted-caller")
                 decision["green_blockers"].append("untrusted-caller")
+            provider = self._provider(decision)
+            if provider == "github":
+                # The shared store predates multi-forge dispatch and emits its
+                # legacy GitLab-only blocker. At this provider-specific seam a
+                # canonical github.com reference is explicitly supported; all
+                # other store-owned eligibility blockers remain authoritative.
+                decision["status_blockers"] = [
+                    blocker for blocker in decision["status_blockers"]
+                    if blocker != "unsupported-provider"
+                ]
+                decision["green_blockers"] = [
+                    blocker for blocker in decision["green_blockers"]
+                    if blocker != "unsupported-provider"
+                ]
             decision["status_blockers"] = list(dict.fromkeys(decision["status_blockers"]))
             decision["green_blockers"] = list(dict.fromkeys(decision["green_blockers"]))
             decision["can_publish"] = not decision["status_blockers"]
             decision["can_publish_status"] = decision["can_publish"]
             decision["can_publish_pass"] = not decision["green_blockers"]
             decision["official_green"] = decision["can_publish_pass"]
-            provider_state = "success" if decision["can_publish_pass"] else "failed"
+            if provider == "github" and decision["can_publish_pass"]:
+                decision["publication_state"] = "pass"
+            provider_state = ("success" if decision["can_publish_pass"] else
+                              "failure" if provider == "github" else "failed")
             description = self._description(decision)
 
             if "run-superseded" in decision["status_blockers"]:
@@ -141,8 +158,8 @@ class FinalPublisher:
     def _description(decision):
         identity = decision["identity"]
         report = decision["report"]
-        # Full run/store/unit identity and exact head fit GitLab's 255-character
-        # description limit. The HTTP(S) report link carries the verbose detail.
+        # Full run/store/unit identity and exact head fit a conservative
+        # 255-character limit. The HTTP(S) report link carries verbose detail.
         description = (
             f"{decision['publication_state']} store={identity['store_instance_id']} "
             f"run={identity['run_id']}#{identity['run_seq']} "
@@ -176,12 +193,22 @@ class FinalPublisher:
             "publication-target-required": "The status destination item is not available",
             "unit-required": "A final-review unit is required for publication",
             "unsupported-unit-kind": "Only individual and combined units can publish",
-            "unsupported-provider": "Only GitLab final-review statuses are supported",
+            "unsupported-provider": "The final-review provider does not support statuses",
         }
         detail = messages.get(reason, f"Publication is ineligible: {reason}")
         return detail + " (" + ", ".join(blockers) + ")"
 
+    @staticmethod
+    def _provider(decision):
+        reference = decision["transport"].get("reference") or ""
+        return provider_name_for_references(reference)
+
     def _request(self, decision, provider_state, description, report_url):
+        if self._provider(decision) == "github":
+            return self._github_request(decision, provider_state, description, report_url)
+        return self._gitlab_request(decision, provider_state, description, report_url)
+
+    def _gitlab_request(self, decision, provider_state, description, report_url):
         identity = decision["identity"]
         project = quote(str(identity["source_project"]), safe="")
         head = quote(str(identity["head_sha"]), safe="")
@@ -222,6 +249,58 @@ class FinalPublisher:
         if response.get("name") not in (None, STATUS_CONTEXT) or \
                 response.get("context") not in (None, STATUS_CONTEXT):
             return None, "GitLab response used the wrong final-review status context"
+        return response, ""
+
+    def _github_request(self, decision, provider_state, description, report_url):
+        identity = decision["identity"]
+        try:
+            pin = next(
+                row["pinned"] for row in self.store.pinned_revisions(decision["run_id"])
+                if row["item_key"] == identity["item_key"]
+            )
+            source = pin["source"]
+            if source["project_id"] != identity["source_project"]:
+                raise ValueError("source project identity changed")
+            project = str(source["project_path"])
+        except (KeyError, StopIteration, TypeError, ValueError) as exc:
+            return None, f"GitHub status source repository could not be pinned: {exc}"
+        parts = project.split("/")
+        if len(parts) != 2 or any(part in ("", ".", "..") for part in parts):
+            return None, "GitHub status source repository is not OWNER/REPO"
+        head = quote(str(identity["head_sha"]), safe="")
+        endpoint = f"repos/{quote(project, safe='/')}/statuses/{head}"
+        host = urlsplit(decision["transport"]["reference"]).netloc.lower()
+        argv = ["gh", "api", "--hostname", host,
+                "--method", "POST", endpoint]
+        fields = [
+            ("state", provider_state),
+            ("context", STATUS_CONTEXT),
+            ("description", description),
+        ]
+        if report_url:
+            fields.append(("target_url", report_url))
+        for key, value in fields:
+            argv.extend(["--raw-field", f"{key}={value}"])
+        try:
+            out, note = self.runner(argv, self.repo_root, self.timeout)
+        except Exception as exc:
+            return None, f"GitHub status transport failed: {str(exc)[:500]}"
+        if note:
+            return None, str(note)[:500]
+        if out is None:
+            return None, "GitHub status write returned no response"
+        try:
+            response = json.loads(out)
+        except (TypeError, ValueError):
+            return None, "GitHub status write returned invalid JSON"
+        if not isinstance(response, dict) or not response.get("id"):
+            return None, "GitHub status write returned no commit-status identity"
+        if response.get("state") not in (None, provider_state):
+            return None, "GitHub response state disagrees with the final-review status"
+        if response.get("sha") not in (None, identity["head_sha"]):
+            return None, "GitHub response SHA disagrees with the pinned final-review head"
+        if response.get("context") not in (None, STATUS_CONTEXT):
+            return None, "GitHub response used the wrong final-review status context"
         return response, ""
 
     def _finalize(self, attempt, decision, *, status, provider_state, description,
