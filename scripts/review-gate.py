@@ -9854,7 +9854,18 @@ def _warn_mode_clamp(tagged):
         conf = 0.0
     conf_cap = _WARN_MODE_CONFIDENCE_CAP
     if conf_cap >= min_conf:
-        conf_cap = max(0.0, round(min_conf - 0.01, 2))
+        conf_cap = round(min_conf - 0.01, 2)
+    if conf_cap < 0:
+        # The confidence bar is inclusive (block tests conf >= min_conf), so
+        # when no valid confidence sits strictly below it the severity side
+        # must be the escape: drop a RANKED safe_sev one tier below the
+        # confidence-gated bar (medium). When the bar is already lowest
+        # (min_rank=low), safe_sev is already "note" -- never raise it back.
+        conf_cap = 0.0
+        if safe_rank >= _SEVERITY_RANK["medium"]:
+            safe_sev = "low"
+    if rank > safe_rank:
+        tagged["severity"] = safe_sev
     if conf > conf_cap:
         tagged["confidence"] = conf_cap
     return tagged
@@ -9934,6 +9945,7 @@ def _docs_quality_block(repo_root, review_root, base, tip, entries=None,
             return None
         diff_base = base or _EMPTY_TREE
         enabled_duties, options, evidence, files = {}, {}, {}, []
+        scopes = {}   # duty -> the doc paths that duty's own globs matched
         for duty in _DOC_QUALITY_DUTIES:
             check = checks.get(duty) or {}
             if check.get("enabled") is not True:
@@ -9949,17 +9961,20 @@ def _docs_quality_block(repo_root, review_root, base, tip, entries=None,
             targets = matched
             if options[duty].get("sweep") is True and duty != "docs-deslop":
                 # Whole-corpus sweep (story 20), markdown-only in v1: every
-                # ADR under the records root, not just the pushed ones.
+                # ADR under the records root RECURSIVELY, not just the
+                # pushed ones -- a sub-dir tree of records is still records.
                 records_root = _records_root(review_root)
                 if records_root:
-                    try:
-                        sweep = [records_root + "/" + name
-                                 for name in sorted(os.listdir(
-                                     str(Path(review_root) / records_root)))
-                                 if name.lower().endswith(".md")]
-                    except OSError:
-                        sweep = []
+                    sweep = []
+                    base = str(Path(review_root) / records_root)
+                    for dirpath, _dirs, walk_files in os.walk(base):
+                        for name in walk_files:
+                            if name.lower().endswith(".md"):
+                                full = os.path.join(dirpath, name)
+                                sweep.append(os.path.relpath(full, review_root)
+                                             .replace(os.sep, "/"))
                     targets = sorted(set(matched) | set(sweep))
+            scopes[duty] = list(targets)
             t0 = time.monotonic()
             cap = options[duty].get("sentence_cap")
             per = ocr_docsquality.compute_evidence(
@@ -9992,7 +10007,7 @@ def _docs_quality_block(repo_root, review_root, base, tip, entries=None,
                 Path(run_dir) if run_dir else None, index,
                 review_root, diff_base, tip, path))
         return {"enabled_duties": enabled_duties, "options": options,
-                "files": payload_files, "evidence": evidence}
+                "files": payload_files, "scopes": scopes, "evidence": evidence}
     except Exception as exc:  # noqa: BLE001 -- the payload must never break a review
         _warn(f"[gate] docs-quality payload failed ({type(exc).__name__}: {exc}); "
               "the push continues without it")
@@ -10029,15 +10044,18 @@ def _apply_docs_quality_demotion(result, repo_root=None):
         subset = [out[i] for i in indexes]
         checked = ocr_docsquality.validate_findings(subset)
         validated = checked.get("findings") or []
-        if len(validated) == len(indexes):  # the helper failed soft: keep as-is
+        if len(validated) == len(indexes):  # helper full-success only
             for i, f in zip(indexes, validated):
                 out[i] = f
-            warnings += [{"file": None, "message": w}
-                         for w in (checked.get("warnings") or [])]
             _TELE.setdefault("docs_quality", []).append({
                 "duty": "docs-deslop-validate", "findings": len(indexes),
                 "demotions": int(checked.get("demoted") or 0),
                 "seconds": round(time.monotonic() - t0, 2)})
+        # The helper's warnings are always kept, partial failure included:
+        # silently dropping them would hide the degrade (ADR 0006:
+        # observable fail-soft). Raw findings stay as-is on that path.
+        warnings += [{"file": None, "message": w}
+                     for w in (checked.get("warnings") or [])]
     modes = {}
     if repo_root is not None:
         try:
@@ -10207,8 +10225,21 @@ def _run_one_command_check(review_root, command, matched,
                         "absolute paths, no '..' components): %s; findings discarded"
                         % command), {}
     exe = str(Path(review_root) / command)
-    if not (os.path.isfile(exe) and os.access(exe, os.X_OK)):
+    # Lexical checks are not a sandbox: isfile/access/subprocess all follow
+    # symlinks, so a repo-committed symlink could point outside the tree.
+    # Resolve to the real target and require it stays inside review_root.
+    try:
+        real_exe = os.path.realpath(exe)
+        inside = os.path.realpath(str(review_root))
+        if os.path.commonpath([real_exe, inside]) != inside:
+            return [], [], ("resolved command escapes the review tree (symlink "
+                            "outside the repo): %s; findings discarded"
+                            % command), {}
+    except (OSError, ValueError):
+        return [], [], f"command not resolvable inside the review tree: {command}", {}
+    if not (os.path.isfile(real_exe) and os.access(real_exe, os.X_OK)):
         return [], [], f"command not executable or missing: {command}", {}
+    exe = real_exe
     # SPEC-15.1: the check's per-check answer budget, clamped to a sane
     # guard (1..3600 s). rg_config already floors positive values at 1, so
     # the ceiling is the only clamp needed here; an unusable value keeps
@@ -12624,6 +12655,11 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
         pass
     stop_evt = threading.Event()   # a sibling failed hard: no more attempts
     docs_context = _docs_context(review_root)
+    # Chunked runs carry docs_quality ONLY on chunk 0: a full payload
+    # (doc diffs + per-duty evidence) re-shipped into every chunk would
+    # duplicate the documentation check N-fold -- one documentation pass
+    # per push is the contract (chunk 0 or the single/deep manifest).
+    quality_attached = {"done": False}
 
     def _prepare(k, chunk_items):
         """Write chunk k's manifest (main thread: the impact bundle touches _TELE)."""
@@ -12644,10 +12680,14 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
         else:
             extras = chunk_extras(k, chunk_paths)
         scope = _ManifestScope(common_dir, run_id, k, len(chunks))
+        chunk_quality = None
+        if docs_quality and not quality_attached["done"]:
+            chunk_quality = docs_quality
+            quality_attached["done"] = True
         manifest = _build_review_manifest(
             scope, chunk_items, other_changed, carry_paths,
             extras, diffs, docs_context=docs_context, arch_flags=arch_flags,
-            docs_quality=docs_quality)
+            docs_quality=chunk_quality)
         _write_manifest_file(manifest_path, manifest, f"chunk manifest for chunk {k}")
         return manifest, manifest_path
 

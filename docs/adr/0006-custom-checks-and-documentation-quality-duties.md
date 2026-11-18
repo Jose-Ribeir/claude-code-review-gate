@@ -69,9 +69,9 @@ exactly the keys it shipped and nothing else.
    review tree at the tip — the deslop catalog scan (163 entries snapshotted
    from the deslop skill's references into `scripts/deslop_catalog.json`),
    throat-clearing, em-dash density, and template skeletons for
-   docs-deslop; STE (ASD-STE100 Simplified Technical English) surface stats
-   (sentence-length outliers, acronym table, passive-voice estimate) for
-   adr-wait-what; existence facts
+   docs-deslop; STE (ASD — the Aerospace and Defence industries — STE100
+   Simplified Technical English) surface stats (sentence-length outliers,
+   acronym table, passive-voice estimate) for adr-wait-what; existence facts
    (`missing_paths`, `dangling_links`, `unresolved_adr_refs`) for
    adr-integrity — and emits it into the manifest's `docs_quality.evidence`
    block in the established arch_flags pattern. The integrity duty is
@@ -162,11 +162,10 @@ exactly the keys it shipped and nothing else.
 
 ## References
 
-- Spec: `.kimchi/tracker/tickets/spec-14-docs-quality-checks.md` (stories
-  1–25) and the working doc `.kimchi/plans/docs-quality-checks-spec.md`.
 - Land commits: `e582f80` (checks config surface), `6d40dec` (evidence and
   finding-contract module), `9ac38dd` (persona duty sections), `8f501d7`
   (gate plumbing).
-- Manifest contract: `skills/review/SKILL.md` §2 (`docs_quality`) and §3
-  ("Documentation check").
+- Manifest contract: `skills/review/SKILL.md` §1 ("Select files and collect
+  diffs", the `docs_quality` manifest field) and §3 (the "Documentation
+  check" orchestration paragraph).
 - ADR 0001 (verdict authority, fail-soft degradation as recorded skill).
