@@ -2,6 +2,7 @@
 from dataclasses import replace
 import json
 import os
+import signal
 import sys
 import threading
 
@@ -18,6 +19,7 @@ from rg_native_executor import (  # noqa: E402
     probe_kimchi_native_capability,
 )
 from rg_run_lifecycle import RunDeadline, RunDeadlineExpired  # noqa: E402
+from rg_final_store import FinalStore  # noqa: E402
 
 
 class _DeadlineTimer:
@@ -389,3 +391,76 @@ def test_run_expiry_fences_dispatch_and_cancels_only_owned_native_handles(tmp_pa
     host.sessions["owned"].finish({"status": "success", "late": True})
     assert len(completions) == 1
     assert not task.artifact_path.exists()
+
+
+def test_malformed_native_result_is_a_durable_failed_event(tmp_path):
+    with FinalStore(tmp_path / "native-failure.sqlite3") as store:
+        started = store.start_run({
+            "provider": "gitlab", "target_project": "group/project",
+            "root_target_ref": "main", "root_target_sha": "b" * 40,
+            "items": [{
+                "item_key": "123", "source_project": "fork/project",
+                "source_ref": "feature", "source_sha": "a" * 40,
+                "target_project": "group/project", "target_ref": "main",
+                "target_sha": "b" * 40, "provider_data": {"iid": 123},
+            }],
+        })
+        task = replace(
+            _task(tmp_path), run_id=started["run_id"],
+            session_name="failure-session",
+            unit_id=started["unit_ids"]["individual:1"],
+            revision_tuple=("b" * 40, "a" * 40, "b" * 40),
+        )
+        host = _FakeHost()
+        completions = []
+        NativeExecutor(host, store=store).start(task, completions.append)
+
+        host.sessions[task.task_id].emit("not-json", 0)
+        events = store.manifest(started["run_id"])["native_tasks"][0]["events"]
+        assert [event["event_type"] for event in events].count("queued") == 1
+        assert [event["event_type"] for event in events].count("started") == 1
+        assert [event["event_type"] for event in events].count("failed") == 1
+        assert completions[0].state == "failed"
+        assert not task.artifact_path.exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descendant process-group control")
+def test_cancel_wakes_pipe_watcher_when_descendant_escapes_group(tmp_path):
+    capture = tmp_path / "escaped-pid"
+    executable = tmp_path / "parent-with-escaped-child"
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import pathlib, subprocess, sys, time\n"
+        "grandchild = subprocess.Popen("
+        "[sys.executable, '-c', 'import time; time.sleep(60)'], "
+        "start_new_session=True)\n"
+        f"pathlib.Path({str(capture)!r}).write_text(str(grandchild.pid))\n"
+        "time.sleep(60)\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+    executor = NativeExecutor(KimchiNativeHost(str(executable), environ={}))
+    completed = threading.Event()
+
+    def finish(completion):
+        assert completion.state == "cancelled"
+        completed.set()
+
+    handle = executor.start(_task(tmp_path), finish)
+    deadline = threading.Event()
+    for _ in range(100):
+        if capture.exists():
+            deadline.set()
+            break
+        deadline.wait(0.05)
+    assert deadline.is_set(), "native child did not expose its detached descendant"
+    try:
+        handle.cancel()
+        assert completed.wait(5), "descendant-held stdout kept cancellation waiting"
+    finally:
+        if capture.exists():
+            try:
+                os.kill(int(capture.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        handle.cancel()

@@ -39,7 +39,7 @@ NATIVE_TASK_SCHEMA = "native-review-task/v1"
 NATIVE_EVENT_SCHEMA = "native-review-event/v1"
 NATIVE_ARTIFACT_SCHEMA = "native-review-artifact/v1"
 NATIVE_EVENT_TYPES = frozenset((
-    "queued", "started", "completed", "warning", "timeout", "cancelled",
+    "queued", "started", "completed", "failed", "warning", "timeout", "cancelled",
     "cleanup", "finalization",
 ))
 _SHA = re.compile(r"^[0-9a-fA-F]{40}$")
@@ -586,7 +586,7 @@ _SCHEMA_V4 = (
         stage TEXT NOT NULL,
         lens TEXT NOT NULL,
         event_type TEXT NOT NULL CHECK(event_type IN (
-            'queued', 'started', 'completed', 'warning', 'timeout', 'cancelled',
+            'queued', 'started', 'completed', 'failed', 'warning', 'timeout', 'cancelled',
             'cleanup', 'finalization')),
         transport TEXT NOT NULL,
         native_session_id TEXT,
