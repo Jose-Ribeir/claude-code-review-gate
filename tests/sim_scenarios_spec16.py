@@ -409,8 +409,103 @@ def _incomplete_real_model(call, reason, *, artifact=None):
 
 
 def _static_units(report):
+    """Join public unit state with same-unit evidence in the persisted report.
+
+    The operator result can summarize lenses while the machine report retains
+    their accepted findings, warnings, and coverage.  Public fields win on a
+    conflict, so this enrichment never replaces the accepted final status.
+    """
     result = report.get("result") or {}
-    return result.get("units") or []
+    units = result.get("units") or []
+    machine_path = result.get("machine_report_path")
+    if not units or not machine_path:
+        return units
+    try:
+        machine = json.loads(Path(machine_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return units
+    stored_units = machine.get("units") or []
+    enriched = []
+    for unit in units:
+        matches = [
+            stored for stored in stored_units
+            if stored.get("unit_key") == unit.get("unit_key")
+            and (not unit.get("unit_id") or stored.get("unit_id") == unit.get("unit_id"))
+        ]
+        enriched.append({**matches[0], **unit} if len(matches) == 1 else unit)
+    return enriched
+
+
+_DYNAMIC_TOOL_FAILURES = (
+    "python not found", "python: command not found", "command not found",
+    "filenotfounderror", "no such file or directory", "not on path",
+)
+_RULE_VIOLATIONS = (
+    "without", "missing", "absent", "lack", "undocumented", "inaccurate",
+    "no docstring", "no test", "adds no", "ships no", "violat", "contradict", "break",
+)
+_COMMENT_RULE_VIOLATIONS = (
+    "no docstring", "without docstring", "without a docstring", "missing docstring",
+    "docstring is absent", "docstring is missing", "inaccurate docstring",
+    "docstring inaccurate", "no documentation comment", "missing documentation comment",
+    "without an explanatory comment", "missing explanatory comment", "undocumented public",
+    "function is undocumented", "function remains undocumented",
+)
+
+
+def _static_finding_text(finding):
+    """Return evidence text only for a genuine static, available-tool finding."""
+    if not isinstance(finding, dict):
+        return ""
+    evidence = finding.get("evidence") or {}
+    worker = (evidence.get("worker") or {}) if isinstance(evidence, dict) else {}
+    if not isinstance(worker, dict):
+        worker = {}
+    dynamic_lenses = {
+        finding.get("lens"), evidence.get("lens") if isinstance(evidence, dict) else None,
+        worker.get("lens"),
+    }
+    dynamic_anchor = any(
+        anchor.get("anchor_type") == "dynamic_evidence"
+        for anchor in finding.get("anchors") or [] if isinstance(anchor, dict)
+    )
+    if "dynamic" in dynamic_lenses or dynamic_anchor or finding.get("evidence_source"):
+        return ""
+    try:
+        text = json.dumps(finding, sort_keys=True, ensure_ascii=False, default=str).lower()
+    except (TypeError, ValueError):
+        return ""
+    return "" if any(marker in text for marker in _DYNAMIC_TOOL_FAILURES) else text
+
+
+def _unchanged_contract_finding(finding):
+    text = _static_finding_text(finding)
+    return bool(
+        text and "docs/adr.md" in text and "app.py" in text and "unchanged" in text
+        and "contract" in text and any(marker in text for marker in (
+            "contradict", "violat", "break", "incompatib",
+        ))
+    )
+
+
+def _comment_standard_finding(finding):
+    text = _static_finding_text(finding)
+    comment_rule = any(marker in text for marker in (
+        "docstring", "documentation comment", "explanatory comment", "required comment",
+    ))
+    return bool(
+        text and "agents.md" in text and "app.py" in text and comment_rule
+        and any(marker in text for marker in _COMMENT_RULE_VIOLATIONS)
+    )
+
+
+def _testing_standard_finding(finding):
+    text = _static_finding_text(finding)
+    return bool(
+        text and "agents.md" in text and "app.py" in text
+        and "permanent" in text and "regression test" in text
+        and any(marker in text for marker in _RULE_VIOLATIONS)
+    )
 
 
 def _scrub_git_trace(monkeypatch):
@@ -473,7 +568,7 @@ def _real_model_static(call):
     individual = next((unit for unit in units if unit.get("unit_key") == "individual:1"), {})
     findings = individual.get("findings") or []
     if domain:
-        selected = [finding for finding in findings if finding.get("lens") == "documentation/domain"]
+        selected = [finding for finding in findings if _unchanged_contract_finding(finding)]
         unchanged = sim._git(["show", f"{fixture.head}:docs/ADR.md"], fixture.repo).stdout
         base_document = sim._git(["show", f"{fixture.base}:docs/ADR.md"], fixture.repo).stdout
         changed = sim._git([
@@ -494,8 +589,8 @@ def _real_model_static(call):
         }
         missing = not selected
     else:
-        comments = [finding for finding in findings if finding.get("lens") == "repository-standards"]
-        testing = [finding for finding in findings if finding.get("lens") == "testing"]
+        comments = [finding for finding in findings if _comment_standard_finding(finding)]
+        testing = [finding for finding in findings if _testing_standard_finding(finding)]
         evidence = {
             "incremental_scope_exclusion": {
                 "review_mode": "complete-repository", "full_tree_run_id": result.get("run_id"),

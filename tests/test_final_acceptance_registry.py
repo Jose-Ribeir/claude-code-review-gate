@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import sys
 import uuid
 from pathlib import Path
@@ -315,3 +316,267 @@ def test_acceptance_seed_is_fully_detached_between_migrations():
     assert first["scenarios"][0]["required_evidence"] != second["scenarios"][0][
         "required_evidence"
     ]
+
+
+def _synthetic_static_finding(lens, finding_id, content, *source_paths, **overrides):
+    """Use the persisted worker-evidence shape emitted by real static lenses."""
+    finding = {
+        "finding_key": finding_id,
+        "finding_id": f"accepted-uuid-{finding_id}",
+        "lens": lens,
+        "path": "app.py",
+        "content": content,
+        "state": "open",
+        "severity": "high",
+        "evidence": {
+            "lens": lens,
+            "worker": {
+                "id": finding_id,
+                "lens": lens,
+                "category": lens,
+                "content": content,
+                "evidence": [
+                    {"source": path, "detail": content} for path in source_paths
+                ],
+            },
+        },
+        "anchors": [{
+            "anchor_type": "content",
+            "details": {"path": source_paths[0] if source_paths else "app.py"},
+            "evidence_fingerprint": f"synthetic-{finding_id}",
+        }],
+    }
+    finding.update(overrides)
+    return finding
+
+
+def _unchanged_contract_evidence(lens="compatibility/migrations"):
+    return _synthetic_static_finding(
+        lens, "COMPAT-001",
+        "New app.py returns 1, contradicting the unchanged ADR-001 contract in "
+        "docs/ADR.md which requires 2.",
+        "app.py", "docs/ADR.md",
+    )
+
+
+def _comment_standard_evidence(lens="documentation/domain"):
+    return _synthetic_static_finding(
+        lens, "DOC-1",
+        "The public function in app.py has no docstring, violating the accurate "
+        "docstring requirement in AGENTS.md.",
+        "app.py", "AGENTS.md",
+    )
+
+
+def _testing_standard_evidence(lens="compatibility/migrations"):
+    return _synthetic_static_finding(
+        lens, "COMPAT-2",
+        "The app.py behavior change ships without the permanent regression test "
+        "required by AGENTS.md; no test file was added.",
+        "app.py", "AGENTS.md",
+    )
+
+
+def _run_synthetic_static_acceptance(tmp_path, monkeypatch, scenario_index, findings):
+    """Run acceptance with real fixture/doc checks and doubled inference output."""
+    import sim_scenarios_spec16 as scenarios
+
+    def simulated_review(_reference, *, artifact_dir, **_kwargs):
+        artifact_dir = Path(artifact_dir)
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        unit_id = "00000000-0000-0000-0000-000000000001"
+        lenses = sorted({finding["lens"] for finding in findings})
+        stored_unit = {
+            "unit_key": "individual:1",
+            "unit_id": unit_id,
+            "state": "findings",
+            "findings": findings,
+            "warnings": [],
+            "lenses": [{"name": lens, "state": "completed"} for lens in lenses],
+            "coverage": [
+                {"kind": "repository", "status": "complete"},
+                {"kind": "diff", "status": "complete"},
+                {"kind": "mandatory_lenses", "status": "complete"},
+            ],
+        }
+        machine_path = artifact_dir / "synthetic-machine-report.json"
+        machine_path.write_text(json.dumps({"units": [stored_unit]}), encoding="utf-8")
+        result = {
+            "run_id": "00000000-0000-0000-0000-000000000101",
+            "state": "findings",
+            "machine_report_path": str(machine_path),
+            "units": [{
+                "unit_key": "individual:1", "unit_id": unit_id,
+                "state": "findings", "lenses": stored_unit["lenses"],
+            }],
+        }
+        return {
+            "artifact": scenarios.sim.persist_simulation_artifact(
+                artifact_dir, "synthetic-review-output.json", result,
+            ),
+            "result": result,
+            "error": "",
+            "stderr": "",
+            "backend": {"name": "deterministic-test-double"},
+            "source_unchanged": True,
+            "cleanup": {
+                "clean": True, "registered_scratch_clones": [],
+                "materialized_repositories_remaining": [],
+            },
+        }
+
+    monkeypatch.setattr(
+        scenarios.sim, "run_final_review_simulation", simulated_review,
+    )
+    scenario_id = EXPECTED_SCENARIO_IDS[scenario_index]
+    with FinalStore(tmp_path / f"static-{scenario_index}.sqlite3") as store:
+        registry = acceptance.AcceptanceRegistry(store, handlers=scenarios.DISPATCH)
+        result = scenarios.run_scenario(
+            registry, scenario_id,
+            context={"real_model": True, "test_tmp_path": str(tmp_path)},
+        )
+        history = registry.history(scenario_id)
+    assert result["result"]["details"]["provider_writes"] is False
+    assert result["result"]["details"]["source_repository_unchanged"] is True
+    assert result["result"]["details"]["cleanup"]["clean"] is True
+    assert len(history) == 1 and history[0]["result"] == result["result"]
+    return result
+
+
+@pytest.mark.parametrize("lens", ("compatibility/migrations", "change-intent"))
+def test_real_static_accepts_unchanged_contract_contradiction_from_any_static_lens(
+        tmp_path, monkeypatch, lens):
+    finding = _unchanged_contract_evidence(lens)
+    result = _run_synthetic_static_acceptance(tmp_path, monkeypatch, 4, [finding])
+
+    assert result["state"] == "findings"
+    evidence = result["result"]["evidence"]
+    assert evidence["domain_finding"]["findings"] == [finding]
+    assert evidence["unchanged_document"]["unchanged_in_diff"] is True
+    assert evidence["unchanged_document"]["base_and_head_identical"] is True
+    assert "ADR-001" in evidence["unchanged_document"]["document"]
+    assert all(
+        evidence["complete_tree_evidence"][kind]["status"] == "complete"
+        for kind in ("repository", "diff", "mandatory_lenses")
+    )
+    assert result["result"]["result_id"]
+    assert result["result"]["recorded_at"] == result["completed_at"]
+
+
+def test_real_static_accepts_comment_and_testing_rules_by_evidence_not_lens_name(
+        tmp_path, monkeypatch):
+    comment = _comment_standard_evidence()
+    testing = _testing_standard_evidence()
+    unrelated = _synthetic_static_finding(
+        "security", "SEC-1", "No exploitable security defect was found.", "app.py",
+    )
+    result = _run_synthetic_static_acceptance(
+        tmp_path, monkeypatch, 5, [comment, testing, unrelated],
+    )
+
+    assert result["state"] == "findings"
+    evidence = result["result"]["evidence"]
+    assert evidence["comment_finding"]["findings"] == [comment]
+    assert evidence["testing_standard_finding"]["findings"] == [testing]
+    assert evidence["incremental_scope_exclusion"]["review_mode"] == "complete-repository"
+    assert set(evidence["incremental_scope_exclusion"]["lenses"]) == {
+        "compatibility/migrations", "documentation/domain", "security",
+    }
+
+
+@pytest.mark.parametrize("bad_slot,bad_finding", (
+    (
+        "comment",
+        _synthetic_static_finding(
+            "repository-standards", "CERT-1",
+            "Rotate the unrelated TLS certificate before its expiry.", "app.py", "AGENTS.md",
+        ),
+    ),
+    (
+        "testing",
+        _synthetic_static_finding(
+            "testing", "MIGRATION-1",
+            "An unrelated schema migration should use a shorter lock timeout.",
+            "app.py", "AGENTS.md",
+        ),
+    ),
+    (
+        "testing",
+        _synthetic_static_finding(
+            "testing", "TOOL-1",
+            "app.py needs the permanent regression test required by AGENTS.md, but "
+            "execution failed: python not found; no test result is available.",
+            "app.py", "AGENTS.md",
+        ),
+    ),
+    (
+        "comment",
+        _synthetic_static_finding(
+            "repository-standards", "DYNAMIC-1",
+            "app.py has no docstring under AGENTS.md, but the dynamic probe failed",
+            "app.py", "AGENTS.md", evidence_source="ephemeral_test",
+        ),
+    ),
+    (
+        "comment",
+        _synthetic_static_finding(
+            "repository-standards", "UNPINNED-1",
+            "No test, docstring, or document in app.py or AGENTS.md states which "
+            "return value the external caller needs; this is not a docstring-rule finding.",
+            "app.py", "AGENTS.md",
+        ),
+    ),
+))
+def test_real_static_rejects_unrelated_or_unavailable_rule_certificates(
+        tmp_path, monkeypatch, bad_slot, bad_finding):
+    # The companion finding uses the legacy selector's expected lens, so only
+    # the invalid certificate prevents a false green under the old matching.
+    good_comment = _comment_standard_evidence("repository-standards")
+    good_testing = _testing_standard_evidence("testing")
+    findings = [
+        bad_finding if bad_slot == "comment" else good_comment,
+        bad_finding if bad_slot == "testing" else good_testing,
+    ]
+    result = _run_synthetic_static_acceptance(tmp_path, monkeypatch, 5, findings)
+
+    assert result["state"] == "error"
+    assert "required finding(s)" in result["error"]
+    evidence = result["result"]["evidence"]
+    expected_comment = [] if bad_slot == "comment" else [good_comment]
+    expected_testing = [] if bad_slot == "testing" else [good_testing]
+    assert evidence["comment_finding"]["findings"] == expected_comment
+    assert evidence["testing_standard_finding"]["findings"] == expected_testing
+
+
+@pytest.mark.parametrize("bad_finding", (
+    _synthetic_static_finding(
+        "documentation/domain", "SEC-2", "An unrelated security header could be tightened.",
+        "app.py", "docs/ADR.md",
+    ),
+    _synthetic_static_finding(
+        "documentation/domain", "MIGRATION-2",
+        "An unrelated migration could retain an additional deployment index.",
+        "app.py", "docs/ADR.md",
+    ),
+    _synthetic_static_finding(
+        "documentation/domain", "TOOL-2",
+        "The unchanged ADR-001 contract in docs/ADR.md contradicts app.py, but "
+        "validation failed with FileNotFoundError: python not found.",
+        "app.py", "docs/ADR.md",
+    ),
+))
+def test_real_static_domain_rejects_nits_and_tool_failures(tmp_path, monkeypatch, bad_finding):
+    result = _run_synthetic_static_acceptance(tmp_path, monkeypatch, 4, [bad_finding])
+
+    assert result["state"] == "error"
+    assert result["result"]["evidence"]["domain_finding"]["findings"] == []
+
+
+@pytest.mark.parametrize("scenario_index", (4, 5))
+def test_real_static_missing_actual_finding_remains_an_error(tmp_path, monkeypatch, scenario_index):
+    result = _run_synthetic_static_acceptance(tmp_path, monkeypatch, scenario_index, [])
+
+    assert result["state"] == "error"
+    assert "completed without the scenario's required finding(s)" in result["error"]
+    assert result["result"]["details"]["executed"] is True
+    assert result["completed_at"]
