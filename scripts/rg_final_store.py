@@ -22,11 +22,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import ocr_verdict
+import rg_final_acceptance
 import rg_final_contract
 import rg_final_memory
 import rg_store
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 REPORT_SCHEMA = "final-review-report/v1"
 PUBLICATION_STATUS_CONTEXT = "review-gate/final-review"
 FINAL_STATES = frozenset(("pass", "findings", "stale", "incomplete"))
@@ -335,6 +336,62 @@ _SCHEMA_V2 = (
     "CREATE INDEX freshness_checks_run ON freshness_checks(run_id, recorded_at, check_id)",
 )
 
+_SCHEMA_V3 = (
+    """CREATE TABLE acceptance_versions (
+        version TEXT PRIMARY KEY,
+        implementation_version TEXT NOT NULL,
+        document_hash TEXT NOT NULL,
+        current INTEGER NOT NULL DEFAULT 0 CHECK(current IN (0, 1)),
+        installed_at TEXT NOT NULL
+    )""",
+    """CREATE TABLE acceptance_scenarios (
+        scenario_version TEXT NOT NULL REFERENCES acceptance_versions(version),
+        scenario_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        behavior TEXT NOT NULL,
+        expected_state TEXT NOT NULL
+            CHECK(expected_state IN ('pass', 'findings', 'incomplete', 'stale', 'error')),
+        required_evidence_json TEXT NOT NULL,
+        dispatch_key TEXT NOT NULL,
+        assertions_json TEXT NOT NULL,
+        sort_order INTEGER NOT NULL,
+        PRIMARY KEY(scenario_version, scenario_id),
+        UNIQUE(scenario_version, sort_order),
+        UNIQUE(scenario_version, dispatch_key)
+    )""",
+    """CREATE TABLE acceptance_runs (
+        acceptance_run_id TEXT PRIMARY KEY,
+        scenario_id TEXT NOT NULL,
+        scenario_version TEXT NOT NULL,
+        review_run_id TEXT REFERENCES runs(run_id),
+        dispatch_key TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'pending'
+            CHECK(state IN ('pending', 'running', 'pass', 'findings',
+                            'incomplete', 'stale', 'error')),
+        details_json TEXT NOT NULL,
+        error TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        started_at TEXT,
+        completed_at TEXT,
+        FOREIGN KEY(scenario_version, scenario_id)
+            REFERENCES acceptance_scenarios(scenario_version, scenario_id)
+    )""",
+    "CREATE INDEX acceptance_runs_scenario ON "
+    "acceptance_runs(scenario_id, scenario_version, created_at, acceptance_run_id)",
+    "CREATE INDEX acceptance_runs_review ON acceptance_runs(review_run_id)",
+    """CREATE TABLE acceptance_results (
+        result_id TEXT PRIMARY KEY,
+        acceptance_run_id TEXT NOT NULL UNIQUE REFERENCES acceptance_runs(acceptance_run_id),
+        state TEXT NOT NULL
+            CHECK(state IN ('pass', 'findings', 'incomplete', 'stale', 'error')),
+        evidence_json TEXT NOT NULL,
+        error TEXT NOT NULL,
+        details_json TEXT NOT NULL,
+        recorded_at TEXT NOT NULL
+    )""",
+    "CREATE INDEX acceptance_results_state ON acceptance_results(state, recorded_at, result_id)",
+)
+
 
 class FinalStore:
     """A persistent final-review SQLite store.
@@ -375,6 +432,7 @@ class FinalStore:
         self._conn.execute("PRAGMA synchronous = NORMAL")
         self._initialize()
         self.install_contract(rg_final_contract.contract_seed())
+        self.install_acceptance(rg_final_acceptance.acceptance_seed())
         self.store_instance_id = self._load_store_instance_id()
 
     @property
@@ -466,6 +524,18 @@ class FinalStore:
                     (_now(),),
                 )
                 self._conn.execute("PRAGMA user_version = 2")
+            if 3 not in applied:
+                if existing_version not in (0, 1, 2, 3):
+                    raise StoreError(f"unsupported database schema {existing_version}")
+                if existing_version == 3:
+                    raise StoreError("database schema version has no migration record")
+                for statement in _SCHEMA_V3:
+                    self._conn.execute(statement)
+                self._conn.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (3, ?)",
+                    (_now(),),
+                )
+                self._conn.execute("PRAGMA user_version = 3")
             self._conn.execute(
                 "INSERT OR IGNORE INTO store_metadata(key, value) VALUES "
                 "('store_instance_id', ?)", (_identifier(),)
@@ -591,6 +661,290 @@ class FinalStore:
             "rules": rules,
             "decision_log": decisions,
         }
+
+    @staticmethod
+    def _normalize_acceptance(document):
+        version = _required_text(document, "version")
+        implementation = _required_text(document, "implementation_version")
+        supplied = document.get("scenarios")
+        if not isinstance(supplied, list) or not supplied:
+            raise ValueError("acceptance scenarios must be a non-empty list")
+        scenarios = []
+        identifiers = set()
+        dispatch_keys = set()
+        for order, raw in enumerate(supplied):
+            if not isinstance(raw, dict):
+                raise ValueError("acceptance scenario must be a mapping")
+            scenario_id = _required_text(raw, "scenario_id")
+            dispatch_key = _required_text(raw, "dispatch_key")
+            if scenario_id in identifiers:
+                raise ValueError(f"duplicate acceptance scenario {scenario_id}")
+            if dispatch_key in dispatch_keys:
+                raise ValueError(f"duplicate acceptance dispatch key {dispatch_key}")
+            identifiers.add(scenario_id)
+            dispatch_keys.add(dispatch_key)
+            expected_state = _required_text(raw, "expected_state")
+            if expected_state not in rg_final_acceptance.RESULT_STATES:
+                raise ValueError(f"invalid expected acceptance state {expected_state}")
+            evidence = raw.get("required_evidence")
+            if not isinstance(evidence, (list, tuple)) or not evidence or \
+                    any(not str(item).strip() for item in evidence):
+                raise ValueError(f"scenario {scenario_id} requires non-empty evidence keys")
+            evidence = [str(item).strip() for item in evidence]
+            if len(set(evidence)) != len(evidence):
+                raise ValueError(f"scenario {scenario_id} has duplicate evidence keys")
+            assertions = {}
+            for name in ("cleanup_assertions", "warning_assertions", "trust_assertions"):
+                values = raw.get(name)
+                if not isinstance(values, (list, tuple)) or not values or \
+                        any(not str(item).strip() for item in values):
+                    raise ValueError(f"scenario {scenario_id} requires {name}")
+                assertions[name] = [str(item).strip() for item in values]
+            scenarios.append({
+                "scenario_id": scenario_id,
+                "title": _required_text(raw, "title"),
+                "behavior": _required_text(raw, "behavior"),
+                "expected_state": expected_state,
+                "required_evidence": evidence,
+                "dispatch_key": dispatch_key,
+                "assertions": assertions,
+                "sort_order": order,
+            })
+        return {
+            "version": version,
+            "implementation_version": implementation,
+            "scenarios": scenarios,
+        }
+
+    def install_acceptance(self, document):
+        """Install an immutable acceptance version without creating any runs."""
+        normalized = self._normalize_acceptance(document)
+        version = normalized["version"]
+        digest = self._contract_hash(normalized)
+        with self._transaction():
+            existing = self._conn.execute(
+                "SELECT document_hash FROM acceptance_versions WHERE version = ?", (version,)
+            ).fetchone()
+            if existing is not None:
+                if existing[0] != digest:
+                    raise ValueError(f"acceptance version {version} is immutable")
+                return
+            self._conn.execute("UPDATE acceptance_versions SET current = 0 WHERE current = 1")
+            self._conn.execute(
+                "INSERT INTO acceptance_versions(version, implementation_version, "
+                "document_hash, current, installed_at) VALUES (?, ?, ?, 1, ?)",
+                (version, normalized["implementation_version"], digest, _now()),
+            )
+            for scenario in normalized["scenarios"]:
+                assertions = scenario["assertions"]
+                self._conn.execute(
+                    "INSERT INTO acceptance_scenarios(scenario_version, scenario_id, title, "
+                    "behavior, expected_state, required_evidence_json, dispatch_key, "
+                    "assertions_json, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (version, scenario["scenario_id"], scenario["title"],
+                     scenario["behavior"], scenario["expected_state"],
+                     _json(scenario["required_evidence"]), scenario["dispatch_key"],
+                     _json(assertions), scenario["sort_order"]),
+                )
+
+    @staticmethod
+    def _acceptance_scenario(row):
+        assertions = _loads(row["assertions_json"])
+        return {
+            "scenario_id": row["scenario_id"],
+            "version": row["scenario_version"],
+            "title": row["title"],
+            "behavior": row["behavior"],
+            "expected_state": row["expected_state"],
+            "required_evidence": _loads(row["required_evidence_json"]),
+            "dispatch_key": row["dispatch_key"],
+            "cleanup_assertions": assertions["cleanup_assertions"],
+            "warning_assertions": assertions["warning_assertions"],
+            "trust_assertions": assertions["trust_assertions"],
+        }
+
+    def acceptance_view(self, version=None):
+        """Return a detached current or historical registry; missing is ``{}``."""
+        with self._lock:
+            self._ensure_open()
+            if version is None:
+                current = self._conn.execute(
+                    "SELECT version FROM acceptance_versions WHERE current = 1"
+                ).fetchone()
+                if current is None:
+                    return {}
+                version = current[0]
+            header = self._conn.execute(
+                "SELECT version, implementation_version FROM acceptance_versions WHERE version = ?",
+                (version,),
+            ).fetchone()
+            if header is None:
+                return {}
+            scenarios = [
+                self._acceptance_scenario(row) for row in self._conn.execute(
+                    "SELECT * FROM acceptance_scenarios WHERE scenario_version = ? "
+                    "ORDER BY sort_order", (version,)
+                )
+            ]
+            return {
+                "schema": rg_final_acceptance.ACCEPTANCE_SCHEMA,
+                "version": header["version"],
+                "implementation_version": header["implementation_version"],
+                "scenarios": scenarios,
+            }
+
+    def start_acceptance_run(self, scenario_id, *, version=None, review_run_id=None,
+                             details=None):
+        """Create a distinct running acceptance attempt for an installed scenario."""
+        scenario_id = str(scenario_id).strip()
+        if not scenario_id:
+            raise ValueError("missing required scenario_id")
+        acceptance_run_id = _identifier()
+        with self._transaction():
+            if version is None:
+                current = self._conn.execute(
+                    "SELECT version FROM acceptance_versions WHERE current = 1"
+                ).fetchone()
+                if current is None:
+                    raise StoreError("no current acceptance registry installed")
+                version = current[0]
+            scenario = self._conn.execute(
+                "SELECT dispatch_key FROM acceptance_scenarios "
+                "WHERE scenario_version = ? AND scenario_id = ?", (version, scenario_id)
+            ).fetchone()
+            if scenario is None:
+                raise StoreError(f"unknown acceptance scenario {scenario_id} at version {version}")
+            if review_run_id is not None and self._conn.execute(
+                    "SELECT 1 FROM runs WHERE run_id = ?", (review_run_id,)).fetchone() is None:
+                raise StoreError(f"unknown run {review_run_id}")
+            now = _now()
+            self._conn.execute(
+                "INSERT INTO acceptance_runs(acceptance_run_id, scenario_id, scenario_version, "
+                "review_run_id, dispatch_key, state, details_json, error, created_at, started_at) "
+                "VALUES (?, ?, ?, ?, ?, 'running', ?, '', ?, ?)",
+                (acceptance_run_id, scenario_id, version, review_run_id,
+                 scenario["dispatch_key"], _json(details), now, now),
+            )
+            row = self._conn.execute(
+                "SELECT * FROM acceptance_runs WHERE acceptance_run_id = ?",
+                (acceptance_run_id,),
+            ).fetchone()
+            return self._acceptance_run_public(row)
+
+    def complete_acceptance_run(self, acceptance_run_id, state, *, evidence=None,
+                                error="", details=None):
+        """Atomically record an independent result and terminal attempt state."""
+        if state not in rg_final_acceptance.RESULT_STATES:
+            raise ValueError(f"invalid acceptance state {state}")
+        error = str(error).strip()
+        if state == "error" and not error:
+            raise ValueError("error acceptance results require a human-readable error")
+        result_id = _identifier()
+        with self._transaction():
+            run = self._conn.execute(
+                "SELECT * FROM acceptance_runs WHERE acceptance_run_id = ?",
+                (acceptance_run_id,),
+            ).fetchone()
+            if run is None:
+                raise StoreError(f"unknown acceptance run {acceptance_run_id}")
+            if run["state"] not in ("pending", "running"):
+                raise StoreError(f"acceptance run {acceptance_run_id} is already complete")
+            scenario = self._conn.execute(
+                "SELECT * FROM acceptance_scenarios WHERE scenario_version = ? AND scenario_id = ?",
+                (run["scenario_version"], run["scenario_id"]),
+            ).fetchone()
+            required = _loads(scenario["required_evidence_json"])
+            if state in ("pass", "findings", "stale"):
+                if not isinstance(evidence, dict):
+                    raise ValueError(f"{state} acceptance results require evidence")
+                missing = [key for key in required if not self._evidence_present(evidence.get(key))]
+                if missing:
+                    raise ValueError(
+                        f"{state} acceptance result is missing evidence: {', '.join(missing)}"
+                    )
+            now = _now()
+            self._conn.execute(
+                "INSERT INTO acceptance_results(result_id, acceptance_run_id, state, "
+                "evidence_json, error, details_json, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (result_id, acceptance_run_id, state, _json(evidence), error,
+                 _json(details), now),
+            )
+            self._conn.execute(
+                "UPDATE acceptance_runs SET state = ?, error = ?, details_json = ?, "
+                "completed_at = ? WHERE acceptance_run_id = ?",
+                (state, error, _json(details), now, acceptance_run_id),
+            )
+            row = self._conn.execute(
+                "SELECT * FROM acceptance_runs WHERE acceptance_run_id = ?",
+                (acceptance_run_id,),
+            ).fetchone()
+            return self._acceptance_run_public(row)
+
+    def _acceptance_run_public(self, row):
+        scenario = self._conn.execute(
+            "SELECT * FROM acceptance_scenarios WHERE scenario_version = ? AND scenario_id = ?",
+            (row["scenario_version"], row["scenario_id"]),
+        ).fetchone()
+        result = self._conn.execute(
+            "SELECT * FROM acceptance_results WHERE acceptance_run_id = ?",
+            (row["acceptance_run_id"],),
+        ).fetchone()
+        return {
+            "acceptance_run_id": row["acceptance_run_id"],
+            "scenario_id": row["scenario_id"],
+            "version": row["scenario_version"],
+            "review_run_id": row["review_run_id"],
+            "dispatch_key": row["dispatch_key"],
+            "state": row["state"],
+            "details": _loads(row["details_json"]),
+            "error": row["error"],
+            "created_at": row["created_at"],
+            "started_at": row["started_at"],
+            "completed_at": row["completed_at"],
+            "scenario": self._acceptance_scenario(scenario),
+            "result": None if result is None else {
+                "result_id": result["result_id"],
+                "acceptance_run_id": result["acceptance_run_id"],
+                "state": result["state"],
+                "evidence": _loads(result["evidence_json"]),
+                "error": result["error"],
+                "details": _loads(result["details_json"]),
+                "recorded_at": result["recorded_at"],
+            },
+        }
+
+    def acceptance_run(self, acceptance_run_id):
+        with self._lock:
+            self._ensure_open()
+            row = self._conn.execute(
+                "SELECT * FROM acceptance_runs WHERE acceptance_run_id = ?",
+                (acceptance_run_id,),
+            ).fetchone()
+            if row is None:
+                raise StoreError(f"unknown acceptance run {acceptance_run_id}")
+            return self._acceptance_run_public(row)
+
+    def acceptance_history(self, *, scenario_id=None, version=None, review_run_id=None):
+        """Return independent attempts oldest first, including retained results."""
+        with self._lock:
+            self._ensure_open()
+            clauses = []
+            parameters = []
+            if scenario_id is not None:
+                clauses.append("scenario_id = ?")
+                parameters.append(str(scenario_id))
+            if version is not None:
+                clauses.append("scenario_version = ?")
+                parameters.append(str(version))
+            if review_run_id is not None:
+                clauses.append("review_run_id = ?")
+                parameters.append(str(review_run_id))
+            where = " WHERE " + " AND ".join(clauses) if clauses else ""
+            rows = self._conn.execute(
+                "SELECT * FROM acceptance_runs" + where +
+                " ORDER BY created_at, acceptance_run_id", tuple(parameters),
+            ).fetchall()
+            return [self._acceptance_run_public(row) for row in rows]
 
     @staticmethod
     def _normalize_stack(stack):
