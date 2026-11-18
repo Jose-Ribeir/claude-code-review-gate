@@ -49,11 +49,20 @@ def project_payload(project_id, path):
     }
 
 
-def metadata_responses(payload=None):
+def branch_payload(branch, sha):
+    return {"name": branch, "commit": {"id": sha}}
+
+
+def metadata_responses(payload=None, *, source_head=None, target_head=None):
+    payload = payload or mr_payload()
+    source_head = source_head or payload["diff_refs"]["head_sha"]
+    target_head = target_head or payload["diff_refs"]["start_sha"]
     return [
-        (json.dumps(payload or mr_payload()), None),
+        (json.dumps(payload), None),
         (json.dumps(project_payload(111, "group/project")), None),
         (json.dumps(project_payload(222, "contributor/fork")), None),
+        (json.dumps(branch_payload(payload["source_branch"], source_head)), None),
+        (json.dumps(branch_payload(payload["target_branch"], target_head)), None),
     ]
 
 
@@ -140,6 +149,8 @@ def test_read_maps_author_fork_branches_and_provider_pinned_revisions():
         "projects/group%2Fproject/merge_requests/17",
         "projects/111",
         "projects/222",
+        "projects/222/repository/branches/feature%2Ffinal-review",
+        "projects/111/repository/branches/main",
     ]
 
 
@@ -173,7 +184,11 @@ def test_revalidate_refreshes_metadata_when_all_pinned_revisions_are_unchanged()
     current = provider.revalidate(pinned)
 
     assert current == pinned
-    assert len(runner.calls) == 6
+    assert len(runner.calls) == 10
+    assert [call["argv"][-1] for call in runner.calls[-2:]] == [
+        "projects/222/repository/branches/feature%2Ffinal-review",
+        "projects/111/repository/branches/main",
+    ]
 
 
 @pytest.mark.parametrize("revision", [
@@ -200,6 +215,64 @@ def test_revalidate_rejects_source_target_and_retargeting_movement(revision):
         provider.revalidate(pinned)
 
 
+@pytest.mark.parametrize(("side", "anchor", "moved"), [
+    ("source", "head_sha", "d" * 40),
+    ("target", "start_sha", "e" * 40),
+])
+def test_initial_read_rejects_branch_heads_that_disagree_with_stale_diff_refs(
+        side, anchor, moved):
+    heads = {"source_head": SOURCE_SHA, "target_head": TARGET_SHA}
+    heads[f"{side}_head"] = moved
+    runner = FakeGlab(metadata_responses(**heads))
+
+    with pytest.raises(
+            rg_final_gitlab.GitLabMetadataError,
+            match=rf"{side} branch head.*diff_refs\.{anchor}"):
+        rg_final_gitlab.GitLabProvider(runner=runner).read(mr_payload()["web_url"])
+
+
+@pytest.mark.parametrize(("side", "moved"), [
+    ("source", "d" * 40),
+    ("target", "e" * 40),
+])
+def test_revalidate_detects_branch_movement_even_when_diff_refs_are_stale(side, moved):
+    runner = FakeGlab(metadata_responses())
+    provider = rg_final_gitlab.GitLabProvider(runner=runner)
+    pinned = provider.read(mr_payload()["web_url"])
+    heads = {"source_head": SOURCE_SHA, "target_head": TARGET_SHA}
+    heads[f"{side}_head"] = moved
+    # Deliberately leave the second MR response and every diff_ref unchanged.
+    runner.responses.extend(metadata_responses(**heads))
+
+    with pytest.raises(rg_final_provider.RevisionChangedError) as changed:
+        provider.revalidate(pinned)
+
+    assert changed.value.field == f"{side} sha"
+    assert changed.value.expected == pinned[side]["sha"]
+    assert changed.value.current == moved
+
+
+def test_branch_head_read_failure_cannot_fall_back_to_diff_refs():
+    runner = FakeGlab([
+        (json.dumps(mr_payload()), None),
+        (json.dumps(project_payload(111, "group/project")), None),
+        (json.dumps(project_payload(222, "contributor/fork")), None),
+        (None, "403 source branch unavailable"),
+    ])
+
+    with pytest.raises(rg_final_provider.ProviderReadError, match="source branch unavailable"):
+        rg_final_gitlab.GitLabProvider(runner=runner).read(mr_payload()["web_url"])
+
+
+def test_branch_response_must_identify_the_requested_branch():
+    responses = metadata_responses()
+    responses[3] = (json.dumps(branch_payload("feature/other", SOURCE_SHA)), None)
+    runner = FakeGlab(responses)
+
+    with pytest.raises(rg_final_gitlab.GitLabMetadataError, match="branch response name"):
+        rg_final_gitlab.GitLabProvider(runner=runner).read(mr_payload()["web_url"])
+
+
 def test_revalidate_rejects_source_project_movement_between_forks():
     runner = FakeGlab(metadata_responses())
     provider = rg_final_gitlab.GitLabProvider(runner=runner)
@@ -210,6 +283,8 @@ def test_revalidate_rejects_source_project_movement_between_forks():
         (json.dumps(changed), None),
         (json.dumps(project_payload(111, "group/project")), None),
         (json.dumps(project_payload(333, "someone/another-fork")), None),
+        (json.dumps(branch_payload("feature/final-review", SOURCE_SHA)), None),
+        (json.dumps(branch_payload("main", TARGET_SHA)), None),
     ])
 
     with pytest.raises(rg_final_provider.RevisionChangedError, match="source project"):
@@ -266,11 +341,18 @@ def test_same_source_and_target_project_is_read_once_with_one_repository_identit
     runner = FakeGlab([
         (json.dumps(payload), None),
         (json.dumps(project_payload(111, "group/project")), None),
+        (json.dumps(branch_payload("feature/final-review", SOURCE_SHA)), None),
+        (json.dumps(branch_payload("main", TARGET_SHA)), None),
     ])
 
     item = rg_final_gitlab.GitLabProvider(runner=runner).read(payload["web_url"])
 
-    assert len(runner.calls) == 2
+    assert [call["argv"][-1] for call in runner.calls] == [
+        "projects/group%2Fproject/merge_requests/17",
+        "projects/111",
+        "projects/111/repository/branches/feature%2Ffinal-review",
+        "projects/111/repository/branches/main",
+    ]
     assert item["source"]["project_id"] == item["target"]["project_id"] == 111
     assert item["source"]["project_path"] == item["target"]["project_path"]
     assert item["source"]["http_url"] == item["target"]["http_url"]
@@ -308,6 +390,8 @@ def test_revalidate_rejects_target_project_movement():
         (json.dumps(changed), None),
         (json.dumps(project_payload(333, "group/moved-project")), None),
         (json.dumps(project_payload(222, "contributor/fork")), None),
+        (json.dumps(branch_payload("feature/final-review", SOURCE_SHA)), None),
+        (json.dumps(branch_payload("main", TARGET_SHA)), None),
     ])
 
     with pytest.raises(rg_final_provider.RevisionChangedError, match="target project"):

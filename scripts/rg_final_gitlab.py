@@ -63,12 +63,20 @@ class GitLabProvider:
         self.runner = runner or run_cli
 
     def read(self, reference, repo_root=None):
-        """Fetch one MR and its source/target projects as immutable metadata.
+        """Fetch an MR and current source/target heads as immutable metadata.
 
-        ``target.sha`` is GitLab's target-branch ``start_sha``;
-        ``target.base_sha`` retains the merge-base diff anchor.  Both are
-        revalidated so target movement cannot be hidden by an unchanged base.
+        Repository-branch reads, rather than potentially stale MR diff refs,
+        establish both heads.  ``target.base_sha`` retains GitLab's merge-base
+        diff anchor.  Branch heads must agree with the MR diff anchors before
+        any immutable metadata is returned.
         """
+        return self._read(reference, repo_root)
+
+    def revalidate(self, pinned, repo_root=None):
+        """Re-read current refs and reject movement even with stale diff refs."""
+        return self._read(pinned["url"], repo_root, pinned=pinned)
+
+    def _read(self, reference, repo_root, pinned=None):
         ref = normalize_reference(reference)
         iid = ref["iid"]
         if ref["project_path"] is None:
@@ -83,16 +91,33 @@ class GitLabProvider:
 
         target_id = self._project_id(data, "target_project_id")
         source_id = self._project_id(data, "source_project_id")
-        revisions = self._mr_revisions(data)
+        diff_revisions = self._mr_revisions(data)
         target_project = self._read_project(target_id, ref["host"], repo_root)
         source_project = (target_project if source_id == target_id else
                           self._read_project(source_id, ref["host"], repo_root))
-        return self._item(data, target_project, source_project, revisions)
-
-    def revalidate(self, pinned, repo_root=None):
-        """Re-read by canonical URL; return fresh metadata or raise on movement."""
-        current = self.read(pinned["url"], repo_root=repo_root)
-        ensure_unchanged(pinned, current)
+        source_branch = self._text(data, "source_branch")
+        target_branch = self._text(data, "target_branch")
+        source_head = self._read_branch(
+            source_id, source_branch, ref["host"], repo_root)
+        target_head = self._read_branch(
+            target_id, target_branch, ref["host"], repo_root)
+        current = self._item(
+            data, target_project, source_project,
+            (source_head, target_head, diff_revisions[2]),
+        )
+        if pinned is not None:
+            # Report branch movement as staleness before rejecting the stale MR
+            # anchors, so callers requeue instead of merely losing freshness.
+            ensure_unchanged(pinned, current)
+        diff_head, diff_start, _ = diff_revisions
+        if source_head != diff_head:
+            raise GitLabMetadataError(
+                "GitLab source branch head does not match diff_refs.head_sha: "
+                f"{source_head!r} != {diff_head!r}")
+        if target_head != diff_start:
+            raise GitLabMetadataError(
+                "GitLab target branch head does not match diff_refs.start_sha: "
+                f"{target_head!r} != {diff_start!r}")
         return current
 
     def _request(self, endpoint, host, repo_root):
@@ -129,6 +154,18 @@ class GitLabProvider:
             "http_url": self._text(data, "http_url_to_repo"),
             "ssh_url": self._text(data, "ssh_url_to_repo"),
         }
+
+    def _read_branch(self, project_id, branch, host, repo_root):
+        project = quote(str(project_id), safe="")
+        encoded_branch = quote(branch, safe="")
+        endpoint = f"projects/{project}/repository/branches/{encoded_branch}"
+        data = self._request(endpoint, host, repo_root)
+        if data.get("name") != branch:
+            raise GitLabMetadataError(
+                f"GitLab branch response name {data.get('name')!r} "
+                f"does not match {branch!r}")
+        commit = self._object(data, "commit")
+        return self._text(commit, "id", "branch.commit.id")
 
     def _mr_revisions(self, data):
         diff_refs = self._object(data, "diff_refs")
