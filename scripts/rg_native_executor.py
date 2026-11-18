@@ -19,6 +19,7 @@ from typing import Callable, Dict, Optional, Protocol, Tuple
 
 from rg_final_env import scrub_environment
 from rg_final_review import (
+    _PIPE_CLOSE_TIMEOUT,
     _REAP_TIMEOUT,
     _close_owned_pipes,
     _kill_owned_process,
@@ -203,13 +204,21 @@ class NativeExecutor:
             "cleanup": host.cleanup,
         }
 
+    @property
+    def store(self):
+        return self._store
+
+    @property
+    def transport(self):
+        return self._host.transport
+
     def _record(self, task, event_type, occurred, *, native_session_id=None,
                 started=None, finished=None, details=None):
         if self._store is None:
             return
         self._store.record_native_event({
             "schema": "native-review-event/v1",
-            "event_id": "executor:" + event_type,
+            "event_id": f"executor:{task.task_id}:{event_type}",
             "event_type": event_type,
             "identity": task.identity(),
             "transport": self._host.transport,
@@ -407,14 +416,6 @@ class _ProcessSession:
         self._progress = progress
         self._cleanup = None
         self._cleanup_lock = threading.Lock()
-        self._close_timer = None
-        self._drain_timed_out = False
-
-    def _close_abandoned_pipes(self):
-        self._drain_timed_out = True
-        if self._cleanup is not None:
-            self._cleanup["errors"].append("pipe-drain-timeout")
-        _close_owned_pipes(self.process)
 
     def cancel(self) -> None:
         # A direct parent may already be reaped while its descendants still own
@@ -423,11 +424,6 @@ class _ProcessSession:
             if self._cleanup is not None:
                 return
             self._cleanup = _kill_owned_process(self.process)
-            self._close_timer = threading.Timer(
-                _REAP_TIMEOUT, self._close_abandoned_pipes,
-            )
-            self._close_timer.daemon = True
-            self._close_timer.start()
 
     def _drain(self, name, stream, parts):
         chunks = 0
@@ -469,16 +465,25 @@ class _ProcessSession:
         for reader in readers:
             reader.start()
         self.process.wait()
+        drain_deadline = time.monotonic() + _REAP_TIMEOUT
         for reader in readers:
-            reader.join()
+            reader.join(max(0.0, drain_deadline - time.monotonic()))
+        abandoned = [reader for reader in readers if reader.is_alive()]
         with self._cleanup_lock:
-            if self._close_timer is not None:
-                self._close_timer.cancel()
             cleanup = self._cleanup
+            if abandoned and cleanup is not None:
+                # An escaped descendant can retain a duplicated pipe after the
+                # model's process group dies. Close only our managed endpoints,
+                # then give the readers one final bounded opportunity to exit.
+                cleanup["errors"].append("pipe-drain-timeout")
+                _close_owned_pipes(self.process)
+                close_deadline = time.monotonic() + _PIPE_CLOSE_TIMEOUT
+                for reader in abandoned:
+                    reader.join(max(0.0, close_deadline - time.monotonic()))
             if cleanup is not None:
                 cleanup["direct_child_reaped"] = self.process.returncode is not None
                 cleanup["pipe_drain_completed"] = (
-                    not self._drain_timed_out and not any(r.is_alive() for r in readers)
+                    not abandoned and not any(reader.is_alive() for reader in readers)
                 )
                 if not cleanup["direct_child_reaped"] or not cleanup["pipe_drain_completed"]:
                     cleanup["tree_termination_verified"] = False
