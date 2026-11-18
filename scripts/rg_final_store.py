@@ -920,6 +920,30 @@ class FinalStore:
             "trust_assertions": assertions["trust_assertions"],
         }
 
+    def resolve_acceptance_version(self, version=None):
+        """Return an installed acceptance identity, defaulting to the current definition.
+
+        This read-only seam lets supervisors select the same identity for a new review
+        run and its linked acceptance attempts without importing a version constant.
+        No acceptance result is required or created.
+        """
+        with self._lock:
+            self._ensure_open()
+            if version is None:
+                current = self._conn.execute(
+                    "SELECT version FROM acceptance_versions WHERE current = 1"
+                ).fetchone()
+                if current is None:
+                    raise StoreError("no current acceptance registry installed")
+                return current[0]
+            version = str(version).strip()
+            installed = self._conn.execute(
+                "SELECT 1 FROM acceptance_versions WHERE version = ?", (version,)
+            ).fetchone()
+            if installed is None:
+                raise StoreError(f"unknown acceptance version {version}")
+            return version
+
     def acceptance_view(self, version=None):
         """Return a detached current or historical registry; missing is ``{}``."""
         with self._lock:
@@ -958,13 +982,7 @@ class FinalStore:
             raise ValueError("missing required scenario_id")
         acceptance_run_id = _identifier()
         with self._transaction():
-            if version is None:
-                current = self._conn.execute(
-                    "SELECT version FROM acceptance_versions WHERE current = 1"
-                ).fetchone()
-                if current is None:
-                    raise StoreError("no current acceptance registry installed")
-                version = current[0]
+            version = self.resolve_acceptance_version(version)
             scenario = self._conn.execute(
                 "SELECT dispatch_key FROM acceptance_scenarios "
                 "WHERE scenario_version = ? AND scenario_id = ?", (version, scenario_id)
@@ -1196,6 +1214,7 @@ class FinalStore:
             contract_version = current["version"]
         if self.contract_view(contract_version) == {}:
             raise StoreError(f"unknown contract version {contract_version}")
+        acceptance_version = self.resolve_acceptance_version(acceptance_version)
         stack_key = self._stack_key(stack)
         run_id = _identifier()
         units = []

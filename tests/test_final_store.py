@@ -19,6 +19,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+import rg_final_acceptance as acceptance  # noqa: E402
 import rg_final_contract as contract  # noqa: E402
 import rg_final_store as final_store  # noqa: E402
 from rg_final_store import FinalStore, StoreBusyError, StoreError  # noqa: E402
@@ -127,6 +128,7 @@ def test_start_run_records_complete_stack_revision_and_unit_identity(tmp_path):
         assert identity["run_seq"] == 1
         assert identity["stack_key"]
         assert identity["contract_version"] == contract.CURRENT_CONTRACT_VERSION
+        assert identity["acceptance_version"] == acceptance.CURRENT_ACCEPTANCE_VERSION
         assert set(identity["unit_ids"]) == {"individual:1", "combined"}
 
         report = store.manifest(run_id)
@@ -134,6 +136,7 @@ def test_start_run_records_complete_stack_revision_and_unit_identity(tmp_path):
         assert report["store"]["store_instance_id"] == store.store_instance_id
         assert report["run"]["run_id"] == run_id
         assert report["run"]["state"] == "incomplete"
+        assert report["run"]["acceptance_version"] == acceptance.CURRENT_ACCEPTANCE_VERSION
         assert report["stack"] == {
             "stack_key": identity["stack_key"],
             "provider": "gitlab",
@@ -329,12 +332,73 @@ def test_unknown_contract_and_acceptance_versions_are_explicit(tmp_path):
     with opened(tmp_path) as store:
         with pytest.raises(StoreError, match="unknown contract"):
             store.start_run(stack(), contract_version="not-installed")
-        identity = store.start_run(
-            stack(), acceptance_version="acceptance-v1", continuity_required=False
-        )
+        with pytest.raises(StoreError, match="unknown acceptance"):
+            store.start_run(stack(), acceptance_version="not-installed")
+        identity = store.start_run(stack(), continuity_required=False)
         run = store.manifest(identity["run_id"])["run"]
-        assert run["acceptance_version"] == "acceptance-v1"
+        assert run["acceptance_version"] == acceptance.CURRENT_ACCEPTANCE_VERSION
         assert run["continuity_required"] is False
+
+
+def test_acceptance_identity_defaults_to_current_and_preserves_two_run_history(tmp_path):
+    path = tmp_path / "acceptance-history.sqlite3"
+    with opened(tmp_path, path.name) as store:
+        registry = acceptance.AcceptanceRegistry(store)
+        old_version = store.resolve_acceptance_version()
+        old_run = start(store)
+        old_acceptance = registry.start(
+            "spec16-01-standalone-provider-parity", review_run_id=old_run["run_id"],
+        )
+        upgraded = acceptance.acceptance_seed(version="spec-16/store-test-v2")
+        registry.install(upgraded)
+
+        new_run = start(store, source_sha="c" * 40)
+        new_acceptance = registry.start(
+            "spec16-01-standalone-provider-parity", review_run_id=new_run["run_id"],
+        )
+
+        assert old_version == acceptance.CURRENT_ACCEPTANCE_VERSION
+        assert old_run["acceptance_version"] == old_version
+        assert new_run["acceptance_version"] == "spec-16/store-test-v2"
+        assert old_acceptance["version"] == old_run["acceptance_version"]
+        assert new_acceptance["version"] == new_run["acceptance_version"]
+        assert store.manifest(old_run["run_id"])["run"]["acceptance_version"] == old_version
+        assert store.machine_report(
+            old_run["run_id"], old_run["unit_ids"]["combined"]
+        )["run"]["acceptance_version"] == old_version
+        assert store.machine_report(
+            new_run["run_id"], new_run["unit_ids"]["individual:1"]
+        )["run"]["acceptance_version"] == "spec-16/store-test-v2"
+        assert registry.history(review_run_id=old_run["run_id"])[0]["version"] == old_version
+        assert registry.history(review_run_id=new_run["run_id"])[0]["version"] == \
+            "spec-16/store-test-v2"
+
+    with FinalStore(path) as reopened:
+        history = reopened.run_history()
+        assert [item["run"]["acceptance_version"] for item in history] == [
+            acceptance.CURRENT_ACCEPTANCE_VERSION, "spec-16/store-test-v2",
+        ]
+        assert len(reopened.acceptance_view(old_version)["scenarios"]) == 21
+        assert len(reopened.acceptance_view("spec-16/store-test-v2")["scenarios"]) == 21
+        assert len(reopened.acceptance_history()) == 2
+
+
+def test_reopen_does_not_backdate_legacy_empty_acceptance_identity(tmp_path):
+    path = tmp_path / "legacy-empty-acceptance.sqlite3"
+    with opened(tmp_path, path.name) as store:
+        legacy = start(store)
+        store.connection.execute(
+            "UPDATE runs SET acceptance_version = NULL WHERE run_id = ?", (legacy["run_id"],)
+        )
+        assert store.acceptance_history() == []
+
+    with FinalStore(path) as reopened:
+        assert reopened.acceptance_history() == []
+        assert reopened.resolve_acceptance_version() == acceptance.CURRENT_ACCEPTANCE_VERSION
+        assert reopened.manifest(legacy["run_id"])["run"]["acceptance_version"] is None
+        current = start(reopened, source_sha="c" * 40)
+        assert current["acceptance_version"] == acceptance.CURRENT_ACCEPTANCE_VERSION
+        assert reopened.manifest(legacy["run_id"])["run"]["acceptance_version"] is None
 
 
 def test_full_run_evidence_round_trip_and_atomic_result_batch(tmp_path):
@@ -514,6 +578,7 @@ def test_machine_unit_report_is_linked_to_parent_without_losing_siblings(tmp_pat
         individual = identity["unit_ids"]["individual:1"]
         report = store.machine_report(identity["run_id"], combined)
         assert report["run"]["run_id"] == identity["run_id"]
+        assert report["run"]["acceptance_version"] == acceptance.CURRENT_ACCEPTANCE_VERSION
         assert len(report["units"]) == 1
         assert report["units"][0]["unit_id"] == combined
         assert report["units"][0]["individual_unit_ids"] == [individual]
