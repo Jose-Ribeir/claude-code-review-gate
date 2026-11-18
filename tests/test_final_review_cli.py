@@ -152,7 +152,9 @@ def make_standalone_fixture(tmp_path, monkeypatch, *, domain_contract=False, sta
     )
     gh.chmod(0o755)
     monkeypatch.setenv("PATH", str(bindir) + os.pathsep + os.environ["PATH"])
+    store_path = tmp_path / "state" / "final-review.sqlite3"
     monkeypatch.setenv("OCR_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("FINAL_REVIEW_STORE", str(store_path))
     monkeypatch.setenv("RG_TEST_PROVIDER_SCRIPT", str(script))
     monkeypatch.setenv(
         "RG_FINAL_WORKER",
@@ -171,7 +173,7 @@ def make_standalone_fixture(tmp_path, monkeypatch, *, domain_contract=False, sta
         monkeypatch=monkeypatch,
         repo=repo, base=base, target=target, head=head, ref=merge_request["web_url"],
         merge_request=merge_request, script=script, calls=calls,
-        trace=tmp_path / "worker-trace.json", store_path=tmp_path / "state" / "final-review.sqlite3",
+        trace=tmp_path / "worker-trace.json", store_path=store_path,
     )
 
 
@@ -324,6 +326,7 @@ def test_standalone_reviews_full_immutable_tree_and_persists_complete_result(sta
     assert output["finding_verdict"] == "pass"
     assert output["exit_code"] == 0
     assert output["run_id"] == machine["run"]["run_id"]
+    assert output["run_seq"] == 1
     assert output["store_instance_id"] == machine["store"]["store_instance_id"]
     assert output["unit_key"] == "individual:1"
     assert output["unit_id"] == machine["units"][0]["unit_id"]
@@ -341,6 +344,12 @@ def test_standalone_reviews_full_immutable_tree_and_persists_complete_result(sta
     assert output["trust"]["stage_incomplete"] is False
     assert output["publication"]["status"] == "local_only"
     assert output["publication"]["official_green"] is False
+    decision = output["publication"]["decision"]
+    assert decision["current"] is True
+    assert decision["superseded"] is False
+    assert decision["identity"]["run_id"] == output["run_id"]
+    assert decision["identity"]["run_seq"] == output["run_seq"]
+    assert "run-superseded" not in decision["status_blockers"]
     assert machine["run"]["state"] == "pass"
     assert machine["run"]["metadata"]["complete"] is True
     assert machine["run"]["metadata"]["missing_stages"] == []
@@ -395,9 +404,17 @@ def test_standalone_reviews_full_immutable_tree_and_persists_complete_result(sta
         "STUB_FINAL_TRACE": str(standalone.trace),
     }
     provider_calls = json.loads(standalone.calls.read_text(encoding="utf-8"))
-    assert len(provider_calls) == 5
-    assert any("merge_requests?state=opened" in call["argv"][-1]
-               for call in provider_calls)
+    item_endpoint = "projects/group%2Fproject/merge_requests/17"
+    target_endpoint = "projects/111"
+    discovery_endpoint = (
+        "projects/111/merge_requests?state=opened&scope=all&per_page=100&page=1"
+    )
+    assert [call["argv"][-1] for call in provider_calls] == [
+        item_endpoint, target_endpoint,  # graph: initial item and target metadata
+        discovery_endpoint,              # graph: open-item completeness
+        item_endpoint, target_endpoint,  # freshness: revalidate the same pins
+    ]
+    assert all("--method" not in call["argv"] for call in provider_calls)
     assert all(call["provider_token_available"] for call in provider_calls)
     assert all(call["argv"][:2] == ["--glab", "api"] for call in provider_calls)
     assert "Completion: COMPLETE" in human
@@ -409,6 +426,7 @@ def test_standalone_reviews_full_immutable_tree_and_persists_complete_result(sta
         assert reopened.machine_report(output["run_id"])["run"]["state"] == "pass"
         assert reopened.machine_report(output["run_id"])["publications"][0]["status"] == \
             "local_only"
+        assert reopened.is_superseded(output["run_id"]) is False
 
 
 def test_blocking_correctness_finding_is_normalized_and_never_an_official_pass(standalone):
