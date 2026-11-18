@@ -749,7 +749,7 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
                      worker=None, environ=None, execute_checks=False,
                      required_runner=None, dynamic_runner=None, dynamic_kwargs=None,
                      context_kwargs=None, publish=False, publication_runner=None,
-                     report_url=None, local_waivers=()):
+                     report_url=None, local_waivers=(), current_root_sha=None):
     """Run one complete standalone individual+combined final review.
 
     Freshness, finding memory, and publication remain store-owned authorities.
@@ -762,7 +762,10 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
             reference, repo_root=repo_root, provider=provider, store_path=store_path,
             worker=worker, environ=environ, execute_checks=execute_checks,
             required_runner=required_runner, dynamic_runner=dynamic_runner,
-            dynamic_kwargs=dynamic_kwargs,
+            dynamic_kwargs=dynamic_kwargs, current_root_sha=current_root_sha,
+            context_kwargs=context_kwargs, publish=publish,
+            publication_runner=publication_runner, report_url=report_url,
+            local_waivers=local_waivers, complete=True,
         )
     environ = os.environ if environ is None else environ
     repo_root = str(repo_root or os.getcwd())
@@ -1410,13 +1413,25 @@ def _write_stack_unit_report(store, run_id, unit, links, *, stage=STACK_STAGE,
 
 def run_final_stack(references, *, repo_root=None, provider=None, store_path=None,
                     worker=None, environ=None, current_root_sha=None, execute_checks=False,
-                    required_runner=None, dynamic_runner=None, dynamic_kwargs=None):
+                    required_runner=None, dynamic_runner=None, dynamic_kwargs=None,
+                    context_kwargs=None, publish=False, publication_runner=None,
+                    report_url=None, local_waivers=(), complete=False):
     """Validate and review a complete base-first stack through composition.
 
     The returned units and per-unit report paths are the C14 publication
     hand-off. Dynamic/required tests and official provider statuses deliberately
     remain pending, so a clean static result still exits incomplete.
     """
+    if complete:
+        from rg_final_stack import run_final_stack as run_complete_stack
+        return run_complete_stack(
+            references, repo_root=repo_root, provider=provider, store_path=store_path,
+            worker=worker, environ=environ, current_root_sha=current_root_sha,
+            required_runner=required_runner, dynamic_runner=dynamic_runner,
+            dynamic_kwargs=dynamic_kwargs, context_kwargs=context_kwargs,
+            publish=publish, publication_runner=publication_runner,
+            report_url=report_url, local_waivers=local_waivers,
+        )
     environ = os.environ if environ is None else environ
     repo_root = str(repo_root or os.getcwd())
     provider = provider or GitLabProvider()
@@ -1668,7 +1683,11 @@ def main(argv=None):
         )
         return 2
     try:
-        result = run_final_review(args[0] if len(args) == 1 else args, publish=True)
+        # Multi-item CLI integration retains the earlier public composition
+        # contract until the dedicated operator-command integration stage.
+        # The complete C14 API is multi-ref run_final_review above.
+        result = (run_final_review(args[0], publish=True) if len(args) == 1
+                  else run_final_stack(args))
     except Exception as exc:
         sys.stderr.write(f"review-gate final-review failed: {exc}\n")
         return 2
