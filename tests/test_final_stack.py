@@ -335,6 +335,50 @@ def test_three_item_stack_runs_complete_units_links_reports_and_publishes_each_i
                 for entry in combined_coverage(report)}["composition"] == "complete"
 
 
+def test_newer_stack_findings_replace_older_green_on_every_pinned_item(tmp_path):
+    harness = Harness(tmp_path)
+    store_path = tmp_path / "replacement.sqlite3"
+    harness.run(store_path)
+    green_writer = StatusWriter()
+    green = harness.run(store_path, publish=True, publication_runner=green_writer)
+    assert green["state"] == "pass"
+    assert len(green_writer.calls) == 3
+    assert all("state=success" in call for call in green_writer.calls)
+
+    harness.environ["STACK_FINDING_UNIT"] = "individual:2"
+    adverse_writer = StatusWriter()
+    adverse = harness.run(store_path, publish=True, publication_runner=adverse_writer)
+
+    assert adverse["run_seq"] == green["run_seq"] + 1
+    assert adverse["state"] == "findings"
+    assert adverse["complete"] is True
+    assert len(adverse_writer.calls) == 3
+    assert all("state=failed" in call for call in adverse_writer.calls)
+    assert len(adverse["publications"]) == 3
+    assert all(publication["status"] == "published"
+               for publication in adverse["publications"])
+    assert all(publication["enforced"] and not publication["official_green"]
+               for publication in adverse["publications"])
+    assert adverse["trust"]["local_only"] is False
+    assert adverse["trust"]["enforced"] is True
+    assert adverse["trust"]["official"] is True
+    for entry, green_call, adverse_call in zip(
+            adverse["items"], green_writer.calls, adverse_writer.calls):
+        assert entry["publication"]["status"] == "published"
+        assert entry["official_green"] is False
+        assert entry["green_allowed"] is False
+        assert entry["publication_decision"]["can_publish_status"] is True
+        assert entry["publication_decision"]["can_publish_pass"] is False
+        green_endpoint = next(arg for arg in green_call if arg.startswith("projects/"))
+        adverse_endpoint = next(arg for arg in adverse_call if arg.startswith("projects/"))
+        assert adverse_endpoint == green_endpoint
+    with FinalStore(store_path) as store:
+        report = store.machine_report(adverse["run_id"])
+        coverage = {row["kind"]: row["status"] for row in combined_coverage(report)}
+        assert coverage["provider_publication"] == "complete"
+        assert len(report["publications"]) == 3
+
+
 def combined_coverage(report):
     return next(unit for unit in report["units"] if unit["kind"] == "combined")["coverage"]
 

@@ -400,10 +400,12 @@ def _write_unit_report(store, run_id, unit, orchestration):
         pass
 
 
-def _publication_decisions(store, run_id, individuals, local_waivers):
+def _publication_decisions(store, run_id, individuals, local_waivers,
+                           trusted_orchestrator):
     return {
         unit["unit_key"]: store.publication_decision(
-            run_id, unit_id=unit["unit_id"], local_waivers=local_waivers)
+            run_id, unit_id=unit["unit_id"], local_waivers=local_waivers,
+            trusted_orchestrator=trusted_orchestrator)
         for unit in individuals
     }
 
@@ -415,9 +417,10 @@ def run_final_stack(references, *, repo_root=None, provider=None, store_path=Non
                     report_url=None, local_waivers=()):
     """Run complete C14 stack orchestration and return detached public evidence.
 
-    Publication is attempted only after every individual, combined, and
-    prospective outcome, memory, freshness, and trust permit a whole-stack
-    pass. The publisher independently enforces C13 scope and ordering rules.
+    Publication is requested for every authoritative completed outcome. Store
+    authority permits adverse statuses without relaxing the individual,
+    combined, prospective, memory, freshness, and trust gates required for a
+    whole-stack pass. The publisher only renders that decision and transports it.
     """
     environ = os.environ if environ is None else environ
     repo_root = str(repo_root or os.getcwd())
@@ -584,12 +587,12 @@ def run_final_stack(references, *, repo_root=None, provider=None, store_path=Non
                     else "Mandatory stack review, memory, or test evidence is incomplete",
                 )
 
-        publishable_pass = bool(
-            publish and state == "pass" and complete and not identity["trust"].get("independent"))
+        publication_permitted = bool(
+            publish and not identity["trust"].get("independent"))
         store.finish_run(run_id, state, trust={
-            "local_only": not publishable_pass,
-            "enforced": publishable_pass,
-            "official": publishable_pass,
+            "local_only": not publication_permitted,
+            "enforced": publication_permitted,
+            "official": publication_permitted,
             "trusted_orchestrator": bool(publish),
             "stage_incomplete": False,
             "missing_stages": [],
@@ -600,7 +603,7 @@ def run_final_stack(references, *, repo_root=None, provider=None, store_path=Non
 
         individuals = [unit for unit in units if unit["kind"] == "individual"]
         publications = []
-        if publish and state == "pass" and complete:
+        if publication_permitted:
             publisher = FinalPublisher(
                 store, runner=publication_runner, trusted_orchestrator=True,
                 repo_root=repo_root,
@@ -618,7 +621,10 @@ def run_final_stack(references, *, repo_root=None, provider=None, store_path=Non
                      "official_green": publication["official_green"],
                      "error": publication["error"]},
                 )
-        decisions = _publication_decisions(store, run_id, individuals, local_waivers)
+        decisions = _publication_decisions(
+            store, run_id, individuals, local_waivers,
+            trusted_orchestrator=bool(publish),
+        )
         attempted = {publication["unit_id"]: publication for publication in publications}
         for unit in individuals:
             if unit["unit_id"] not in attempted:
@@ -632,7 +638,7 @@ def run_final_stack(references, *, repo_root=None, provider=None, store_path=Non
                      "official_green": False},
                 )
         combined_state = "complete" if publications and all(
-            publication["official_green"] for publication in publications) else (
+            publication["status"] == "published" for publication in publications) else (
                 "local_only" if publications else "not_eligible")
         store.record_coverage(
             combined_id, "provider_publication", combined_state,

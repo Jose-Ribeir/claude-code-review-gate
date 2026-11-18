@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 from urllib.parse import quote, urlsplit
 
-from rg_final_provider import FETCH_TIMEOUT, provider_name_for_references, run_cli
+from rg_final_provider import FETCH_TIMEOUT, run_cli
 from rg_final_store import PUBLICATION_STATUS_CONTEXT
 
 
@@ -74,36 +74,9 @@ class FinalPublisher:
         with self.store.publication_guard(run_id, unit_id, item_key) as attempt:
             decision = self.store.publication_decision(
                 run_id, unit_id=unit_id, item_key=item_key, local_waivers=local_waivers,
+                trusted_orchestrator=self.trusted_orchestrator,
             )
-            if not attempt.current and "run-superseded" not in decision["status_blockers"]:
-                decision["status_blockers"].append("run-superseded")
-                decision["green_blockers"].append("run-superseded")
-                decision["superseded"] = True
-            if not self.trusted_orchestrator:
-                decision["status_blockers"].append("untrusted-caller")
-                decision["green_blockers"].append("untrusted-caller")
             provider = self._provider(decision)
-            if provider == "github":
-                # The shared store predates multi-forge dispatch and emits its
-                # legacy GitLab-only blocker. At this provider-specific seam a
-                # canonical github.com reference is explicitly supported; all
-                # other store-owned eligibility blockers remain authoritative.
-                decision["status_blockers"] = [
-                    blocker for blocker in decision["status_blockers"]
-                    if blocker != "unsupported-provider"
-                ]
-                decision["green_blockers"] = [
-                    blocker for blocker in decision["green_blockers"]
-                    if blocker != "unsupported-provider"
-                ]
-            decision["status_blockers"] = list(dict.fromkeys(decision["status_blockers"]))
-            decision["green_blockers"] = list(dict.fromkeys(decision["green_blockers"]))
-            decision["can_publish"] = not decision["status_blockers"]
-            decision["can_publish_status"] = decision["can_publish"]
-            decision["can_publish_pass"] = not decision["green_blockers"]
-            decision["official_green"] = decision["can_publish_pass"]
-            if provider == "github" and decision["can_publish_pass"]:
-                decision["publication_state"] = "pass"
             provider_state = ("success" if decision["can_publish_pass"] else
                               "failure" if provider == "github" else "failed")
             description = self._description(decision)
@@ -118,8 +91,6 @@ class FinalPublisher:
             if decision["status_blockers"]:
                 reason = decision["status_blockers"][0]
                 error = self._blocker_message(reason, decision["status_blockers"])
-                trust = attempt.degrade_trust(error)
-                decision["trust"] = trust
                 return self._finalize(
                     attempt, decision, status="local_only", provider_state=None,
                     description=description, report_url=report_url,
@@ -129,8 +100,6 @@ class FinalPublisher:
             response, error = self._request(decision, provider_state, description, report_url)
             if error:
                 reason = "publication-provider-write-failed"
-                trust = attempt.degrade_trust(error)
-                decision["trust"] = trust
                 return self._finalize(
                     attempt, decision, status="local_only", provider_state=None,
                     description=description, report_url=report_url,
@@ -187,6 +156,8 @@ class FinalPublisher:
                 "Only the trusted orchestrator may write final-review provider statuses"
             ),
             "run-not-completed": "The final-review run has not completed",
+            "freshness-not-assessed": "The pinned revisions have no freshness assessment",
+            "independent-run": "An independent store cannot publish final-review statuses",
             "trust-local-only": "The final-review trust decision is local-only",
             "trust-not-enforced": "The final-review trust decision is unenforced",
             "trust-not-official": "The final-review trust decision is not official",
@@ -200,8 +171,7 @@ class FinalPublisher:
 
     @staticmethod
     def _provider(decision):
-        reference = decision["transport"].get("reference") or ""
-        return provider_name_for_references(reference)
+        return decision["transport"]["provider"]
 
     def _request(self, decision, provider_state, description, report_url):
         if self._provider(decision) == "github":
@@ -307,6 +277,8 @@ class FinalPublisher:
                   report_url, reason, error="", response=None):
         published = status == "published"
         official_green = bool(published and provider_state == "success")
+        if not published:
+            decision["trust"] = attempt.degrade_trust(error or reason)
         provider_status_id = (response or {}).get("id")
         details = {
             "reason": reason,

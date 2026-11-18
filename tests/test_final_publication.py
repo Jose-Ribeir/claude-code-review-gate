@@ -309,22 +309,35 @@ def test_incomplete_evidence_or_stop_cannot_create_green(store, mode):
 
     assert result["decision"]["can_publish_pass"] is False
     assert result["decision"]["scope"]["complete"] is False
-    assert result["provider_state"] == "failed"
     assert result["official_green"] is False
-    assert transport.fields["state"] == "failed"
+    if mode == "missing-freshness":
+        assert result["status"] == "local_only"
+        assert result["provider_state"] is None
+        assert result["enforced"] is False
+        assert "freshness-not-assessed" in result["decision"]["status_blockers"]
+        assert transport.calls == []
+    else:
+        assert result["status"] == "published"
+        assert result["provider_state"] == "failed"
+        assert result["enforced"] is True
+        assert transport.fields["state"] == "failed"
 
 
-def test_independent_pass_cannot_emit_official_green(store):
-    identity = ready_run(store, continued=False)
+@pytest.mark.parametrize("state", ["pass", "findings"])
+def test_independent_run_never_publishes_or_emits_official_green(store, state):
+    identity = ready_run(store, continued=False, state=state)
     transport = ScriptedGlab((json.dumps({"id": 816, "status": "failed"}), None))
 
     result = publish_individual(store, transport, identity)
 
     assert result["decision"]["trust"]["independent"] is True
+    assert "independent-run" in result["decision"]["status_blockers"]
     assert "independent-run" in result["decision"]["green_blockers"]
-    assert result["provider_state"] == "failed"
+    assert result["status"] == "local_only"
+    assert result["provider_state"] is None
+    assert result["enforced"] is False
     assert result["official_green"] is False
-    assert transport.fields["state"] == "failed"
+    assert transport.calls == []
 
 
 def test_local_prepush_waiver_is_context_only_at_publication_seam(store):
@@ -382,6 +395,22 @@ def test_permission_and_transport_failures_preserve_local_unenforced_evidence(
     assert report["units"][0]["coverage"]
 
 
+def test_adverse_permission_failure_remains_local_and_unenforced(store):
+    identity = ready_run(store, state="findings")
+    transport = ScriptedGlab((None, "403 Forbidden: status permission denied"))
+
+    result = publish_individual(store, transport, identity)
+
+    assert result["status"] == "local_only"
+    assert result["provider_state"] is None
+    assert result["enforced"] is False
+    assert result["official_green"] is False
+    trust = store.machine_report(identity["run_id"])["trust"]
+    assert trust["local_only"] is True
+    assert trust["enforced"] is False
+    assert trust["official"] is False
+
+
 def test_untrusted_caller_cannot_access_provider_write_path(store):
     identity = ready_run(store)
     transport = ScriptedGlab()
@@ -411,6 +440,41 @@ def test_local_only_trust_never_attempts_a_provider_write(store):
     assert result["error"]
     assert result["official_green"] is False
     assert store.machine_report(identity["run_id"])["publications"][0]["status"] == "local_only"
+
+
+def test_newer_adverse_replaces_green_and_late_old_completion_cannot_write(store):
+    old = ready_run(store)
+    green_transport = ScriptedGlab((json.dumps({
+        "id": 817, "status": "success", "name": STATUS_CONTEXT, "sha": SOURCE,
+    }), None))
+    green = publish_individual(store, green_transport, old)
+    new = ready_run(store, continued=False, state="findings")
+    adverse_transport = ScriptedGlab((json.dumps({
+        "id": 818, "status": "failed", "name": STATUS_CONTEXT, "sha": SOURCE,
+    }), None))
+
+    adverse = publish_individual(store, adverse_transport, new)
+    late_transport = ScriptedGlab()
+    late = publish_individual(store, late_transport, old)
+
+    assert green["provider_state"] == "success"
+    assert adverse["status"] == "published"
+    assert adverse["provider_state"] == "failed"
+    assert adverse["official_green"] is False
+    assert adverse["enforced"] is True
+    assert adverse["identity"]["head_sha"] == green["identity"]["head_sha"] == SOURCE
+    assert adverse["run_id"] != green["run_id"]
+    assert late["status"] == "superseded"
+    assert late["enforced"] is False
+    assert late_transport.calls == []
+    assert green_transport.fields["state"] == "success"
+    assert adverse_transport.fields["state"] == "failed"
+    assert green_transport.fields["context"] == adverse_transport.fields["context"]
+    old_endpoint = next(arg for arg in green_transport.calls[0]["argv"]
+                        if arg.startswith("projects/"))
+    new_endpoint = next(arg for arg in adverse_transport.calls[0]["argv"]
+                        if arg.startswith("projects/"))
+    assert old_endpoint == new_endpoint
 
 
 def test_late_older_identical_sha_run_cannot_replace_newer_outcome(store):
@@ -518,6 +582,32 @@ def test_inflight_old_status_finishes_before_newer_identical_sha_run_can_start(s
         assert new_result["official_green"] is True
 
     assert provider_writes == [old["run_id"], new["run_id"]]
+
+
+def test_incomplete_prospective_unit_blocks_green_but_allows_adverse_status(store):
+    identity = ready_run(store)
+    prospective_id = store.add_unit(
+        identity["run_id"], "prospective", "prospective", TARGET, SOURCE,
+        target_ref="main",
+    )
+    store.set_unit_state(prospective_id, "incomplete", "Prospective integration is incomplete")
+    transport = ScriptedGlab((json.dumps({"id": 820, "status": "failed"}), None))
+
+    result = publish_individual(store, transport, identity)
+
+    assert result["status"] == "published"
+    assert result["provider_state"] == "failed"
+    assert result["decision"]["publication_state"] == "incomplete"
+    assert result["decision"]["can_publish_status"] is True
+    assert result["decision"]["can_publish_pass"] is False
+    assert result["report"]["total_units"] == 3
+    assert {unit["kind"] for unit in result["decision"]["scope"]["units"]} == {
+        "individual", "combined", "prospective",
+    }
+    assert result["decision"]["scope"]["all_pass"] is False
+    assert result["decision"]["scope"]["complete"] is False
+    assert "units-not-pass" in result["decision"]["green_blockers"]
+    assert "scope-incomplete" in result["decision"]["green_blockers"]
 
 
 def test_unfinished_run_is_audited_without_a_provider_write(store):

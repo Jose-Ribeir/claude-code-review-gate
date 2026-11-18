@@ -26,6 +26,7 @@ import ocr_verdict
 import rg_final_acceptance
 import rg_final_contract
 import rg_final_memory
+import rg_final_provider
 import rg_final_telemetry
 import rg_store
 
@@ -2040,13 +2041,16 @@ class FinalStore:
             not stopped and not skipped
         )
 
-    def publication_decision(self, run_id, *, unit_id=None, item_key=None, local_waivers=()):
-        """Derive status and official-green eligibility from durable authority.
+    def publication_decision(self, run_id, *, unit_id=None, item_key=None, local_waivers=(),
+                             trusted_orchestrator=False):
+        """Derive provider-neutral status and official-green eligibility.
 
         The existing finding verdict remains the only severity authority. Full
-        individual+combined execution evidence, run completion, fresh pins,
-        same-store ordering, and enforceable trust are additional mandatory
-        gates. Local waiver records are visible but never enter verdict input.
+        individual+combined+prospective execution evidence, run completion,
+        assessed pins, same-store ordering, supported provider capability, and
+        enforceable trust are mandatory gates. A completed adverse outcome may
+        replace an older status without relaxing any official-green gate.
+        Local waiver records are visible but never enter verdict input.
         """
         with self._lock:
             run, selected_unit, item = self._publication_target(run_id, unit_id, item_key)
@@ -2061,8 +2065,9 @@ class FinalStore:
                 "local_waivers_applied": False,
             })
             units = self._rows(
-                "SELECT * FROM units WHERE run_id = ? AND kind IN ('individual', 'combined') "
-                "ORDER BY rowid", (run_id,),
+                "SELECT * FROM units WHERE run_id = ? "
+                "AND kind IN ('individual', 'combined', 'prospective') ORDER BY rowid",
+                (run_id,),
             )
             scope_units = []
             stopped = False
@@ -2125,12 +2130,41 @@ class FinalStore:
             else:
                 state = run["state"]
 
+            latest = self._conn.execute(
+                "SELECT run_id FROM runs WHERE stack_id = ? ORDER BY run_seq DESC LIMIT 1",
+                (run["stack_id"],),
+            ).fetchone()
+            current = bool(latest and latest["run_id"] == run_id and not superseded)
+            provider_data = _loads(item["provider_data_json"]) if item is not None else {}
+            reference = (item["reference"] if item is not None else None) or \
+                provider_data.get("url")
+            stack = self._conn.execute(
+                "SELECT provider FROM stacks WHERE stack_id = ?", (run["stack_id"],),
+            ).fetchone()
+            provider = stack["provider"] if stack is not None else None
+            provider_supported = provider in ("gitlab", "github")
+            item_provider = provider_data.get("provider")
+            if item_provider is not None and item_provider != provider:
+                provider_supported = False
+            if reference:
+                try:
+                    reference_provider = rg_final_provider.provider_name_for_references(reference)
+                except (ValueError, rg_final_provider.ProviderError):
+                    provider_supported = False
+                else:
+                    if reference_provider != provider:
+                        provider_supported = False
+            elif provider == "github":
+                # GitHub source repository and host identity are mandatory for
+                # its commit-status transport; never guess them.
+                provider_supported = False
+
             status_blockers = []
             if run["state"] not in FINAL_STATES:
                 status_blockers.append("invalid-final-state")
             if not run_completed:
                 status_blockers.append("run-not-completed")
-            if superseded:
+            if not current:
                 status_blockers.append("run-superseded")
             if selected_unit is None:
                 status_blockers.append("unit-required")
@@ -2138,11 +2172,16 @@ class FinalStore:
                 status_blockers.append("unsupported-unit-kind")
             if item is None:
                 status_blockers.append("publication-target-required")
-            stack = self._conn.execute(
-                "SELECT provider FROM stacks WHERE stack_id = ?", (run["stack_id"],),
-            ).fetchone()
-            if stack is None or stack["provider"] != "gitlab":
+            if not provider_supported:
                 status_blockers.append("unsupported-provider")
+            if freshness is None:
+                # An assessed stale/incomplete result is useful adverse
+                # evidence; the complete absence of an assessment is not.
+                status_blockers.append("freshness-not-assessed")
+            if bool(run["independent"]):
+                status_blockers.append("independent-run")
+            if not trusted_orchestrator:
+                status_blockers.append("untrusted-caller")
             if trust.get("local_only"):
                 status_blockers.append("trust-local-only")
             if not trust.get("enforced"):
@@ -2151,8 +2190,6 @@ class FinalStore:
                 status_blockers.append("trust-not-official")
 
             green_blockers = list(status_blockers)
-            if bool(run["independent"]):
-                green_blockers.append("independent-run")
             if not scope_complete:
                 green_blockers.append("scope-incomplete")
             if not all_pass:
@@ -2178,9 +2215,6 @@ class FinalStore:
             stale = state == "stale"
             identity = self._publication_identity(run, selected_unit, item)
             identity["store_instance_id"] = self.store_instance_id
-            provider_data = _loads(item["provider_data_json"]) if item is not None else {}
-            reference = (item["reference"] if item is not None else None) or \
-                provider_data.get("url")
             report = {
                 "findings": len(findings), "lenses": lens_count, "tests": test_count,
                 "warnings": warning_count, "stops": stop_count,
@@ -2196,7 +2230,7 @@ class FinalStore:
                 "store_instance_id": self.store_instance_id,
                 "unit_id": unit_id, "item_key": identity["item_key"],
                 "identity": identity,
-                "transport": {"reference": reference},
+                "transport": {"reference": reference, "provider": provider},
                 "scope": {
                     "complete": scope_complete, "evidence_complete": evidence_complete,
                     "all_pass": all_pass, "stopped": stopped, "units": scope_units,
@@ -2217,6 +2251,7 @@ class FinalStore:
                 "can_publish_pass": can_publish_pass,
                 "official_green": can_publish_pass,
                 "superseded": superseded,
+                "current": current,
                 "independent": bool(run["independent"]),
                 "restart_required": stale, "automatic_restart": False,
                 "restart": {"required": stale, "automatic": False},

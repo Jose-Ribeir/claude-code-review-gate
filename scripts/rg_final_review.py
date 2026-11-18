@@ -1036,13 +1036,12 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
                     else "Mandatory review, memory, or test evidence is incomplete",
                 )
 
-        publishable_pass = (
-            publish and state == "pass" and complete
-            and not identity["trust"].get("independent"))
+        publication_permitted = bool(
+            publish and not identity["trust"].get("independent"))
         trust = store.finish_run(run_id, state, trust={
-            "local_only": not publishable_pass,
-            "enforced": bool(publishable_pass),
-            "official": bool(publishable_pass),
+            "local_only": not publication_permitted,
+            "enforced": publication_permitted,
+            "official": publication_permitted,
             "trusted_orchestrator": bool(publish),
             "stage_incomplete": False, "missing_stages": [],
             "static_lenses_complete": all(
@@ -1051,7 +1050,9 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
             "reason": "Complete standalone evidence; publication remains explicitly guarded",
         })
         publication = None
-        if publish and state == "pass" and complete:
+        if publish:
+            # Store authority distinguishes an enforced adverse status from a
+            # green one; incomplete/stale outcomes never bypass green gates.
             publisher = FinalPublisher(
                 store, runner=publication_runner, trusted_orchestrator=True,
                 repo_root=repo_root,

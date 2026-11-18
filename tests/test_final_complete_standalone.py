@@ -140,7 +140,7 @@ class Provider:
 class StatusWriter:
     def __init__(self, response=None):
         self.response = response or (json.dumps({
-            "id": 9001, "status": "success", "name": STATUS_CONTEXT, "sha": SOURCE,
+            "id": 9001, "name": STATUS_CONTEXT, "sha": SOURCE,
         }), None)
         self.calls = []
 
@@ -149,6 +149,26 @@ class StatusWriter:
         if isinstance(self.response, BaseException):
             raise self.response
         return self.response
+
+
+def assert_enforced_adverse(output, writer, publication_state):
+    publication = output["publication"]
+    assert publication["status"] == "published"
+    assert publication["provider_state"] == "failed"
+    assert publication["local_only"] is False
+    assert publication["enforced"] is True
+    assert publication["official"] is True
+    assert publication["official_green"] is False
+    assert publication["decision"]["publication_state"] == publication_state
+    assert publication["decision"]["can_publish_status"] is True
+    assert publication["decision"]["can_publish_pass"] is False
+    assert output["trust"]["local_only"] is False
+    assert output["trust"]["enforced"] is True
+    assert output["trust"]["official"] is True
+    if writer is not None:
+        assert len(writer.calls) == 1
+        assert "state=failed" in writer.calls[0]
+        assert f"context={STATUS_CONTEXT}" in writer.calls[0]
 
 
 @pytest.fixture
@@ -297,7 +317,7 @@ def test_clean_fully_covered_standalone_passes_and_publishes_on_trusted_rerun(st
                     and test["state"] == "pass"]
 
 
-def test_ordinary_finding_completes_both_test_stages_without_green_publication(standalone):
+def test_ordinary_finding_completes_both_test_stages_and_publishes_adverse(standalone):
     store_path = standalone.tmp_path / "final.sqlite3"
     provider = Provider()
     run(standalone, provider, store_path)
@@ -321,15 +341,46 @@ def test_ordinary_finding_completes_both_test_stages_without_green_publication(s
     assert all(unit["execution_complete"] for unit in output["units"])
     assert output["units"][0]["state"] == "findings"
     assert output["units"][1]["state"] == "pass"
-    assert writer.calls == []
-    assert output["publication"] is None
-    assert output["trust"]["official"] is False
+    assert_enforced_adverse(output, writer, "findings")
     assert standalone.cleaned == [True, True]
     with FinalStore(store_path) as store:
         report = store.machine_report(output["run_id"])
         assert len(report["units"][0]["findings"]) == 1
         assert report["units"][1]["findings"] == []
-        assert report["publications"] == []
+        assert [row["status"] for row in report["publications"]] == ["published"]
+
+
+def test_newer_standalone_findings_replace_an_older_green_on_same_head(standalone):
+    store_path = standalone.tmp_path / "replacement.sqlite3"
+    provider = Provider()
+    run(standalone, provider, store_path)
+    green_writer = StatusWriter()
+    green = run(
+        standalone, provider, store_path,
+        publish=True, publication_runner=green_writer,
+    )
+    assert green["publication"]["provider_state"] == "success"
+
+    def finding_worker(request, **kwargs):
+        finding = [blocking_finding()] if (
+            request["unit_key"] == "individual:1" and request["lens"] == "correctness"
+        ) else []
+        return worker_result(finding)
+
+    standalone.monkeypatch.setattr(rg_final_review, "invoke_worker", finding_worker)
+    adverse_writer = StatusWriter()
+    adverse = run(
+        standalone, provider, store_path,
+        publish=True, publication_runner=adverse_writer,
+    )
+
+    assert adverse["run_seq"] == green["run_seq"] + 1
+    assert adverse["state"] == "findings"
+    assert_enforced_adverse(adverse, adverse_writer, "findings")
+    assert "state=success" in green_writer.calls[0]
+    for writer in (green_writer, adverse_writer):
+        assert any(f"statuses/{SOURCE}" in argument for argument in writer.calls[0])
+        assert f"context={STATUS_CONTEXT}" in writer.calls[0]
 
 
 def establish_continuity(standalone, provider, store_path):
@@ -388,9 +439,7 @@ def test_missing_intent_context_or_mandatory_stage_is_not_complete(
     assert output["complete"] is False
     assert output["exit_code"] == 2
     assert output["freshness"]["state"] == "fresh"
-    assert output["publication"] is None
-    assert output["trust"]["official"] is False
-    assert writer.calls == []
+    assert_enforced_adverse(output, writer, "incomplete")
     assert standalone.cleaned == [True, True]
     if missing in ("required", "dynamic"):
         assert "dynamic" in standalone.stages[-4:]
@@ -427,7 +476,7 @@ def test_memory_is_carried_explicitly_and_a_quiet_rerun_is_not_clean(standalone)
     assert second["complete"] is True
     assert second["finding_memory"]["pending_thread_ids"] == []
     assert second["finding_memory"]["unresolved_thread_ids"] == [pending["thread_id"]]
-    assert second["publication"] is None
+    assert_enforced_adverse(second, None, "findings")
     with FinalStore(store_path) as store:
         history = store.finding_history(pending["thread_id"])
         assert [event["event_type"] for event in history["events"]] == [
@@ -447,11 +496,11 @@ def test_memory_is_carried_explicitly_and_a_quiet_rerun_is_not_clean(standalone)
     assert third["complete"] is False
     assert third["finding_memory"]["quiet_rerun_cleared"] is False
     assert third["finding_memory"]["pending_thread_ids"] == [pending["thread_id"]]
-    assert third["publication"] is None
+    assert_enforced_adverse(third, None, "findings")
     assert standalone.cleaned == [True, True, True]
 
 
-def test_stale_revision_at_completion_has_no_official_pass_or_write(standalone):
+def test_stale_revision_publishes_adverse_only_to_original_pinned_head(standalone):
     class MovingProvider(Provider):
         def read(self, reference, repo_root=None):
             current = super().read(reference, repo_root)
@@ -472,15 +521,16 @@ def test_stale_revision_at_completion_has_no_official_pass_or_write(standalone):
     assert output["exit_code"] == 3
     assert output["freshness"]["restart_required"] is True
     assert output["freshness"]["automatic_restart"] is False
-    assert output["publication"] is None
-    assert writer.calls == []
+    assert_enforced_adverse(output, writer, "stale")
+    assert any(f"statuses/{SOURCE}" in argument for argument in writer.calls[0])
+    assert not any("d" * 40 in argument for argument in writer.calls[0])
     assert standalone.cleaned == [True, True]
     with FinalStore(store_path) as store:
         assert all(unit["state"] == "stale" for unit in store.machine_report(
             output["run_id"])["units"])
 
 
-def test_valid_stop_skips_only_dependent_combined_work_and_never_publishes(standalone):
+def test_valid_stop_skips_only_dependent_combined_work_and_publishes_incomplete(standalone):
     store_path = standalone.tmp_path / "stop.sqlite3"
     provider = Provider()
     establish_continuity(standalone, provider, store_path)
@@ -504,15 +554,14 @@ def test_valid_stop_skips_only_dependent_combined_work_and_never_publishes(stand
     assert [request["lens"] for request in standalone.requests
             if request["run_id"] == output["run_id"]] == ["correctness"]
     assert output["units"][1]["skipped_work"]
-    assert output["publication"] is None
-    assert writer.calls == []
+    assert_enforced_adverse(output, writer, "incomplete")
     assert standalone.cleaned == [True, True]
     with FinalStore(store_path) as store:
         report = store.machine_report(output["run_id"])
         assert len(report["units"][0]["findings"]) == 1
         assert {row["name"] for row in report["units"][1]["skipped_work"]} >= {
             "required_tests", "dynamic_tests"}
-        assert report["publications"] == []
+        assert [row["status"] for row in report["publications"]] == ["published"]
 
 
 def test_non_actionable_finding_uses_existing_warn_authority_not_findings_state(standalone):
@@ -536,8 +585,7 @@ def test_non_actionable_finding_uses_existing_warn_authority_not_findings_state(
     assert output["state"] != "findings"
     assert output["complete"] is False
     assert output["exit_code"] == 2
-    assert output["publication"] is None
-    assert writer.calls == []
+    assert_enforced_adverse(output, writer, "findings")
     assert standalone.cleaned == [True, True]
 
 
