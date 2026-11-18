@@ -1948,6 +1948,30 @@ def _run_check_four(tmp_path, body, timeout=None):
         str(tmp_path), "scripts/dslcheck.sh", ["app.py"], **kw)
 
 
+def test_command_check_reject_paths_keep_four_tuple_contract(tmp_path):
+    """Symlink escapes and missing executables fail soft through the full
+    (findings, warnings, error_note, telemetry) command-check contract."""
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    outside = tmp_path.parent / "outside-command.sh"
+    outside.write_text("#!/bin/sh\ncat >/dev/null\nprintf '[]\\n'\n",
+                       encoding="utf-8")
+    outside.chmod(0o755)
+    (scripts / "escape.sh").symlink_to(outside)
+
+    for command, expected in (
+            ("scripts/escape.sh", "resolved command escapes the review tree"),
+            ("scripts/missing.sh", "command not executable or missing")):
+        got = review_gate._run_one_command_check(
+            str(tmp_path), command, ["app.py"], timeout=120)
+        assert len(got) == 4, got
+        findings, warnings, note, tele = got
+        assert findings == []
+        assert warnings == []
+        assert expected in note, got
+        assert tele == {}
+
+
 def test_per_check_budget_is_exported_without_losing_the_base_env(
         tmp_path, monkeypatch):
     """The resolved per-check timeout reaches the executor's environment as
