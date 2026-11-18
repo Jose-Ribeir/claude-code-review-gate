@@ -5,6 +5,7 @@ import shlex
 from rg_final_provider import (
     ProviderError,
     list_open_references,
+    provider_name_for_references,
     revision_tuple,
     select_provider,
 )
@@ -215,7 +216,46 @@ def _linear_component(supplied, items):
     return ordered
 
 
-def discover_linear_graph(references, *, provider=None, repo_root=None):
+def record_graph_observation(telemetry, references, *, graph=None, error=None):
+    """Fail-soft graph counters; provider command/description text is excluded."""
+    if telemetry is None:
+        return
+    try:
+        supplied_count = (len(references)
+                          if not isinstance(references, str) and references is not None else 1)
+        provider = (graph or {}).get("provider") or provider_name_for_references(references)
+        if error is None:
+            telemetry.graph_discovered(
+                provider=provider, status="validated", supplied_count=supplied_count,
+                discovered_count=len((graph or {}).get("items") or ()),
+            )
+            return
+        telemetry.graph_discovered(
+            provider=provider, status="rejected", supplied_count=supplied_count,
+            discovered_count=len(getattr(error, "actual", ()) or ()),
+            omitted_ancestor_count=len(getattr(error, "omitted_ancestors", ()) or ()),
+            omitted_descendant_count=len(getattr(error, "omitted_descendants", ()) or ()),
+            error_code=str(getattr(error, "code", "graph-discovery-failed")),
+        )
+    except Exception:
+        try:
+            telemetry.record("observability-internal-warning", {})
+        except Exception:
+            pass
+
+
+def discover_linear_graph(references, *, provider=None, repo_root=None, telemetry=None):
+    """Return provider-pinned items, recording only bounded graph counters."""
+    try:
+        graph = _discover_linear_graph(references, provider=provider, repo_root=repo_root)
+    except Exception as exc:
+        record_graph_observation(telemetry, references, error=exc)
+        raise
+    record_graph_observation(telemetry, references, graph=graph)
+    return graph
+
+
+def _discover_linear_graph(references, *, provider=None, repo_root=None):
     """Return provider-pinned items in their explicit base-most-first order."""
     provider = select_provider(references, provider=provider, repo_root=repo_root)
     references = normalize_base_most_references(references)

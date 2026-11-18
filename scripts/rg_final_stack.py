@@ -31,6 +31,7 @@ from rg_final_materialize import materialize_review
 from rg_final_memory import refresh_run_freshness, rerun_context
 from rg_final_publish import FinalPublisher
 from rg_final_store import FinalStore
+from rg_final_telemetry import FinalReviewTelemetry
 from rg_final_verification import run_required_verification
 
 
@@ -426,14 +427,18 @@ def run_final_stack(references, *, repo_root=None, provider=None, store_path=Non
     if configured_executor:
         options.setdefault("executor", shlex.split(configured_executor))
     options.setdefault("environ", environ)
-    graph = discover_linear_graph(references, provider=provider, repo_root=repo_root)
+    telemetry = FinalReviewTelemetry()
+    graph = standalone._discover_observed(
+        discover_linear_graph, references, provider=provider, repo_root=repo_root,
+        telemetry=telemetry,
+    )
     items = graph["items"]
     with FinalStore(store_path) as store:
         identity = store.start_run(_store_stack(graph), metadata={
             "stage": standalone.COMPLETE_STAGE, "complete": True, "missing_stages": [],
             "standalone": False,
             "graph": {"schema": graph["schema"], "item_keys": graph["item_keys"]},
-        })
+        }, telemetry=telemetry)
         run_id = identity["run_id"]
         combined_id = identity["unit_ids"]["combined"]
         prior = rerun_context(store, run_id)

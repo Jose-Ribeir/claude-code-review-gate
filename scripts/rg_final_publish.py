@@ -319,6 +319,11 @@ class FinalPublisher:
             "provider_status_id": provider_status_id,
         }
         attempt.record(status, STATUS_CONTEXT, details, error)
+        self.store.record_publication_observability(
+            decision["run_id"], provider=self._provider(decision), status=status,
+            reason=reason, local_only=not published, enforced=published,
+            official_green=official_green,
+        )
         return {
             "schema": PUBLICATION_SCHEMA,
             "publication_id": attempt.publication_id,

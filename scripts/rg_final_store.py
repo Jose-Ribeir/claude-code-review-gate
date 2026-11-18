@@ -17,6 +17,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +26,7 @@ import ocr_verdict
 import rg_final_acceptance
 import rg_final_contract
 import rg_final_memory
+import rg_final_telemetry
 import rg_store
 
 SCHEMA_VERSION = 3
@@ -417,6 +419,7 @@ class FinalStore:
             raise ValueError("busy timeout and retry settings must be non-negative")
         self._lock = threading.RLock()
         self._closed = False
+        self._observability = {}
         self._conn = sqlite3.connect(
             str(self.path), timeout=self.busy_timeout, isolation_level=None,
             check_same_thread=False,
@@ -548,6 +551,160 @@ class FinalStore:
         if row is None:
             raise StoreError("database has no store_instance_id")
         return row[0]
+
+    def _telemetry_for_run(self, run_id, supplied=None):
+        """Return the bounded collector associated with one durable run.
+
+        A second store process can append supersession/publication observations
+        to an older run. Replay only the already-sanitized persisted event ring
+        in that case, then restore its historical counters and sequence.
+        """
+        if supplied is not None:
+            self._observability[run_id] = supplied
+        collector = self._observability.get(run_id)
+        if collector is not None:
+            return collector
+        row = self._conn.execute(
+            "SELECT metadata_json FROM runs WHERE run_id = ?", (run_id,),
+        ).fetchone()
+        if row is None:
+            raise StoreError(f"unknown run {run_id}")
+        collector = rg_final_telemetry.FinalReviewTelemetry()
+        persisted = _loads(row["metadata_json"]).get("observability") or {}
+        for event in persisted.get("events", [])[-rg_final_telemetry.MAX_EVENTS:]:
+            if not isinstance(event, dict):
+                continue
+            collector.record(event.get("kind"), {
+                key: value for key, value in event.items()
+                if key not in ("schema", "kind", "sequence")
+            })
+        counters = persisted.get("counters") or {}
+        for name in ("accepted", "rejected", "dropped"):
+            value = counters.get(name)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                setattr(collector, "_" + name, max(getattr(collector, "_" + name), value))
+        by_kind = counters.get("by_kind") or {}
+        if isinstance(by_kind, dict):
+            collector._by_kind = Counter({
+                kind: value for kind, value in by_kind.items()
+                if kind in rg_final_telemetry.EVENT_KINDS
+                and isinstance(value, int) and not isinstance(value, bool) and value >= 0
+            })
+        collector._sequence = collector._accepted
+        self._observability[run_id] = collector
+        return collector
+
+    def _persist_observability(self, run_id):
+        """Store a detached, size-checked snapshot in the existing run JSON."""
+        collector = self._telemetry_for_run(run_id)
+        snapshot = json.loads(collector.to_json())
+        row = self._conn.execute(
+            "SELECT metadata_json FROM runs WHERE run_id = ?", (run_id,),
+        ).fetchone()
+        if row is None:
+            raise StoreError(f"unknown run {run_id}")
+        metadata = _loads(row["metadata_json"])
+        metadata["observability"] = snapshot
+        self._conn.execute(
+            "UPDATE runs SET metadata_json = ? WHERE run_id = ?",
+            (_json(metadata), run_id),
+        )
+
+    def _observe(self, subject_run_id, recorder, **fields):
+        """Emit and durably retain telemetry without affecting gate behavior."""
+        collector = None
+        try:
+            collector = self._telemetry_for_run(subject_run_id)
+            getattr(collector, recorder)(**fields)
+            self._persist_observability(subject_run_id)
+        except Exception:
+            # Closed-schema rejection and internal instrumentation failures use
+            # the existing rejection counter; neither may abort review evidence.
+            try:
+                collector = collector or self._telemetry_for_run(subject_run_id)
+                collector.record("observability-internal-warning", {})
+                self._persist_observability(subject_run_id)
+            except Exception:
+                pass
+
+    def _observe_unit(self, unit_id, status):
+        row = self._unit_row(unit_id)
+        self._observe(
+            row["run_id"], "unit_executed", unit_key=row["unit_key"],
+            kind=row["kind"], status=status,
+        )
+
+    @staticmethod
+    def _bounded_count(value, default=0):
+        if isinstance(value, bool):
+            return default
+        try:
+            return min(max(int(value), 0), rg_final_telemetry.MAX_COUNT)
+        except (TypeError, ValueError, OverflowError):
+            return default
+
+    @staticmethod
+    def _lens_telemetry_state(state):
+        if state in ("completed", "completed_with_warnings", "incomplete", "stopped", "skipped"):
+            return state
+        return "completed" if state == "complete" else "incomplete"
+
+    @staticmethod
+    def _test_telemetry_state(state, coverage=""):
+        if state in ("pass", "block", "absent", "findings", "degraded", "not_applicable",
+                     "incomplete", "reproduced_failure", "flake", "uncovered", "skipped",
+                     "unknown", "fail"):
+            return state
+        if state in ("passed", "success", "ok"):
+            return "pass"
+        if state in ("failed", "failure"):
+            return "fail"
+        if state in ("error", "timeout", "incomplete") or coverage in (
+                "unknown", "uncovered", "incomplete", "error"):
+            return "degraded" if coverage != "incomplete" else "incomplete"
+        return "unknown"
+
+    @staticmethod
+    def _test_telemetry_coverage(execution, status):
+        if execution == "required":
+            return "absent" if status == "absent" else "declared"
+        if status in ("declared", "existing_tests", "ephemeral_only", "uncovered", "unknown",
+                      "not_applicable"):
+            return status
+        if status == "absent":
+            return "absent"
+        return "unknown"
+
+    def _observe_test_coverage(self, unit_id, kind, status, details):
+        if kind not in ("required_tests", "dynamic_tests"):
+            return
+        execution = "required" if kind == "required_tests" else "dynamic"
+        row = self._unit_row(unit_id)
+        marker = (row["run_id"], unit_id, execution)
+        emitted = getattr(self, "_test_coverage_observed", set())
+        self._test_coverage_observed = emitted
+        if marker in emitted:
+            return
+        emitted.add(marker)
+        details = details if isinstance(details, dict) else {}
+        telemetry = details.get("telemetry") if isinstance(details.get("telemetry"), dict) else {}
+        dynamic_state = details.get("state", status)
+        coverage = self._test_telemetry_coverage(execution, status)
+        if execution == "dynamic" and coverage == "unknown" and status == "not_applicable":
+            coverage = "not_applicable"
+        evidence_source = ("existing_test" if coverage == "existing_tests" else
+                           "ephemeral_test" if coverage == "ephemeral_only" else "")
+        self._observe(
+            row["run_id"], "tests_executed", unit_key=row["unit_key"],
+            execution=execution,
+            status=self._test_telemetry_state(dynamic_state, coverage), coverage=coverage,
+            executed=self._bounded_count(telemetry.get("runs", 0)),
+            attempts=self._bounded_count(
+                telemetry.get("executor_attempts", telemetry.get("selector_attempts", 0))),
+            findings=self._bounded_count(details.get("finding_count", 0)),
+            warnings=self._bounded_count(details.get("warning_count", 0)),
+            evidence_source=evidence_source,
+        )
 
     def store_identity(self):
         """Inspect the explicit boundary for ordering and finding continuity."""
@@ -1024,7 +1181,7 @@ class FinalStore:
         return trust
 
     def start_run(self, stack, contract_version=None, acceptance_version=None,
-                  continuity_required=False, metadata=None):
+                  continuity_required=False, metadata=None, telemetry=None):
         """Atomically persist a run, its immutable revisions, and initial units.
 
         The returned identity includes ``unit_ids`` keyed by ``individual:N``
@@ -1099,6 +1256,27 @@ class FinalStore:
                 "AND run_seq < ? AND superseded_by_run_id IS NULL",
                 (run_id, stack_key, run_id, run_seq),
             )
+            trust = self._trust(independent, continuity_required)
+            self._observability[run_id] = (
+                telemetry or rg_final_telemetry.FinalReviewTelemetry())
+            self._observe(
+                run_id, "store_bound", store_instance_id=self.store_instance_id,
+                run_id=run_id, run_seq=run_seq,
+                continuity_required=bool(continuity_required), independent=independent,
+                continuity_available=not independent,
+                enforced=bool(trust.get("enforced")), official=bool(trust.get("official")),
+            )
+            for _unit_id, key, kind, _position, _base, _head, _target_ref, _source_ref in units:
+                self._observe(run_id, "unit_executed", unit_key=key, kind=kind,
+                              status="incomplete")
+            superseded = self._rows(
+                "SELECT run_id FROM runs WHERE superseded_by_run_id = ?", (run_id,))
+            for prior_run in superseded:
+                self._observe(
+                    prior_run["run_id"], "run_superseded",
+                    store_instance_id=self.store_instance_id, run_id=prior_run["run_id"],
+                    superseded_by_run_id=run_id, publication_blocked=True,
+                )
         return {
             "run_id": run_id,
             "run_seq": run_seq,
@@ -1107,7 +1285,7 @@ class FinalStore:
             "contract_version": contract_version,
             "acceptance_version": acceptance_version,
             "unit_ids": unit_ids,
-            "trust": self._trust(independent, continuity_required),
+            "trust": trust,
         }
 
     def _unit_row(self, unit_id):
@@ -1133,6 +1311,8 @@ class FinalStore:
                  _sha(base_sha, "base_sha"), _sha(head_sha, "head_sha"), target_ref,
                  source_ref, _json(metadata), _now()),
             )
+            self._observe(run_id, "unit_executed", unit_key=str(unit_key), kind=kind,
+                          status="incomplete")
         return unit_id
 
     def set_unit_state(self, unit_id, state, summary=None):
@@ -1151,6 +1331,9 @@ class FinalStore:
                 )
             if cursor.rowcount != 1:
                 raise StoreError(f"unknown unit {unit_id}")
+            row = self._unit_row(unit_id)
+            self._observe(row["run_id"], "unit_executed", unit_key=row["unit_key"],
+                          kind=row["kind"], status=state)
 
     def finish_run(self, run_id, state, trust=None):
         """Record a supervisor-computed final state and effective trust qualifiers."""
@@ -1177,6 +1360,15 @@ class FinalStore:
                 (lens_id, unit_id, _required_text({"name": name}, "name"),
                  _required_text({"state": state}, "state"), str(summary), _json(evidence), _now()),
             )
+            row = self._unit_row(unit_id)
+            details = evidence if isinstance(evidence, dict) else {}
+            self._observe(
+                row["run_id"], "lens_executed", unit_key=row["unit_key"], lens=str(name),
+                status=self._lens_telemetry_state(state),
+                findings=self._bounded_count(details.get("finding_count", 0)),
+                warnings=self._bounded_count(details.get("warning_count", 0)),
+                unreviewed=self._bounded_count(len(details.get("unreviewed") or ())),
+            )
         return lens_id
 
     def record_test(self, unit_id, name, kind, state, output="", evidence_fingerprint="",
@@ -1190,6 +1382,24 @@ class FinalStore:
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (test_id, unit_id, str(name), str(kind), str(state), str(output),
                  str(evidence_fingerprint), _json(details), _now()),
+            )
+            row = self._unit_row(unit_id)
+            execution = "required" if kind == "required" else "dynamic"
+            details = details if isinstance(details, dict) else {}
+            attempts = details.get("attempts") or ()
+            evidence_source = details.get("evidence_source") or ""
+            if evidence_source not in ("", "existing_test", "ephemeral_test"):
+                evidence_source = ""
+            coverage = self._test_telemetry_coverage(execution, state)
+            if execution == "dynamic" and evidence_source:
+                coverage = ("existing_tests" if evidence_source == "existing_test"
+                            else "ephemeral_only")
+            self._observe(
+                row["run_id"], "tests_executed", unit_key=row["unit_key"],
+                execution=execution,
+                status=self._test_telemetry_state(state), coverage=coverage,
+                executed=1, attempts=self._bounded_count(len(attempts), 1),
+                findings=0, warnings=0, evidence_source=evidence_source,
             )
         return test_id
 
@@ -1690,6 +1900,12 @@ class FinalStore:
                     )
             if state != "fresh":
                 self._conn.execute("UPDATE runs SET state = ? WHERE run_id = ?", (state, run_id))
+            if state == "stale":
+                self._observe(
+                    run_id, "stale_outcome", run_id=run_id, changed_count=len(changes),
+                    incomplete_count=len(errors), restart_required=True,
+                    pass_publication_allowed=False,
+                )
         return {
             **assessment, "check_id": check_id, "run_id": run_id,
             "recorded_at": recorded_at, "restart_required": state == "stale",
@@ -2041,6 +2257,13 @@ class FinalStore:
                 (warning_id, unit_id, str(code), str(message), str(scope),
                  _json(details), _now()),
             )
+            if code == "structured-stop-rejected":
+                row = self._unit_row(unit_id)
+                self._observe(
+                    row["run_id"], "stop_evaluated", outcome="rejected",
+                    stage=str(scope), reason_code="structured-stop-rejected", category="",
+                    affected_units=0, skipped_stages=0,
+                )
         return warning_id
 
     def record_coverage(self, unit_id, kind, status, summary="", details=None):
@@ -2057,6 +2280,7 @@ class FinalStore:
                 "SELECT coverage_id FROM coverage WHERE unit_id = ? AND kind = ? AND status = ? "
                 "AND summary = ?", (unit_id, str(kind), str(status), str(summary))
             ).fetchone()
+            self._observe_test_coverage(unit_id, str(kind), str(status), details)
         return row[0]
 
     def record_stop(self, unit_id, reason, evidence=None, affected_unit_ids=(), skipped_work=()):
@@ -2086,7 +2310,36 @@ class FinalStore:
                     (_identifier(), stop_id, skipped_unit, _required_text(skipped, "kind"),
                      _required_text(skipped, "name"), _json(skipped.get("details")), _now()),
                 )
+            details = evidence if isinstance(evidence, dict) else {}
+            if details.get("schema") == "final-review-stop/v1" or (
+                    details.get("reason_code") and details.get("category") and details.get("stage")):
+                row = self._unit_row(unit_id)
+                self._observe(
+                    row["run_id"], "stop_evaluated", outcome="validated",
+                    stage=str(details.get("stage") or ""),
+                    reason_code=str(details.get("reason_code") or ""),
+                    category=str(details.get("category") or ""),
+                    affected_units=len(affected), skipped_stages=len(skipped_work),
+                )
         return stop_id
+
+    def record_publication_observability(self, run_id, *, provider, status, reason,
+                                         local_only, enforced, official_green):
+        """Persist publication ordering/degradation inside its existing guard."""
+        with self._lock:
+            run = self._run_row(run_id)
+            if status == "superseded" and run["superseded_by_run_id"]:
+                self._observe(
+                    run_id, "run_superseded", store_instance_id=self.store_instance_id,
+                    run_id=run_id, superseded_by_run_id=run["superseded_by_run_id"],
+                    publication_blocked=True,
+                )
+            if status in ("local_only", "superseded"):
+                self._observe(
+                    run_id, "publication_degraded", provider=provider, status=status,
+                    reason=reason, local_only=bool(local_only), enforced=bool(enforced),
+                    official_green=bool(official_green),
+                )
 
     def record_publication(self, run_id, item_key=None, unit_id=None, status="attempted",
                            status_context="review-gate/final", details=None, error=""):
@@ -2265,9 +2518,11 @@ class FinalStore:
                     "SELECT * FROM publications WHERE run_id = ? ORDER BY attempted_at, "
                     "publication_id", (run_id,))
             ]
+            run_metadata = _loads(run["metadata_json"])
             return {
                 "schema": REPORT_SCHEMA,
                 "store": self.store_identity(),
+                "observability": run_metadata.get("observability", {}),
                 "run": {
                     "run_id": run_id, "run_seq": run["run_seq"], "stack_key": run["stack_id"],
                     "contract_version": run["contract_version"],
@@ -2275,7 +2530,7 @@ class FinalStore:
                     "continuity_required": bool(run["continuity_required"]),
                     "started_at": run["started_at"], "completed_at": run["completed_at"],
                     "superseded_by_run_id": run["superseded_by_run_id"],
-                    "metadata": _loads(run["metadata_json"]),
+                    "metadata": run_metadata,
                 },
                 "stack": {
                     "stack_key": stack["stack_id"], "provider": stack["provider"],
@@ -2331,6 +2586,9 @@ class FinalStore:
             f"{'independent' if trust.get('independent') else 'same-store continuity'}",
             f"Trust details: {self._details(trust)}",
             f"Superseded by: {run['superseded_by_run_id'] or 'no newer run in this store'}",
+            "Observability: " + self._details(
+                (report["observability"].get("counters") or {})
+                if report["observability"] else {}),
             "", "## Pinned item revisions", "",
         ]
         for item in report["revisions"]["items"]:

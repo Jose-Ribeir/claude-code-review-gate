@@ -13,6 +13,7 @@ verdicts from normalized findings.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
 from copy import deepcopy
@@ -26,7 +27,7 @@ import tempfile
 import ocr_profile
 from rg_final_compose import compose_stack
 from rg_final_context import collect_review_context
-from rg_final_graph import discover_linear_graph
+from rg_final_graph import discover_linear_graph, record_graph_observation
 from rg_final_gitlab import GitLabProvider
 from rg_final_dynamic import run_dynamic_checks
 from rg_final_memory import carry_forward, rerun_context
@@ -47,6 +48,7 @@ from rg_final_lenses import (
 from rg_final_materialize import materialize_review
 from rg_final_provider import RevisionChangedError, revision_tuple, select_provider
 from rg_final_store import FinalStore
+from rg_final_telemetry import FinalReviewTelemetry
 
 
 RESULT_SCHEMA = "final-review-result/v1"
@@ -75,6 +77,35 @@ def _selected_provider(reference, provider, repo_root):
         reference, provider=provider, repo_root=repo_root,
         gitlab_factory=lambda: GitLabProvider(),
     )
+
+
+def _discover_observed(discover, references, *, provider, repo_root, telemetry):
+    """Use the instrumented graph seam without breaking legacy injected callables."""
+    try:
+        supports_telemetry = "telemetry" in inspect.signature(discover).parameters
+    except (TypeError, ValueError):
+        supports_telemetry = True
+    if supports_telemetry:
+        return discover(
+            references, provider=provider, repo_root=repo_root, telemetry=telemetry,
+        )
+    graph = discover(references, provider=provider, repo_root=repo_root)
+    record_graph_observation(telemetry, references, graph=graph)
+    return graph
+
+
+def _read_standalone_observed(provider, reference, repo_root):
+    """Bind the one-item graph observation to the collector adopted by its run."""
+    telemetry = FinalReviewTelemetry()
+    try:
+        item = provider.read(reference, repo_root=repo_root)
+    except Exception as exc:
+        record_graph_observation(telemetry, [reference], error=exc)
+        raise
+    record_graph_observation(
+        telemetry, [reference], graph={"provider": item["provider"], "items": [item]},
+    )
+    return item, telemetry
 
 
 class WorkerError(RuntimeError):
@@ -343,6 +374,7 @@ def _record_lens_aggregation(store, unit_id, aggregation, materialized=None):
             **common,
             "summary": outcome.summary,
             "finding_verdict": aggregation.finding_verdict if aggregation.complete else None,
+            "finding_count": len(outcome.findings),
             "warning_count": len(outcome.warnings),
             "unreviewed": list(outcome.unreviewed),
             "capabilities": list(outcome.capabilities),
@@ -478,7 +510,7 @@ def _run_static_final_review(reference, *, repo_root=None, provider=None, store_
     environ = os.environ if environ is None else environ
     stage = EXECUTION_STAGE if execute_checks else STAGE
     missing_stages = EXECUTION_MISSING_STAGES if execute_checks else MISSING_STAGES
-    item = provider.read(reference, repo_root=repo_root)
+    item, telemetry = _read_standalone_observed(provider, reference, repo_root)
     revisions = list(revision_tuple(item))
     source = item["source"]
     target = item["target"]
@@ -488,7 +520,7 @@ def _run_static_final_review(reference, *, repo_root=None, provider=None, store_
             "complete": False,
             "missing_stages": missing_stages,
             "standalone": True,
-        })
+        }, telemetry=telemetry)
         run_id = identity["run_id"]
         unit_id = identity["unit_ids"]["individual:1"]
         combined_id = identity["unit_ids"]["combined"]
@@ -783,7 +815,7 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
     if configured_executor:
         standalone_dynamic_kwargs.setdefault("executor", shlex.split(configured_executor))
     standalone_dynamic_kwargs.setdefault("environ", environ)
-    item = provider.read(reference, repo_root=repo_root)
+    item, telemetry = _read_standalone_observed(provider, reference, repo_root)
     revisions = list(revision_tuple(item))
     source = item["source"]
     target = item["target"]
@@ -791,7 +823,7 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
         identity = store.start_run(_stack(item), metadata={
             "stage": COMPLETE_STAGE, "complete": True, "missing_stages": [],
             "standalone": True,
-        })
+        }, telemetry=telemetry)
         run_id = identity["run_id"]
         unit_id = identity["unit_ids"]["individual:1"]
         combined_id = identity["unit_ids"]["combined"]
@@ -1445,14 +1477,18 @@ def run_final_stack(references, *, repo_root=None, provider=None, store_path=Non
     provider = _selected_provider(references, provider, repo_root)
     stage = EXECUTION_STAGE if execute_checks else STACK_STAGE
     missing_stages = EXECUTION_STACK_MISSING_STAGES if execute_checks else STACK_MISSING_STAGES
-    graph = discover_linear_graph(references, provider=provider, repo_root=repo_root)
+    telemetry = FinalReviewTelemetry()
+    graph = _discover_observed(
+        discover_linear_graph, references, provider=provider, repo_root=repo_root,
+        telemetry=telemetry,
+    )
     items = graph["items"]
     with FinalStore(store_path) as store:
         identity = store.start_run(_graph_stack(graph), metadata={
             "stage": stage, "complete": False,
             "missing_stages": missing_stages, "standalone": False,
             "graph": {"schema": graph["schema"], "item_keys": graph["item_keys"]},
-        })
+        }, telemetry=telemetry)
         run_id = identity["run_id"]
         combined_id = identity["unit_ids"]["combined"]
         unit_results = []
