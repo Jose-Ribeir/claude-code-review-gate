@@ -585,13 +585,20 @@ def test_empty_history_and_empty_scoped_run_list_are_not_empty_successes(tmp_pat
     assert fixture["store_id"] not in no_runs.stdout
 
 
-def test_store_option_uses_requested_database_not_process_default(tmp_path, monkeypatch):
+def test_store_option_wins_over_environment_and_tool_defaults(tmp_path, monkeypatch):
     requested = tmp_path / "requested.sqlite3"
     fixture = upgraded_history(requested)
+    configured = tmp_path / "environment.sqlite3"
     default_root = tmp_path / "default-state"
     env = os.environ.copy()
+    env["FINAL_REVIEW_STORE"] = str(configured)
     env["OCR_STATE_DIR"] = str(default_root)
-    monkeypatch.setenv("OCR_STATE_DIR", str(default_root))
+    env["KIMCHI_CONFIG_DIR"] = str(tmp_path / "kimchi-config")
+    env["CLAUDE_CONFIG_DIR"] = str(tmp_path / "claude-config")
+    for name, value in env.items():
+        if name in {"FINAL_REVIEW_STORE", "OCR_STATE_DIR", "KIMCHI_CONFIG_DIR",
+                    "CLAUDE_CONFIG_DIR"}:
+            monkeypatch.setenv(name, value)
 
     view = json_view(requested, "contract", "show")
     direct = subprocess.run(
@@ -603,7 +610,52 @@ def test_store_option_uses_requested_database_not_process_default(tmp_path, monk
     assert direct.returncode == 0, direct.stderr
     assert json.loads(direct.stdout)["store_instance_id"] == fixture["store_id"]
     assert view["store_instance_id"] == fixture["store_id"]
+    assert not configured.exists()
     assert not (default_root / "final-review.sqlite3").exists()
+
+
+def test_normal_entrypoint_uses_environment_then_neutral_home_and_documents_precedence(
+        tmp_path):
+    home = tmp_path / "entrypoint-home"
+    configured = tmp_path / "from-environment.sqlite3"
+    tool_paths = {
+        "OCR_STATE_DIR": tmp_path / "ocr-state",
+        "KIMCHI_CONFIG_DIR": tmp_path / "kimchi-config",
+        "KIMCHI_HOME": tmp_path / "kimchi-home",
+        "CLAUDE_CONFIG_DIR": tmp_path / "claude-config",
+    }
+    env = os.environ.copy()
+    env.update({name: str(path) for name, path in tool_paths.items()})
+    env.update({
+        "HOME": str(home), "USERPROFILE": str(home), "FINAL_REVIEW_STORE": str(configured),
+    })
+    command = [sys.executable, str(GATE), "contract", "show", "--json"]
+    from_environment = subprocess.run(
+        command, cwd=str(tmp_path), env=env,
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert from_environment.returncode == 0, from_environment.stderr
+    assert json.loads(from_environment.stdout)["store"]["path"] == str(configured)
+
+    del env["FINAL_REVIEW_STORE"]
+    from_home = subprocess.run(
+        command, cwd=str(tmp_path), env=env,
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert from_home.returncode == 0, from_home.stderr
+    neutral = home / ".final-review" / "final-review.sqlite3"
+    assert json.loads(from_home.stdout)["store"]["path"] == str(neutral)
+    assert neutral.exists()
+    assert all(not path.exists() for path in tool_paths.values())
+
+    help_result = subprocess.run(
+        [sys.executable, str(GATE), "contract", "show", "--help"],
+        cwd=str(tmp_path), env=env, capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert help_result.returncode == 0, help_result.stderr
+    assert "FINAL_REVIEW_STORE" in help_result.stdout
+    assert "~/.final-review/final-review.sqlite3" in help_result.stdout
+    assert "external store root" not in help_result.stdout
 
 
 def test_legacy_null_and_old_contract_continuation_remain_exact_after_upgrade(tmp_path):

@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
@@ -56,17 +57,216 @@ def start(store, **kwargs):
     return store.start_run(stack(**kwargs))
 
 
-def test_default_database_uses_external_store_root(tmp_path, monkeypatch):
-    monkeypatch.setenv("OCR_STATE_DIR", str(tmp_path / "external"))
-    store = FinalStore()
-    try:
-        assert store.path == tmp_path / "external" / "final-review.sqlite3"
+def test_store_path_precedence_is_explicit_then_environment_then_neutral_home(
+        tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    explicit = tmp_path / "explicit.sqlite3"
+    configured = tmp_path / "configured.sqlite3"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("FINAL_REVIEW_STORE", str(configured))
+    monkeypatch.setenv("OCR_STATE_DIR", str(tmp_path / "ocr-state"))
+
+    assert final_store.resolve_store_path(explicit) == explicit
+    assert final_store.resolve_store_path() == configured
+    monkeypatch.delenv("FINAL_REVIEW_STORE")
+    assert final_store.resolve_store_path() == home / ".final-review" / "final-review.sqlite3"
+    monkeypatch.setenv("FINAL_REVIEW_STORE", "  ")
+    assert final_store.resolve_store_path() == home / ".final-review" / "final-review.sqlite3"
+
+
+def test_default_database_ignores_tool_configuration_and_source_repository_state(
+        tmp_path, monkeypatch):
+    home = tmp_path / "neutral-home"
+    repo = tmp_path / "reviewed-repository"
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".ocr").mkdir()
+    (repo / ".git" / "config").write_text("[core]\n\trepositoryformatversion = 0\n")
+    (repo / ".ocr" / "config.json").write_text('{"checks": {}}\n')
+    (repo / "tracked.txt").write_text("unchanged\n")
+    before = sorted(repo.rglob("*"))
+    before_contents = {path: path.read_bytes() for path in before if path.is_file()}
+    tool_paths = {
+        "OCR_STATE_DIR": tmp_path / "bogus-ocr-state",
+        "KIMCHI_CONFIG_DIR": tmp_path / "bogus-kimchi-config",
+        "KIMCHI_HOME": tmp_path / "bogus-kimchi-home",
+        "CLAUDE_CONFIG_DIR": tmp_path / "bogus-claude-config",
+    }
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.delenv("FINAL_REVIEW_STORE", raising=False)
+    for name, path in tool_paths.items():
+        monkeypatch.setenv(name, str(path))
+    monkeypatch.chdir(repo)
+
+    with FinalStore() as store:
+        assert store.path == home / ".final-review" / "final-review.sqlite3"
         assert store.path.exists()
         if os.name != "nt":
             assert store.path.stat().st_mode & 0o777 == 0o600
-        assert not (ROOT / "final-review.sqlite3").exists()
-    finally:
-        store.close()
+            assert store.path.parent.stat().st_mode & 0o777 == 0o700
+
+    assert all(not path.exists() for path in tool_paths.values())
+    assert sorted(repo.rglob("*")) == before
+    assert {path: path.read_bytes() for path in before if path.is_file()} == before_contents
+    assert not (repo / "final-review.sqlite3").exists()
+
+
+def test_environment_store_is_a_raw_sqlite_database_with_all_versioned_records(tmp_path):
+    path = tmp_path / "portable" / "records.sqlite3"
+    with FinalStore(path) as store:
+        identity = start(store)
+        individual = identity["unit_ids"]["individual:1"]
+        combined = identity["unit_ids"]["combined"]
+        store.record_lens(
+            individual, "correctness", "completed", evidence={"diff_bytes": 42},
+        )
+        store.set_unit_state(individual, "pass")
+        store.set_unit_state(combined, "pass")
+        store.finish_run(identity["run_id"], "pass")
+
+    script = r'''
+import json
+import sqlite3
+import sys
+
+connection = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+tables = {row[0] for row in connection.execute(
+    "SELECT name FROM sqlite_master WHERE type = 'table'"
+)}
+required = {
+    "schema_migrations", "store_metadata", "contract_versions", "contract_rules",
+    "contract_decisions", "acceptance_versions", "acceptance_scenarios", "runs",
+    "run_items", "units", "lenses", "test_evidence", "findings", "finding_anchors",
+    "warnings", "coverage", "stops", "skipped_work", "publications",
+}
+assert required <= tables, sorted(required - tables)
+summary = {
+    "schema_version": connection.execute("PRAGMA user_version").fetchone()[0],
+    "migrations": connection.execute("SELECT count(*) FROM schema_migrations").fetchone()[0],
+    "contracts": connection.execute("SELECT count(*) FROM contract_versions").fetchone()[0],
+    "rules": connection.execute("SELECT count(*) FROM contract_rules").fetchone()[0],
+    "decisions": connection.execute("SELECT count(*) FROM contract_decisions").fetchone()[0],
+    "acceptance": connection.execute("SELECT count(*) FROM acceptance_versions").fetchone()[0],
+    "scenarios": connection.execute("SELECT count(*) FROM acceptance_scenarios").fetchone()[0],
+    "run": connection.execute(
+        "SELECT state, contract_version, acceptance_version FROM runs"
+    ).fetchone(),
+    "lens": connection.execute(
+        "SELECT name, state, evidence_json FROM lenses"
+    ).fetchone(),
+}
+connection.close()
+print(json.dumps(summary))
+'''
+    process = subprocess.run(
+        [sys.executable, "-I", "-B", "-c", script, str(path)],
+        env={"HOME": str(tmp_path / "raw-home")},
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert process.returncode == 0, process.stderr
+    summary = json.loads(process.stdout)
+    assert summary["schema_version"] == final_store.SCHEMA_VERSION
+    assert summary["migrations"] == final_store.SCHEMA_VERSION
+    assert summary["contracts"] == 1
+    assert summary["rules"] > 0
+    assert summary["decisions"] > 0
+    assert summary["acceptance"] == 1
+    assert summary["scenarios"] > 0
+    assert summary["run"][0] == "pass"
+    assert summary["run"][1] == contract.CURRENT_CONTRACT_VERSION
+    assert summary["run"][2] == acceptance.CURRENT_ACCEPTANCE_VERSION
+    assert summary["lens"][:2] == ["correctness", "completed"]
+    assert json.loads(summary["lens"][2]) == {"diff_bytes": 42}
+
+
+def test_portable_api_and_export_survive_clean_second_process(tmp_path):
+    path = tmp_path / "environment-store" / "final.sqlite3"
+    forbidden = tmp_path / "forbidden-tool-state"
+    environment = {
+        "HOME": str(tmp_path / "first-home"),
+        "USERPROFILE": str(tmp_path / "first-home"),
+        "PATH": os.environ.get("PATH", ""),
+        "FINAL_REVIEW_STORE": str(path),
+        "PORTABILITY_FORBIDDEN_ROOT": str(forbidden),
+        "OCR_STATE_DIR": str(forbidden / "ocr-state"),
+        "OCR_CONFIG_DIR": str(forbidden / "ocr-config"),
+        "KIMCHI_CONFIG_DIR": str(forbidden / "kimchi-config"),
+        "KIMCHI_HOME": str(forbidden / "kimchi-home"),
+        "CLAUDE_CONFIG_DIR": str(forbidden / "claude-config"),
+    }
+    create_script = r'''
+import json
+import os
+import sys
+
+sys.dont_write_bytecode = True
+forbidden = os.path.abspath(os.environ["PORTABILITY_FORBIDDEN_ROOT"])
+def reject_tool_state(event, args):
+    if event not in {"open", "os.stat", "os.listdir", "os.scandir", "os.mkdir", "os.rename"}:
+        return
+    targets = args[:2] if event == "os.rename" else args[:1]
+    for target in targets:
+        if not isinstance(target, (str, bytes, os.PathLike)):
+            continue
+        candidate = os.path.abspath(os.fspath(target))
+        if candidate == forbidden or candidate.startswith(forbidden + os.sep):
+            raise RuntimeError(f"coding-tool configuration access: {event}: {candidate}")
+sys.addaudithook(reject_tool_state)
+sys.path.insert(0, sys.argv[1])
+from rg_final_store import FinalStore
+
+assert "rg_store" not in sys.modules
+with FinalStore() as store:
+    identity = store.start_run(json.loads(sys.argv[2]))
+    for unit_id in identity["unit_ids"].values():
+        store.set_unit_state(unit_id, "pass")
+    store.finish_run(identity["run_id"], "pass")
+    result = {"path": str(store.path), "run_id": identity["run_id"]}
+print(json.dumps(result))
+'''
+    created = subprocess.run(
+        [sys.executable, "-I", "-B", "-c", create_script,
+         str(ROOT / "scripts"), json.dumps(stack())],
+        cwd=str(ROOT), env=environment, capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert created.returncode == 0, created.stderr
+    created_result = json.loads(created.stdout)
+    assert created_result["path"] == str(path)
+    assert path.exists()
+    assert not forbidden.exists()
+
+    clean_environment = os.environ.copy()
+    for name in list(clean_environment):
+        if name == "FINAL_REVIEW_STORE" or name.startswith(("OCR_", "KIMCHI", "CLAUDE")):
+            del clean_environment[name]
+    clean_environment["HOME"] = str(tmp_path / "second-home")
+    clean_environment["USERPROFILE"] = str(tmp_path / "second-home")
+    export_script = r'''
+import sys
+sys.dont_write_bytecode = True
+sys.path.insert(0, sys.argv[1])
+import rg_final_views
+raise SystemExit(rg_final_views.main([
+    "final-report", "export", sys.argv[3], "--format", "json", "--store", sys.argv[2],
+]))
+'''
+    exported = subprocess.run(
+        [sys.executable, "-I", "-B", "-c", export_script,
+         str(ROOT / "scripts"), str(path), created_result["run_id"]],
+        cwd=str(tmp_path), env=clean_environment,
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert exported.returncode == 0, exported.stderr
+    report = json.loads(exported.stdout)
+    assert report["store"]["path"] == str(path)
+    assert report["run"]["run_id"] == created_result["run_id"]
+    assert report["run"]["state"] == "pass"
+    assert report["run"]["contract_version"] == contract.CURRENT_CONTRACT_VERSION
+    assert report["run"]["acceptance_version"] == acceptance.CURRENT_ACCEPTANCE_VERSION
+    assert len(report["units"]) == 2
+    assert not (tmp_path / "second-home" / ".final-review").exists()
+    assert not forbidden.exists()
 
 
 def test_fresh_store_persists_identity_and_database_guards(tmp_path):

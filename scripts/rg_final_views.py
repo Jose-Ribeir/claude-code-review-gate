@@ -366,7 +366,11 @@ def _report_export(args, store):
 
 def _leaf(subparsers, name, help_text, handler, *, json_option=True):
     parser = subparsers.add_parser(name, help=help_text)
-    parser.add_argument("--store", help="final-review SQLite path (default: external store root)")
+    parser.add_argument(
+        "--store",
+        help="final-review SQLite path (overrides FINAL_REVIEW_STORE; "
+             "default: ~/.final-review/final-review.sqlite3)",
+    )
     if json_option:
         parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     parser.set_defaults(handler=handler)

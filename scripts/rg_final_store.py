@@ -1,11 +1,12 @@
 """Durable, store-local SPEC-16 final-review identity, evidence, and reports.
 
-The database lives under the existing *external* review-gate store root, never
-inside a repository under review.  Only Python's standard-library sqlite3 is
-used.  All writes are explicit transactions; a write transaction is acquired
-with BEGIN IMMEDIATE so its run sequence and same-store supersession decisions
-are atomic.  The module records verdicts supplied by the supervisor and
-delegates official finding verdicts to the existing ocr_verdict authority.
+The database is one dedicated, portable SQLite file, never a coding tool's
+application database or a file inside a repository under review. Only Python's
+standard-library sqlite3 is used. All writes are explicit transactions; a write
+transaction is acquired with BEGIN IMMEDIATE so its run sequence and same-store
+supersession decisions are atomic. The module records verdicts supplied by the
+supervisor and delegates official finding verdicts to the existing ocr_verdict
+authority.
 """
 from __future__ import annotations
 
@@ -28,7 +29,6 @@ import rg_final_contract
 import rg_final_memory
 import rg_final_provider
 import rg_final_telemetry
-import rg_store
 
 SCHEMA_VERSION = 3
 REPORT_SCHEMA = "final-review-report/v1"
@@ -396,18 +396,31 @@ _SCHEMA_V3 = (
 )
 
 
+def resolve_store_path(path=None, *, environ=None):
+    """Resolve the standalone database without consulting coding-tool state.
+
+    An explicit path wins, then ``FINAL_REVIEW_STORE``, then the neutral
+    ``~/.final-review/final-review.sqlite3`` default. This function performs no
+    filesystem or repository inspection and contains no provider selection.
+    """
+    if path is None:
+        environment = os.environ if environ is None else environ
+        configured = str(environment.get("FINAL_REVIEW_STORE", "")).strip()
+        path = configured or Path.home() / ".final-review" / "final-review.sqlite3"
+    return Path(path).expanduser().absolute()
+
+
 class FinalStore:
     """A persistent final-review SQLite store.
 
-    ``path`` defaults to ``rg_store.store_root()/final-review.sqlite3``.
-    ``busy_timeout`` is per SQLite lock wait in seconds and ``busy_retries``
-    bounds additional BEGIN/COMMIT attempts.  Instances may be shared by
-    threads; independent processes coordinate through SQLite WAL and locks.
+    ``path`` follows :func:`resolve_store_path` precedence. ``busy_timeout`` is
+    per SQLite lock wait in seconds and ``busy_retries`` bounds additional
+    BEGIN/COMMIT attempts. Instances may be shared by threads; independent
+    processes coordinate through SQLite WAL and locks.
     """
 
     def __init__(self, path=None, busy_timeout=5.0, busy_retries=4, retry_delay=0.025):
-        self.path = Path(path) if path is not None else rg_store.store_root() / "final-review.sqlite3"
-        self.path = self.path.expanduser().absolute()
+        self.path = resolve_store_path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         try:
             os.chmod(self.path.parent, 0o700)

@@ -107,11 +107,28 @@ memory does not ingest or suppress the separate external review bot.
 
 ### 5. Versioned SQLite records and the exact store boundary
 
-The external store-root database uses embedded SQLite, WAL, foreign keys,
-explicit transactions, bounded writer retries, and additive migrations; no
-server is introduced. Runs bind stack, unit, revision, store, contract, and
-acceptance identities, while lenses, tests, findings/anchors, warnings,
-coverage, stops, skipped work, trust, and publication attempts remain auditable.
+The final-review database is a dedicated, portable SQLite file, independent of
+Kimchi, Claude, and every other coding tool; it is not Kimchi's application
+database and never lives in a reviewed source checkout by default. Store
+location has exactly three levels of precedence: an explicit `FinalStore(path)`
+constructor argument or view `--store PATH` wins; otherwise a non-empty
+`FINAL_REVIEW_STORE` is used; otherwise the default is
+`~/.final-review/final-review.sqlite3`. Blank environment values are absent.
+There is no implicit fallback to or migration from the abandoned external
+review-gate store-root convention: `OCR_STATE_DIR`, Kimchi/Claude paths and
+configuration, review-gate configuration, `.git`, and other source-repository
+state neither select nor create the database. Per-database directory/file
+permission tightening remains in force.
+
+The portable database uses embedded SQLite, WAL, foreign keys, explicit
+transactions, bounded writer retries, and additive migrations; no server is
+introduced. Runs bind stack, unit, revision, store, contract, and acceptance
+identities, while lenses, tests, findings/anchors, warnings, coverage, stops,
+skipped work, trust, and publication attempts remain auditable. Definitions,
+decisions, versions, run records, evidence, and migrations are self-contained
+and directly queryable with standard-library `sqlite3`, without a coding agent
+or integration adapter. GitHub, GitLab, and inference integrations remain
+adapters; the neutral path resolver performs no vendor selection.
 
 Contract rules/decisions and acceptance definitions/results have stable versions
 (currently both `spec-16/v1`) and implementation versions. Every run retains the
@@ -190,11 +207,13 @@ results.
 | `review-gate.py final-report show RUN [--unit UNIT] [--json]` | Renders the exact run or one unit as Markdown by default or its machine manifest with `--json`, retaining that run's historical contract and audit evidence. | LocalRead. Unknown runs, or units not belonging to the run, are errors. |
 | `review-gate.py final-report export RUN [--unit UNIT] [--format json\|markdown] [--output PATH\|-]` | Exports the same selected report; format defaults to `json` and output defaults to stdout (`-`). | LocalRead plus the explicitly named local file write. It refuses to overwrite the selected final-review store; selection or output I/O errors are nonzero and perform no provider write. |
 
-Every view leaf accepts `--store PATH`; without it the command selects
-`final-review.sqlite3` under the external store root. View selections,
-store/value/SQLite/I/O errors exit 1 with a diagnostic (argument-parser usage
-errors exit 2). They do not turn an empty selection into success or invoke a
-provider. The final-review result exits **0** for `pass`, **1** for `findings`,
+Every view leaf accepts `--store PATH`. Without it, a non-empty
+`FINAL_REVIEW_STORE` selects the database; without either override, the command
+selects `~/.final-review/final-review.sqlite3`. The selected dedicated SQLite
+file can also be reopened or attached by arbitrary local tools without Kimchi,
+Claude, or review-gate configuration. View selections, store/value/SQLite/I/O
+errors exit 1 with a diagnostic (argument-parser usage errors exit 2). They do
+not turn an empty selection into success or invoke a provider. The final-review result exits **0** for `pass`, **1** for `findings`,
 **2** for `incomplete` and usage/discovery/orchestration failures, and **3**
 for `stale`. Publication permission or transport failure preserves the review
 state and exit result but degrades trust to local-only/unenforced; it cannot
