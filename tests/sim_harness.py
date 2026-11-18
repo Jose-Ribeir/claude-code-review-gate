@@ -36,6 +36,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -56,6 +57,9 @@ GIT_PUSH_FAILED = "failed to push some refs"
 GATE_MARKER_RE = re.compile(r"review-gate", re.IGNORECASE)
 
 _SCRIPTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts")
+if _SCRIPTS not in sys.path:
+    sys.path.insert(0, _SCRIPTS)
+from rg_final_review import run_owned_process  # noqa: E402
 
 
 class SimError(RuntimeError):
@@ -527,6 +531,299 @@ def run_scenario(scratch, env, scenario, timeout_s=5400, gate_scripts=None):
                           ok=not failures, pushes=pushes,
                           elapsed_s=round(time.monotonic() - t0, 1),
                           transcript=transcript, failures=failures)
+
+
+# --------------------------------------------------------------------------
+# SPEC-16 real-model final-review simulations
+# --------------------------------------------------------------------------
+
+_REAL_WORKER_OVERRIDES = (
+    "OCR_REVIEWER_CMD", "OCR_STUB_WORKER", "RG_FINAL_WORKER",
+    "RG_FINAL_DYNAMIC_EXECUTOR", "OCR_TEST_SELECTOR_CMD",
+)
+_PROVIDER_SECRET_PARTS = ("GITLAB", "GITHUB", "GLAB_", "GH_")
+
+
+def real_model_environment(environ=None, *, artifact_dir):
+    """Return an inference-capable, recorded-provider simulation environment.
+
+    No reviewer/selector test double can leak into a real-model run. Provider
+    credentials from the caller are discarded; the local recorded GitLab
+    transport receives only a non-secret marker so its read audit remains
+    explicit. Model authentication is retained for the selected gate backend.
+    """
+    source = os.environ if environ is None else environ
+    env = dict(source)
+    for key in list(env):
+        upper = key.upper()
+        if upper.startswith(("STUB_", "GIT_TRACE")) or any(
+            part in upper for part in _PROVIDER_SECRET_PARTS
+        ):
+            env.pop(key, None)
+    for key in _REAL_WORKER_OVERRIDES:
+        env.pop(key, None)
+    for key in ("SSH_AUTH_SOCK", "GIT_ASKPASS", "SSH_ASKPASS", "GIT_CONFIG_COUNT"):
+        env.pop(key, None)
+    root = Path(artifact_dir).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    env["OCR_STATE_DIR"] = str(root / "state")
+    if env.get("RG_TEST_PROVIDER_SCRIPT"):
+        env["GLAB_TOKEN"] = "recorded-read-only-provider-fixture"
+    return env
+
+
+def selected_inference_backend(environ=None, *, repo_root=None):
+    """Resolve the gate's real backend and fail exactly when it is unavailable."""
+    if _SCRIPTS not in sys.path:
+        sys.path.insert(0, _SCRIPTS)
+    import ocr_profile
+
+    env = os.environ if environ is None else environ
+    try:
+        selection = ocr_profile.select_backend(env=env, repo_root=repo_root)
+    except ocr_profile.BackendError as exc:
+        raise SimError(f"selected inference backend is unavailable: {exc}") from exc
+    executable = shutil.which(selection.name, path=env.get("PATH"))
+    if not executable:
+        raise SimError(
+            f"selected inference backend {selection.name!r} is not on PATH "
+            f"({selection.reason}); real-model simulation was not executed"
+        )
+    return {
+        "name": selection.name,
+        "reason": selection.reason,
+        "executable": executable,
+        "notes": list(selection.notes),
+    }
+
+
+def persist_simulation_artifact(artifact_dir, name, payload):
+    """Persist one human/machine inspectable artifact and return its identity."""
+    root = Path(artifact_dir).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / name
+    serialized = json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False, default=str)
+    path.write_text(serialized + "\n", encoding="utf-8")
+    digest = hashlib.sha256((serialized + "\n").encode("utf-8")).hexdigest()
+    return {
+        "evidence_id": "sha256:" + digest,
+        "artifact": str(path),
+        "sha256": digest,
+        "bytes": path.stat().st_size,
+    }
+
+
+def _recorded_provider_writes(script_path):
+    """Audit recorded provider CLI calls; any mutation is a hard failure."""
+    if not script_path:
+        return {"calls": 0, "provider_writes": False, "audit": "no provider fixture"}
+    script = json.loads(Path(script_path).read_text(encoding="utf-8"))
+    calls_path = Path(script["calls"])
+    calls = json.loads(calls_path.read_text(encoding="utf-8")) if calls_path.exists() else []
+    mutations = []
+    for call in calls:
+        argv = [str(part) for part in call.get("argv") or []]
+        lowered = [part.lower() for part in argv]
+        mutating_flags = {
+            "-x", "--method", "-f", "--raw-field", "-f", "--field", "--input",
+        }
+        method_write = any(
+            part in {"post", "put", "patch", "delete"}
+            for index, part in enumerate(lowered)
+            if index and lowered[index - 1] in {"-x", "--method"}
+        )
+        if mutating_flags.intersection(lowered) or method_write:
+            mutations.append(argv)
+    return {
+        "calls": len(calls),
+        "provider_writes": bool(mutations),
+        "mutating_argv": mutations,
+        "audit": str(calls_path),
+    }
+
+
+def _simulation_cleanup(artifact_dir, result=None):
+    clone_root = Path(artifact_dir).resolve() / "state" / "clones"
+    registered = sorted(str(path) for path in clone_root.glob("*-final-*")) \
+        if clone_root.exists() else []
+    repository_paths = []
+    for unit in (result or {}).get("units") or []:
+        value = unit.get("repository_path")
+        if value:
+            repository_paths.append(str(value))
+    return {
+        "registered_scratch_clones": registered,
+        "materialized_repositories_remaining": [path for path in repository_paths if Path(path).exists()],
+        "clean": not registered and not any(Path(path).exists() for path in repository_paths),
+    }
+
+
+def run_final_review_simulation(reference, *, repo_root, artifact_dir, environ=None,
+                                timeout=7200, runner=None):
+    """Invoke the public final-review CLI with the selected real backend.
+
+    Provider reads may come from ``RG_TEST_PROVIDER_SCRIPT``; every recorded
+    call is audited for writes. The source snapshot, CLI result, inference
+    diagnostics, and cleanup proof are persisted before a verdict is returned.
+    """
+    root = Path(artifact_dir).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    env = real_model_environment(environ, artifact_dir=root)
+    backend = selected_inference_backend(env, repo_root=repo_root)
+    if backend["name"] == "kimchi":
+        env["KIMCHI_BIN"] = backend["executable"]
+    before = repo_snapshot(repo_root)
+    gate = Path(_SCRIPTS) / "review-gate.py"
+    command = [sys.executable, str(gate), "final-review", str(reference)]
+    process = None
+    error = ""
+    stdout = stderr = ""
+    returncode = None
+    process_cleanup = None
+    try:
+        if runner is None:
+            # Bounded independent lens waves fit inside the existing two-hour
+            # outer allowance; no model depth or individual coverage is removed.
+            process = run_owned_process(
+                command, cwd=str(repo_root), env=env, timeout=float(timeout),
+            )
+        else:
+            process = runner(
+                command, cwd=str(repo_root), env=env, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=float(timeout), check=False,
+            )
+    except subprocess.TimeoutExpired as exc:
+        error = f"real-model final-review invocation unavailable: TimeoutExpired: {exc}"
+        stdout = exc.output or ""
+        stderr = exc.stderr or ""
+        returncode = getattr(exc, "returncode", None)
+        process_cleanup = getattr(exc, "cleanup", None)
+    except (OSError, subprocess.SubprocessError) as exc:
+        error = f"real-model final-review invocation unavailable: {type(exc).__name__}: {exc}"
+    if process is not None:
+        stdout = process.stdout or ""
+        stderr = process.stderr or ""
+        returncode = process.returncode
+    if isinstance(stdout, bytes):
+        stdout = stdout.decode("utf-8", "replace")
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", "replace")
+    try:
+        # Partial output from a killed deadline is evidence, never a completed
+        # operator result (and must not replace the exact timeout diagnosis).
+        result = json.loads(stdout) if process is not None and stdout.strip() else None
+    except ValueError:
+        result = None
+        error = "real-model final-review returned non-JSON operator output"
+    provider = _recorded_provider_writes(env.get("RG_TEST_PROVIDER_SCRIPT"))
+    after = repo_snapshot(repo_root)
+    source_unchanged = before == after
+    if not source_unchanged:
+        error = "real-model simulation mutated the source repository"
+    if provider["provider_writes"]:
+        error = "recorded provider audit contains a forbidden provider mutation"
+    cleanup = _simulation_cleanup(root, result)
+    if process_cleanup is not None:
+        cleanup["process"] = process_cleanup
+        cleanup["clean"] = bool(
+            cleanup["clean"] and process_cleanup.get("status") == "complete"
+        )
+    cleanup_verified = process_cleanup is None or bool(
+        process_cleanup.get("direct_child_reaped")
+        and process_cleanup.get("tree_termination_verified")
+        and process_cleanup.get("status") == "complete"
+    )
+    if process is None and "TimeoutExpired" in error and cleanup_verified:
+        # Only registered clones inside this simulation's private state root
+        # are eligible for harness cleanup; never touch the caller's store. An
+        # unverified Windows descendant tree keeps its directories as evidence.
+        removed = []
+        clone_root = (root / "state" / "clones").resolve()
+        for registered in cleanup["registered_scratch_clones"]:
+            path = Path(registered).resolve()
+            if path.is_relative_to(clone_root) and "-final-" in path.name:
+                shutil.rmtree(path, ignore_errors=True)
+                removed.append(str(path))
+        cleanup = _simulation_cleanup(root, result)
+        if process_cleanup is not None:
+            cleanup["process"] = process_cleanup
+        cleanup["registered_clones_removed_after_timeout"] = removed
+    elif process is None and "TimeoutExpired" in error and process_cleanup is not None:
+        cleanup["registered_clones_removed_after_timeout"] = []
+    report = {
+        "schema": "spec16-real-model-simulation/v1",
+        "kind": "final-review",
+        "evidence_type": "real-model-simulation",
+        "backend": backend,
+        "provider": provider,
+        "command": ["review-gate.py", "final-review", str(reference)],
+        "returncode": returncode,
+        "result": result,
+        "stdout": stdout,
+        "stderr": stderr,
+        "error": error,
+        "source_unchanged": source_unchanged,
+        "cleanup": cleanup,
+        "state": (result or {}).get("state", "incomplete"),
+    }
+    report["artifact"] = persist_simulation_artifact(root, "final-review-simulation.json", report)
+    return report
+
+
+def run_dynamic_simulation(repository, target_sha, head_sha, *, artifact_dir,
+                           environ=None, timeout=600, dynamic_runner=None):
+    """Run the reference dynamic selector/executor against a real pinned Git unit."""
+    if _SCRIPTS not in sys.path:
+        sys.path.insert(0, _SCRIPTS)
+    import rg_final_dynamic
+
+    root = Path(artifact_dir).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    env = real_model_environment(environ, artifact_dir=root)
+    backend = selected_inference_backend(env, repo_root=repository)
+    if backend["name"] != "kimchi":
+        raise SimError(
+            "the reference dynamic selector requires the kimchi launch shape; "
+            f"selected gate backend is {backend['name']!r}; dynamic simulation was not executed"
+        )
+    env["KIMCHI_BIN"] = backend["executable"]
+    before = repo_snapshot(repository)
+    execute = rg_final_dynamic.run_dynamic_checks if dynamic_runner is None else dynamic_runner
+    # materialize_review reads the process environment (its public API has no
+    # environ argument), so the mapping passed to the executor alone is not a
+    # sufficient scratch-store sandbox. Temporarily bind the actual process
+    # too, restoring the caller even when inference or execution raises.
+    previous_state_dir = os.environ.get("OCR_STATE_DIR")
+    os.environ["OCR_STATE_DIR"] = env["OCR_STATE_DIR"]
+    try:
+        result = execute(
+            repository, target_sha, head_sha, environ=env, timeout=float(timeout),
+            unit_key="individual:1",
+        )
+    finally:
+        if previous_state_dir is None:
+            os.environ.pop("OCR_STATE_DIR", None)
+        else:
+            os.environ["OCR_STATE_DIR"] = previous_state_dir
+    after = repo_snapshot(repository)
+    cleanup = _simulation_cleanup(root)
+    probe_root = Path(repository) / rg_final_dynamic.PROBE_ROOT
+    cleanup["source_probe_root_remaining"] = probe_root.exists()
+    cleanup["clean"] = cleanup["clean"] and not probe_root.exists()
+    report = {
+        "schema": "spec16-real-model-simulation/v1",
+        "kind": "dynamic",
+        "evidence_type": "real-model-simulation",
+        "backend": backend,
+        "provider": {"calls": 0, "provider_writes": False, "audit": "no provider transport"},
+        "result": result,
+        "state": (result or {}).get("state", "degraded"),
+        "source_unchanged": before == after,
+        "cleanup": cleanup,
+        "error": "" if before == after else "real-model dynamic simulation mutated the source repository",
+    }
+    report["artifact"] = persist_simulation_artifact(root, "dynamic-simulation.json", report)
+    return report
 
 
 # --------------------------------------------------------------------------

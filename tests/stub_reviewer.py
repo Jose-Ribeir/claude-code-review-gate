@@ -89,8 +89,152 @@ the trace so a test can assert what was reviewed.
 """
 import json
 import os
+from pathlib import Path
 import sys
 import time
+from urllib.parse import unquote
+
+
+# SPEC-16 standalone final-review test doubles.  These modes return before the
+# historical pre-push stub parses its argv, so existing stub behavior is intact.
+if len(sys.argv) > 1 and sys.argv[1] == "--gh":
+    if sys.argv[2:5] == ["issue", "view", "88"]:
+        sys.stdout.write(json.dumps({
+            "title": "Normalize the return value",
+            "body": "Return the value required by the existing caller.",
+        }))
+        sys.exit(0)
+    sys.stderr.write("unexpected scripted gh invocation\n")
+    sys.exit(1)
+
+if len(sys.argv) > 1 and sys.argv[1] == "--final-dynamic":
+    json.load(sys.stdin)
+    sys.stdout.write(json.dumps({"findings": [], "warnings": [], "telemetry": {}}))
+    sys.exit(0)
+
+if len(sys.argv) > 1 and sys.argv[1] == "--glab":
+    script_path = os.environ["RG_TEST_PROVIDER_SCRIPT"]
+    with open(script_path, encoding="utf-8") as fh:
+        scripted = json.load(fh)
+    endpoint = sys.argv[-1]
+    calls_path = Path(scripted["calls"])
+    calls = json.loads(calls_path.read_text(encoding="utf-8")) \
+        if calls_path.exists() else []
+    calls.append({
+        "argv": sys.argv[1:],
+        "provider_token_available": bool(os.environ.get("GLAB_TOKEN")),
+    })
+    calls_path.write_text(json.dumps(calls), encoding="utf-8")
+    if "/merge_requests?" in endpoint:
+        payload = scripted.get("open_merge_requests") or [{
+            "web_url": scripted["merge_request"]["web_url"],
+        }]
+    elif "/merge_requests/" in endpoint:
+        iid = int(endpoint.rsplit("/", 1)[1])
+        prior = sum(
+            call["argv"][-1].endswith(f"/merge_requests/{iid}")
+            for call in calls[:-1]
+        )
+        merge_requests = scripted.get("merge_requests")
+        if merge_requests:
+            payload = next(mr for mr in merge_requests if mr["iid"] == iid)
+        else:
+            key = "revalidated_merge_request" if prior else "merge_request"
+            payload = scripted.get(key) or scripted["merge_request"]
+    elif "/repository/branches/" in endpoint:
+        prefix, encoded_branch = endpoint.rsplit("/repository/branches/", 1)
+        project_id = int(prefix.rsplit("/", 1)[1])
+        branch = unquote(encoded_branch)
+        merge_requests = scripted.get("merge_requests")
+        if merge_requests:
+            candidates = merge_requests
+        else:
+            prior_reads = sum(
+                "/merge_requests/" in call["argv"][-1]
+                for call in calls[:-1]
+            )
+            key = ("revalidated_merge_request"
+                   if prior_reads >= 2 and scripted.get("revalidated_merge_request")
+                   else "merge_request")
+            candidates = [scripted[key]]
+        selected = None
+        for merge_request in candidates:
+            for side, head_field in (
+                    ("source", "source_branch_head"),
+                    ("target", "target_branch_head")):
+                if (project_id == merge_request[f"{side}_project_id"]
+                        and branch == merge_request[f"{side}_branch"]):
+                    selected = (merge_request, head_field)
+                    break
+            if selected is not None:
+                break
+        if selected is None:
+            sys.stderr.write(
+                f"unknown scripted glab branch: {project_id}/{branch}\n")
+            sys.exit(1)
+        merge_request, head_field = selected
+        head = merge_request.get(head_field)
+        if not isinstance(head, str) or not head:
+            sys.stderr.write(f"missing scripted branch head: {head_field}\n")
+            sys.exit(1)
+        payload = {"name": branch, "commit": {"id": head}}
+    elif endpoint == "projects/111":
+        payload = scripted["target_project"]
+    elif endpoint == "projects/222":
+        payload = scripted["source_project"]
+    else:
+        sys.stderr.write("unexpected scripted glab endpoint: " + endpoint + "\n")
+        sys.exit(1)
+    sys.stdout.write(json.dumps(payload))
+    sys.exit(0)
+
+if len(sys.argv) > 2 and sys.argv[1] == "--final-review":
+    request_path = Path(sys.argv[2])
+    request = json.loads(request_path.read_text(encoding="utf-8"))
+    trace_path = os.environ.get("STUB_FINAL_TRACE")
+    if trace_path:
+        sensitive_names = (
+            "GLAB_TOKEN", "GITLAB_WRITE_TOKEN", "GH_TOKEN",
+            "UNRELATED_SECRET", "STUB_FINAL_TRACE",
+        )
+        traced = {
+            "request": request,
+            "environment": {name: os.environ.get(name) for name in sensitive_names},
+            "unchanged_adr": (Path(request["repository"]["path"]) / "docs/ADR.md")
+            .read_text(encoding="utf-8"),
+            "local_only_exists": (Path(request["repository"]["path"]) / "local-only.txt")
+            .exists(),
+        }
+        with open(trace_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(traced) + "\n")
+
+    def lens_setting(name, default=None):
+        """Return a per-lens override, falling back to the historical global knob."""
+        overrides = json.loads(os.environ.get(name, "{}") or "{}")
+        if request["lens"] in overrides:
+            return overrides[request["lens"]]
+        return os.environ.get(name.removesuffix("_FOR"), default)
+
+    exit_code = lens_setting("STUB_FINAL_EXIT_FOR")
+    if exit_code:
+        sys.stderr.write("scripted final worker failure\n")
+        sys.exit(int(exit_code))
+    raw = lens_setting("STUB_FINAL_RAW_FOR")
+    if raw is not None:
+        sys.stdout.write(raw)
+        sys.exit(0)
+    result = lens_setting("STUB_FINAL_RESULT_FOR", "{}")
+    if isinstance(result, str):
+        result = json.loads(result)
+    result.setdefault("schema", "final-review-worker-result/v1")
+    result.setdefault("status", "success")
+    result.setdefault(
+        "summary", f"{request['lens']} lens inspected the complete tree and diff")
+    result.setdefault("findings", [])
+    result.setdefault("warnings", [])
+    sys.stdout.write(json.dumps(result))
+    sys.exit(0)
+
 
 # Parse arguments: range is the last non-flag arg; --paths-file, --resolve and
 # --docs-summary (docs-gate 05) are optional.

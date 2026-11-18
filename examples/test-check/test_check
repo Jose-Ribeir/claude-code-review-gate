@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Reference test-check executor (SPEC-15.5): a selector-driven test runner.
 
-A gated repo copies this executable in (e.g. ``scripts/rg_test_check``) and
-declares it as a command check in ``.ocr/config.json`` (see README.md next to
-this file):
+A gated repo copies this executable and ``rg_final_env.py`` in together
+(e.g. ``scripts/rg_test_check`` and ``scripts/rg_final_env.py``) and declares
+the executor as a command check in ``.ocr/config.json`` (see README.md next
+to this file):
 
     "test-check": {"command": "scripts/rg_test_check", "globs": [...],
                    "parallel": true, "timeout": 600, "mode": "block"}
@@ -56,11 +57,15 @@ Four phases:
    the scratch dir.
 4. CLASSIFY -- reproduced failure (failed twice) -> finding; failed once then
    passed -> flake warning; build/run error (syntax error, missing module,
-   unexecutable) -> warning; pass -> silent. Fail-soft everywhere: exit 0
-   unless stdin itself violates the contract.
+   unexecutable) or timeout -> warning; pass -> silent. Selector
+   authentication and publication/provider credentials are stripped before
+   untrusted tests/probes execute. Fail-soft everywhere: exit 0 unless stdin
+   itself violates the contract.
 
 Python 3, stdlib only. POSIX (probe run_cmd goes through /bin/sh).
 """
+import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -69,6 +74,34 @@ import shutil
 import subprocess
 import sys
 import tempfile
+
+
+def _load_credential_scrubber():
+    """Load the portable sibling policy, or this checkout's canonical copy.
+
+    A copied installation has no review-gate checkout to fall back to. Missing
+    policy is therefore a hard startup error, never permission to run subjects
+    with an inherited environment or a second locally maintained scrub loop.
+    """
+    here = os.path.dirname(os.path.realpath(__file__))
+    sibling = os.path.join(here, "rg_final_env.py")
+    checkout = os.path.abspath(os.path.join(
+        here, os.pardir, os.pardir, "scripts", "rg_final_env.py"))
+    for candidate in (sibling, checkout):
+        if not os.path.isfile(candidate):
+            continue
+        spec = importlib.util.spec_from_file_location("rg_final_env", candidate)
+        if spec is None or spec.loader is None:
+            continue
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.scrub_environment
+    raise RuntimeError(
+        "test_check requires rg_final_env.py alongside the executable; "
+        "install both files as documented (credential scrubbing is mandatory)")
+
+
+scrub_environment = _load_credential_scrubber()
 
 # The selector model pin (grilling decision: cheap, one-shot -- a selection
 # failure must never slow the pipeline).
@@ -114,6 +147,12 @@ MAX_PROBES = 10
 # A finding quotes verbatim output, trimmed -- and capped so a chatty test
 # suite cannot balloon the review stream.
 CONTENT_CAP = 8000
+# Simulation-only, explicit opt-in diagnostics. No path means no log file.
+DIAGNOSTICS_ENV = "OCR_TEST_DIAGNOSTICS_FILE"
+DIAGNOSTIC_RAW_CAP = 6000
+DIAGNOSTIC_SOURCE_CAP = 2048
+DIAGNOSTIC_COMMAND_CAP = 1000
+DIAGNOSTIC_OUTPUT_CAP = 2000
 # Probes live only here, inside the executor's own clone, and are removed
 # when the run ends (SPEC-15 "No gate-authored tests in the user's tree").
 PROBE_ROOT = ".test-check-probes"
@@ -174,7 +213,23 @@ shell -> probe.sh) and run_cmd executes with that directory as its cwd; the
 placeholder {{probe_file}} in run_cmd is replaced with the written file's
 name. Example probe: a Go test file exercising the changed behavior with the
 race detector, run_cmd "go test -race -count=1 ." (the probe directory lives
-inside the repo's module, so repo packages can be imported).
+inside the repo's module, so repo packages can be imported). The probe file
+is two scratch-directory levels below the clone root; resolve imports to that
+root rather than assuming the probe's cwd is the repository root.
+Every probe must directly call the changed public API with concrete inputs
+and assert behavior with an independently derived expected value or invariant
+from the contract, inputs, or operation counts. A sentinel such as 'ok' is an
+oracle only when that contract independently requires it; never compare an
+API result with itself, accept any non-None/truthy result, or turn the observed
+buggy value into the expectation. Import-only, print-only, and
+exit-without-assertion probes are invalid.
+When the changed behavior itself involves concurrency, use multiple
+independent invocations and assert shared-state and interleaving invariants,
+not one fortunate scheduler execution. Prefer deterministic test-owned
+barriers/events or the toolchain race detector where appropriate, keep all
+waits bounded, and emit only bounded observation/counter output (for example,
+a short list of exact final counts) that makes the failed invariant visible.
+Do not invent concurrency or races outside the changed behavior.
 Deterministic coverage rule, enforced by the executor: existing_tests OR
 probes, NEVER both. When existing_tests is non-empty, every probe in this
 reply is DISCARDED unauthored and unrun; probes execute only when
@@ -183,6 +238,84 @@ exists -- a partial existing test beats a probe: list it and drop the probe.
 Author a probe ONLY for changed behavior no existing test covers, and return
 an empty existing_tests array with it. Return both arrays empty when nothing
 is worth running."""
+
+
+_DIAGNOSTIC_SENSITIVE_KEY = (
+    r"(?:api[_-]?key|token|secret|password|credential|authorization|auth)"
+    r"[A-Za-z0-9_.-]*"
+)
+_DIAGNOSTIC_SECRET = re.compile(
+    rf"(?i)({_DIAGNOSTIC_SENSITIVE_KEY}\s*\\?[\"']?\s*[:=]\s*)"
+    r"(?!\[redacted\])"
+    r"(?:(\\?[\"'])(.*?)\2|([^\s,;\"'\}\]&]+))",
+    re.DOTALL,
+)
+_DIAGNOSTIC_AUTHORIZATION = re.compile(
+    r"(?i)(?<![A-Za-z0-9_])([A-Za-z0-9_-]{0,128}authorization"
+    r"\\?[\"']?\s*[:=]\s*\\?[\"']?)(?:basic|bearer)\s+[^\s,\"'\}\]]+",
+)
+_DIAGNOSTIC_BEARER = re.compile(r"(?i)\bbearer\s+[^\s,\"']+")
+_DIAGNOSTIC_POSIX_PATH = re.compile(
+    r"(?<![A-Za-z0-9_.-])/(?:[^/\s\"']+/)+[^/\s\"']*")
+_DIAGNOSTIC_WINDOWS_PATH = re.compile(
+    r"(?i)[a-z]:[\\/](?:[^\\/\s\"']+[\\/])+[^\\/\s\"']*")
+
+
+def _redact_diagnostic_assignment(match):
+    quote = match.group(2) or ""
+    return match.group(1) + quote + "[redacted]" + quote
+
+
+def _diagnostic_text(value, cap):
+    """Redact complete credentials, then bound one untrusted diagnostic string."""
+    text = str(value or "")
+    sensitive = ("TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "COOKIE",
+                 "PRIVATE_KEY", "API_KEY", "ASKPASS", "AUTHORIZATION", "AUTH")
+    known = [value for key, value in os.environ.items()
+             if len(value) >= 4 and any(part in key.upper() for part in sensitive)]
+    for secret in sorted(set(known), key=len, reverse=True):
+        text = text.replace(secret, "[redacted]")
+    text = _DIAGNOSTIC_AUTHORIZATION.sub(r"\1[redacted]", text)
+    text = _DIAGNOSTIC_BEARER.sub("[redacted]", text)
+    text = _DIAGNOSTIC_SECRET.sub(_redact_diagnostic_assignment, text)
+    text = _DIAGNOSTIC_WINDOWS_PATH.sub("<path>", text)
+    text = _DIAGNOSTIC_POSIX_PATH.sub("<path>", text)
+    text = "".join(char if char.isprintable() or char in "\n\t" else " "
+                   for char in text)
+    if len(text) <= cap:
+        return text
+    marker = "\n[...diagnostic truncated...]"
+    return text[:cap - len(marker)] + marker
+
+
+def _diagnostics_path():
+    path = os.environ.get(DIAGNOSTICS_ENV, "").strip()
+    return path if path and os.path.isabs(path) else ""
+
+
+def _write_diagnostics(path, diagnostics):
+    """Best-effort restricted capture; a log failure never affects the gate."""
+    if not path:
+        return
+    diagnostics["cleanup"] = {"probe_root_removed": not os.path.exists(PROBE_ROOT)}
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            os.fchmod(descriptor, 0o600)
+            json.dump(diagnostics, handle, sort_keys=True)
+            handle.write("\n")
+    except OSError as exc:
+        _note("diagnostics unavailable: %s" % type(exc).__name__)
+
+
+def _capture_run(capture, returncode, output, note=None):
+    if capture is not None:
+        capture.append({
+            "returncode": returncode,
+            "output": _diagnostic_text(output or note or "", DIAGNOSTIC_OUTPUT_CAP),
+        })
 
 
 def _note(message):
@@ -224,7 +357,7 @@ def _reproduce_key(outcome):
     """The telemetry bucket a classified outcome lands in (the gate's
     contract names fail/pass/flake/build/error)."""
     return {"finding": "fail", "pass": "pass", "flake": "flake",
-            "build": "build", "error": "error"}[outcome]
+            "build": "build", "error": "error", "timeout": "error"}[outcome]
 
 
 def _bump(counts, group, key=None):
@@ -250,7 +383,7 @@ def _run(argv, cwd, timeout, stdin=None, env=None):
     """(rc, combined_output, note): one bounded subprocess run, never an
     exception. ``note`` is set only when argv could not be executed at all
     (binary missing); a timeout is reported through rc None + output text
-    and is treated like a failing run by the caller."""
+    and is classified as a visible timeout gap by the caller."""
     try:
         proc = subprocess.run(argv, cwd=cwd, input=stdin, capture_output=True,
                               text=True, errors="replace", timeout=timeout,
@@ -330,7 +463,7 @@ def _validate_selection(data):
     return existing, probes
 
 
-def call_selector(manifest):
+def call_selector(manifest, diagnostics=None):
     """ONE selector attempt: (existing_tests, probes, failed). ``failed``
     collapses every degrade path -- exec error, timeout, nonzero exit,
     unparseable or schema-invalid reply -- into a single flag; the caller
@@ -354,6 +487,9 @@ def call_selector(manifest):
             return None, None, True
         rc, reply, note = _run(argv, os.getcwd(), _selector_timeout(),
                                stdin=payload)
+        if diagnostics is not None:
+            diagnostics["selector"]["raw_response"] = _diagnostic_text(
+                reply, DIAGNOSTIC_RAW_CAP)
         if rc != 0 or note:
             _note("selector stub failed (exit %s)" % rc)
             return None, None, True
@@ -371,6 +507,9 @@ def call_selector(manifest):
                     "--mcp-config", tmp_path]
             _note("selector: %s (model %s)" % (binary, MODEL))
             rc, reply, note = _run(argv, os.getcwd(), _selector_timeout())
+            if diagnostics is not None:
+                diagnostics["selector"]["raw_response"] = _diagnostic_text(
+                    reply, DIAGNOSTIC_RAW_CAP)
             if rc != 0 or note:
                 _note("selector failed (exit %s)" % rc)
                 return None, None, True
@@ -381,6 +520,9 @@ def call_selector(manifest):
                 pass
     try:
         data = json.loads(reply)
+        if diagnostics is not None:
+            diagnostics["selector"]["json"] = _diagnostic_text(
+                json.dumps(data, sort_keys=True), DIAGNOSTIC_RAW_CAP)
     except ValueError:
         _note("selector reply is not JSON")
         return None, None, True
@@ -389,6 +531,8 @@ def call_selector(manifest):
         _note("selector reply failed schema validation")
         return None, None, True
     existing, probes = selection
+    if diagnostics is not None:
+        diagnostics["selector"]["valid"] = True
     _note("selector: %d existing test(s), %d probe(s)"
           % (len(existing), len(probes)))
     return existing, probes, False
@@ -411,26 +555,38 @@ def _pytest_available():
     return _PYTEST
 
 
+def _subject_environment():
+    """Credential-free environment for untrusted repo tests and probes.
+
+    Selector model authentication is needed only by the trusted selector
+    process.  Tests receive neither it nor publication/provider credentials.
+    Non-secret test knobs such as FLAKE_STATE remain available to fixtures.
+    """
+    environment = scrub_environment()
+    environment.pop(DIAGNOSTICS_ENV, None)
+    return environment
+
+
 def _runner_for(path):
-    """(argv, cwd) to run ONE existing repo test, or (None, reason) when no
-    runner can be inferred -- an unknown shape is a warning, never a wild
-    guess. Python runs get PYTHONDONTWRITEBYTECODE and pytest runs drop the
-    cache provider so a test run leaves no artifacts in the clone."""
+    """(argv, cwd, env) to run ONE existing repo test, or (None, reason)
+    when no runner can be inferred -- an unknown shape is a warning, never a
+    wild guess. Python runs get PYTHONDONTWRITEBYTECODE and pytest runs drop
+    the cache provider so a test run leaves no artifacts in the clone."""
     base = os.path.basename(path)
     directory = os.path.dirname(path) or "."
+    env = _subject_environment()
     if base.endswith("_test.go"):
-        return (["go", "test", "-race", "-count=1", "."], directory, None)
+        return (["go", "test", "-race", "-count=1", "."], directory, env)
     if base.endswith((".test.js", ".test.mjs", ".test.cjs")):
-        return (["node", "--test", base], directory, None)
+        return (["node", "--test", base], directory, env)
     if base.endswith(".py"):
-        env = dict(os.environ)
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         if _pytest_available():
             return ([sys.executable, "-m", "pytest", "-q", "-p",
                      "no:cacheprovider", base], directory, env)
         return ([sys.executable, base], directory, env)
     if base.endswith(".sh"):
-        return (["sh", base], directory, None)
+        return (["sh", base], directory, env)
     return (None, None, "runner unknown for this file type")
 
 
@@ -439,23 +595,29 @@ def _looks_like_build_error(output):
     return any(marker in lowered for marker in _BUILD_ERROR_MARKERS)
 
 
-def _execute_subject(argv, cwd, label, env=None, counts=None):
+def _execute_subject(argv, cwd, label, env=None, counts=None, capture=None):
     """Run once, classify, and re-run a failure EXACTLY once (the
     reproduce-then-block rule). Returns (outcome, first_output) with
-    outcome in {"pass", "finding", "flake", "build", "error"}:
+    outcome in {"pass", "finding", "flake", "build", "error", "timeout"}:
 
     * pass        -- exited 0.
     * finding     -- failed, re-run failed again: a reproduced failure.
     * flake       -- failed, re-run passed: repro-free, demoted.
     * build       -- failed with a compile/setup shape: never a block.
     * error       -- could not be executed at all (missing binary).
+    * timeout     -- a subject exceeded its bound: dynamic evidence is unknown.
     """
     rc, out, note = _run(argv, cwd, _run_timeout(), env=env)
+    _capture_run(capture, rc, out, note)
     _bump(counts, "runs")
     _note("run %s -> exit %s" % (label, rc))
     if rc is None and note:
         _bump(counts, "reproduce_results", "error")
         return "error", out or note
+    if rc is None:
+        _bump(counts, "timeouts")
+        _bump(counts, "reproduce_results", "error")
+        return "timeout", out
     if rc == 0:
         _bump(counts, "reproduce_results", "pass")
         return "pass", out
@@ -464,11 +626,16 @@ def _execute_subject(argv, cwd, label, env=None, counts=None):
         _bump(counts, "reproduce_results", "build")
         return "build", out
     rc2, _out2, note2 = _run(argv, cwd, _run_timeout(), env=env)
+    _capture_run(capture, rc2, _out2, note2)
     _bump(counts, "runs")
     _note("re-run %s -> exit %s" % (label, rc2))
     if rc2 is None and note2:
         _bump(counts, "reproduce_results", "error")
         return "error", out
+    if rc2 is None:
+        _bump(counts, "timeouts")
+        _bump(counts, "reproduce_results", "error")
+        return "timeout", out
     if rc2 == 0:
         _bump(counts, "reproduce_results", "flake")
         return "flake", out
@@ -488,6 +655,13 @@ def _handle(outcome, out, kind, name, path, evidence, findings, warnings,
         warnings.append({"file": path,
                          "message": "%s %s could not be executed (%s); skipped"
                                     % (kind, name, out.strip())})
+        return
+    if outcome == "timeout":
+        warnings.append({"file": path,
+                         "message": "%s %s timed out; the dynamic check was "
+                                    "demoted to a warning (no finding): %s"
+                                    % (kind, name, _cap(out.strip(),
+                                                        CONTENT_CAP))})
         return
     if outcome == "build":
         warnings.append({"file": path,
@@ -545,6 +719,22 @@ def _slug(name):
 
 
 def run(matched):
+    """Execute with diagnostics only when the acceptance harness opted in."""
+    path = _diagnostics_path()
+    diagnostics = None
+    if path:
+        diagnostics = {
+            "schema": "test-check-selector-diagnostics/v1",
+            "selector": {"raw_response": "", "json": None, "valid": False},
+            "probes": [],
+        }
+    try:
+        return _run_with_diagnostics(matched, diagnostics)
+    finally:
+        _write_diagnostics(path, diagnostics)
+
+
+def _run_with_diagnostics(matched, diagnostics):
     """The whole executor, fail-soft: returns (findings, warnings,
     telemetry) -- telemetry is the SPEC-15.4 counts object the gate merges
     into the check's command_checks entry: actual counts (selector
@@ -559,7 +749,7 @@ def run(matched):
     _note("manifest: %d file(s), %d byte(s)"
           % (len(manifest), len(json.dumps(manifest))))
     counts["selector_attempts"] += 1   # exactly one, never retried
-    existing, probes, failed = call_selector(manifest)
+    existing, probes, failed = call_selector(manifest, diagnostics=diagnostics)
     if failed:
         warnings.append({"file": None,
                          "message": "selector failed; no tests selected"})
@@ -603,11 +793,11 @@ def run(matched):
         outcome, out = _execute_subject(argv, cwd, path, env=env, counts=counts)
         _handle(outcome, out, "existing test", path, path,
                 "existing_test", findings, warnings)
-    _run_probes(probes, matched, findings, warnings, counts)
+    _run_probes(probes, matched, findings, warnings, counts, diagnostics)
     return findings, warnings, counts
 
 
-def _run_probes(probes, matched, findings, warnings, counts=None):
+def _run_probes(probes, matched, findings, warnings, counts=None, diagnostics=None):
     """Phase 3 + the probe half of phase 4. Probe sources are materialized
     ONLY inside ``.test-check-probes/`` under the executor's own cwd (the
     throwaway clone), run there, and destroyed afterwards -- nothing is
@@ -631,6 +821,20 @@ def _run_probes(probes, matched, findings, warnings, counts=None):
             name = _slug(probe["name"])
             language = probe["language"].strip().lower()
             filename = PROBE_FILENAMES.get(language)
+            record = {
+                "name": name, "language": language,
+                "source_excerpt": _diagnostic_text(
+                    probe["source"], DIAGNOSTIC_SOURCE_CAP),
+                "source_sha256": hashlib.sha256(
+                    probe["source"].encode("utf-8")).hexdigest(),
+                "source_chars": len(probe["source"]),
+                "run_command": _diagnostic_text(
+                    probe["run_cmd"].replace("{probe_file}", filename or ""),
+                    DIAGNOSTIC_COMMAND_CAP),
+                "outcome": "skipped", "runs": [],
+            }
+            if diagnostics is not None:
+                diagnostics["probes"].append(record)
             if filename is None:
                 warnings.append({"file": default_path,
                                  "message": "probe %s skipped: unknown "
@@ -648,8 +852,10 @@ def _run_probes(probes, matched, findings, warnings, counts=None):
             path = probe.get("path")
             if not isinstance(path, str) or not path.strip():
                 path = default_path or name
-            outcome, out = _execute_subject(["/bin/sh", "-c", run_cmd],
-                                            directory, name, counts=counts)
+            outcome, out = _execute_subject(
+                ["/bin/sh", "-c", run_cmd], directory, name,
+                env=_subject_environment(), counts=counts, capture=record["runs"])
+            record["outcome"] = outcome
             _handle(outcome, out, "ephemeral probe", name, path,
                     "ephemeral_test", findings, warnings)
     finally:

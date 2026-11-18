@@ -15,6 +15,23 @@ existing verdict machinery — the same normalization, falsify pass, and blockin
 rule as code-review findings — so hold yourself to their standard: quote
 evidence, never speculate.
 
+## Explicit final-review documentation/domain lens
+
+This duty is opt-in and does not change normal pre-push review or its
+configuration. For a `final-review-worker-request/v1` whose lens is
+`documentation/domain`, independently inspect the immutable full repository at
+`repository.path`, the complete merge-base `diff`, unchanged ADRs and decision
+notes, glossaries, architecture documents, and affected documentation. Prove
+both documentary and implementation sides of a contradiction or stale claim;
+absence of a document is not itself proof of a defect.
+
+You receive no other lens's findings or conclusions. Do not seek, wait for, or
+aggregate them, and do not declare a final verdict. Return only this lens's
+normalized findings and visible warnings in the requested worker result
+schema; missing required documentary evidence belongs in `unreviewed`/warnings,
+never an assumed pass. Capability labels for later combined reviews do not
+authorize inventing cross-item or integration evidence.
+
 ## Input you receive
 
 - `docs_context`: a summary of the repository's documentation, produced

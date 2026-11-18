@@ -31,8 +31,10 @@ Resolution order -- later wins, key by key:
                       string names a repo-relative executable (run in a later
                       ticket); a command check also takes "parallel"
                       (default False -- its executor may run concurrently
-                      against its own tip clone; SPEC-15.1) and "timeout"
-                      (seconds, default 60 -- its answer budget). Command
+                      against its own tip clone; SPEC-15.1), "required"
+                      (default False -- opt in to final-review required
+                      verification without adding a pre-push duty), and
+                      "timeout" (seconds, default 60 -- its answer budget). Command
                       checks may define new check names; other unknown names
                       are typos and are ignored.
 
@@ -80,7 +82,7 @@ _BUILT_IN_CHECKS = {
 # SPEC-15.3), and "timeout" pins its answer budget -- 60 s, the budget the
 # gate already gives every command check (_COMMAND_CHECK_TIMEOUT_S).
 _COMMAND_CHECK_DEFAULTS = {"enabled": True, "mode": "block", "globs": [],
-                            "parallel": False, "timeout": 60}
+                            "parallel": False, "required": False, "timeout": 60}
 
 
 def _defaults():
@@ -318,11 +320,11 @@ def _as_check_value(key, value, notes, path, label, name):
         notes.append(f"{note}invalid checks.{name}.sweep value {value!r}; "
                      "current value kept")
         return False, None
-    if key == "parallel":
+    if key in ("parallel", "required"):
         ok, parsed = _as_switch(value)
         if ok:
             return True, parsed
-        notes.append(f"{note}invalid checks.{name}.parallel value {value!r}; "
+        notes.append(f"{note}invalid checks.{name}.{key} value {value!r}; "
                      "current value kept")
         return False, None
     if key == "timeout":

@@ -14391,6 +14391,17 @@ def main(argv):
     # closed rather than crashing without emitting a deny payload.
     mode = "git"  # safe default for the except clause below
 
+    # Explicit final review is a standalone operator command, never a pre-push
+    # mode: dispatch before reading hook input or changing any push state.
+    if len(argv) > 1 and argv[1] == "final-review":
+        import rg_final_review
+        sys.exit(rg_final_review.main(argv))
+    # Database-backed final-review views are likewise standalone commands.
+    # Dispatch before hook input, markers, or any incremental push behavior.
+    if len(argv) > 1 and argv[1] in ("contract", "acceptance", "final-report"):
+        import rg_final_views
+        sys.exit(rg_final_views.main(argv))
+
     # Read-only query over the persisted log. Handled before anything else so
     # it never spawns a review, touches a marker, or needs a hook payload.
     if "--history" in argv:

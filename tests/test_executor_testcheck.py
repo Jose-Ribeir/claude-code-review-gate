@@ -32,6 +32,7 @@ import sys
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
 EXECUTOR = os.path.join(_ROOT, "examples", "test-check", "test_check")
+POLICY = os.path.join(_ROOT, "scripts", "rg_final_env.py")
 PROBE_ROOT = ".test-check-probes"
 
 sys.path.insert(0, os.path.join(_ROOT, "scripts"))
@@ -428,6 +429,7 @@ def test_contract_through_the_gate_runner(tmp_path, monkeypatch):
     exe = work / "scripts" / "rg_test_check"
     exe.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(EXECUTOR, exe)
+    shutil.copyfile(POLICY, exe.parent / "rg_final_env.py")
     exe.chmod(0o755)
     cmd, _count = _stub_selector(
         tmp_path, {"existing_tests": ["tests/test_dsl.py"], "probes": []})
@@ -551,6 +553,7 @@ def test_gate_merges_executor_telemetry_into_command_checks(
     exe = work / "scripts" / "rg_test_check"
     exe.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(EXECUTOR, exe)
+    shutil.copyfile(POLICY, exe.parent / "rg_final_env.py")
     exe.chmod(0o755)
     tip = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(work),
                          capture_output=True, text=True, check=True).stdout.strip()
@@ -574,3 +577,307 @@ def test_gate_merges_executor_telemetry_into_command_checks(
     # The declared per-check budget was exported to the executor, and the
     # executor's clamp honored it (the run finished well inside it).
     assert tele["seconds"] < 120, tele
+
+
+def test_executor_subject_environment_excludes_selector_and_publication_secrets(
+        monkeypatch):
+    """Model auth stops at the selector; untrusted tests get no write secrets.
+
+    Non-secret fixture state remains usable, so this boundary does not alter
+    the existing reproduce/flake tests' behavior.
+    """
+    for key, value in {
+        "PUBLICATION_SECRET": "do-not-publish",
+        "GITLAB_TOKEN": "do-not-write",
+        "OPENAI_API_KEY": "selector-only",
+        "KIMCHI_BIN": "selector-only-binary",
+        "OCR_TEST_SELECTOR_CMD": "selector-only-command",
+        "FLAKE_STATE": "/tmp/non-secret-fixture-state",
+    }.items():
+        monkeypatch.setenv(key, value)
+
+    argv, _cwd, env = test_check._runner_for("tests/test_example.py")
+
+    assert argv
+    assert env["FLAKE_STATE"] == "/tmp/non-secret-fixture-state"
+    assert env["RG_FINAL_CREDENTIAL_FREE"] == "1"
+    for key in ("PUBLICATION_SECRET", "GITLAB_TOKEN", "OPENAI_API_KEY",
+                "KIMCHI_BIN", "OCR_TEST_SELECTOR_CMD"):
+        assert key not in env
+
+
+def test_executor_subject_timeout_is_a_warning_without_a_second_run(
+        tmp_path, monkeypatch):
+    """A timed-out subject is missing evidence, not a reproduced defect."""
+    monkeypatch.setattr(test_check, "_run_timeout", lambda: 0.05)
+    counts = {"runs": 0,
+              "reproduce_results": {"fail": 0, "pass": 0, "flake": 0,
+                                    "build": 0, "error": 0}}
+    argv = [sys.executable, "-c", "import time; time.sleep(2)"]
+
+    outcome, output = test_check._execute_subject(
+        argv, str(tmp_path), "slow test", counts=counts)
+    findings, warnings = [], []
+    test_check._handle(outcome, output, "existing test", "tests/slow.py",
+                       "tests/slow.py", "existing_test", findings, warnings)
+
+    assert outcome == "timeout"
+    assert counts["runs"] == 1, "a timeout is not retried as a failure"
+    assert counts["timeouts"] == 1
+    assert counts["reproduce_results"]["error"] == 1
+    assert findings == []
+    (warning,) = warnings
+    assert "timed out" in warning["message"]
+    assert "tests/slow.py" in warning["message"]
+
+
+# ---------------------------------------------------------------------------
+# SPEC-16: deterministic real-race acceptance and opt-in selector diagnostics
+# ---------------------------------------------------------------------------
+
+
+def _run_spec16_dynamic_with_selector(tmp_path, monkeypatch, probe_source,
+                                      run_id="race-evidence", run_cmd=None):
+    """Run the real acceptance fixture/executor with only inference doubled."""
+    import rg_final_dynamic
+    import sim_scenarios_spec16 as scenarios
+
+    cmd, _count = _stub_selector(tmp_path, {
+        "existing_tests": [],
+        "probes": [{
+            "name": "direct-race-oracle", "language": "python",
+            "source": probe_source,
+            "run_cmd": run_cmd or '"%s" {probe_file}' % _PY,
+            "path": "dsl.py",
+        }],
+    })
+    real_simulation = scenarios.sim.run_dynamic_simulation
+    monkeypatch.setattr(scenarios.sim, "selected_inference_backend",
+                        lambda *args, **kwargs: {
+                            "name": "kimchi", "reason": "mocked inference",
+                            "executable": "/bin/kimchi", "notes": [],
+                        })
+
+    def simulated(repository, target_sha, head_sha, **kwargs):
+        supplied_runner = kwargs.get("dynamic_runner")
+
+        def runner(*args, **run_kwargs):
+            environ = dict(run_kwargs.get("environ") or {})
+            environ["OCR_TEST_SELECTOR_CMD"] = cmd
+            run_kwargs["environ"] = environ
+            execute = supplied_runner or rg_final_dynamic.run_dynamic_checks
+            return execute(*args, **run_kwargs)
+
+        kwargs["dynamic_runner"] = runner
+        return real_simulation(repository, target_sha, head_sha, **kwargs)
+
+    monkeypatch.setattr(scenarios.sim, "run_dynamic_simulation", simulated)
+    call = {
+        "scenario": {
+            "scenario_id": "spec16-09-ephemeral-probe-attribution-cleanup",
+            "dispatch_key": "ephemeral_probe_attribution_cleanup",
+        },
+        "acceptance_run_id": run_id,
+        "context": {"test_tmp_path": str(tmp_path)},
+    }
+    result = scenarios._real_model_dynamic(call)
+    artifact = result["evidence"]["reproduced_failure"]["simulation_artifact"]
+    persisted = json.loads(open(artifact["artifact"], encoding="utf-8").read())
+    return result, persisted
+
+
+def test_correct_direct_probe_deterministically_reproduces_planted_race(
+        tmp_path, monkeypatch):
+    """Two barrier-rendezvoused workers perform 40 logical increments.
+
+    The independent oracle therefore requires 40 on every fresh invocation;
+    a deterministic lost-update interleaving observes 20, and the executor
+    must execute that real assertion failure twice before blocking.
+    """
+    probe = (
+        "import os, sys\n"
+        "sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(\n"
+        "    os.path.abspath(__file__)))))\n"
+        "from dsl import verdict\n"
+        "expected = 2 * 20\n"
+        "observations = [verdict() for _ in range(6)]\n"
+        "assert observations == [expected] * len(observations), (\n"
+        "    f'lost updates: expected {expected} per independent run, '\n"
+        "    f'observed {observations}')\n"
+    )
+    result, persisted = _run_spec16_dynamic_with_selector(
+        tmp_path, monkeypatch, probe)
+
+    assert result["state"] == "findings", result
+    finding = result["evidence"]["reproduced_failure"]["findings"][0]
+    assert finding["evidence_source"] == "ephemeral_test"
+    assert "observed [20, 20, 20, 20, 20, 20]" in finding["content"]
+    assert "expected 40" in finding["content"]
+    assert persisted["result"]["telemetry"]["runs"] == 2
+    assert persisted["result"]["telemetry"]["reproduce_results"] == {
+        "fail": 1, "pass": 0, "flake": 0, "build": 0, "error": 0,
+    }
+    assert persisted["cleanup"]["clean"] is True
+    diagnostics = persisted["result"]["selector_diagnostics"]
+    assert diagnostics["schema"] == "test-check-selector-diagnostics/v1"
+    assert diagnostics["selector"]["valid"] is True
+    assert "direct-race-oracle" in diagnostics["selector"]["raw_response"]
+    assert '"existing_tests"' in diagnostics["selector"]["json"]
+    (probe_record,) = diagnostics["probes"]
+    assert "from dsl import verdict" in probe_record["source_excerpt"]
+    assert "expected = 2 * 20" in probe_record["source_excerpt"]
+    assert probe_record["source_sha256"]
+    assert probe_record["run_command"].endswith("probe_test.py")
+    assert _PY not in probe_record["run_command"]
+    assert probe_record["outcome"] == "finding"
+    assert [run["returncode"] for run in probe_record["runs"]] == [1, 1]
+    assert all("observed [20, 20, 20, 20, 20, 20]" in run["output"]
+               for run in probe_record["runs"])
+    assert diagnostics["cleanup"] == {"probe_root_removed": True}
+    assert str(tmp_path) not in json.dumps(diagnostics)
+    artifact = result["evidence"]["reproduced_failure"]["simulation_artifact"]
+    artifact_path = os.path.realpath(artifact["artifact"])
+    assert os.stat(artifact_path).st_mode & 0o777 == 0o600
+    assert not os.path.exists(os.path.join(
+        os.path.dirname(artifact_path), "selector-diagnostics.json"))
+
+
+def test_diagnostics_redact_complete_credentials_before_simulation_persistence(
+        tmp_path, monkeypatch):
+    probe = (
+        "import os, sys\n"
+        "sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(\n"
+        "    os.path.abspath(__file__)))))\n"
+        "from dsl import verdict\n"
+        "# Authorization: Basic dXNlcjpwYXNz\n"
+        "# proxy_authorization=Bearer bearer.token.value\n"
+        '# {\"access_token\":\"token with spaces\",\n'
+        '#  \"client_secret\":\"client secret with spaces\"}\n'
+        "# CLAUDE_TChoices=valid-diagnostic /Users/alice/private/app.py\n"
+        "retry = os.path.exists('credential-retry.flag')\n"
+        "if retry:\n"
+        "    print('Authorization: Basic dXNlcjpwYXNz')\n"
+        "    print('proxy_authorization=Bearer bearer.token.value')\n"
+        '    print(\'{"access_token":"token with spaces"}\')\n'
+        '    print(\'{"client_secret":"client secret with spaces"}\')\n'
+        "    print('CLAUDE_TChoices=valid-diagnostic /Users/alice/private/app.py',\n"
+        "          file=sys.stderr)\n"
+        "else:\n"
+        "    open('credential-retry.flag', 'w').close()\n"
+        "    print('safe initial dynamic failure')\n"
+        "expected = 2 * 20\n"
+        "observations = [verdict() for _ in range(6)]\n"
+        "assert observations == [expected] * len(observations), (\n"
+        "    f'lost updates: expected {expected}, observed {observations}')\n"
+    )
+    run_cmd = (
+        "proxy_authorization='Bearer bearer.token.value' "
+        "access_token='token with spaces' "
+        "client_secret='client secret with spaces' "
+        'CLAUDE_TChoices=valid-diagnostic "%s" {probe_file}' % _PY
+    )
+
+    result, persisted = _run_spec16_dynamic_with_selector(
+        tmp_path, monkeypatch, probe, run_id="credential-redaction", run_cmd=run_cmd)
+
+    assert result["state"] == "findings", result
+    diagnostics = persisted["result"]["selector_diagnostics"]
+    assert diagnostics["selector"]["valid"] is True
+    (record,) = diagnostics["probes"]
+    assert [run["returncode"] for run in record["runs"]] == [1, 1]
+    assert "safe initial dynamic failure" in record["runs"][0]["output"]
+    scrubbed_fields = (
+        diagnostics["selector"]["raw_response"], diagnostics["selector"]["json"],
+        record["source_excerpt"], record["run_command"], record["runs"][1]["output"],
+    )
+    for text in scrubbed_fields:
+        assert "[redacted]" in text
+    assert "CLAUDE_TChoices=valid-diagnostic" in record["run_command"]
+    assert "CLAUDE_TChoices=valid-diagnostic" in record["runs"][1]["output"]
+
+    serialized = json.dumps(persisted)
+    for secret in (
+            "dXNlcjpwYXNz", "bearer.token.value", "token with spaces",
+            "client secret with spaces"):
+        assert secret not in serialized
+    assert "/Users/alice" not in serialized
+    assert "Basic [redacted]" not in serialized
+    assert "Bearer [redacted]" not in serialized
+    assert str(tmp_path) not in json.dumps(diagnostics)
+    artifact = result["evidence"]["reproduced_failure"]["simulation_artifact"]
+    assert not os.path.exists(os.path.join(
+        os.path.dirname(artifact["artifact"]), "selector-diagnostics.json"))
+
+
+def test_repeated_print_only_probe_cannot_satisfy_race_scenario(
+        tmp_path, monkeypatch):
+    """Observing the defective result without an oracle is not test evidence."""
+    probe = (
+        "import os, sys\n"
+        "sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(\n"
+        "    os.path.abspath(__file__)))))\n"
+        "from dsl import verdict\n"
+        "print('bounded observations:', [verdict() for _ in range(6)])\n"
+    )
+    result, persisted = _run_spec16_dynamic_with_selector(
+        tmp_path, monkeypatch, probe, run_id="smoke-is-not-evidence")
+
+    assert result["state"] == "error"
+    assert "did not reproduce" in result["error"]
+    assert persisted["result"]["findings"] == []
+    assert persisted["result"]["telemetry"]["runs"] == 1
+    assert persisted["result"]["telemetry"]["reproduce_results"]["pass"] == 1
+    (probe_record,) = persisted["result"]["selector_diagnostics"]["probes"]
+    assert probe_record["outcome"] == "pass"
+    assert len(probe_record["runs"]) == 1
+    assert "bounded observations: [20, 20, 20, 20, 20, 20]" in \
+        probe_record["runs"][0]["output"]
+    assert persisted["cleanup"]["clean"] is True
+
+
+def test_selector_prompt_requires_behavioral_oracles_and_bounded_race_evidence():
+    prompt = " ".join(test_check._SELECTOR_PROMPT.split())
+    for requirement in (
+            "directly call the changed public API",
+            "independently derived expected value or invariant",
+            "never compare an API result with itself",
+            "Import-only, print-only, and exit-without-assertion probes are invalid",
+            "multiple independent invocations",
+            "shared-state and interleaving invariants",
+            "bounded observation/counter output",
+            "Do not invent concurrency or races outside the changed behavior"):
+        assert requirement in prompt
+
+
+def test_selector_diagnostics_are_opt_in_bounded_sanitized_and_clean(tmp_path):
+    """Only the acceptance harness's explicit path enables diagnostics."""
+    work = _repo(tmp_path, [{"app.py": "x = 1\n"}])
+    secret = "diagnostic-model-secret"
+    malformed = ("not-json " + secret + " /home/private-runner/source/app.py "
+                 + "x" * 12000)
+    cmd, _count = _stub_selector(tmp_path, malformed)
+    proc = _run_executor(work, ["app.py"], _env(
+        OCR_TEST_SELECTOR_CMD=cmd, OPENAI_API_KEY=secret))
+    assert _answer(proc)["warnings"] == [
+        {"file": None, "message": "selector failed; no tests selected"}]
+    assert not list(work.rglob("*diagnostic*")), "default runs persist no logs"
+
+    capture = tmp_path / "selector-diagnostics.json"
+    proc = _run_executor(work, ["app.py"], _env(
+        OCR_TEST_SELECTOR_CMD=cmd, OPENAI_API_KEY=secret,
+        OCR_TEST_DIAGNOSTICS_FILE=str(capture)))
+    assert _answer(proc)["warnings"] == [
+        {"file": None, "message": "selector failed; no tests selected"}]
+    diagnostics = json.loads(capture.read_text(encoding="utf-8"))
+    raw = diagnostics["selector"]["raw_response"]
+    assert diagnostics["selector"]["valid"] is False
+    assert diagnostics["selector"]["json"] is None
+    assert 0 < len(raw) <= 6000
+    assert diagnostics["probes"] == []
+    assert diagnostics["cleanup"] == {"probe_root_removed": True}
+    serialized = json.dumps(diagnostics)
+    assert secret not in serialized
+    assert "/home/private-runner" not in serialized
+    assert str(tmp_path) not in serialized
+    assert capture.stat().st_mode & 0o777 == 0o600
+    assert not (work / PROBE_ROOT).exists()

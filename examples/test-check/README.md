@@ -25,12 +25,20 @@ the next push gets a different content anchor and is judged fresh.
 
 ## Install into a gated repository
 
-1. Copy the executor into your repo and commit it:
+1. Copy the executor and its portable credential-policy helper into your repo
+   and commit both files:
 
    ```console
    $ cp examples/test-check/test_check /path/to/repo/scripts/test_check
+   $ cp scripts/rg_final_env.py /path/to/repo/scripts/rg_final_env.py
    $ chmod +x /path/to/repo/scripts/test_check
    ```
+
+   The executor loads `rg_final_env.py` beside itself. Neither installed file
+   imports Kimchi, reads neutral final-review storage, or needs a review-gate
+   checkout at runtime. If the helper is absent, startup fails closed before
+   selector, repository-test, or probe execution; there is no inherited-env
+   fallback.
 
 2. Declare the command check in `/path/to/repo/.ocr/config.json`:
 
@@ -100,13 +108,35 @@ knobs and defaults above.
   on the first matched file (the default).
 - **Probes** are materialized under `.test-check-probes/` inside the
   executor's clone and deleted after the run. They never touch your working
-  tree and never appear in reviewer evidence.
+  tree and never appear in reviewer evidence. Repository tests and probes run
+  in a credential-scrubbed environment: selector model authentication,
+  provider/publication tokens, askpass helpers and generic secrets stop at the
+  executor boundary. A subject timeout is a visible evidence gap and warning,
+  not a reproduced failure.
 - **Telemetry (SPEC-15.4):** the stdout wrapper may carry a `telemetry`
   object of actual run counts — `selector_attempts`, `tests_selected`,
   `probes_authored`, `runs`, and `reproduce_results`
   (`fail`/`pass`/`flake`/`build`/`error`) — which the gate merges into that
   check's `command_checks` telemetry entry (malformed values degrade to a
   warning and are ignored). This executor always emits it.
+
+## Explicit final-review reuse
+
+`scripts/rg_final_dynamic.py` exposes the separate SPEC-16 opt-in seam. An
+individual or combined final-review unit calls
+`run_dynamic_checks(repository, target_sha, head_sha, unit_key=...)`; calling
+that function is the opt-in, and no pre-push config or default is changed. The
+wrapper creates its own pinned disposable clone (never `review_root` or a
+required-test clone), invokes this executor once, and returns a compact
+`final-review-dynamic-result/v1` object with findings, coded warnings, test
+evidence, coverage, revisions and the executor telemetry. It adds no retry
+around the executor's internal exactly-one failure rerun.
+
+`record_dynamic_result(store, unit_id, result)` persists that object through
+the existing `FinalStore` methods. Dynamic degradation stays separate from
+required-suite policy: flakes, missing coverage, selector/build/probe errors
+and timeouts are warnings; only a reproduced failure becomes finding evidence.
+Probe source and scratch paths are not returned or persisted.
 
 ## Costs
 

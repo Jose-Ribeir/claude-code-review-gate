@@ -7,6 +7,38 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Explicit final whole-stack review (ADR 0008, SPEC-16).**
+  `review-gate.py final-review <ref>…` reviews provider-pinned, immutable
+  complete trees rather than local working-tree content: every explicitly
+  supplied item receives an independent full-tree review and the linear stack
+  also receives combined and prospective-integration reviews. Mandatory
+  correctness, standards, documentation/domain, testing, security,
+  compatibility/migration, and intent lenses share the existing sole verdict
+  authority; required repository/CI suites use isolated credential-free
+  execution, while SPEC-15 dynamic checks retain warning-only degradation.
+  Findings, warnings, coverage, stops, exact revisions, freshness, memory,
+  contract rules/decisions, contract/acceptance versions, acceptance records,
+  evidence, migrations, and publication attempts persist in one dedicated,
+  tool-independent SQLite database with bounded structured telemetry. An
+  explicit API path or CLI `--store` wins, then non-empty `FINAL_REVIEW_STORE`,
+  then the neutral default `~/.final-review/final-review.sqlite3` (blank values
+  are ignored). Store selection never consults `OCR_STATE_DIR`, Kimchi/Claude
+  paths or configuration, review-gate configuration, `.git`, or other source
+  repository state; the abandoned external review-gate store-root default is
+  not used or implicitly migrated. This is a standalone SQLite file, not
+  Kimchi's application DB, and arbitrary local tools can reopen or attach it
+  with raw `sqlite3` while directory/file permission tightening is retained.
+  GitHub, GitLab, and inference integrations remain adapters. Results
+  distinguish `pass`, `findings`, `stale`, and `incomplete` (exit 0/1/3/2),
+  keep same-store continuity separate from independent local evidence, and
+  permit official provider statuses only through the trusted publication
+  boundary; denied or failed publication leaves local-only, unenforced
+  evidence. Database-backed `contract show`, `acceptance list/status/history`,
+  and `final-report list/show/export` commands expose current and historical
+  records without maintaining a parallel report authority. Command checks
+  gain `required` (default `false`) to opt a pinned repository declaration
+  into final-review required verification without changing incremental
+  pre-push defaults.
 - **Race & regression test checks and granular finding waivers (ADR 0007,
   SPEC-15).** Command checks gain `parallel` (default `false`; run the
   executor concurrently with the review session against its own throwaway
