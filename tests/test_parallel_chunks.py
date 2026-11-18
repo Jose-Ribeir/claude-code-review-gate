@@ -139,7 +139,9 @@ def test_a_limit_stops_the_sibling_but_finished_chunks_keep_their_records(
     validly never start; the sibling-first case instead guarantees it started and is
     held at a rendezvous until the gate kills it. No call may start after the limit,
     the unfinished chunks have no records, and the completed records survive."""
-    work = ag._big_repo(tmp_path, n_files=4)
+    # Chunk 4 must stay pending while 2/3 occupy the two slots. It is the canary
+    # for the gate-level rule: no new work starts after the gate observes a limit.
+    work = ag._big_repo(tmp_path, n_files=5)
     tip = ag._git(["rev-parse", "HEAD"], cwd=work)
     chunk3_started = tmp_path / "chunk-3-started"
     chunk_waits = {"3": str(tmp_path / "release-chunk-3")}
@@ -164,7 +166,11 @@ def test_a_limit_stops_the_sibling_but_finished_chunks_keep_their_records(
         assert indices in ([0, 1, 2], [0, 1, 2, 3]), indices
     limit_reports = [c for c in trace if c.get("event") == "limit_reported"]
     assert len(limit_reports) == 1, limit_reports
-    assert not [c for c in calls if c["ts"] > limit_reports[0]["ts"]], trace
+    assert 4 not in indices
+    # `limit_reported` is emitted before the child responds; the gate observes
+    # ReviewLimitError only later in its future collection loop. A sibling can
+    # legitimately start between those two events, so raw stub timestamps cannot
+    # determine whether the gate honored its no-later-dispatch guarantee.
     # If chunk 3 started before the limit, its unreleased rendezvous was killed rather
     # than waited out. Its 60 s failure deadline must not be mistaken for cancellation.
     assert time.time() - min(c["ts"] for c in calls) < 40
