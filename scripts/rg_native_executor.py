@@ -10,7 +10,6 @@ from dataclasses import dataclass, field
 import json
 import os
 from pathlib import Path
-import signal
 import shutil
 import subprocess
 import tempfile
@@ -177,13 +176,21 @@ class NativeExecutor:
         self._deadline = deadline
         self._store = store
 
+    @property
+    def store(self):
+        return self._store
+
+    @property
+    def transport(self):
+        return self._host.transport
+
     def _record(self, task, event_type, occurred, *, native_session_id=None,
                 started=None, finished=None, details=None):
         if self._store is None:
             return
         self._store.record_native_event({
             "schema": "native-review-event/v1",
-            "event_id": "executor:" + event_type,
+            "event_id": f"executor:{task.task_id}:{event_type}",
             "event_type": event_type,
             "identity": task.identity(),
             "transport": self._host.transport,
@@ -359,19 +366,27 @@ class _ProcessSession:
     def cancel(self) -> None:
         if self.process.poll() is not None:
             return
+        from rg_final_review import _close_owned_pipes, _kill_owned_process
         if os.name == "posix" and self.process.pid != os.getpgrp():
-            try:
-                os.killpg(self.process.pid, signal.SIGKILL)
-                return
-            except ProcessLookupError:
-                return
+            _kill_owned_process(self.process)
+            # A descendant outside the model's process group can inherit the
+            # captured pipes and otherwise keep the watcher alive indefinitely.
+            _close_owned_pipes(self.process)
+            return
         self.process.kill()
+        _close_owned_pipes(self.process)
 
     def wait(self, callback: Callable[[NativeHostCompletion], None]) -> None:
-        stdout, _stderr = self.process.communicate()
+        try:
+            stdout, _stderr = self.process.communicate()
+        except (OSError, ValueError):
+            # Cancellation closes pipes to wake this watcher if an unowned
+            # descendant retains duplicates. Cancellation output is diagnostic
+            # only, and its worker must never publish a result artifact.
+            stdout = ""
         callback(NativeHostCompletion(
             native_session_id=self.native_session_id,
-            return_code=self.process.returncode,
+            return_code=self.process.returncode if self.process.returncode is not None else -1,
             stdout=stdout,
             started_at_unix=self.started_at_unix,
             finished_at_unix=time.time(),

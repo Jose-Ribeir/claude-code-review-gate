@@ -58,7 +58,7 @@ def test_expiry_fences_later_dispatch_and_runs_callbacks_exactly_once():
     started = []
     expired = []
     deadline = RunDeadline(
-        "run-a", 12.5, timer_factory=timer,
+        "run-a", 12.5, timer_factory=timer, clock=lambda: 1000.0,
         on_start=started.append, on_expire=expired.append,
     )
 
