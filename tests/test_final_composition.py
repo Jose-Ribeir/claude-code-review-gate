@@ -419,7 +419,12 @@ def test_multi_ref_operator_main_runs_validated_stack_and_emits_linked_reports(
     provider = StackProvider(items)
     trace = tmp_path / "worker-trace.json"
     worker = _worker_script(tmp_path)
+    neutral_home = tmp_path / "neutral-home"
+    neutral_home.mkdir()
+    store_path = tmp_path / "final-review-state" / "final-review.sqlite3"
     monkeypatch.setattr(rg_final_review, "GitLabProvider", lambda: provider)
+    monkeypatch.setenv("HOME", str(neutral_home))
+    monkeypatch.setenv("FINAL_REVIEW_STORE", str(store_path))
     monkeypatch.setenv("OCR_STATE_DIR", str(tmp_path / "operator-state"))
     monkeypatch.setenv("STACK_WORKER_TRACE", str(trace))
     monkeypatch.setenv(
@@ -440,6 +445,11 @@ def test_multi_ref_operator_main_runs_validated_stack_and_emits_linked_reports(
     assert output["composition"]["complete"] is True
     assert output["graph"]["references"] == [item["url"] for item in items]
     assert output["item_keys"] == [item["id"] for item in items]
+    assert output["run_seq"] == 1
+    assert Path(output["store_path"]) == store_path
+    assert store_path.is_file()
+    assert not (neutral_home / ".final-review").exists()
+    assert not (neutral_home / ".local" / "state" / "review-gate").exists()
     assert output["units"][2]["individual_reports"]
     assert Path(output["machine_report_path"]).is_file()
     assert Path(output["units"][2]["combined_report_path"]).is_file()
