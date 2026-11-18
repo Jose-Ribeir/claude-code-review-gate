@@ -17,6 +17,7 @@ _SCRIPTS = _HERE.parent / "scripts"
 sys.path.insert(0, str(_SCRIPTS))
 
 from rg_final_context import ContextCompletenessError, collect_review_context  # noqa: E402
+from rg_final_lenses import REQUIRED_LENSES, build_lens_request  # noqa: E402
 from rg_final_materialize import materialize_review  # noqa: E402
 from rg_ticket_fetch import fetch_final_intent  # noqa: E402
 
@@ -45,8 +46,12 @@ def _repository(tmp_path):
         "AGENTS.md": "Repository instructions\n",
         "docs/standards/review.md": "Review standard\n",
         "docs/adr/0001-storage.md": "Unchanged storage decision\n",
+        "docs/ADR.md": "Unchanged plain storage decision\n",
+        "guides/aDr.MD": "Unchanged alternate-case decision\n",
         "docs/GLOSSARY.md": "Unchanged domain language\n",
+        "reference/glossary.MD": "Unchanged alternate-case domain language\n",
         "docs/domain/ordering.md": "Ordering invariant\n",
+        "docs/overview.md": "Ordinary prose is not a domain decision\n",
         "src/orders.py": "def total(lines):\n    return sum(lines)\n",
         "tests/test_orders.py": "def test_total():\n    assert True\n",
     }
@@ -82,13 +87,21 @@ def test_collects_unchanged_repository_knowledge_without_serializing_sources(tmp
     documents = {doc["path"]: doc for doc in context["documents"]}
     for name in (
         "AGENTS.md", "docs/standards/review.md", "docs/adr/0001-storage.md",
-        "docs/GLOSSARY.md", "docs/domain/ordering.md",
+        "docs/ADR.md", "guides/aDr.MD", "docs/GLOSSARY.md",
+        "reference/glossary.MD", "docs/domain/ordering.md",
     ):
         assert name in documents
         assert documents[name]["unchanged"] is True
     assert documents["docs/adr/0001-storage.md"]["kind"] == "adr"
+    assert documents["docs/ADR.md"] == {
+        "path": "docs/ADR.md", "kind": "adr", "unchanged": True,
+    }
+    assert documents["guides/aDr.MD"]["kind"] == "adr"
     assert documents["docs/GLOSSARY.md"]["kind"] == "glossary"
+    assert documents["reference/glossary.MD"]["kind"] == "glossary"
     assert documents["AGENTS.md"]["kind"] == "instructions"
+    assert "docs/overview.md" not in documents
+    assert "Unchanged plain storage decision" not in str(context["documents"])
 
     assert context["files"]["implementation"] == ["src/orders.py"]
     assert context["files"]["tests"] == ["tests/test_orders.py"]
@@ -98,6 +111,41 @@ def test_collects_unchanged_repository_knowledge_without_serializing_sources(tmp
     assert "def total" not in str(context["files"])
     assert "src/orders.py" in context["diff"]
     assert context["completeness"]["complete"] is True
+
+
+def test_plain_adr_reaches_documentation_domain_worker_request(tmp_path):
+    repo, target, head = _repository(tmp_path)
+    with materialize_review(repo, target, head) as review:
+        context = collect_review_context(
+            review, description="Fix totals without changing the storage contract",
+            intent_fetcher=lambda **_request: {"tickets": [], "warnings": []},
+        )
+        base_request = {
+            "schema": "final-review-worker-request/v1",
+            "repository": {
+                "path": str(review.path), "access": "full_tree",
+                "head_sha": review.head_sha, "target_sha": review.target_sha,
+                "merge_base_sha": review.merge_base_sha,
+            },
+            "diff": review.diff,
+            "review_context": context,
+        }
+        documentation = next(
+            spec for spec in REQUIRED_LENSES if spec.name == "documentation/domain"
+        )
+        request = build_lens_request(base_request, documentation)
+
+        documents = {entry["path"]: entry for entry in request["review_context"]["documents"]}
+        assert request["lens"] == "documentation/domain"
+        assert documents["docs/ADR.md"] == {
+            "path": "docs/ADR.md", "kind": "adr", "unchanged": True,
+        }
+        assert request["repository"]["head_sha"] == head
+        assert request["review_context"]["head_sha"] == head
+        search_root = Path(request["review_context"]["search_roots"][0])
+        assert search_root == Path(request["repository"]["path"])
+        assert (search_root / documents["docs/ADR.md"]["path"]).is_file()
+        assert set(documents["docs/ADR.md"]) == {"path", "kind", "unchanged"}
 
 
 def test_intent_always_uses_description_and_attempts_linked_fetch(tmp_path):

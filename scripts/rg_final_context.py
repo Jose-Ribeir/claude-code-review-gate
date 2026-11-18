@@ -93,7 +93,7 @@ def _document_kind(name):
             or base == "copilot-instructions.md"
             or ".cursor" in parts or ".claude" in parts):
         return "instructions"
-    if ({"adr", "adrs", "decisions", "decision"} & parts
+    if (base == "adr.md" or {"adr", "adrs", "decisions", "decision"} & parts
             or stem.startswith("adr-") or stem.startswith("adr_")):
         return "adr"
     if "glossary" in stem or stem in {"terminology", "ubiquitous-language"}:
