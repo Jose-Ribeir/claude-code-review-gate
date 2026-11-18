@@ -172,12 +172,60 @@ def _atomic_write(path: Path, value: Dict[str, object]) -> None:
 class NativeExecutor:
     """Own native session callbacks, result envelopes, and atomic artifacts."""
 
-    def __init__(self, host: NativeHost):
+    def __init__(self, host: NativeHost, *, deadline=None, store=None):
         self._host = host
+        self._deadline = deadline
+        self._store = store
+
+    def _record(self, task, event_type, occurred, *, native_session_id=None,
+                started=None, finished=None, details=None):
+        if self._store is None:
+            return
+        self._store.record_native_event({
+            "schema": "native-review-event/v1",
+            "event_id": "executor:" + event_type,
+            "event_type": event_type,
+            "identity": task.identity(),
+            "transport": self._host.transport,
+            "native_session_id": native_session_id,
+            "timing": {
+                "occurred_at_unix": occurred,
+                "started_at_unix": started,
+                "finished_at_unix": finished,
+                "duration_seconds": (
+                    finished - started if started is not None and finished is not None else None
+                ),
+            },
+            "details": {} if details is None else details,
+        })
+
+    def _notify(self, completion, on_completion, *, started, finished, details=None):
+        handle = completion.handle
+        self._record(
+            handle.task, completion.state, finished,
+            native_session_id=handle.native_session_id,
+            started=started, finished=finished, details=details,
+        )
+        on_completion(completion)
 
     def start(self, task: NativeTask,
               on_completion: Callable[[NativeCompletion], None]) -> NativeSessionHandle:
         """Start without nesting or blocking; completion arrives on the host thread."""
+        if self._deadline is not None:
+            self._deadline.ensure_active(task.run_id)
+        if self._store is not None:
+            self._store.register_native_task({
+                "schema": "native-review-task/v1",
+                "identity": task.identity(),
+                "transport": self._host.transport,
+            })
+        queued_details = {}
+        if self._deadline is not None:
+            queued_details = {
+                "run_timeout_seconds": self._deadline.timeout_seconds,
+                "watchdog": self._deadline.diagnostics()["watchdog"],
+            }
+        self._record(task, "queued", time.time(), details=queued_details)
         lock = threading.Lock()
         state = {"handle": None, "terminal": False}
         early = []
@@ -191,6 +239,8 @@ class NativeExecutor:
                 if state["terminal"]:
                     return
                 state["terminal"] = True
+            if self._deadline is not None:
+                self._deadline.release(handle)
             self._complete(handle, host_completion, on_completion)
 
         def cancel() -> None:
@@ -199,11 +249,30 @@ class NativeExecutor:
                     return
                 state["terminal"] = True
                 handle = state["handle"]
+            if self._deadline is not None:
+                self._deadline.release(handle)
             # Cancellation intent is fenced before the native callback can race us.
             session.cancel()
-            on_completion(NativeCompletion(handle=handle, state="cancelled", artifact=None))
+            expired = self._deadline is not None and self._deadline.expired
+            details = {
+                "reason": "run-deadline-exceeded" if expired else "operator-cancelled",
+                "expiry_count": (
+                    self._deadline.diagnostics()["expiry_count"]
+                    if self._deadline is not None else 0
+                ),
+                "cancellation_status": "native-handle-signalled",
+            }
+            self._notify(
+                NativeCompletion(handle=handle, state="cancelled", artifact=None),
+                on_completion, started=started_at, finished=time.time(), details=details,
+            )
 
         session = self._host.launch(task, host_completed)
+        started_at = time.time()
+        self._record(
+            task, "started", started_at, native_session_id=session.native_session_id,
+            started=started_at,
+        )
         handle = NativeSessionHandle(
             task=task,
             session_name=task.session_name,
@@ -219,25 +288,36 @@ class NativeExecutor:
                 pending.clear()
             elif pending:
                 state["terminal"] = True
+        if self._deadline is not None:
+            self._deadline.own(task.run_id, handle)
         for host_completion in pending:
+            if self._deadline is not None:
+                self._deadline.release(handle)
             self._complete(handle, host_completion, on_completion)
         return handle
 
-    @staticmethod
-    def _complete(handle: NativeSessionHandle, host: NativeHostCompletion,
+    def _complete(self, handle: NativeSessionHandle, host: NativeHostCompletion,
                   on_completion: Callable[[NativeCompletion], None]) -> None:
         if host.return_code:
-            on_completion(NativeCompletion(
-                handle=handle, state="failed", artifact=None,
-                error=f"native session exited {host.return_code}",
-            ))
+            error = f"native session exited {host.return_code}"
+            self._notify(
+                NativeCompletion(
+                    handle=handle, state="failed", artifact=None, error=error,
+                ),
+                on_completion, started=host.started_at_unix,
+                finished=host.finished_at_unix, details={"error": error},
+            )
             return
         payload = _object_from_text(host.stdout)
         if payload is None:
-            on_completion(NativeCompletion(
-                handle=handle, state="failed", artifact=None,
-                error="native session returned no valid final-review worker result",
-            ))
+            error = "native session returned no valid final-review worker result"
+            self._notify(
+                NativeCompletion(
+                    handle=handle, state="failed", artifact=None, error=error,
+                ),
+                on_completion, started=host.started_at_unix,
+                finished=host.finished_at_unix, details={"error": error},
+            )
             return
         artifact = NativeArtifact(
             task=handle.task,
@@ -248,7 +328,11 @@ class NativeExecutor:
             finished_at_unix=host.finished_at_unix,
         )
         _atomic_write(handle.task.artifact_path, artifact.as_dict())
-        on_completion(NativeCompletion(handle=handle, state="completed", artifact=artifact))
+        self._notify(
+            NativeCompletion(handle=handle, state="completed", artifact=artifact),
+            on_completion, started=host.started_at_unix,
+            finished=host.finished_at_unix, details={"outcome": "completed"},
+        )
 
 
 def _top_level_environment(environ) -> Dict[str, str]:

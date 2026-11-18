@@ -112,11 +112,77 @@ def test_a_timed_out_reviewer_whose_child_holds_the_pipe_does_not_hang_the_gate(
     monkeypatch.setenv("STUB_SPAWN_CHILD", str(tmp_path / "grandchild.pid"))
     monkeypatch.setenv("STUB_SLEEP", "120")
     monkeypatch.setattr(review_gate, "_find_claude", lambda: None)
-    t0 = time.monotonic()
-    with pytest.raises(review_gate.ReviewGateError) as exc:
-        review_gate._run_review_once(str(tmp_path), "hook", str(tmp_path), "t" * 40, "a..b",
-                                     timeout=3)
-    assert exc.value.is_timeout
-    assert time.monotonic() - t0 < 60
-    pid = int((tmp_path / "grandchild.pid").read_text())
-    assert _wait_gone(pid), "the reviewer's child outlived the timeout kill"
+    unrelated = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(120)"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        t0 = time.monotonic()
+        with pytest.raises(review_gate.ReviewGateError) as exc:
+            review_gate._run_review_once(
+                str(tmp_path), "hook", str(tmp_path), "t" * 40, "a..b", timeout=3,
+            )
+        assert exc.value.is_timeout
+        assert time.monotonic() - t0 < 10
+        assert unrelated.poll() is None, "an unrelated process group was killed"
+        pid = int((tmp_path / "grandchild.pid").read_text())
+        assert _wait_gone(pid), "the reviewer's child outlived the timeout kill"
+    finally:
+        unrelated.kill()
+        unrelated.wait(timeout=5)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group guard")
+def test_legacy_timeout_reap_is_bounded_and_exposes_cleanup_evidence(monkeypatch, tmp_path):
+    import rg_final_review as final_review
+
+    class _PipeHoldingProcess:
+        pid = os.getpgrp()
+        returncode = None
+        stdout = None
+        stderr = None
+
+        def __init__(self):
+            self.communicate_timeouts = []
+            self.killed = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def communicate(self, timeout=None):
+            self.communicate_timeouts.append(timeout)
+            if len(self.communicate_timeouts) == 1:
+                raise subprocess.TimeoutExpired("reviewer", timeout, output="partial")
+            return "partial", ""
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.killed = True
+            self.returncode = -9
+
+        def wait(self, timeout=None):
+            assert timeout is not None
+            return self.returncode
+
+    process = _PipeHoldingProcess()
+    monkeypatch.setattr(review_gate.subprocess, "Popen", lambda *_a, **_k: process)
+    monkeypatch.setenv("OCR_REVIEWER_CMD", f'"{sys.executable}" "{_STUB}"')
+    monkeypatch.setenv("OCR_SKIP_CANARY", "1")
+
+    with pytest.raises(review_gate.ReviewGateError) as captured:
+        review_gate._run_review_once(
+            str(tmp_path), "hook", str(tmp_path), "t" * 40, "a..b", timeout=0.25,
+        )
+
+    assert process.killed
+    assert process.communicate_timeouts == [0.25, final_review._REAP_TIMEOUT]
+    assert captured.value.cleanup["status"] == "incomplete"
+    assert captured.value.cleanup["tree_termination_verified"] is False
+    assert captured.value.cleanup["termination_method"] == "direct-child"
+    assert captured.value.cleanup["pipe_drain_completed"] is True

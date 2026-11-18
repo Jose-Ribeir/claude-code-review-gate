@@ -17,6 +17,25 @@ from rg_native_executor import (  # noqa: E402
     NativeTask,
     probe_kimchi_native_capability,
 )
+from rg_run_lifecycle import RunDeadline, RunDeadlineExpired  # noqa: E402
+
+
+class _DeadlineTimer:
+    def __init__(self):
+        self.callback = None
+
+    def __call__(self, _delay, callback):
+        self.callback = callback
+        return self
+
+    def start(self):
+        pass
+
+    def cancel(self):
+        pass
+
+    def fire(self):
+        self.callback()
 
 
 class _FakeSession:
@@ -334,4 +353,39 @@ def test_failed_or_malformed_native_session_never_publishes_an_artifact(
     assert completions[0].state == "failed"
     assert completions[0].artifact is None
     assert completions[0].error == error
+    assert not task.artifact_path.exists()
+
+
+def test_run_expiry_fences_dispatch_and_cancels_only_owned_native_handles(tmp_path):
+    timer = _DeadlineTimer()
+    deadline = RunDeadline("run-1", 30, timer_factory=timer)
+    host = _FakeHost()
+    executor = NativeExecutor(host, deadline=deadline)
+    other_host = _FakeHost()
+    other_executor = NativeExecutor(other_host)
+    task = _task(tmp_path, "owned")
+    other_task = replace(
+        _task(tmp_path, "unrelated"), run_id="run-other",
+        session_name="review-run-other-unrelated",
+    )
+    completions = []
+    deadline.start()
+    handle = executor.start(task, completions.append)
+    other_executor.start(other_task, lambda _completion: None)
+
+    timer.fire()
+
+    assert host.sessions["owned"].cancel_calls == 1
+    assert other_host.sessions["unrelated"].cancel_calls == 0
+    assert [completion.state for completion in completions] == ["cancelled"]
+    handle.cancel()
+    assert host.sessions["owned"].cancel_calls == 1
+    assert len(completions) == 1
+
+    with pytest.raises(RunDeadlineExpired):
+        executor.start(_task(tmp_path, "late-dispatch"), completions.append)
+    assert "late-dispatch" not in host.sessions
+
+    host.sessions["owned"].finish({"status": "success", "late": True})
+    assert len(completions) == 1
     assert not task.artifact_path.exists()
