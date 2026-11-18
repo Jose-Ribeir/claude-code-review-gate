@@ -9956,7 +9956,6 @@ def _docs_quality_block(repo_root, review_root, base, tip, entries=None,
                 enabled_duties[duty] = False
                 continue
             enabled_duties[duty] = True
-            scopes[duty] = list(matched)
             options[duty] = {k: check[k] for k in _DOC_QUALITY_OPTION_KEYS
                              if k in check}
             targets = matched
@@ -9975,6 +9974,7 @@ def _docs_quality_block(repo_root, review_root, base, tip, entries=None,
                                 sweep.append(os.path.relpath(full, review_root)
                                              .replace(os.sep, "/"))
                     targets = sorted(set(matched) | set(sweep))
+            scopes[duty] = list(targets)
             t0 = time.monotonic()
             cap = options[duty].get("sentence_cap")
             per = ocr_docsquality.compute_evidence(
