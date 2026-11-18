@@ -9,14 +9,43 @@ import importlib.util
 import os
 import sys
 
-import pytest
-
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SCRIPTS = os.path.join(os.path.dirname(_HERE), "scripts")
 sys.path.insert(0, _SCRIPTS)
 _spec = importlib.util.spec_from_file_location("review_gate_env", os.path.join(_SCRIPTS, "review-gate.py"))
 review_gate = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(review_gate)
+
+import rg_final_review as final_review  # noqa: E402
+from rg_final_env import scrub_environment  # noqa: E402
+
+
+def test_final_worker_uses_the_shared_credential_policy():
+    source = {
+        "PATH": "/usr/bin",
+        "OPENAI_API_KEY": "model-key",
+        "ANTHROPIC_AUTH_TOKEN": "model-token",
+        "CLAUDE_CODE_OAUTH_TOKEN": "model-oauth",
+        "CLAUDE_CODE_MESSAGING_TOKEN": "must-not-cross",
+        "PI_MESSAGING_TOKEN": "must-not-cross",
+        "PUBLICATION_SECRET": "must-not-cross",
+        "GITHUB_TOKEN": "must-not-cross",
+        "GENERIC_API_KEY": "must-not-cross",
+        "CI_REPOSITORY_URL": "https://oauth2:token@gitlab.example/group/repo.git",
+        "GIT_TRACE2_EVENT": "/tmp/trace",
+        "GIT_DIR": "/tmp/source/.git",
+    }
+
+    env = final_review.worker_environment(source)
+
+    assert env == scrub_environment(source, preserve_model_auth=True)
+    assert env["OPENAI_API_KEY"] == "model-key"
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "model-token"
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "model-oauth"
+    assert set(env) == {
+        "PATH", "OPENAI_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
+        "RG_FINAL_CREDENTIAL_FREE",
+    }
 
 
 def _env_with_everything():

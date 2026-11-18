@@ -208,6 +208,39 @@ def test_claude_single_json_result_envelope_is_understood(repo, tmp_path):
     assert _verdict_record(repo, tip)["verdict"] == "block"
 
 
+def test_docs_only_push_under_claude_runs_the_deslop_duty_and_blocks(repo, tmp_path):
+    """Claude-profile plumbing proof for the docs-quality pipeline (no real
+    `claude` CLI on the machine: the fake backend stands in for it). A
+    docs-only push with docs-deslop on (the default) must build the
+    docs_quality payload -- so the checker spawn flow fires -- and a
+    high-severity deslop finding must block. The launch trace proves the
+    claude launch path did every answering, never a kimchi swap."""
+    (repo / "docs").mkdir()
+    (repo / "docs" / "guide.md").write_text("# Guide\n\nAn overwrought section.\n")
+    subprocess.run(["git", "add", "."], cwd=str(repo), check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "docs: add the guide"], cwd=str(repo), check=True)
+    tip = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo), capture_output=True,
+                         text=True, check=True).stdout.strip()
+    finding = {
+        "content": "docs-deslop: clustered catalog tells in the new section",
+        "severity": "high",
+        "path": "docs/guide.md",
+        "docs_quality_duty": "docs-deslop",
+        "document_wide": True,
+        "tells": [{"phrase": "leverage", "line": 1},
+                  {"phrase": "robust", "line": 1},
+                  {"phrase": "seamless", "line": 2}],
+    }
+    env = _backend_env(tmp_path, clis=("claude",), OCR_BACKEND="claude",
+                       STUB_DOCS_FINDING=json.dumps(finding))
+    decision, reason = _push(repo, env)
+    assert decision == "deny", reason
+    assert "catalog tells" in reason
+    assert _verdict_record(repo, tip)["verdict"] == "block"
+    launches = _launches(tmp_path)
+    assert launches and {t["flavor"] for t in launches} == {"claude"}
+
+
 # --- fail closed, both profiles ---------------------------------------------
 
 @pytest.mark.parametrize("profile", PROFILES)
@@ -335,6 +368,14 @@ def test_an_unknown_explicit_backend_blocks_and_runs_nothing(repo, tmp_path):
 @pytest.fixture
 def clean(monkeypatch):
     for k in _BACKEND_VARS:
+        monkeypatch.delenv(k, raising=False)
+    # Ambient kimchi-session markers (KIMCHI_* / PI_*): the suite may run
+    # inside Kimchi just as conftest scrubs CLAUDECODE/CLAUDE_CODE_* for
+    # Claude Code, and _supervisor_env's SNIFFED_VAR hand-off sniffs the FULL
+    # parent environment -- an unscrubbed kimchi marker makes any test about
+    # "a claude session" read as "kimchi,claude". Same rule as conftest: a
+    # test about the environment sets exactly the signals it means.
+    for k in [x for x in os.environ if x.startswith(("KIMCHI_", "PI_"))]:
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setitem(rg._canary_state, "probed", False)
     return monkeypatch

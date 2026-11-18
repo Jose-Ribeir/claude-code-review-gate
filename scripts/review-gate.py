@@ -69,7 +69,10 @@ from pathlib import Path, PurePosixPath
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ocr_verdict import (compute_verdict, drop_failed_intent_findings,  # noqa: E402
-                         norm_severity, _INTENT_SEVERITIES, _is_intent_finding)
+                         comment_kind, comment_quotes_missing,
+                         norm_severity, _INTENT_SEVERITIES, _is_intent_finding,
+                         _SEVERITY_RANK, _block_threshold)
+import ocr_docsquality  # noqa: E402  # SPEC-14: docs-quality evidence + demotion
 import ocr_impact  # noqa: E402
 import ocr_index  # noqa: E402
 import ocr_memory  # noqa: E402
@@ -1915,6 +1918,9 @@ def _record_review(git_dir, head_sha, branch, mode, verdict, advisory, blocked, 
             "blocked": bool(blocked),
             "finding_count": len(findings),
             "findings": findings,
+            # SPEC-15.2: the record keeps what was waived -- never deleted.
+            "waived": (list(result.get("waived") or [])
+                       if isinstance(result, dict) and result.get("waived") else []),
             "truncated": False,
             "raw": f"{HISTORY_DIR}/{raw_name}" if raw_name else "",
         }
@@ -3450,15 +3456,24 @@ def _check_limit(out_text, err_text=""):
 
 def _final_verdict(result):
     """The run's verdict: compute_verdict's recompute, plus the SPEC-06
-    warn-fallback honor rule. compute_verdict is the only verdict authority
-    for what the reviewer reported; the fallback downgrade on top exists
-    because a counts-only axis report carries signal the reconstructed (and
-    therefore empty) findings list can no longer express -- recomputing over
-    it would turn an unreconstructable report into an unearned silent pass.
-    """
+    warn-fallback honor rule and the warn-mode clamp honor rule.
+    compute_verdict is the only verdict authority for what the reviewer
+    reported; the fallback downgrade on top exists because a counts-only
+    axis report carries signal the reconstructed (and therefore empty)
+    findings list can no longer express -- recomputing over it would turn
+    an unreconstructable report into an unearned silent pass. The clamp
+    honor rule is the same shape: a warn-mode finding the operator's lowered
+    block bar forced below the warn tier (low/note ranks) still carries real
+    signal the severity alone can no longer express, and ADR 0006's contract
+    is "a warning at the verdict" -- never a silent pass. Both rules only
+    ever sharpen toward warn, never toward block."""
     verdict = compute_verdict(result)
     if isinstance(result, dict) and result.get("rescued") == "warn_fallback" \
             and verdict == "pass":
+        return "warn"
+    if verdict == "pass" and isinstance(result, dict) and any(
+            isinstance(f, dict) and f.get("warn_mode_clamped")
+            for f in (result.get("findings") or [])):
         return "warn"
     return verdict
 
@@ -5160,6 +5175,9 @@ def _supervise_run(state_path, run_id):
     chunks_new = 0   # chunks reviewed in this run
     progress = {"new": 0}
     plan_summary = ""
+    cmd_findings, cmd_warnings = [], []   # SPEC-14.4: command checks (see below)
+    dq_notes, dq_note_warnings = [], []   # SPEC-14 story 12: pre-pass notes
+    parallel_checks = None    # SPEC-15.3: the parallel subset's runner (below)
     diffs = None     # precomputed diffs (_build_diffs); None on the 0.9.x path
     verdict_intent_base = None  # t25: day-0 intent view for the verdict record
     intent_chunk_stats = None   # [] on the chunked path: per-chunk digests
@@ -5185,6 +5203,14 @@ def _supervise_run(state_path, run_id):
                 "were during the review rather than at the pushed commit."
             )
         _mark_phase("worktree", ok=bool(worktree))
+
+        # SPEC-15.3: the parallel command-check subset starts NOW -- before
+        # the review session spawn, which is the whole point -- against its
+        # own throwaway tip clone (never review_root; see
+        # _ParallelCommandChecks). Joined at the verdict-assembly point
+        # below; the finally removes the clone on every exit path.
+        parallel_checks = _ParallelCommandChecks(
+            repo_root, state_path, run_id, base, tip).start()
 
         _TELE["tier"] = tier
         force_review = os.environ.get("OCR_FORCE_REVIEW", "").strip().lower() in ("1", "true", "yes")
@@ -5275,6 +5301,14 @@ def _supervise_run(state_path, run_id):
                     deep_flags = _arch_flags(review_root, base, tip, entries=_entries)
                     if deep_flags:
                         manifest["arch_flags"] = deep_flags
+                # SPEC-14.4: the quality payload is independent of the summary
+                # artifact -- deslop applies to any repo with markdown, so it
+                # rides the deep manifest whether docs_context exists or not.
+                deep_quality = _docs_quality_block(repo_root, review_root, base, tip,
+                                                   entries=_entries,
+                                                   run_dir=_run_dir(common_dir, run_id))
+                if deep_quality:
+                    manifest["docs_quality"] = deep_quality
                 manifest_path = str(_async_dir(common_dir) / f"manifest-{run_id}-deep.json")
                 _write_manifest_file(manifest_path, manifest, "deep-review manifest")
                 try:
@@ -5290,11 +5324,41 @@ def _supervise_run(state_path, run_id):
                     except Exception:
                         pass
             else:
-                result, ran, raw_name = _run_review_with_retry(
-                    lambda: _run_review(review_root, mode, git_dir, tip, review_range,
-                                        tier=ocr_telemetry.TIER_REVIEW,
-                                        common_dir=common_dir, partial=partial)
-                )
+                # SPEC-14.4: a docs-only push with an enabled quality duty
+                # still runs the documentation checker (the docs changer pays
+                # for the docs check, mirroring docs-gate 05's freshness cost
+                # rule): the single-context fallback gains a manifest carrying
+                # the docs_quality payload. No payload (all duties off, or no
+                # doc files matched): the 0.7.0 no-manifest path, unchanged.
+                docs_quality = _docs_quality_block(repo_root, review_root, base, tip,
+                                                   run_dir=_run_dir(common_dir, run_id))
+                if docs_quality is None:
+                    result, ran, raw_name = _run_review_with_retry(
+                        lambda: _run_review(review_root, mode, git_dir, tip, review_range,
+                                            tier=ocr_telemetry.TIER_REVIEW,
+                                            common_dir=common_dir, partial=partial)
+                    )
+                else:
+                    manifest_path = str(_async_dir(common_dir)
+                                        / f"manifest-{run_id}-docs.json")
+                    manifest = _build_review_manifest(
+                        _ManifestScope(common_dir, run_id), [], [], [], None, None,
+                        docs_quality=docs_quality)
+                    _write_manifest_file(manifest_path, manifest,
+                                         "docs-quality manifest")
+                    try:
+                        result, ran, raw_name = _run_review_with_retry(
+                            lambda: _run_review(review_root, mode, git_dir, tip,
+                                                review_range,
+                                                paths_file=manifest_path,
+                                                tier=ocr_telemetry.TIER_REVIEW,
+                                                common_dir=common_dir, partial=partial)
+                        )
+                    finally:
+                        try:
+                            Path(manifest_path).unlink(missing_ok=True)
+                        except Exception:
+                            pass
             chunks_new = 1 if ran else 0
             _mark_phase("review", chunks=chunks_new)
             if planner_warnings and isinstance(result, dict):
@@ -5307,6 +5371,11 @@ def _supervise_run(state_path, run_id):
             # context exists in this repo (no artifact = behavior is today).
             docs_context = _docs_context(review_root)
             arch_flags = _arch_flags(review_root, base, tip) if docs_context else None
+            # SPEC-14.4: the docs-quality payload (independent of the summary
+            # artifact): computed once here, injected into both the chunked
+            # and the single-context manifests.
+            docs_quality = _docs_quality_block(repo_root, review_root, base, tip,
+                                               run_dir=_run_dir(common_dir, run_id))
             # Part S: a flagged-truncated record of a file that CAN be reviewed in
             # units is no longer carried -- the file gets its proper review.
             seg = None
@@ -5576,7 +5645,7 @@ def _supervise_run(state_path, run_id):
                     fp=fp, carry_paths=carry_paths, chunk_extras=_review_extras,
                     timeout_marks=timeout_marks, diffs=diffs, seg=seg, impact=impact,
                     own_items=plan, push_ref=push_ref, arch_flags=arch_flags,
-                    review_range=review_range,
+                    docs_quality=docs_quality, review_range=review_range,
                 )
                 n_delta = sum(1 for p in active_items if p["mode"] == "delta")
                 n_full = len(active_items) - n_delta
@@ -5589,7 +5658,7 @@ def _supervise_run(state_path, run_id):
                 all_full = all(p["mode"] == "full" for p in active_items)
                 extras = _review_extras(0, [p["entry"]["path"] for p in active_items])
                 if diffs is None and all_full and not carry_items and not extras \
-                        and docs_context is None:
+                        and docs_context is None and docs_quality is None:
                     # Golden argv: byte-identical to 0.7.0 (no --paths-file).
                     # Only with OCR_PRECOMPUTED_DIFFS=0: otherwise a manifest is
                     # always written, since the diffs reach the reviewer through it.
@@ -5609,7 +5678,8 @@ def _supervise_run(state_path, run_id):
                     scope = _ManifestScope(common_dir, run_id)
                     manifest = _build_review_manifest(
                         scope, active_items, [], carry_paths,
-                        extras, diffs, docs_context=docs_context, arch_flags=arch_flags)
+                        extras, diffs, docs_context=docs_context, arch_flags=arch_flags,
+                        docs_quality=docs_quality)
                     _write_manifest_file(manifest_path, manifest,
                                          "single-context manifest")
                     try:
@@ -5724,6 +5794,29 @@ def _supervise_run(state_path, run_id):
 
         if plan is not None and plan_summary and isinstance(result, dict):
             result.setdefault("plan_summary", plan_summary)
+
+        # SPEC-14.4: command checks run against the tip CLONE, which the
+        # finally below removes as soon as the review ends -- the run must
+        # happen here, while review_root still exists. The findings join the
+        # stream at verdict-assembly time (with the deslop demotion pass),
+        # ahead of memory demotion and compute_verdict.
+        if isinstance(result, dict):
+            # SPEC-15.3: the SEQUENTIAL subset keeps today's exact semantics
+            # -- post-review, against review_root. The parallel subset
+            # (started above, before the review spawn) is joined HERE, so
+            # both finish or fail-soft before anything downstream. Both
+            # merge through the one extra_findings/extra_warnings path,
+            # sequential findings first then parallel ones (the documented
+            # order), leaving every downstream pass -- docs-quality
+            # demotion, memory demotion, waivers, compute_verdict --
+            # untouched; compute_verdict stays the sole verdict authority.
+            seq_findings, seq_warnings = _command_check_findings(
+                repo_root, review_root, base, tip, parallel=False)
+            par_findings, par_warnings = parallel_checks.join()
+            cmd_findings = seq_findings + par_findings
+            cmd_warnings = seq_warnings + par_warnings
+            dq_notes, dq_note_warnings = _docs_quality_scan_notes(
+                repo_root, review_root, base, tip)
     except _Fenced:
         stop.set()
         _remove_run_dir(common_dir, run_id)
@@ -5767,6 +5860,8 @@ def _supervise_run(state_path, run_id):
         _remove_run_dir(common_dir, run_id)
         if worktree:
             _remove_worktree(repo_root, worktree)
+        if parallel_checks is not None:
+            parallel_checks.cleanup()   # SPEC-15.3: the isolated tip clone
 
     st = _read_state(state_path) or st
     if st.get("run_id") != run_id or fenced["hit"]:
@@ -5845,6 +5940,21 @@ def _supervise_run(state_path, run_id):
             "severity": "info", "path": "review-gate", "start_line": "-",
             "end_line": "-", "content": cwd_note,
         }] + list(result.get("findings") or [])
+    # SPEC-14.4, at T1 verdict-assembly time like memory demotion: docs-
+    # deslop findings pass the cluster-rule demotion and the per-duty
+    # warn-mode clamp; command-check findings and the deterministic pre-pass
+    # notes (both computed above, while the tip clone existed) merge into the
+    # same stream -- compute_verdict below stays the single verdict authority.
+    if isinstance(result, dict):
+        result = _apply_docs_quality_demotion(result, repo_root)
+        extra_findings = dq_notes + cmd_findings
+        if extra_findings:
+            result = dict(result, findings=list(result.get("findings") or [])
+                          + extra_findings)
+        extra_warnings = dq_note_warnings + cmd_warnings
+        if extra_warnings:
+            result = dict(result, warnings=list(result.get("warnings") or [])
+                          + extra_warnings)
     # Memory (t08): at T1 verdict-assembly time, before the verdict is
     # decided, a finding matching a dismissal recorded through the dismiss
     # command drops to low severity with a "previously dismissed" prefix and
@@ -5852,6 +5962,13 @@ def _supervise_run(state_path, run_id):
     # the sole writer, and bypasses never teach the store.
     if isinstance(result, dict):
         result = _apply_memory_demotion(repo_root, result)
+    # SPEC-15.2: waiver enforcement at verdict-assembly time. The ledger
+    # filters compute_verdict's inputs (an anchor match moves the finding to
+    # a `waived` list the reasons, the record, and telemetry all carry; a
+    # miss -- no waiver, or the code changed so it lapsed -- judges it
+    # fresh); compute_verdict stays the only verdict authority.
+    if isinstance(result, dict):
+        result = _apply_waivers(repo_root, tip, result, common_dir)
     verdict = _final_verdict(result)
     if isinstance(result, dict):
         _TELE["findings"] = [
@@ -5859,11 +5976,21 @@ def _supervise_run(state_path, run_id):
              "start_line": f.get("start_line"), "severity": f.get("severity"),
              "confidence": f.get("confidence"), "category": f.get("category"),
              "provenance": f.get("provenance") or "new",
+             "evidence_source": f.get("evidence_source"),
              "content": str(f.get("content") or "")[:300]}
             for f in (result.get("findings") or []) if isinstance(f, dict)
         ]
         _TELE["warnings"] = [w if isinstance(w, dict) else {"message": str(w)}
                              for w in (result.get("warnings") or [])][:50]
+        # SPEC-15.2: loud always -- telemetry carries the waived list
+        # whenever suppression happened.
+        if result.get("waived"):
+            _TELE["waived"] = [
+                {"id": w.get("id") or _finding_id(w), "path": w.get("path"),
+                 "start_line": w.get("start_line"), "severity": w.get("severity"),
+                 "category": w.get("category"),
+                 "content": str(w.get("content") or "")[:300]}
+                for w in result["waived"] if isinstance(w, dict)]
         if isinstance(result.get("cross_file_context_summary"), dict):
             _TELE["model_cross_file"] = result["cross_file_context_summary"]
         if isinstance(result.get("impact_verdicts"), dict):
@@ -6560,6 +6687,384 @@ def _dismiss_finding(argv):
         f"{_sanitize(f.get('path', '?'), 120)}: {_sanitize(f.get('content') or '', 100)}\n"
         f"recorded to {ocr_memory.store_path(repo_root)} -- future matches demote "
         "to low severity with a 'previously dismissed' note.\n" + caveat)
+    return 0
+
+
+# --- SPEC-15.2: granular finding waivers --------------------------------------
+
+def _evidence_fingerprint(content):
+    """A deterministic fingerprint of a command-check finding's EVIDENCE
+    (the quoted output in `content`), normalized the way ocr_impact's
+    signature search normalizes text: each line stripped, runs of
+    whitespace collapsed, blank lines dropped. "" when nothing remains
+    (no content at all) -- the caller fails closed on that, exactly like a
+    missing path or signature."""
+    lines = [" ".join(line.split())
+              for line in str(content or "").splitlines()]
+    lines = [line for line in lines if line]
+    if not lines:
+        return ""
+    return hashlib.sha256("\n".join(lines)
+                           .encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def _waiver_anchor(git_root, tip, finding):
+    """The finding's content anchor (`sid`), or "" when it cannot be computed.
+
+    Content-anchored over a LOCAL window: the finding's path, the
+    signature_line() of its code (the distinctive code line ocr_impact's
+    sibling sweep anchors on -- the same anchoring _known_defects uses), and
+    the file's text at `tip` restricted to a context window around the
+    finding's location (start_line..end_line plus ~10 lines each side,
+    clamped to the file length). Both divergence directions of the earlier
+    whole-file-blob scheme are fixed: a far-field edit elsewhere in the
+    file no longer lapses the waiver (the window is unchanged), while any
+    edit inside the window still does (the finding is judged fresh and
+    blocks again). The window carries the uniqueness the blob oid used to:
+    two findings sharing path+signature at different locations keep distinct
+    anchors, so an unrelated unchanged finding can never ride another's
+    waiver. Stale sids keyed to the old blob scheme simply stop matching
+    (fail-closed fresh judgment) -- the ledger is machine-local, no
+    migration. Findings that carry no existing_code (command checks such as
+    the SPEC-15 test executor emit outputs, not diff hunks) anchor on the
+    tip text AT THE FINDING'S OWN LOCATION instead: an empty signature
+    there, not an absent one, is what still fails closed. Without that
+    fallback the anchor would be "" for every command-check finding,
+    making this class of finding unwaivable (spec story 23 demands the
+    opposite). No path, no signature line findable at the tip location, or
+    no blob at the tip: "", which never matches -- the gate never waives
+    blind.
+
+    Why identity binds to evidence for test-evidenced findings: an
+    executor finding says "this test failed, here is the output" -- the
+    waived thing is the acknowledged FAILURE, not the file's first line.
+    Two different reproduced failures at the same head-of-file location
+    (the executor reports start_line 1 on the failing test's target)
+    would otherwise share one anchor, letting a waiver granted for one
+    silently suppress the other. For findings with a valid evidence_source
+    the anchor therefore also carries a deterministic fingerprint of the
+    finding's quoted evidence (`content`, normalized); the same evidence
+    keeps the waiver while different failure evidence is a CHANGED
+    finding -- fresh and blocking -- even when the code at the reported
+    path is unchanged."""
+    path = str(finding.get("path") or "").strip()
+    if not path or not tip:
+        return ""
+    sig = ocr_impact.signature_line(str(finding.get("existing_code") or ""))
+    out, rc = _git(["show", f"{tip}:{path}"], cwd=git_root)
+    if rc != 0:
+        return ""
+    lines = out.splitlines()
+    try:
+        start = max(1, int(finding.get("start_line") or 1))
+    except (TypeError, ValueError):
+        start = 1
+    try:
+        end = int(finding.get("end_line") or start)
+    except (TypeError, ValueError):
+        end = start
+    start = min(start, max(1, len(lines)))
+    end = min(max(end, start), max(1, len(lines)))
+    if not sig:
+        sig = ocr_impact.signature_line("\n".join(lines[start - 1:end]))
+    if not sig:
+        return ""
+    window = "\n".join(lines[max(1, start - 10) - 1:end + 10])
+    # SPEC-15.6 (W9): a finding evidenced by a test run (evidence_source
+    # existing_test / ephemeral_test) binds its waiver identity to its
+    # EVIDENCE as well as its location. Without this, every executor
+    # finding anchored on the SAME tip window: a waived flaky suite let a
+    # DIFFERENT reproduced failure under the same head-of-file anchor ride
+    # the waiver -- the anchor now includes a deterministic fingerprint of
+    # the finding's quoted output, so the SAME evidence keeps the waiver
+    # (a far-field code edit does not lapse it) while DIFFERENT failure
+    # evidence is a changed finding that blocks again even though the
+    # code at the reported path is untouched. An evidence-source finding
+    # whose evidence yields no fingerprint (empty content) fails closed, ""
+    # -- the same never-match posture as a missing path or signature.
+    parts = [path, sig, window]
+    if str(finding.get("evidence_source") or "") in _EVIDENCE_SOURCES:
+        evidence = _evidence_fingerprint(finding.get("content"))
+        if not evidence:
+            return ""
+        parts.append("evidence:" + evidence)
+    raw = "\x00".join(parts)
+    return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def _waiver_display_id(f):
+    """The id a waived finding is shown and waived/unwaived by: the
+    reviewer-assigned id verbatim, else the gate's stable sha (12 chars)."""
+    sid = str(f.get("id") or "").strip()
+    return sid if sid else _finding_id(f)[:12]
+
+
+def _apply_waivers(repo_root, tip, result, common_dir):
+    """SPEC-15.2 waiver enforcement at verdict-assembly time.
+
+    After the merged findings stream is assembled and BEFORE compute_verdict:
+    each finding's current content anchor is matched against the repo-scoped
+    waiver ledger. An exact match leaves the blocking set and moves to a
+    `waived` list -- still in the record, the printed reasons, and telemetry,
+    never deleted. A miss (no waiver, or the code changed since it was
+    granted -- the waiver lapsed) judges the finding fresh. compute_verdict
+    stays the only verdict authority: waivers filter its inputs, they never
+    alter the rule. Fail-soft: an unreadable or empty ledger changes nothing.
+    """
+    if not isinstance(result, dict):
+        return result
+    try:
+        ledger = rg_store.read_waivers(common_dir)
+    except Exception as exc:  # noqa: BLE001 -- fail-soft AND observable (ADR 0006)
+        # rg_store.read_waivers already swallows store errors; this wrapper
+        # survives only because THIS path must note the miss.
+        result["warnings"] = list(result.get("warnings") or []) + [
+            {"file": None,
+             "message": ("waiver ledger could not be read (%s: %s); no "
+                         "finding waived this run" % (type(exc).__name__, exc))}]
+        _TELE.setdefault("waiver_errors", []).append(
+            "apply_waivers: %s: %s" % (type(exc).__name__, _sanitize(str(exc), 200)))
+        return result  # fail-soft: the verdict path itself is unchanged
+    sids = {str(e.get("sid") or "") for e in ledger if e.get("sid")}
+    if not sids:
+        return result
+    kept, waived = [], []
+    for f in result.get("findings") or []:
+        try:
+            hit = isinstance(f, dict) and _waiver_anchor(repo_root, tip, f) in sids
+        except Exception:
+            hit = False
+        if hit:
+            waived.append(dict(f, waived=True))
+        else:
+            kept.append(f)
+    if not waived:
+        return result  # nothing suppressed: the record and output stay as-is
+    result = dict(result, findings=kept, waived=waived)
+    ids = ", ".join(_sanitize(_waiver_display_id(w), 80) for w in waived)
+    result["warnings"] = list(result.get("warnings") or []) + [
+        {"message": (f"waiver: suppressed {len(waived)} finding(s) "
+                     f"[{ids}] - still recorded, never deleted")}]
+    return result
+
+
+def _match_waiver_ids(records, fid, ids_of):
+    """The records <fid> resolves to, --dismiss style (the one id-resolution
+    rule for both waive and unwaive): every record whose id set contains
+    <fid> exactly, else -- only when nothing matched exactly -- every record
+    with an id prefixed by <fid> (a >=6-char prefix, the --dismiss
+    precedent). [] when nothing matches. Callers requiring unique
+    identification (waive) take len(hits) == 1; unwaive clears them all (a
+    re-waived finding holds several ledger entries under one finding_id)."""
+    exact = [r for r in records if fid in ids_of(r)]
+    if exact:
+        return exact
+    if len(fid) < 6:
+        return []
+    return [r for r in records if any(s.startswith(fid) for s in ids_of(r))]
+
+
+def _resolve_waiver_finding(findings, fid):
+    """Resolve <fid> against the last verdict's findings, --dismiss style:
+    reviewer ids verbatim, else the gate's stable _finding_id sha. Exactly
+    one match (exact, or a >=6-char prefix when nothing matched exactly);
+    None when nothing (or nothing unique) matches."""
+    def ids_of(f):
+        ids = {str(i) for i in [f.get("id")] if i}
+        ids.add(_finding_id(f))
+        return ids
+    hits = _match_waiver_ids(findings, fid, ids_of)
+    return hits[0] if len(hits) == 1 else None
+
+
+def _last_verdict(git_dir):
+    """(head, findings, at) of the most recently recorded verdict -- the
+    shared tail the waive/unwaive/--list commands all judge the ledger
+    against. ("", [], "?") when nothing is recorded yet."""
+    entries = _read_history(git_dir, 1) if git_dir else []
+    if not entries:
+        return "", [], "?"
+    entry = entries[-1]
+    findings = [f for f in entry.get("findings") or [] if isinstance(f, dict)]
+    return (str(entry.get("head") or ""), findings,
+            str(entry.get("at") or "?"))
+
+
+def _waiver_counts(repo_root, common_dir, head, findings):
+    """(active, suppressed): waivers in the ledger vs findings of the last
+    recorded verdict their anchors currently suppress."""
+    ledger = rg_store.read_waivers(common_dir)  # fail-soft: [] on any miss
+    sids = {str(e.get("sid") or "") for e in ledger if e.get("sid")}
+    suppressed = 0
+    if sids and findings:
+        for f in findings:
+            if isinstance(f, dict) and _waiver_anchor(repo_root, head, f) in sids:
+                suppressed += 1
+    return len(sids), suppressed
+
+
+def _waiver_list(repo_root, common_dir):
+    """`review-gate.py waive --list`: the ledger, or a note for an empty one.
+    Never a failure."""
+    ledger = rg_store.read_waivers(common_dir)  # fail-soft: [] on any miss
+    if not ledger:
+        sys.stdout.write("no waivers recorded for this repository.\n")
+        return 0
+    for e in ledger:
+        when = e.get("waived_at")
+        try:
+            when = time.strftime("%Y-%m-%d %H:%M:%SZ", time.gmtime(float(when)))
+        except (TypeError, ValueError):
+            when = str(when or "?")
+        note = (f"  note: {_sanitize(str(e.get('note') or ''), 120)}"
+                if e.get("note") else "")
+        sys.stdout.write(
+            f"  {_sanitize(str(e.get('sid') or '?'), 16)}  "
+            f"{_sanitize(str(e.get('finding_id') or '?'), 80)}  waived {when}{note}\n")
+    git_dir = _git_dir(repo_root)
+    head, findings, _at = _last_verdict(git_dir)
+    active, suppressed = _waiver_counts(repo_root, common_dir, head, findings)
+    sys.stdout.write(
+        f"{active} active waiver(s), {suppressed} finding(s) suppressed in the last "
+        "recorded verdict.\n")
+    return 0
+
+
+def _waiver_command(argv):
+    """`review-gate.py waive <finding-id> [<finding-id>...] [--note TEXT]` and
+    `review-gate.py waive --list` (SPEC-15.2, ADR 0004 operator-command
+    precedent: standalone, no review, no markers, no hook payload; waiving is
+    a between-pushes act, nothing attaches to the push command line).
+
+    `waive` resolves each id against the LAST recorded verdict's findings
+    (same resolution as --dismiss), computes the finding's content anchor at
+    that verdict's head, and appends {sid, finding_id, waived_at, note?} to
+    the store-root, repo-scoped ledger. Prints the resulting active/suppressed
+    counts. Unknown ids, empty histories, and anchorless findings degrade
+    with notes, never failures.
+    """
+    args = argv[2:]  # argv[1] == "waive"
+    repo_root = _repo_root()
+    git_dir = _git_dir(repo_root)
+    if not git_dir:
+        _warn("not inside a git repository - no waiver ledger here.")
+        return 1
+    common_dir = _git_common_dir(repo_root) or git_dir
+    if "--list" in args:
+        return _waiver_list(repo_root, common_dir)
+    note = ""
+    fids, i = [], 0
+    while i < len(args):
+        if args[i] == "--note":
+            note = args[i + 1] if i + 1 < len(args) else ""
+            if not note:
+                _warn("waive: --note given with no text; ignoring it")
+            i += 2
+        elif not args[i].startswith("--"):
+            fids.append(args[i])
+            i += 1
+        else:
+            i += 1
+    if not fids:
+        _warn("usage: review-gate.py waive <finding-id> [<finding-id>...] "
+              "[--note TEXT]  (or: review-gate.py waive --list)")
+        return 1
+    entries = _last_verdict(git_dir)
+    head, findings, at = entries
+    if not head and not findings:
+        _warn(f"no recorded verdicts yet ({_findings_log_path(git_dir)}) - "
+              "nothing to waive.")
+        return 0  # nothing recorded: a note, never a failure
+    ledger = rg_store.read_waivers(common_dir)  # fail-soft: [] on any miss
+    added, skipped = [], []
+    for fid in fids:
+        f = _resolve_waiver_finding(findings, fid)
+        if f is None:
+            skipped.append(fid)
+            _warn(f"waive: unknown finding '{_sanitize(fid, 80)}' in the last "
+                  f"recorded verdict ({at}) - not waived.")
+            continue
+        sid = _waiver_anchor(repo_root, head, f)
+        disp = _waiver_display_id(f)
+        if not sid:
+            skipped.append(fid)
+            _warn(f"waive: '{_sanitize(disp, 80)}' has no computable content anchor "
+                  "(no path or no code) - not waived.")
+            continue
+        if any(str(e.get("sid") or "") == sid for e in ledger):
+            _warn(f"waive: '{_sanitize(disp, 80)}' is already waived "
+                  f"(anchor {sid}).")
+            continue
+        e = {"sid": sid, "finding_id": disp, "waived_at": time.time()}
+        if note:
+            e["note"] = str(note)
+        ledger.append(e)
+        added.append(e)
+        sys.stdout.write(
+            f"waived [{_sanitize(f.get('severity', '?'), 20)}] "
+            f"{_sanitize(f.get('path', '?'), 120)}: "
+            f"{_sanitize(f.get('content') or '', 100)}\n")
+    if added:
+        try:
+            rg_store.write_waivers(common_dir, ledger)
+        except Exception as exc:
+            _warn(f"waiver ledger could not be written: {_sanitize(str(exc), 200)}")
+            return 1
+        sys.stdout.write(
+            f"recorded to {rg_store.waiver_path(common_dir)} -- the same finding, "
+            "code unchanged, is suppressed from the blocking set on the next "
+            "push (code changed: the waiver lapses and it blocks again).\n")
+    active, suppressed = _waiver_counts(repo_root, common_dir, head, findings)
+    sys.stdout.write(
+        f"ledger: {active} active waiver(s), {suppressed} finding(s) suppressed "
+        f"in the last recorded verdict, {len(skipped)} skipped.\n")
+    return 0
+
+
+def _unwaive_command(argv):
+    """`review-gate.py unwaive <finding-id> [<finding-id>...]`: remove ledger
+    entries by finding_id (exact, else a >=6-char unique prefix, --dismiss
+    style). An unknown id or an empty ledger degrades with a note, never a
+    failure."""
+    fids = [a for a in argv[2:] if not a.startswith("--")]  # argv[1] == "unwaive"
+    if not fids:
+        _warn("usage: review-gate.py unwaive <finding-id> [<finding-id>...]")
+        return 1
+    repo_root = _repo_root()
+    git_dir = _git_dir(repo_root)
+    if not git_dir:
+        _warn("not inside a git repository - no waiver ledger here.")
+        return 1
+    common_dir = _git_common_dir(repo_root) or git_dir
+    ledger = rg_store.read_waivers(common_dir)  # fail-soft: [] on any miss
+    if not ledger:
+        sys.stdout.write("no waivers recorded for this repository - nothing to "
+                         "unwaive.\n")
+        return 0
+    removed = 0
+    for fid in fids:
+        hits = _match_waiver_ids(
+            ledger, fid, lambda e: {str(e.get("finding_id") or "")})
+        if not hits:
+            _warn(f"unwaive: no waiver for '{_sanitize(fid, 80)}' - the ledger is "
+                  "unchanged.")
+            continue
+        for h in hits:
+            ledger.remove(h)
+            removed += 1
+            sys.stdout.write(f"unwaived {_sanitize(str(h.get('finding_id') or '?'), 80)} "
+                             f"(anchor {_sanitize(str(h.get('sid') or '?'), 16)}) - the "
+                             "finding blocks again on its next appearance.\n")
+    if removed:
+        try:
+            rg_store.write_waivers(common_dir, ledger)
+        except Exception as exc:
+            _warn(f"waiver ledger could not be written: {_sanitize(str(exc), 200)}")
+            return 1
+    head, findings, _at = _last_verdict(git_dir)
+    active, suppressed = _waiver_counts(repo_root, common_dir, head, findings)
+    sys.stdout.write(f"ledger: {active} active waiver(s), {suppressed} finding(s) "
+                     "suppressed in the last recorded verdict.\n")
     return 0
 
 
@@ -9287,6 +9792,868 @@ def _arch_flags(root, base, tip, entries=None):
         return None
 
 
+# --- documentation-quality duties (SPEC-14.4): the docs_quality payload ------
+# The gate-side plumbing for the checker's three quality duty classes
+# (docs-deslop, adr-wait-what, adr-integrity): doc-diff detection against the
+# layered checks config, deterministic evidence from ocr_docsquality (called,
+# never reimplemented), the manifest payload the personality contract
+# (skills/review/SKILL.md §2 / agents/docs-checker.md) consumes verbatim, and
+# user-registered command checks. The personality runs a duty only when the
+# payload's enabled_duties flag is true, so the flag is the gate's spawn rule.
+
+_DOC_QUALITY_DUTIES = ("docs-deslop", "adr-wait-what", "adr-integrity")
+# The per-duty checks-config options that travel in the payload (SKILL.md's
+# contract). The v2 stub surfaces (commit_messages / code_comments) resolve
+# through rg_config as recognized, disabled, inert keys; they are not among
+# these duty options: v1 is markdown-only and they stay inert here.
+_DOC_QUALITY_OPTION_KEYS = ("sections", "template", "sentence_cap", "sweep")
+# Which of the helper's evidence classes feeds which duty (SKILL.md's contract).
+_DOC_QUALITY_EVIDENCE_KEYS = {
+    "docs-deslop": ("deslop",),
+    "adr-wait-what": ("ste",),
+    "adr-integrity": ("missing_paths", "dangling_links", "unresolved_adr_refs"),
+}
+# A doc-file diff inlines under this size; bigger ones go to a run-dir file the
+# checker reads itself (the manifest's {path, diff}|{path, diff_file} shape).
+_DOC_DIFF_INLINE_MAX_BYTES = 60 * 1024
+# A user-registered command check gets this long to answer by default; a
+# per-check `timeout` (SPEC-15.1, rg_config) overrides it, clamped to
+# 1..3600 s in _run_one_command_check. Over it the run degrades to a warning
+# like every other check failure (never a stuck gate).
+_COMMAND_CHECK_TIMEOUT_S = 60
+# The warn-mode confidence clamp: under the default block bar, so a warn-mode
+# finding warns but never blocks. Mode only ever downgrades, never upgrades.
+_WARN_MODE_CONFIDENCE_CAP = 0.5
+# Cap on the tells one deterministic pre-pass note carries: the note points
+# a human at the pattern, it never retypes the file.
+_DETERMINISTIC_NOTE_TELLS_CAP = 10
+
+
+def _warn_mode_clamp(tagged):
+    """The warn-mode clamp, one finding, in place: severity strictly below
+    the effective block bar and confidence strictly below the confidence bar,
+    so a warn finding warns but never blocks WHATEVER the operator lowered
+    OCR_BLOCK_SEVERITY / OCR_BLOCK_CONFIDENCE to (downgrade-only; compute_verdict
+    stays the sole verdict authority). Severity ladder: high > medium > low;
+    below low the finding is reduced to "note" (unranked, never blocking).
+    The clamp stamps warn_mode_clamped: true so _final_verdict's honor rule
+    can keep ADR 0006's contract -- "a warning at the verdict" -- when the
+    lowered bar forces the severity below the warn tier (low/note). Every
+    checks-config mode consumer uses this one clamp (command checks, the
+    built-in quality duties)."""
+    tagged["warn_mode_clamped"] = True
+    min_rank, min_conf = _block_threshold()
+    safe_rank = min_rank - 1
+    safe_sev = {0: "low", 1: "medium"}.get(safe_rank, "note")
+    rank = _SEVERITY_RANK.get(norm_severity(tagged.get("severity")), -1)
+    if rank > safe_rank:
+        tagged["severity"] = safe_sev
+    try:
+        conf = float(tagged.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        conf = 0.0
+    conf_cap = _WARN_MODE_CONFIDENCE_CAP
+    if conf_cap >= min_conf:
+        conf_cap = max(0.0, round(min_conf - 0.01, 2))
+    if conf > conf_cap:
+        tagged["confidence"] = conf_cap
+    return tagged
+
+
+def _changed_doc_paths(entries):
+    """Sorted doc-format paths of a diff-entry list: every changed *.md minus
+    the corpus filter's excluded basenames (changelogs; _DOC_BASENAME_EXCLUDED).
+    Deletions have no prose to judge and never match. The quality duties'
+    prose scope is exactly this corpus (story 8)."""
+    docs = set()
+    for e in entries or []:
+        if str(e.get("status") or "").startswith("D"):
+            continue
+        path = (e.get("path") or "").replace("\\", "/")
+        # The gate's own state (the summary artifact, the checks config) is
+        # never documentation under review -- the corpus filter rule.
+        if path.startswith(".ocr/") or path == ".ocr":
+            continue
+        base = path.rsplit("/", 1)[-1].lower()
+        if base.endswith(".md") and not base.startswith(_DOC_BASENAME_EXCLUDED):
+            docs.add(path)
+    return sorted(docs)
+
+
+def _check_glob_matches(path, globs):
+    """fnmatch-style repo-relative glob matching (the risk-glob semantics:
+    `*` spans separators, a leading `**/` is optional so it matches at the
+    root too)."""
+    return any(_risk_glob_match(path, glob) for glob in globs or [])
+
+
+def _doc_diff_payload_entry(directory, index, review_root, base, tip, path):
+    """One {path, diff}|{path, diff_file} payload entry. The diff is the
+    file's own base..tip text; bulky diffs go to a run-dir file the checker
+    reads itself (the manifest never retypes them into a prompt). Fail-soft:
+    a diff that cannot be produced degrades to a marker line, never a crash."""
+    out, rc = _git(["diff", "--no-color", "-M", f"{base}..{tip}", "--", path],
+                   cwd=review_root)
+    if rc != 0:
+        return {"path": path, "diff": "# diff unavailable (git diff failed)\n"}
+    data = out.encode("utf-8", errors="replace")
+    if directory is None or len(data) <= _DOC_DIFF_INLINE_MAX_BYTES:
+        return {"path": path, "diff": out}
+    # _write_diff_file names the file itself: a name derived from the
+    # reviewed tree is against its rule.
+    diff_file = _write_diff_file(directory, index, out)
+    if not diff_file:
+        return {"path": path, "diff": out}
+    return {"path": path, "diff_file": str(diff_file)}
+
+
+def _docs_quality_block(repo_root, review_root, base, tip, entries=None,
+                        run_dir=None):
+    """The manifest's docs_quality payload (SPEC-14, stories 4/5/8/20), or None.
+
+    Present only when at least one ENABLED built-in quality duty's globs
+    match doc files of the push diff; absent in every other case (no key, no
+    quality check, no cost). Contract (skills/review/SKILL.md §2):
+    {enabled_duties, options, files, evidence} -- enabled_duties flags one
+    duty true only when it is both enabled in config AND matched doc files;
+    options carries the duty's checks-config options (sections/template/
+    sentence_cap/sweep); files holds the doc-format entries of the change set
+    ONLY (documentation, never code); evidence is the helper's deterministic
+    scan, sliced to the class each duty consumes. An ADR duty's `sweep`
+    option (default off, story 20) widens its evidence targets to every ADR
+    under the records root -- the `files` list itself stays the change set.
+    Fail-soft: any failure here pays a warning, never the push's outcome.
+    """
+    try:
+        checks = rg_config.load_settings(repo_root)["checks"]
+        if entries is None:
+            entries, _warnings = _collect_diff_entries(
+                review_root, base or _EMPTY_TREE, tip)
+        doc_paths = _changed_doc_paths(entries)
+        if not doc_paths:
+            return None
+        diff_base = base or _EMPTY_TREE
+        enabled_duties, options, evidence, files = {}, {}, {}, []
+        for duty in _DOC_QUALITY_DUTIES:
+            check = checks.get(duty) or {}
+            if check.get("enabled") is not True:
+                enabled_duties[duty] = False
+                continue
+            matched = [p for p in doc_paths if _check_glob_matches(p, check.get("globs"))]
+            if not matched:
+                enabled_duties[duty] = False
+                continue
+            enabled_duties[duty] = True
+            options[duty] = {k: check[k] for k in _DOC_QUALITY_OPTION_KEYS
+                             if k in check}
+            targets = matched
+            if options[duty].get("sweep") is True and duty != "docs-deslop":
+                # Whole-corpus sweep (story 20), markdown-only in v1: every
+                # ADR under the records root, not just the pushed ones.
+                records_root = _records_root(review_root)
+                if records_root:
+                    try:
+                        sweep = [records_root + "/" + name
+                                 for name in sorted(os.listdir(
+                                     str(Path(review_root) / records_root)))
+                                 if name.lower().endswith(".md")]
+                    except OSError:
+                        sweep = []
+                    targets = sorted(set(matched) | set(sweep))
+            t0 = time.monotonic()
+            cap = options[duty].get("sentence_cap")
+            per = ocr_docsquality.compute_evidence(
+                str(review_root), targets,
+                sentence_cap=cap if isinstance(cap, int) and cap > 0
+                else ocr_docsquality.SENTENCE_CAP_DEFAULT)
+            keys = _DOC_QUALITY_EVIDENCE_KEYS[duty]
+            sliced = {}
+            for rel, full in (per.get("evidence") or {}).items():
+                entry = {}
+                for k in keys:
+                    # The scan classes feed the duty's evidence FLAT: deslop
+                    # and STE are each one class, existence facts are three.
+                    if k in ("deslop", "ste"):
+                        entry.update(full.get(k) or {})
+                    else:
+                        entry[k] = full.get(k) or []
+                sliced[rel] = entry
+            evidence[duty] = sliced
+            _TELE.setdefault("docs_quality", []).append({
+                "duty": duty, "files": len(targets), "sweep": len(targets) - len(matched),
+                "seconds": round(time.monotonic() - t0, 2),
+                "warnings": list(per.get("warnings") or [])})
+            files += matched
+        if not any(enabled_duties.values()):
+            return None
+        payload_files = []
+        for index, path in enumerate(sorted(set(files))):
+            payload_files.append(_doc_diff_payload_entry(
+                Path(run_dir) if run_dir else None, index,
+                review_root, diff_base, tip, path))
+        return {"enabled_duties": enabled_duties, "options": options,
+                "files": payload_files, "evidence": evidence}
+    except Exception as exc:  # noqa: BLE001 -- the payload must never break a review
+        _warn(f"[gate] docs-quality payload failed ({type(exc).__name__}: {exc}); "
+              "the push continues without it")
+        return None
+
+
+def _apply_docs_quality_demotion(result, repo_root=None):
+    """The pre-verdict quality-duty seam (stories 11 and 2).
+
+    Cluster rule (story 11): every docs-deslop finding -- the quality class
+    carrying `tells` -- passes through ocr_docsquality --validate, which
+    demotes anything under the cluster bar (fewer than 3 co-located tells,
+    no document_wide) to a note that can never block. Gate-side
+    deterministic pre-pass findings (deterministic: true) are already
+    notes and skip validation -- the cluster rule governs model findings.
+
+    Warn mode (story 2): a quality duty whose resolved checks-config mode
+    is "warn" gets the same downgrade-only clamp command checks get
+    (_warn_mode_clamp), so a warn-mode duty finding warns but never
+    blocks. All other findings -- including block-mode quality findings --
+    flow to compute_verdict UNALTERED (the doc-anchored exemption touches
+    anchoring, not fields; house rule: call the helper, never reimplement
+    the cluster rule).
+    """
+    findings = result.get("findings") or []
+    out = list(findings)
+    warnings = list(result.get("warnings") or [])
+    indexes = [i for i, f in enumerate(out)
+               if isinstance(f, dict)
+               and f.get("docs_quality_duty") == "docs-deslop"
+               and f.get("deterministic") is not True]
+    if indexes:
+        t0 = time.monotonic()
+        subset = [out[i] for i in indexes]
+        checked = ocr_docsquality.validate_findings(subset)
+        validated = checked.get("findings") or []
+        if len(validated) == len(indexes):  # the helper failed soft: keep as-is
+            for i, f in zip(indexes, validated):
+                out[i] = f
+            warnings += [{"file": None, "message": w}
+                         for w in (checked.get("warnings") or [])]
+            _TELE.setdefault("docs_quality", []).append({
+                "duty": "docs-deslop-validate", "findings": len(indexes),
+                "demotions": int(checked.get("demoted") or 0),
+                "seconds": round(time.monotonic() - t0, 2)})
+    modes = {}
+    if repo_root is not None:
+        try:
+            checks = rg_config.load_settings(repo_root)["checks"]
+            modes = {d: str((checks.get(d) or {}).get("mode") or "block")
+                     for d in _DOC_QUALITY_DUTIES}
+        except Exception as exc:  # noqa: BLE001 -- fail-soft and observable
+            warnings.append({
+                "file": None,
+                "message": ("quality-duty warn-mode clamp skipped: the "
+                            "checks config failed to load (%s)"
+                            % type(exc).__name__)})
+    warn_duties = {d for d, mode in modes.items() if mode == "warn"}
+    if warn_duties:
+        clamped = 0
+        for i, f in enumerate(out):
+            if isinstance(f, dict) and f.get("docs_quality_duty") in warn_duties:
+                out[i] = _warn_mode_clamp(dict(f))
+                clamped += 1
+        if clamped:
+            _TELE.setdefault("docs_quality", []).append({
+                "duty": "warn-mode-clamp", "duties": sorted(warn_duties),
+                "findings": clamped})
+    return dict(result, findings=out, warnings=warnings)
+
+
+def _docs_quality_scan_notes(repo_root, review_root, base, tip, entries=None):
+    """(findings, warnings): the deterministic pre-pass hits as NOTE
+    findings (story 12).
+
+    The same deslop scan that feeds the checker as manifest evidence also
+    leaves a trace the report carries: one note per matched doc file
+    aggregating that file's catalog and throat-clearing hits (the tells
+    list capped at _DETERMINISTIC_NOTE_TELLS_CAP), tagged
+    docs_quality_duty "docs-deslop" plus deterministic: true. A note
+    severity ranks below low in compute_verdict, so notes reach the report
+    and telemetry but never enter blocking math. Only when the duty is
+    enabled and its globs match changed doc files; fail-soft like every
+    gate-side piece -- a notes failure costs warnings, never the push.
+    The scan is re-run here rather than cached from the payload build: the
+    payload exists only when a checker spawns, and notes are owed either
+    way.
+    """
+    findings, warnings = [], []
+    try:
+        checks = rg_config.load_settings(repo_root)["checks"]
+    except Exception as exc:  # noqa: BLE001 -- fail-soft and observable
+        warnings.append({"file": None, "message":
+                         "docs-quality scan notes skipped: the checks config "
+                         "failed to load (%s)" % type(exc).__name__})
+        return findings, warnings
+    try:
+        check = checks.get("docs-deslop") or {}
+        if check.get("enabled") is not True:
+            return findings, warnings
+        if entries is None:
+            entries, _warnings = _collect_diff_entries(
+                review_root, base or _EMPTY_TREE, tip)
+        doc_paths = _changed_doc_paths(entries)
+        matched = [p for p in doc_paths
+                   if _check_glob_matches(p, check.get("globs"))]
+        if not matched:
+            return findings, warnings
+        per = ocr_docsquality.compute_evidence(str(review_root), matched)
+        warnings += [{"file": None, "message": w}
+                     for w in (per.get("warnings") or [])]
+        for rel in sorted(per.get("evidence") or {}):
+            deslop = (per["evidence"].get(rel) or {}).get("deslop") or {}
+            tells = []
+            for hit in (deslop.get("catalog_hits") or []):
+                tells.append({"phrase": hit.get("phrase"),
+                              "line": hit.get("line"),
+                              "category": hit.get("category")})
+            for hit in (deslop.get("throat_clearing") or []):
+                tells.append({"phrase": hit.get("phrase"),
+                              "line": hit.get("line"),
+                              "category": "throat_clearing"})
+            if not tells:
+                continue
+            total = len(tells)
+            tells = tells[:_DETERMINISTIC_NOTE_TELLS_CAP]
+            lines = [int(t["line"]) for t in tells
+                     if isinstance(t.get("line"), (int, float))]
+            phrases = ", ".join(
+                sorted({str(t.get("phrase") or "") for t in tells})[:3])
+            content = ("deterministic deslop pre-pass: %d catalog/"
+                       "throat-clearing hit(s) in this file (e.g. %s)"
+                       % (total, phrases))
+            n_skeleton = len(deslop.get("template_skeletons") or [])
+            if n_skeleton:
+                content += "; plus %d template-skeleton heading(s)" % n_skeleton
+            findings.append({
+                "severity": "note", "confidence": 0.0,
+                "path": rel,
+                "start_line": min(lines) if lines else 1,
+                "end_line": max(lines) if lines else 1,
+                "category": "documentation",
+                "content": content,
+                "docs_quality_duty": "docs-deslop",
+                "deterministic": True,
+                "tells": tells,
+            })
+    except Exception as exc:  # noqa: BLE001 -- notes never break a review
+        _warn(f"[gate] docs-quality scan notes failed ({type(exc).__name__}: "
+              f"{exc}); the push continues without them")
+        warnings.append({"file": None, "message":
+                         "docs-quality scan notes failed (%s); skipped"
+                         % type(exc).__name__})
+        return [], warnings
+    if findings:
+        _TELE.setdefault("docs_quality", []).append({
+            "duty": "docs-deslop-scan-notes", "files": len(matched),
+            "notes": len(findings)})
+    return findings, warnings
+
+
+# --- user-registered command checks (SPEC-14 story 4) -------------------------
+
+# SPEC-15.4: the evidence_source tag a command-check finding may carry, and
+# the pattern that marks a check warning as the no-permanent-coverage warning
+# an ephemeral_test finding should be paired with. CONVENTION the reference
+# executor (SPEC-15.5) must follow: the warning must STATE the lack -- a
+# negation (no / without / missing / lack(s)) within a short span of
+# "permanent test" or "coverage", e.g. "no permanent coverage for the race
+# probe: tests/dsl.py missing". A warning that merely MENTIONS coverage
+# ("coverage is 82%") does not pair.
+_EVIDENCE_SOURCES = frozenset(("existing_test", "ephemeral_test"))
+_COVERAGE_WARNING_RE = re.compile(
+    r"(no|without|missing|lacks?)\w*\s+.{0,40}(permanent\s+)?(test|coverage)",
+    re.IGNORECASE)
+
+
+def _run_one_command_check(review_root, command, matched,
+                           timeout=_COMMAND_CHECK_TIMEOUT_S):
+    """(findings, warnings, error_note_or_None, telemetry) for ONE command
+    check over its matched changed files: the repo-relative executable runs
+    with cwd the review tree root and the matched file list on stdin as a
+    JSON array;
+    stdout is the findings contract (SPEC-15.4: a bare findings array, or a
+    {"findings": [...]} or {"findings": [...], "warnings": [...]} wrapper
+    -- the warnings array is the check's own degradations and surfaces like
+    every other one; a malformed warnings field degrades to a note, never a
+    failure). Findings may carry evidence_source "existing_test" or
+    "ephemeral_test"; an unknown value degrades the tag with a note while
+    the finding survives. An ephemeral_test finding without the check's
+    findings. An ephemeral_test finding without the check's
+    no-permanent-coverage warning gains a gate-side warning on the same
+    channel as the check's own -- never a finding, never a verdict change.
+    The answer budget defaults to 60 s and is clamped to 1..3600 s
+    (SPEC-15.1 per-check `timeout`). Nonzero
+    exit, timeout, and malformed output degrade to a note -- the check's
+    findings are DISCARDED, never silently passed (the note plus telemetry
+    stay) and never a crash. The contract is a REPO-RELATIVE executable: an
+    absolute path or any ".." component is an escape outside the reviewed
+    tree and is rejected before anything runs. The resolved budget is also
+    exported to the executor as OCR_CHECK_TIMEOUT_S (string seconds, on top
+    of the gate's own environment) so a cooperative executor can finish its
+    internal selector/test/probe phases BEFORE the gate's kill. An
+    executor may add a `telemetry` field (object) to its wrapper: its
+    entries -- scalars, or a one-level object of scalars (the
+    reproduce_results shape) -- merge into that check's command_checks
+    telemetry entry; a malformed field or malformed values degrade to
+    notes and are ignored -- never a failure, never a discard."""
+    cmd_path = Path(command)
+    if cmd_path.is_absolute() or ".." in cmd_path.parts:
+        return [], [], ("command must name a repo-relative executable (no "
+                        "absolute paths, no '..' components): %s; findings discarded"
+                        % command), {}
+    exe = str(Path(review_root) / command)
+    if not (os.path.isfile(exe) and os.access(exe, os.X_OK)):
+        return [], [], f"command not executable or missing: {command}", {}
+    # SPEC-15.1: the check's per-check answer budget, clamped to a sane
+    # guard (1..3600 s). rg_config already floors positive values at 1, so
+    # the ceiling is the only clamp needed here; an unusable value keeps
+    # the default budget.
+    try:
+        budget = min(max(float(timeout), 1.0), 3600.0)
+    except (TypeError, ValueError):
+        budget = float(_COMMAND_CHECK_TIMEOUT_S)
+    # SPEC-15.4: the resolved per-check budget reaches the executor as
+    # OCR_CHECK_TIMEOUT_S (string seconds) WITHOUT losing the base
+    # environment, so a cooperative executor can clamp its own phases to
+    # finish before this budget's kill.
+    env = dict(os.environ)
+    env["OCR_CHECK_TIMEOUT_S"] = "%g" % budget
+    try:
+        proc = subprocess.run([exe], input=json.dumps(matched), text=True,
+                              cwd=str(review_root), capture_output=True,
+                              timeout=budget, env=env)
+    except subprocess.TimeoutExpired:
+        return [], [], f"timed out after {budget:g}s; findings discarded", {}
+    except OSError as exc:
+        return [], [], f"could not execute: {exc}", {}
+    if proc.returncode != 0:
+        return [], [], f"exit code {proc.returncode}; findings discarded", {}
+    try:
+        data = json.loads(proc.stdout or "")
+    except ValueError:
+        return [], [], "malformed output (stdout is not JSON); findings discarded", {}
+    notes, check_warnings = [], []   # gate-side degrade notes / the check's own
+    telemetry = {}
+    if isinstance(data, dict):
+        raw_telemetry = data.get("telemetry")
+        if isinstance(raw_telemetry, dict):
+            def _tele_value_ok(value):
+                # Scalars pass; a one-level object of scalars (the
+                # reproduce_results shape) passes; anything else is
+                # malformed and dropped loudly.
+                if isinstance(value, dict):
+                    return all(v is None or
+                               isinstance(v, (str, int, float, bool))
+                               for v in value.values())
+                return (value is None
+                        or isinstance(value, (str, int, float, bool)))
+
+            telemetry = {k: v for k, v in raw_telemetry.items()
+                         if _tele_value_ok(v)}
+            dropped = sorted(str(k) for k in raw_telemetry
+                             if k not in telemetry)
+            if dropped:
+                notes.append({"file": None,
+                              "message": ("malformed telemetry values for "
+                                          "%s; entries ignored"
+                                          % ", ".join(dropped))})
+        elif raw_telemetry is not None:
+            notes.append({"file": None,
+                          "message": ("malformed telemetry field (not an "
+                                      "object); telemetry ignored")})
+        raw_warnings = data.get("warnings")
+        if isinstance(raw_warnings, list):
+            for w in raw_warnings:
+                if isinstance(w, str):
+                    check_warnings.append({"file": None, "message": w})
+                elif isinstance(w, dict):
+                    check_warnings.append({"file": w.get("file"),
+                                           "message": str(w.get("message") or "")})
+                else:
+                    notes.append({"file": None,
+                                 "message": ("malformed warnings entry (%s); "
+                                             "entry ignored" % type(w).__name__)})
+        elif raw_warnings is not None:
+            notes.append({"file": None,
+                         "message": ("malformed warnings field (not an array); "
+                                     "warnings ignored")})
+        data = data.get("findings")
+    if not isinstance(data, list):
+        return [], [], "malformed output (no findings array); findings discarded", {}
+    findings = []
+    covered = any(_COVERAGE_WARNING_RE.search(str(w.get("message") or ""))
+                  for w in check_warnings)
+    for f in data:
+        if not isinstance(f, dict):
+            continue
+        f = dict(f)
+        src = f.get("evidence_source")
+        if "evidence_source" in f and src not in _EVIDENCE_SOURCES:
+            f.pop("evidence_source")
+            notes.append({"file": f.get("path"),
+                         "message": ("unknown evidence_source %r (expected "
+                                     "existing_test or ephemeral_test); tag "
+                                     "dropped, finding kept" % (src,))})
+        if src == "ephemeral_test" and not covered:
+            notes.append({
+                "file": f.get("path"),
+                "message": ("ephemeral_test evidence without the check's "
+                            "no-permanent-coverage warning: the finding "
+                            "stands on ephemeral evidence alone")})
+        findings.append(f)
+    return findings, notes + check_warnings, None, telemetry
+
+
+def _select_command_checks(checks, parallel):
+    """The enabled command checks whose `parallel` key matches the
+    requested subset -- the ONE selection used by every caller (the
+    supervisor's parallel start, the sequential post-review pass, and the
+    worker's own run), so the three can never drift apart. `parallel` is a
+    tri-state: None keeps every check (the pre-15.3 unit surface), False
+    keeps only the checks WITHOUT `parallel: true` (the supervisor's
+    post-review pass against review_root), True keeps only the
+    `parallel: true` subset (run against the worker's own tip clone,
+    never review_root). A check must be a dict with a string `command`
+    and `enabled` not False, whatever the subset."""
+    return {n: c for n, c in sorted((checks or {}).items())
+            if isinstance(c, dict)
+            and isinstance(c.get("command"), str)
+            and c.get("enabled") is not False
+            and (parallel is None or bool(c.get("parallel")) is parallel)}
+
+
+def _command_check_findings(repo_root, review_root, base, tip, entries=None,
+                            parallel=None, tele_sink=None):
+    """(findings, warnings) of every enabled command check, merged for the
+    findings stream (story 4). Each finding is tagged with its check name
+    and clamped to the check's mode (block|warn; warn clamps severity AND
+    confidence below the block bar -- mode only downgrades at the verdict,
+    which stays compute_verdict's sole authority). A check whose globs match
+    nothing costs nothing.
+
+    SPEC-15.3: `parallel` selects the subset -- None runs every check (the
+    pre-15.3 unit surface), False only the checks WITHOUT `parallel: true`
+    (the supervisor's post-review pass against review_root, today's exact
+    semantics), True only the parallel subset (run against the worker's own
+    tip clone, never review_root). `tele_sink` (the background worker) collects
+    the per-check telemetry entries into the given list instead of writing
+    _TELE: shared-dict writes stay on the main thread, which merges the
+    entries back at join time."""
+    findings, warnings = [], []
+    tele_list = (tele_sink if tele_sink is not None
+                 else _TELE.setdefault("command_checks", []))
+    try:
+        checks = rg_config.load_settings(repo_root)["checks"]
+    except Exception as exc:  # noqa: BLE001 -- fail-soft AND observable (ADR 0006)
+        note = ("command checks skipped: the checks config failed to load "
+                "(%s: %s)" % (type(exc).__name__, exc))
+        warnings.append({"file": None, "message": note})
+        _warn(f"[gate] {note}")
+        tele_list.append({
+            "name": None, "mode": "", "files": 0, "findings": 0,
+            "error": note, "seconds": 0.0})
+        return findings, warnings
+    command_checks = _select_command_checks(checks, parallel)
+    if not command_checks:
+        return findings, warnings
+    try:
+        if entries is None:
+            entries, _warnings = _collect_diff_entries(
+                review_root, base or _EMPTY_TREE, tip)
+        changed = sorted({(e["path"] or "").replace("\\", "/") for e in (entries or [])
+                          if not str(e.get("status") or "").startswith("D")})
+    except Exception as exc:
+        warnings.append({
+            "file": None,
+            "message": ("command checks skipped: could not enumerate the "
+                        "push's changed files (%s)" % type(exc).__name__),
+        })
+        return findings, warnings
+    for name, check in command_checks.items():
+        t0 = time.monotonic()
+        tele = {"name": name, "mode": str(check.get("mode") or "block"),
+                "files": 0, "findings": 0, "error": "", "seconds": 0.0}
+        tele_list.append(tele)
+        matched = [p for p in changed if _check_glob_matches(p, check.get("globs"))]
+        tele["files"] = len(matched)
+        if not matched:
+            tele["seconds"] = round(time.monotonic() - t0, 2)
+            continue
+        got, check_warnings, note, tele_extra = _run_one_command_check(
+            review_root, check["command"], matched,
+            timeout=check.get("timeout"))
+        tele["seconds"] = round(time.monotonic() - t0, 2)
+        tele["findings"] = len(got)
+        # SPEC-15.4: an executor-declared telemetry object (actual counts)
+        # merges into THIS check's command_checks entry, on whichever thread
+        # owns the tele list -- the worker collects, the main thread drains.
+        if tele_extra:
+            tele.update(tele_extra)
+        if note:
+            tele["error"] = note
+            warnings.append({"file": None, "message":
+                             f"command check {name!r}: {note}"})
+            continue
+        # SPEC-15.4: the check's own warnings (coverage gaps, unbuildable
+        # probes, flake demotions) surface like every other degradation,
+        # named after the check that raised them.
+        tele["warnings"] = len(check_warnings)
+        for w in check_warnings:
+            warnings.append({"file": w.get("file"),
+                             "message": f"command check {name!r}: "
+                                        f"{w.get('message')}"})
+        warn_mode = tele["mode"] != "block"
+        for f in got:
+            tagged = dict(f)
+            tagged["check"] = name
+            tagged.setdefault("category", "custom")
+            if warn_mode:
+                tagged = _warn_mode_clamp(tagged)
+            findings.append(tagged)
+    return findings, warnings
+
+
+class _ParallelCommandChecks:
+    """SPEC-15.3: the `parallel: true` command checks run concurrently with
+    the review session spawn, against a DEDICATED throwaway clone of the tip
+    (never review_root -- reviewer greps and reads can never observe
+    executor-written probe files, and a race probe writing into review_root
+    would contaminate the reviewer's evidence). One clone serves the run's
+    whole parallel subset; it is registered in the run's state under the
+    `worktrees` list the async reaper already honors, so a reaper cannot
+    sweep it mid-run, and it is removed by cleanup() on every exit path.
+
+    The worker thread RETURNS its results (findings, warnings, telemetry
+    entries); the MAIN thread writes _TELE and merges the findings at join
+    time -- no shared-dict writes off-main. Every failure degrades to a
+    warning plus telemetry, and isolation is never traded for throughput:
+    a clone-creation failure SKIPS the parallel checks outright (they never
+    fall back to review_root)."""
+
+    # The cleanup join bound: a worker that has not finished 5 s after the
+    # supervisor's exit is warned about and abandoned (its findings are
+    # discarded), never waited on indefinitely -- the per-check budgets
+    # mean a healthy worker has long finished by then.
+    _JOIN_GRACE_S = 5.0
+
+    def __init__(self, repo_root, state_path, run_id, base, tip, _clone=None):
+        self.repo_root, self.state_path = repo_root, state_path
+        self.run_id, self.base, self.tip = run_id, base, tip
+        self._make_clone = _clone or rg_store.make_review_clone
+        self.clone = ""
+        self.thread = None
+        # (findings, warnings, tele_entries) -- filled by the worker thread,
+        # or by a degrade path on the main thread before any thread exists.
+        self.result = ([], [], [])
+        # True once the worker's results have been merged (join) or drained
+        # (cleanup): the telemetry flows into _TELE exactly once per runner.
+        self._drained = False
+        # True when cleanup discarded a still-running worker: its late
+        # results can never be trusted through this runner again.
+        self._discarded = False
+
+    def start(self):
+        """Create the isolated clone and spawn the worker, unless the repo
+        declares no parallel check (then this is a no-op) or the checks
+        config cannot be read (the sequential pass reports that failure
+        exactly as today). Raises _Fenced only when the clone's state
+        registration loses the tip to a newer run. Every OTHER failure --
+        the clone factory raising (including after partial creation) or
+        the worker thread failing to construct/start -- is self-cleaning:
+        the clone (or its deterministic intended path, when the factory
+        died mid-creation) and its `worktrees` registration are removed
+        and the checks degrade to a warning plus telemetry, exactly like a
+        plain clone-creation failure; the supervisor's fail-soft path
+        continues and the checks never fall back to review_root."""
+        try:
+            checks = rg_config.load_settings(self.repo_root)["checks"]
+        except Exception:
+            return self  # the post-review sequential pass emits this degrade
+        names = sorted(_select_command_checks(checks, True))
+        if not names:
+            return self
+        try:
+            return self._spawn(names)
+        except _Fenced:
+            raise
+        except Exception as exc:  # noqa: BLE001 -- self-clean, fail-soft
+            partial = self.clone or self._intended_clone_path()
+            self._drop_clone(partial)
+            self.clone = ""
+            self.thread = None
+            self._unregister_clone(partial)
+            self._skip(
+                names,
+                "the parallel runner could not be started for %s (%s: %s)"
+                % (", ".join(names), type(exc).__name__, exc),
+                "parallel runner start failed (%s: %s); check skipped"
+                % (type(exc).__name__, exc))
+        return self
+
+    def _spawn(self, names):
+        """The raw spawn path (clone, registration, thread) whose failures
+        start() self-cleans. A run_id suffix keeps the parallel clone's
+        directory distinct from the reviewer clone's (make_review_clone
+        names dirs tip12-run_id)."""
+        self.clone = self._make_clone(
+            self.repo_root, self.tip, self.run_id + "-par")
+        if not self.clone:
+            self._skip(names, "could not create the isolated tip clone for "
+                       ", ".join(names))
+            return self
+        try:
+            # Reaper protection: registered under `worktrees` (the list the
+            # async reaper already skips for live runs) -- never `worktree`,
+            # which names the reviewer clone this run's finally removes.
+            _update_state_owned(self.state_path, self.run_id,
+                                worktrees=[self.clone])
+        except _Fenced:
+            self._drop_clone(self.clone)
+            self.clone = ""
+            raise
+        except Exception:
+            pass  # best-effort protection; the run itself still owns cleanup
+        self.thread = threading.Thread(
+            target=self._work, name="ocr-parallel-checks", daemon=True)
+        self.thread.start()
+        return self
+
+    def _skip(self, names, reason, tele_error=None):
+        """The degrade result for a parallel subset that never ran: an empty
+        findings/warnings answer plus one tele entry per skipped check, so
+        the skip is loud in the record and the verdict alike."""
+        note = ("parallel command checks skipped: %s; the checks did NOT "
+                "run against the review tree" % reason)
+        self.result = (
+            [], [{"file": None, "message": note}],
+            [{"name": n, "mode": "", "files": 0, "findings": 0,
+               "error": tele_error or
+               "isolated tip clone creation failed; check skipped",
+               "seconds": 0.0} for n in names])
+        _warn(f"[gate] {note}")
+
+    def _intended_clone_path(self):
+        """The deterministic clone path make_review_clone creates for this
+        runner (clones/<tip12>-<run_id>): the cleanup target when the
+        factory raises after partial creation and returns no path."""
+        try:
+            return str(rg_store.clones_dir()
+                       / f"{self.tip[:12]}-{self.run_id}-par")
+        except Exception:
+            return ""
+
+    def _drop_clone(self, path):
+        """Best-effort clone removal. remove_review_clone refuses anything
+        outside the gate's own clones/ dir, so a bogus or empty path is a
+        safe no-op -- the only directory this can delete is a gate clone."""
+        if path:
+            _remove_worktree(self.repo_root, path)
+
+    def _unregister_clone(self, path):
+        """Best-effort removal of the clone's reaper-protection
+        registration (the run state's `worktrees` list). Never raises; a
+        fenced run (a newer run owns the state) keeps the stale entry --
+        the reaper's sweep tolerates paths that no longer exist."""
+        if not path:
+            return
+        try:
+            current = (_read_state(self.state_path) or {}).get(
+                "worktrees") or []
+            _update_state_owned(self.state_path, self.run_id,
+                                worktrees=[w for w in current if w != path])
+        except Exception:
+            pass
+
+    def _work(self):
+        """Worker body: runs the parallel subset against the isolated clone.
+        Never raises, never writes _TELE (the sink list is handed back to the
+        main thread at join); the per-check timeouts bound the run."""
+        findings, warnings, tele = [], [], []
+        try:
+            findings, warnings = _command_check_findings(
+                self.repo_root, self.clone, self.base, self.tip,
+                parallel=True, tele_sink=tele)
+        except BaseException as exc:  # noqa: BLE001 -- fail-soft, observable
+            findings, warnings = [], [{
+                "file": None,
+                "message": ("parallel command checks failed (%s: %s); "
+                            "findings discarded" % (type(exc).__name__, exc))}]
+            tele.append({"name": None, "mode": "", "files": 0, "findings": 0,
+                         "error": "worker crashed: %s: %s"
+                                  % (type(exc).__name__, exc),
+                         "seconds": 0.0})
+        self.result = (findings, warnings, tele)
+
+    def join(self):
+        """(findings, warnings): the worker's results, with its telemetry
+        entries written to _TELE here on the main thread. Never raises; a
+        worker that never started returns its degrade result. Idempotent:
+        the telemetry is merged exactly once per runner, whichever of
+        join()/cleanup() runs first."""
+        if self.thread is not None:
+            self.thread.join()
+            self.thread = None
+        if self._discarded:
+            # A cleanup that abandoned a stuck worker already declared its
+            # findings discarded; a late answer is never resurrected.
+            return [], []
+        findings, warnings, tele = self.result
+        if not self._drained:
+            self._drained = True
+            if tele:
+                _TELE.setdefault("command_checks", []).extend(tele)
+        return findings, warnings
+
+    def cleanup(self):
+        """Remove the parallel clone on every exit path (the supervisor's
+        finally, exceptions included). Joins the worker first, but only for
+        a SMALL documented grace window (5 s -- after the per-check budgets
+        a healthy worker has long finished): supervisor cleanup must never
+        hang the push on a stuck executor, and no arbitrary child process
+        is killed (the executor's own subprocess timeouts bound it). A
+        worker still alive after the grace window draws a warning ("still
+        running; parallel-check findings discarded") plus telemetry, and
+        its unverifiable findings are discarded. An abnormal exit that
+        never called join() still drains the worker's warnings and
+        telemetry here, so the degradation is observable, never silent.
+        Idempotent with join(): the telemetry drains exactly once, on the
+        main thread either way (the worker only collects; _TELE is never
+        written off-main)."""
+        alive = False
+        if self.thread is not None:
+            self.thread.join(self._JOIN_GRACE_S)
+            alive = self.thread.is_alive()
+            self.thread = None
+        if self.clone:
+            _remove_worktree(self.repo_root, self.clone)
+            self.clone = ""
+        if self._drained:
+            return
+        self._drained = True
+        findings, warnings, tele = self.result
+        if tele:
+            _TELE.setdefault("command_checks", []).extend(tele)
+        for w in warnings:
+            _warn("[gate] parallel command check warning (unjoined exit): %s"
+                  % str(w.get("message") or w))
+        if alive:
+            note = ("parallel command check worker still running; "
+                    "parallel-check findings discarded (cleanup join bound "
+                    "%gs)" % self._JOIN_GRACE_S)
+            _warn(f"[gate] {note}")
+            _TELE.setdefault("command_checks", []).append(
+                {"name": None, "mode": "", "files": 0, "findings": 0,
+                 "error": note, "seconds": 0.0})
+            self._discarded = True
+        elif findings:
+            _warn("[gate] parallel checks not joined; findings discarded")
+
+
 class _ManifestScope:
     """The identity every manifest shares: the run's storage dir and name,
     plus the chunk coordinates (k, total). k is None for the single-context
@@ -9304,7 +10671,7 @@ class _ManifestScope:
 
 def _build_review_manifest(scope, chunk_items, other_changed, carry_paths,
                            extras=None, diffs=None, docs_context=None,
-                           arch_flags=None):
+                           arch_flags=None, docs_quality=None):
     """The reviewer's manifest for one chunk (scope.k, scope.total) or the
     single-context review (scope.k None). The one builder for both.
 
@@ -9378,6 +10745,8 @@ def _build_review_manifest(scope, chunk_items, other_changed, carry_paths,
         manifest["docs_context"] = docs_context
     if arch_flags:
         manifest["arch_flags"] = arch_flags
+    if docs_quality:
+        manifest["docs_quality"] = docs_quality
     return manifest
 
 
@@ -11165,7 +12534,8 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
                  tip, push_range, active_items, planner_warnings, fenced,
                  progress=None, fp="", carry_paths=None, chunk_extras=None,
                  timeout_marks=None, diffs=None, seg=None, impact=None, own_items=None,
-                 push_ref="", arch_flags=None, partial=False, review_range=""):
+                 push_ref="", arch_flags=None, partial=False, review_range="",
+                 docs_quality=None):
     """Run per-chunk reviews with fencing, budget and retry.
 
     review_range (restack-b) overrides the range the reviewer is told for each
@@ -11276,7 +12646,8 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
         scope = _ManifestScope(common_dir, run_id, k, len(chunks))
         manifest = _build_review_manifest(
             scope, chunk_items, other_changed, carry_paths,
-            extras, diffs, docs_context=docs_context, arch_flags=arch_flags)
+            extras, diffs, docs_context=docs_context, arch_flags=arch_flags,
+            docs_quality=docs_quality)
         _write_manifest_file(manifest_path, manifest, f"chunk manifest for chunk {k}")
         return manifest, manifest_path
 
@@ -12545,10 +13916,27 @@ def _format_reasons(result, limit=20):
                       "flagged code is no longer at the tip - check by hand) ")
         else:
             prefix = ""
-        lines.append(f"  [{sev}] {prefix}{loc} - {content}")
+        # comment-gate: a tagged comment-consistency finding is displayed like
+        # any other finding; when it arrived without its verbatim proof the
+        # GATE (never the reviewer) stamps it, so the pusher sees which
+        # comment nits came with evidence.
+        stamp = (" [unverified: no verbatim quotes attached]"
+                 if comment_kind(f) is not None and comment_quotes_missing(f)
+                 else "")
+        lines.append(f"  [{sev}] {prefix}{loc} - {content}{stamp}")
     # limit=0 means "all of them" -- used by --history, which is read on demand
     # and has no context budget to protect, unlike the gate's own messages.
     out = "\n".join(lines if not limit else lines[:limit])
+    # SPEC-15.2: loud always -- the waived list rides the reasons text
+    # whenever suppression happened (never when it did not).
+    waived = result.get("waived") if isinstance(result, dict) else None
+    if isinstance(waived, list) and waived:
+        wids = [_waiver_display_id(w) for w in waived if isinstance(w, dict)]
+        wids = [i for i in wids if i]
+        out += ("\n" if out else "") + (
+            f"  waived: [{', '.join(_sanitize(i, 80) for i in wids)}] - "
+            f"{len(waived)} finding(s) suppressed by waiver; still recorded, "
+            "never deleted (a code change lapses the waiver and blocks again)")
     paths = result.get("unreviewed_truncated") if isinstance(result, dict) else None
     if isinstance(paths, list) and paths:
         # Cached truncated reviews (see _surface_truncated): said on every verdict, because
@@ -13510,6 +14898,17 @@ def main(argv):
     # closed rather than crashing without emitting a deny payload.
     mode = "git"  # safe default for the except clause below
 
+    # Explicit final review is a standalone operator command, never a pre-push
+    # mode: dispatch before reading hook input or changing any push state.
+    if len(argv) > 1 and argv[1] == "final-review":
+        import rg_final_review
+        sys.exit(rg_final_review.main(argv))
+    # Database-backed final-review views are likewise standalone commands.
+    # Dispatch before hook input, markers, or any incremental push behavior.
+    if len(argv) > 1 and argv[1] in ("contract", "acceptance", "final-report"):
+        import rg_final_views
+        sys.exit(rg_final_views.main(argv))
+
     # Read-only query over the persisted log. Handled before anything else so
     # it never spawns a review, touches a marker, or needs a hook payload.
     if "--history" in argv:
@@ -13521,6 +14920,13 @@ def main(argv):
         # Records a dismissal into .ocr/memory.jsonl -- the store's only write
         # path. Standalone like --history: no review, no markers, no payload.
         sys.exit(_dismiss_finding(argv))
+    # SPEC-15.2 operator commands: subcommand form (argv[1]), same standalone
+    # contract as --dismiss / --reset-tip -- no review, no markers, no payload.
+    # Nothing attaches to the push command line; --no-verify stays untouched.
+    if len(argv) > 1 and argv[1] == "waive":
+        sys.exit(_waiver_command(argv))
+    if len(argv) > 1 and argv[1] == "unwaive":
+        sys.exit(_unwaive_command(argv))
     if "--telemetry-report" in argv:
         sys.exit(_print_telemetry_report(argv))
     if "--print-range" in argv:

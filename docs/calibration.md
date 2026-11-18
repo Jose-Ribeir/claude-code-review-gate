@@ -25,6 +25,45 @@ positive; its findings are recorded verbatim.
 | upstream-e2bb9e6-4a40fa1 | upstream | e2bb9e6..4a40fa1 | pass | pass | no | pass | (none) | 1144.6 | upstream: [W5] ledger: scope delta priors by tip ancestry across refs [verdict landed in the store after the harness's 19-min patience; corrected from the store] |
 | upstream-fbc880c-e2bb9e6 | upstream | fbc880c..e2bb9e6 | pass | warn | no | pass | (none) | 2340.9 | upstream: [W6] docs: stacked-branch review base and findings persistence [timed out waiting for the supervisor] |
 
+## Experiment log: comment-gate first dogfood (2026-11-16)
+
+First real-model dogfood of the deep-lane comment-consistency class (nits
+tagged `comment_kind`: false_citation / stale_tense / contract_divergence;
+non-blocking by construction, unproven ones machine-stamped "unverified").
+Not a harness row: manual scratch branches on this repo, deleted after. Deep
+lane was forced by placing the seed under `scratch/api/` (risk glob
+`**/api/**`; state file confirms `tier: deep`).
+
+**Adversarial push** (`dogfood/comment-gate-adversarial`, range
+`1dacf08..af97c60`, 3 commits -- includes the comment-gate feature commit, so
+this run also paid the promised one-time fingerprint churn):
+
+| check | planted | result |
+|---|---|---|
+| false_citation | module docstring cites `_legacy_token_check()`; the symbol was renamed in the same push (cross-file) | FLAGGED, tag correct, both quotes, no stamp. Reviewer verified repo-wide absence and named the live symbol (`_modern_token_check`) |
+| stale_tense | "Will delegate to parse_v2 ... ; until then this parses the old format directly" while the body already delegates | FLAGGED, tag correct, both quotes, no stamp |
+| contract_divergence | docstring "retries up to 3 times" vs `attempts=5` | FLAGGED, tag correct, both quotes, no stamp. Reviewer judged WHICH side was wrong (code self-consistent, callers treat result as bool -> docstring is the wrong side) and kept it a low nit instead of inflating to a Correctness block -- severity cap + routing works as intended |
+| decoy: legit future tense (YAML TODO) | not planted | NOT flagged |
+| decoy: citation fixed alongside its rename | not planted | NOT flagged |
+| invented nits | -- | 0 (only the 3 planted findings, all low @ 0.95) |
+
+Verdict: pass; push proceeded. Findings log row `af97c60`: 3 findings, 3/3
+planted, 0 invented, 0 stamps.
+
+**Clean control** (`dogfood/comment-gate-clean`, tip `29b1c1c`): accurate
+docstrings, a correct citation, a legit TODO. Verdict: pass; finding_count 0;
+zero comment tags. No invented nits.
+
+**Conclusion.** The class behaves to spec: 3/3 planted-hit rate with correct
+tags and verbatim proof, 0/2 decoy false positives, 0 invented nits across
+two real deep-lane pushes. No numeric cap needed; the deterministic collector
+stays deferred (pending more dogfood data). Fingerprint churn observed once,
+as planned.
+
+(An unplanned bonus check: the adversarial seed also carried obviously-wrong
+inline annotations like `# plant P1: citation, valid here`; the reviewer
+called those out inside the findings' prose rather than trusting them.)
+
 ## Experiment log: flash orchestration tier (2026-11-09, reverted)
 
 Re-running the 6 FN reviews with the worker session on `kimchi-dev/glm-5.3-flash`

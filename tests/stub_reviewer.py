@@ -5,6 +5,8 @@ which only honours a script under this directory. Behaviour is driven by
 environment variables so one command line serves every scenario:
 
   STUB_SLEEP         seconds to wait before answering (default 0)
+  STUB_TOUCH         a file to touch after the sleep, right before answering
+                     (optional; an event-join seam for overlap tests)
   STUB_VERDICT       pass | warn | block | exit1 | garbage | limit  (default pass)
   STUB_TRACE         a file to append one line per invocation to (optional)
   STUB_FAIL_ON_CALL  N — exit1 on the Nth call (1-based, counted via STUB_TRACE)
@@ -46,12 +48,21 @@ unit_diff is `unit:<path>:<unit>:<part>` and a context item `context:<role>:<pat
   STUB_DOCS_FINDING  JSON {content, severity?, path?, category?, existing_code?,
                      source_doc?, confidence?, docs_kind?, stale_passage?,
                      doc_path?} -- a documentation-checker finding, only when the
-                     manifest carries docs_context (docs-gate 01). Contradiction
+                     manifest carries docs_context (docs-gate 01) or, for a spec with
+                     docs_quality_duty set, a docs_quality payload (SPEC-14.4; the
+                     quality fields tells/document_wide/score/reads/
+                     verified_claims pass through). Contradiction
                      class (docs-gate 03): dropped per the checker's contract when
                      either quote is missing or source_doc names a document outside
                      docs_context.corpus. Drift class (docs-gate 04): docs_kind/
                      stale_passage/doc_path pass through verbatim when scripted; a
                      scripted confidence overrides the tier default.
+  STUB_COMMENT_FINDING JSON {content?, comment_kind?, path?, severity?,
+                     confidence?, start_line?, end_line?, existing_code?,
+                     evidence?} -- a deep-review comment-consistency finding
+                     (comment-gate). The tag and the quote fields pass through
+                     verbatim, so a test can script a proven finding (both
+                     quotes present) or an unproven one (either quote missing).
   STUB_MISSING_RECORD  truthy -- a missing-decision-record finding (docs-gate 02),
                      but only when the manifest carries docs_context AND non-empty
                      arch_flags (a flag must fire; flags without model agreement
@@ -78,8 +89,152 @@ the trace so a test can assert what was reviewed.
 """
 import json
 import os
+from pathlib import Path
 import sys
 import time
+from urllib.parse import unquote
+
+
+# SPEC-16 standalone final-review test doubles.  These modes return before the
+# historical pre-push stub parses its argv, so existing stub behavior is intact.
+if len(sys.argv) > 1 and sys.argv[1] == "--gh":
+    if sys.argv[2:5] == ["issue", "view", "88"]:
+        sys.stdout.write(json.dumps({
+            "title": "Normalize the return value",
+            "body": "Return the value required by the existing caller.",
+        }))
+        sys.exit(0)
+    sys.stderr.write("unexpected scripted gh invocation\n")
+    sys.exit(1)
+
+if len(sys.argv) > 1 and sys.argv[1] == "--final-dynamic":
+    json.load(sys.stdin)
+    sys.stdout.write(json.dumps({"findings": [], "warnings": [], "telemetry": {}}))
+    sys.exit(0)
+
+if len(sys.argv) > 1 and sys.argv[1] == "--glab":
+    script_path = os.environ["RG_TEST_PROVIDER_SCRIPT"]
+    with open(script_path, encoding="utf-8") as fh:
+        scripted = json.load(fh)
+    endpoint = sys.argv[-1]
+    calls_path = Path(scripted["calls"])
+    calls = json.loads(calls_path.read_text(encoding="utf-8")) \
+        if calls_path.exists() else []
+    calls.append({
+        "argv": sys.argv[1:],
+        "provider_token_available": bool(os.environ.get("GLAB_TOKEN")),
+    })
+    calls_path.write_text(json.dumps(calls), encoding="utf-8")
+    if "/merge_requests?" in endpoint:
+        payload = scripted.get("open_merge_requests") or [{
+            "web_url": scripted["merge_request"]["web_url"],
+        }]
+    elif "/merge_requests/" in endpoint:
+        iid = int(endpoint.rsplit("/", 1)[1])
+        prior = sum(
+            call["argv"][-1].endswith(f"/merge_requests/{iid}")
+            for call in calls[:-1]
+        )
+        merge_requests = scripted.get("merge_requests")
+        if merge_requests:
+            payload = next(mr for mr in merge_requests if mr["iid"] == iid)
+        else:
+            key = "revalidated_merge_request" if prior else "merge_request"
+            payload = scripted.get(key) or scripted["merge_request"]
+    elif "/repository/branches/" in endpoint:
+        prefix, encoded_branch = endpoint.rsplit("/repository/branches/", 1)
+        project_id = int(prefix.rsplit("/", 1)[1])
+        branch = unquote(encoded_branch)
+        merge_requests = scripted.get("merge_requests")
+        if merge_requests:
+            candidates = merge_requests
+        else:
+            prior_reads = sum(
+                "/merge_requests/" in call["argv"][-1]
+                for call in calls[:-1]
+            )
+            key = ("revalidated_merge_request"
+                   if prior_reads >= 2 and scripted.get("revalidated_merge_request")
+                   else "merge_request")
+            candidates = [scripted[key]]
+        selected = None
+        for merge_request in candidates:
+            for side, head_field in (
+                    ("source", "source_branch_head"),
+                    ("target", "target_branch_head")):
+                if (project_id == merge_request[f"{side}_project_id"]
+                        and branch == merge_request[f"{side}_branch"]):
+                    selected = (merge_request, head_field)
+                    break
+            if selected is not None:
+                break
+        if selected is None:
+            sys.stderr.write(
+                f"unknown scripted glab branch: {project_id}/{branch}\n")
+            sys.exit(1)
+        merge_request, head_field = selected
+        head = merge_request.get(head_field)
+        if not isinstance(head, str) or not head:
+            sys.stderr.write(f"missing scripted branch head: {head_field}\n")
+            sys.exit(1)
+        payload = {"name": branch, "commit": {"id": head}}
+    elif endpoint == "projects/111":
+        payload = scripted["target_project"]
+    elif endpoint == "projects/222":
+        payload = scripted["source_project"]
+    else:
+        sys.stderr.write("unexpected scripted glab endpoint: " + endpoint + "\n")
+        sys.exit(1)
+    sys.stdout.write(json.dumps(payload))
+    sys.exit(0)
+
+if len(sys.argv) > 2 and sys.argv[1] == "--final-review":
+    request_path = Path(sys.argv[2])
+    request = json.loads(request_path.read_text(encoding="utf-8"))
+    trace_path = os.environ.get("STUB_FINAL_TRACE")
+    if trace_path:
+        sensitive_names = (
+            "GLAB_TOKEN", "GITLAB_WRITE_TOKEN", "GH_TOKEN",
+            "UNRELATED_SECRET", "STUB_FINAL_TRACE",
+        )
+        traced = {
+            "request": request,
+            "environment": {name: os.environ.get(name) for name in sensitive_names},
+            "unchanged_adr": (Path(request["repository"]["path"]) / "docs/ADR.md")
+            .read_text(encoding="utf-8"),
+            "local_only_exists": (Path(request["repository"]["path"]) / "local-only.txt")
+            .exists(),
+        }
+        with open(trace_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(traced) + "\n")
+
+    def lens_setting(name, default=None):
+        """Return a per-lens override, falling back to the historical global knob."""
+        overrides = json.loads(os.environ.get(name, "{}") or "{}")
+        if request["lens"] in overrides:
+            return overrides[request["lens"]]
+        return os.environ.get(name.removesuffix("_FOR"), default)
+
+    exit_code = lens_setting("STUB_FINAL_EXIT_FOR")
+    if exit_code:
+        sys.stderr.write("scripted final worker failure\n")
+        sys.exit(int(exit_code))
+    raw = lens_setting("STUB_FINAL_RAW_FOR")
+    if raw is not None:
+        sys.stdout.write(raw)
+        sys.exit(0)
+    result = lens_setting("STUB_FINAL_RESULT_FOR", "{}")
+    if isinstance(result, str):
+        result = json.loads(result)
+    result.setdefault("schema", "final-review-worker-result/v1")
+    result.setdefault("status", "success")
+    result.setdefault(
+        "summary", f"{request['lens']} lens inspected the complete tree and diff")
+    result.setdefault("findings", [])
+    result.setdefault("warnings", [])
+    sys.stdout.write(json.dumps(result))
+    sys.exit(0)
+
 
 # Parse arguments: range is the last non-flag arg; --paths-file, --resolve and
 # --docs-summary (docs-gate 05) are optional.
@@ -194,6 +349,17 @@ if spawn_child:
     with open(spawn_child, "w", encoding="utf-8") as fh:
         fh.write(str(_child.pid))
 time.sleep(float(os.environ.get("STUB_SLEEP", "0") or 0))
+# STUB_TOUCH: a file to touch after the sleep, right before answering -- an
+# event-join seam for overlap tests (the touch is observable while the
+# caller is still waiting on this process).
+_stub_touch = os.environ.get("STUB_TOUCH", "")
+if _stub_touch:
+    try:
+        with open(_stub_touch, "a", encoding="utf-8"):
+            pass
+        os.utime(_stub_touch, None)
+    except OSError:
+        pass
 sleep_for = os.environ.get("STUB_SLEEP_FOR", "")
 if sleep_for and sleep_for in ((manifest or {}).get("paths") or []):
     time.sleep(float(os.environ.get("STUB_SLEEP_FOR_SECS", "30") or 30))
@@ -479,14 +645,26 @@ if os.environ.get("STUB_CROSS_FILE"):
 # (READMEs/runbooks and excluded docs never veto).
 docs_finding = os.environ.get("STUB_DOCS_FINDING", "")
 _docs_ctx = (manifest or {}).get("docs_context") or {}
-if docs_finding and _docs_ctx:
+_docs_quality = (manifest or {}).get("docs_quality") or {}
+# SPEC-14.4: a quality-duty finding (docs_quality_duty set) needs the
+# docs_quality payload, not the summary artifact; the manifest need only
+# carry one of the two blocks for the checker to have been spawned.
+if docs_finding and (_docs_ctx or _docs_quality):
     try:
         spec = json.loads(docs_finding)
         content = spec.get("content", "stub docs finding")
         code_quote = spec.get("existing_code", "stub code")
         source_doc = spec.get("source_doc")
+        quality = bool(spec.get("docs_quality_duty"))
+        # A legacy finding (contradiction/drift) needs the artifact payload;
+        # a quality-duty finding needs the docs_quality payload. Neither runs
+        # without its own block -- the skill's spawn condition.
+        if quality and not _docs_quality:
+            raise KeyError("no docs_quality block")
+        if not quality and not _docs_ctx:
+            raise KeyError("no docs_context block")
         corpus = [_p for cls in (_docs_ctx.get("corpus") or {}).values() for _p in cls]
-        if content and code_quote and (source_doc is None or source_doc in corpus):
+        if content and code_quote and (quality or source_doc is None or source_doc in corpus):
             anchor = spec.get("path") or (manifest.get("paths") or ["?"])[0]
             sev = spec.get("severity", "high")
             f = {
@@ -498,10 +676,38 @@ if docs_finding and _docs_ctx:
                 "content": content,
                 "existing_code": code_quote,
             }
-            for k in ("docs_kind", "stale_passage", "doc_path"):
+            for k in ("docs_kind", "stale_passage", "doc_path",
+                      "docs_quality_duty", "tells", "document_wide",
+                      "score", "reads", "verified_claims",
+                      "start_line", "end_line"):
                 if k in spec:
                     f[k] = spec[k]
             findings.append(f)
+    except Exception:
+        pass
+
+# comment-gate: a deep-review comment-consistency finding. comment_kind and
+# the quote fields pass through verbatim so the gate's verdict cap and the
+# report's unverified stamp can be exercised end to end.
+comment_finding = os.environ.get("STUB_COMMENT_FINDING", "")
+if comment_finding:
+    try:
+        cspec = json.loads(comment_finding)
+        csev = cspec.get("severity", "low")
+        cf = {
+            "path": cspec.get("path") or ((manifest or {}).get("paths") or ["?"])[0],
+            "start_line": int(cspec.get("start_line", 1)),
+            "end_line": int(cspec.get("end_line", 2)),
+            "confidence": _confidence(csev, cspec),
+            "category": cspec.get("category", "maintainability"),
+            "severity": csev,
+            "content": cspec.get("content", "stub comment-consistency finding"),
+            "comment_kind": cspec.get("comment_kind", "stale_tense"),
+        }
+        for k in ("existing_code", "evidence"):
+            if k in cspec:
+                cf[k] = cspec[k]
+        findings.append(cf)
     except Exception:
         pass
 

@@ -50,6 +50,7 @@ from urllib.parse import quote
 
 import rg_store
 import rg_jira_fetch
+import rg_tickets
 
 # 24h inherits the spec's "retries and re-pushes review instantly"; the few
 # seconds of fetch timeout bounds how long a dead VPN can stall a push.
@@ -301,3 +302,104 @@ def _fetch_one_safe(key, order, repo_root, runner, cache_dir, now,
                           jira_settings=jira_settings)
     except Exception as exc:
         return None, f"fetch failed ({exc})"
+
+
+# --- explicit final-review intent (tickets mandatory-attempt, never required) ----
+
+def _message_text(message):
+    if isinstance(message, str):
+        return message
+    if isinstance(message, dict):
+        return "\n".join(str(message.get(field) or "")
+                        for field in ("subject", "body"))
+    return str(message or "")
+
+
+def fetch_final_intent(description=None, linked_intent=None, commit_messages=(),
+                       branch=None, settings=None, repo_root=None, runner=None,
+                       cache_dir=None, now=None):
+    """Acquire description-linked issue/spec text for an explicit final review.
+
+    Unlike :func:`fetch_tickets`, this final-review seam does not honor the
+    pre-push ``intent.tickets`` opt-in: discovery and every applicable read-only
+    backend are always attempted when a reference exists. The original settings
+    object is not mutated and all pre-push defaults remain unchanged. Missing
+    provider descriptions, absent references and tracker failures are visible
+    warnings; no requirement text or dependency edge is synthesized.
+    """
+    empty = {"description": description if isinstance(description, str) else None,
+             "references": linked_intent, "tickets": [], "listed_only": [],
+             "warnings": []}
+    try:
+        warnings = []
+        description_text = description if isinstance(description, str) and description.strip() else None
+        if description_text is None:
+            warnings.append("provider description is empty or unavailable")
+        base = settings if isinstance(settings, dict) else {}
+        final_settings = dict(base)
+        intent = dict(base.get("intent") or {})
+        intent["tickets"] = True
+        final_settings["intent"] = intent
+        texts = [_message_text(message) for message in (commit_messages or ())]
+        discovered = rg_tickets.discover_ticket_keys(
+            final_settings, branch, texts)
+        warnings.extend(str(note) for note in discovered.get("notes") or ())
+
+        # Provider references and description IDs are direct intent, not
+        # background commit references. Existing discovery is still used for
+        # branch/commit precedence, while these provider-pinned provenance
+        # fields are preserved rather than reconstructed.
+        direct = []
+        if isinstance(linked_intent, (list, tuple)):
+            for reference in linked_intent:
+                if not isinstance(reference, dict):
+                    continue
+                key = reference.get("key")
+                if isinstance(key, str) and rg_tickets.extract_keys(key) == [key]:
+                    direct.append({
+                        "key": key,
+                        "source": reference.get("source") or "provider",
+                        "role": reference.get("role") or "direct",
+                    })
+        direct.extend({"key": key, "source": "description", "role": "direct"}
+                      for key in rg_tickets.extract_keys(description_text))
+        ordered = direct + list(discovered.get("selected") or ())
+        selected = []
+        seen = set()
+        for selection in ordered:
+            key = selection.get("key")
+            if key not in seen:
+                selected.append(selection)
+                seen.add(key)
+        extras = list(discovered.get("extras") or ())
+        extras.extend(item["key"] for item in selected[rg_tickets.CAP:])
+        selected = selected[:rg_tickets.CAP]
+        fetched = fetch_tickets(
+            final_settings, {"selected": selected}, repo_root=repo_root,
+            runner=runner, cache_dir=cache_dir, now=now)
+        warnings.extend(str(note) for note in fetched.get("notes") or ())
+        if not selected:
+            # If a provider supplied a non-list reference, make one final
+            # read-only discovery attempt against its textual representation.
+            if linked_intent is not None and not isinstance(linked_intent, (list, tuple)):
+                fallback = rg_tickets.discover_ticket_keys(
+                    final_settings, None,
+                    [json.dumps(linked_intent, ensure_ascii=False)])
+                if fallback.get("selected"):
+                    selected = fallback["selected"]
+                    extras.extend(fallback.get("extras") or ())
+                    fetched = fetch_tickets(
+                        final_settings, fallback, repo_root=repo_root,
+                        runner=runner, cache_dir=cache_dir, now=now)
+                    warnings.extend(str(note) for note in fetched.get("notes") or ())
+        if not selected:
+            warnings.append(
+                "linked issue/spec intent unavailable: no resolvable reference was discovered"
+            )
+        return {"description": description_text, "references": linked_intent,
+                "tickets": fetched.get("tickets") or [],
+                "listed_only": extras,
+                "warnings": warnings}
+    except Exception as exc:
+        empty["warnings"] = [f"final intent acquisition skipped: {exc}"]
+        return empty

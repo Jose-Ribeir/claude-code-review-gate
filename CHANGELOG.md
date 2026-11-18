@@ -39,6 +39,106 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `bypasses.jsonl` with mechanism, remote, ref, tip and reason, and is
   announced loudly. `git push --no-verify` never invokes the hook, so it is
   unrecordable by design (docs corrected to say so).
+- **Explicit final whole-stack review (ADR 0008, SPEC-16).**
+  `review-gate.py final-review <ref>…` reviews provider-pinned, immutable
+  complete trees rather than local working-tree content: every explicitly
+  supplied item receives an independent full-tree review and the linear stack
+  also receives combined and prospective-integration reviews. Mandatory
+  correctness, standards, documentation/domain, testing, security,
+  compatibility/migration, and intent lenses share the existing sole verdict
+  authority; required repository/CI suites use isolated credential-free
+  execution, while SPEC-15 dynamic checks retain warning-only degradation.
+  Findings, warnings, coverage, stops, exact revisions, freshness, memory,
+  contract rules/decisions, contract/acceptance versions, acceptance records,
+  evidence, migrations, and publication attempts persist in one dedicated,
+  tool-independent SQLite database with bounded structured telemetry. An
+  explicit API path or CLI `--store` wins, then non-empty `FINAL_REVIEW_STORE`,
+  then the neutral default `~/.final-review/final-review.sqlite3` (blank values
+  are ignored). Store selection never consults `OCR_STATE_DIR`, Kimchi/Claude
+  paths or configuration, review-gate configuration, `.git`, or other source
+  repository state; the abandoned external review-gate store-root default is
+  not used or implicitly migrated. This is a standalone SQLite file, not
+  Kimchi's application DB, and arbitrary local tools can reopen or attach it
+  with raw `sqlite3` while directory/file permission tightening is retained.
+  GitHub, GitLab, and inference integrations remain adapters. Results
+  distinguish `pass`, `findings`, `stale`, and `incomplete` (exit 0/1/3/2),
+  keep same-store continuity separate from independent local evidence, and
+  permit official provider statuses only through the trusted publication
+  boundary; denied or failed publication leaves local-only, unenforced
+  evidence. Database-backed `contract show`, `acceptance list/status/history`,
+  and `final-report list/show/export` commands expose current and historical
+  records without maintaining a parallel report authority. Command checks
+  gain `required` (default `false`) to opt a pinned repository declaration
+  into final-review required verification without changing incremental
+  pre-push defaults.
+- **Race & regression test checks and granular finding waivers (ADR 0007,
+  SPEC-15).** Command checks gain `parallel` (default `false`; run the
+  executor concurrently with the review session against its own throwaway
+  tip clone — probe files can never leak into reviewer evidence; a
+  clone-creation failure skips the check with a warning, never a fallback
+  to the review tree) and `timeout` (default 60 s, clamped to 1–3600).
+  The executor contract extends to `warnings` and
+  `evidence_source: "existing_test" | "ephemeral_test"` (validated;
+  `ephemeral_test` findings pair with the canonical no-permanent-coverage
+  warning). A **reference executor** ships in `examples/test-check/`:
+  a pinned one-shot selector model reads the matched diff, runs selected
+  repo tests (`go test -race` for Go) and authors ephemeral probes inside
+  its own clone, re-runs every failure exactly once (reproduce-then-block),
+  and quotes verbatim output; flakes, unbuildable probes, and coverage gaps
+  degrade to warnings plus telemetry, never blocks. The executor contract
+  also carries an optional `telemetry` object (actual counts:
+  `selector_attempts`, `tests_selected`, `probes_authored`, `runs`,
+  `reproduce_results`) merged into that check's `command_checks` entry
+  (malformed values degrade to a warning), the resolved per-check budget
+  is exported to the executor as `OCR_CHECK_TIMEOUT_S` so it can finish
+  its internal phases before the gate's kill, the selector's optional
+  probe `path` field is documented in the contract, and the parallel
+  runner is self-cleaning on every start failure with a bounded (5 s)
+  cleanup join that discards-and-warns instead of hanging the push.
+- **Finding waivers (ADR 0007).** `review-gate.py waive <id>… [--note]`,
+  `unwaive <id>…`, and `waive --list` record narrow, per-finding
+  acknowledgments in a store-root, repo-scoped ledger (machine-local, no
+  expiry). A waiver keys on the finding's content anchor — including a
+  tip-location fallback for command-check findings that carry no diff
+  hunk — so it survives rebases and line movement, **lapses automatically
+  when the code under the finding changes**, and stays loud. For
+  test-evidenced findings (`evidence_source`) the anchor also binds a
+  deterministic fingerprint of the finding's quoted evidence, so the
+  same reproduced failure stays waived while a DIFFERENT failure output
+  under the same location is judged fresh and blocks again: verdict
+  text, recorded JSON, and telemetry all list what was suppressed, and
+  the findings log keeps every waived finding. Waivers apply to every
+  finding class and only filter `compute_verdict`'s inputs.
+- **Custom checks and documentation-quality duties (`checks` config, ADR 0006).**
+  The settings gain a top-level `checks` object resolving through the usual
+  layering (built-in defaults, store-root `config.json`, per-repo
+  `.ocr/config.json`; invalid values degrade to load notes, never fatal).
+  Per check: `enabled`, `mode` (`block`/`warn`; warn clamps severity to at
+  most medium and confidence to at most 0.5 and never blocks), `globs`
+  (the check runs only when matching files are in the push diff), and the
+  duty options `sections`, `template`, `sentence_cap`, `sweep`. Three
+  built-in documentation-quality duties ride the existing
+  documentation-checker agent as new duty sections (one spawn, one cost),
+  driven by deterministic gate-side evidence
+  (`scripts/ocr_docsquality.py`, catalog `scripts/deslop_catalog.json`,
+  163 entries): **docs-deslop** (default ON, `**/*.md`) flags deslopped
+  prose, with a gate-side cluster rule — fewer than three co-located tells
+  without `document_wide: true` demotes a finding to a note that can never
+  block; **adr-wait-what** and **adr-integrity** (default OFF, ADR globs)
+  check changed ADRs against the repo's own structure/template (fallback
+  superset Status/Date/Context/Decision/Consequences), Context-first,
+  STE-style readability, glossary vocabulary, and end-to-end claim
+  verification. Quality findings anchor at the documentation file, ride the
+  normal falsify pass, and `compute_verdict` stays the sole verdict
+  authority. User command checks: declare a name with a string `command`
+  (default enabled, block, unscoped); the repo-relative executable runs at
+  the review tree root, gets the matched files as a JSON array on stdin,
+  answers with findings JSON on stdout within 60 s, and any error discards
+  its findings with a warning plus telemetry — never a silent pass, never a
+  crash. A docs-only push with an enabled quality duty now runs the
+  documentation checker; with no enabled duty the no-manifest path is
+  unchanged. The v2 stubs `commit_messages`/`code_comments` ship inert
+  (v1 covers markdown only).
 
 ### Fixed
 - **A fix in a different file now clears an old finding.** A carried-forward finding
@@ -54,6 +154,29 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `claude.exe` behind the shim and flattens the prompt if it cannot.
 
 ### Added
+- **Comment-consistency findings in the deep lane (comment-gate).** The
+  deep-reviewer gains an opt-in nit class for comments/docstrings that
+  disagree with the code they annotate — three sub-classes carried on the
+  finding's new optional `comment_kind` field: `false_citation` (a comment
+  cites a symbol/anchor/section that no longer exists), `stale_tense`
+  ("will be removed" where the change already happened), and
+  `contract_divergence` (the comment claims behaviour the code lacks).
+  The class is **non-blocking by construction**: `compute_verdict` skips
+  every tagged finding whatever the claimed severity or confidence, even
+  under `OCR_BLOCK_SEVERITY=low`; the docs-drift ideal of "always low"
+  for such nits lives in the gate code, not the prompt. When the code —
+  not the comment — is the wrong side, the correct report is an untagged
+  Correctness finding at its own severity; the prompt says so explicitly.
+  Scope is diff-only (text this diff introduced or made stale, incl.
+  cross-file staleness the diff caused); pre-existing staleness is never
+  flagged. Nothing is ever dropped or capped: a tagged finding that
+  arrives without its verbatim proof (the quoted comment text in
+  `existing_code`, the contradicting code / killing diff hunk / zero-hit
+  search in `evidence`) is DISPLAYED with a machine-applied
+  `[unverified: no verbatim quotes attached]` stamp in the gate's report.
+  Only the three contracted tag values count — an improvised tag keeps
+  the finding's full strictness. The deep-reviewer prompt is
+  fingerprinted, so the ledger re-reviews once as scheduled.
 - **The `claude` backend can review a push (unified gate).** `OCR_BACKEND=claude`
   (or a repo pin, the `OCR_HARNESS` hint a hook adapter sets, a Claude Code
   session environment, or claude being the only backend CLI on PATH) now

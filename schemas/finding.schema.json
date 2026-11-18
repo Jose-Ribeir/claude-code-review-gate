@@ -70,6 +70,11 @@
         "sibling_of": {
           "type": "string",
           "description": "Id of the known_defects entry this finding confirms (0.9.0)."
+        },
+        "evidence_source": {
+          "type": "string",
+          "enum": ["existing_test", "ephemeral_test"],
+          "description": "Provenance of the evidence behind the finding (SPEC-15.4, command-check findings): an existing test that was run, or an ephemeral probe materialized by the check. Unknown values are dropped with a note; the tag flows into output and telemetry untouched."
         }
       }
     }

@@ -306,8 +306,8 @@ note* — the gate never fails on config.
 | `<store root>/config.json` — the gate's external store root (`$OCR_STATE_DIR`, else `~/.local/state/review-gate`) | machine-wide defaults |
 | `<repo>/.ocr/config.json` — the config file the gate already honours for `blocking` | per-repo overrides; also the **only** place `intent.ticket` is accepted |
 
-Keys (all under an `"intent"` object except the `"jira"` block; switches
-accept booleans, `0`/`1`, and on/off-style words):
+Keys (under an `"intent"` object, the `"jira"` block, or the `"checks"`
+object; switches accept booleans, `0`/`1`, and on/off-style words):
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -316,6 +316,29 @@ accept booleans, `0`/`1`, and on/off-style words):
 | `intent.ticket` | — | explicit ticket key (e.g. `"PROJ-123"`); per-repo file only — a global value is ignored with a note |
 | `intent.tracker_order` | `["github", "gitlab", "jira"]` | tracker backends tried per key, in order; unknown names are dropped with a note |
 | `jira` | `{}` | Jira coordinates, e.g. `{"server": "https://you.atlassian.net", "project": "PROJ", "timeout": 30}` — the side-fetch names the server in its prompt; a positive `timeout` overrides the 30 s default |
+| `checks.<name>.enabled` | per duty | on/off switch — a disabled check costs nothing, ever |
+| `checks.<name>.mode` | `"block"` | `"block"` or `"warn"`; warn clamps severity to at most medium and confidence to at most 0.5, and can never block a push |
+| `checks.<name>.globs` | per duty | repo-relative globs; the check runs only when matching files are in the push diff |
+| `checks.<name>.command` | — | repo-relative executable; naming one turns the entry into a command check (see "Custom checks" below) |
+| `checks.<name>.sections` | — | ADR structure section list for `adr-wait-what` (else the fallback superset) |
+| `checks.<name>.template` | — | path to an ADR template file for `adr-wait-what` |
+| `checks.<name>.sentence_cap` | — | positive integer; STE sentence-length cap for `adr-wait-what` |
+| `checks.<name>.sweep` | `false` | widen ADR-duty evidence to every `*.md` under the records root; the findings scope stays the change set |
+| `checks.<name>.parallel` | `false` | command checks only: declares the check runs concurrently with the review session, against its own throwaway tip clone (SPEC-15.3) — the clone is removed with the run's other temporaries; if it cannot be created the check is skipped with a warning (isolation is never traded for throughput). Non-parallel checks stay sequential, post-review, against the review tree |
+| `checks.<name>.timeout` | `60` | command checks only: the check's answer budget in seconds, clamped to 1–3600 (SPEC-15.1; the default matches the 60 s budget every check already got) |
+
+The `checks` object resolves through the same layering as everything else —
+built-in defaults, then the store-root `config.json`, then the per-repo
+`.ocr/config.json` — and invalid values degrade to load notes, never
+failures. Built-ins and their defaults: `docs-deslop` `{enabled: true,
+mode: "block", globs: ["**/*.md"]}`; `adr-wait-what` and `adr-integrity`
+`{enabled: false, mode: "block", globs: ["docs/adr/**/*.md", "**/adr/*.md"]}`
+(the ADR duties presuppose conventions a repo may not follow, so they start
+off). Declaring a new name with a string `command` enables a command check
+with `{enabled: true, mode: "block", globs: []}`; a declaration without
+`command` is ignored with a note — a typo can never break the gate. The v2
+stubs `commit_messages` and `code_comments` ship inert (v1 is markdown
+only). See "Custom checks" below for the full contract (ADR 0006).
 
 Discovery order: **override file > branch name > commit messages**
 (commit-derived keys are marked background). Key shapes: Jira-style
@@ -347,6 +370,124 @@ One manual verification of the Jira path with the real connector:
    the connector), and push again. The review still completes on commit
    messages alone, with a Jira miss note recorded — the push is never stalled
    beyond the bounded side-fetch and never blocked by Jira.
+
+## Custom checks
+
+The `checks` object layers two kinds of check on top of the review: three
+built-in documentation-quality duties and any command checks you declare.
+
+### Built-in documentation-quality duties
+
+All three are sections of the one documentation-checker agent — one spawn,
+one cost — and each runs only when it is enabled AND matching files are in
+the push diff. The documentation checker spawns when the review manifest
+carries `docs_context` (the pre-existing rule) or `docs_quality`; with
+neither, no spawn and no cost.
+
+- **`docs-deslop`** (default ON): changed markdown against the deslop
+  rulebook — empty words, metaphor verbs claiming mechanism, AI shape. A
+  gate-side scan (catalog hits, throat-clearing, em-dash density, template
+  skeletons from `scripts/deslop_catalog.json`) feeds the agent as
+  evidence. Cluster rule, enforced gate-side: a finding needs ≥3 co-located
+  tells or `document_wide: true`, else it is demoted to a note that can
+  never block.
+- **`adr-wait-what`** (default OFF): changed ADRs against the repo's own
+  structure (your `sections` list or `template` file, else the Status / Date
+  / Context / Decision / Consequences superset), Context-before-Decision
+  (unconditional), STE-style readability judged from deterministic surface
+  stats (`sentence_cap` configurable), and glossary vocabulary.
+- **`adr-integrity`** (default OFF): every claim a changed ADR makes,
+  verified end to end — referenced files, functions, and config keys exist
+  and do what is claimed; cited ADRs actually say what the ADR says they
+  say. Guilty until proven innocent, scoped to claims about present reality
+  (forward-looking intentions and predictions are not claims): a claim the
+  checker cannot verify — unreadable cited thing, indeterminable behavior,
+  unreachable external reference — is a blocking finding, never a silent
+  pass. Existence facts are computed deterministically; the agent judges
+  truth. `sweep` (default off) widens evidence to the whole records root.
+
+**Docs-only pushes:** with an enabled quality duty and matching files in the
+diff, a docs-only push now runs the documentation checker — the docs changer
+pays for the docs check (mirroring the freshness cost rule). With no enabled
+duty the no-manifest path is unchanged: no spawn, no cost.
+
+### Command checks
+
+Declare any executable in your repo as a push check:
+
+```json
+{
+  "checks": {
+    "my-lint": {"command": "scripts/my_lint.sh", "globs": ["**/*.py"], "mode": "warn"}
+  }
+}
+```
+
+- The executable is repo-relative, must be executable, and runs with cwd at
+  the review tree root (the pushed tip). An absolute path or any `..`
+  component is rejected before anything runs — warning plus telemetry, the
+  check is skipped.
+- The matched changed files arrive on **stdin** as a JSON array of
+  repo-relative paths.
+- Findings come back on **stdout** as a JSON array (bare or wrapped as
+  `{"findings": [...]}`) of finding objects in the gate's findings shape.
+  A check may additionally report its own degradations in a `warnings`
+  array (`{"findings": [...], "warnings": [...]}`) — coverage gaps,
+  unbuildable probes, flake demotions; they surface in the gate output and
+  telemetry like every other check degradation, and a malformed warnings
+  field degrades to a note, never a failure.
+- A finding may carry `evidence_source: "existing_test" | "ephemeral_test"`
+  (which kind of test evidenced it). The gate validates the value against
+  that enumeration: absent is fine (non-test checks), an unknown value
+  drops the tag with a note while the finding survives. A finding tagged
+  `ephemeral_test` should come with the check's no-permanent-coverage
+  warning — wording that states the lack (a negation near "permanent
+  test"/"coverage", e.g. "no permanent coverage for the race probe");
+  its absence surfaces a gate-side warning naming no-permanent-coverage,
+  never a verdict change. A warning that merely mentions coverage does
+  not pair. The tag flows into the verdict output and telemetry untouched
+  by demotion passes.
+- The check gets **60 seconds by default**, configurable per check via
+  `timeout` (SPEC-15.1; clamped to 1–3600 s). Nonzero exit, timeout, or
+  malformed output discards that check's findings and records a warning
+  plus telemetry — never a silent pass, never a gate crash.
+- `mode: "warn"` clamps severity to at most medium and confidence to at most
+  0.5; mode only downgrades, and `compute_verdict` stays the sole verdict
+  authority.
+- A check whose globs match nothing in the diff costs nothing.
+
+A complete, working example lives in **`examples/test-check/`**: the
+reference race & regression test executor (selector-driven, runs selected
+repo tests and ephemeral `-race` probes in its own tip clone, reproduces
+failures before blocking) plus its install guide.
+
+### Finding waivers
+
+`--no-verify` is the nuclear option. For the case of expected findings you
+accept, the gate offers narrow, per-finding acknowledgment (ADR 0007):
+
+```console
+$ python3 scripts/review-gate.py waive F2 F3 --note "expected during the migration"
+$ python3 scripts/review-gate.py waive --list
+$ python3 scripts/review-gate.py unwaive F2
+```
+
+- Waiving is a **between-pushes act** on the repo you push from: after a
+  blocked push, waive the findings you accept by id; your next push is
+  judged on what is left.
+- A waiver keys on the finding's **content anchor** (path + signature + the
+  tip's local text window around the finding), so it survives rebases and
+  line movement — and **lapses automatically when the code under the
+  finding changes**: anything new or altered can never ride an old waiver.
+  Findings without diff hunks (command checks) anchor on the tip text at
+  the finding's own location instead, so they are waivable too.
+- Suppression is **loud, always**: the verdict text, the recorded JSON, and
+telemetry list what was waived; the findings log keeps every finding
+  (waived findings are never deleted from the record).
+- The ledger is store-root, **repo-scoped, machine-local, no expiry** —
+  like the verdict store. Waivers apply to every finding class (reviewer,
+  deep reviewer, docs checker, command checks) and only filter what
+  `compute_verdict` sees; they never alter the verdict rule.
 
 ## Relationship to upstream
 

@@ -43,8 +43,13 @@ def unwrap(path):
     match = _NPM_EXE.search(text)
     if not match:
         return path
+    # The test suite simulates Windows on POSIX: convert the shim's native
+    # separators before joining, so the extraction and its existence check
+    # work on either platform (os.path.normpath does not treat "\\" as a
+    # separator on POSIX).
+    relative = match.group(1).replace("\\", os.sep).replace("/", os.sep)
     target = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(path)),
-                                           match.group(1)))
+                                           relative))
     return target if os.path.isfile(target) else path
 
 
