@@ -67,6 +67,17 @@ verdicts, absent output, telemetry, reports, and store views have no competing
 authority. Final states are `pass`, `findings`, `stale`, and `incomplete`, with
 publication trust qualified separately.
 
+Within one unit, independent lens requests run with at most four in-flight workers;
+results retain required-lens order and their original request identity regardless of
+completion order. `RG_FINAL_LENS_WORKERS` selects the bound, defaulting to 4 and
+clamping blank/non-numeric values to 4 and all other values to 1..4. This setting does
+not parallelize provider, materialization, test, or cross-unit work. A validated STOP
+prevents new lens requests, joins already-running safe peers, records unstarted lenses
+and dependent mandatory tests as skipped/incomplete, and aggregates only after those
+peers finish. Worker and outer simulation deadlines own a separate descendant process
+group, kill and reap only that group, and retain partial output as incomplete evidence;
+they never kill the caller's process group.
+
 ### 3. Required evidence differs from best-effort dynamic coverage
 
 Repository-declared required suites run at every applicable level. Reproduced

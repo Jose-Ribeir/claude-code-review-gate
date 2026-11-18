@@ -12,8 +12,12 @@ does not discover or execute a stack.
 """
 from __future__ import annotations
 
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from copy import deepcopy
 from dataclasses import dataclass
+import os
+import threading
+import time
 
 import ocr_verdict
 
@@ -22,6 +26,9 @@ WORKER_RESULT_SCHEMA = "final-review-worker-result/v1"
 CROSS_ITEM_CONTRACTS = "cross-item-contracts"
 INTEGRATION_BEHAVIOR = "integration-behavior"
 CAPABILITY_LABELS = frozenset((CROSS_ITEM_CONTRACTS, INTEGRATION_BEHAVIOR))
+DEFAULT_LENS_WORKERS = 4
+MAX_LENS_WORKERS = 4
+_LENS_START_INTERVAL_SECONDS = 0.05
 
 
 @dataclass(frozen=True)
@@ -112,6 +119,23 @@ REQUIRED_LENS_NAMES = tuple(spec.name for spec in REQUIRED_LENSES)
 
 class LensResultError(ValueError):
     """A worker result cannot support a trustworthy normalized completion."""
+
+    def __init__(self, message, *, details=None):
+        super().__init__(message)
+        self.details = deepcopy(details) if isinstance(details, dict) else {}
+
+
+def _received_status(value):
+    """Bound an untrusted status diagnostic without serializing nested content."""
+    if value is not None and not isinstance(value, (str, int, float, bool)):
+        return f"<{type(value).__name__}>"
+    text = str(value)
+    return "".join(char if char.isprintable() else " " for char in text)[:128]
+
+
+def _error_details(error):
+    details = getattr(error, "details", {})
+    return deepcopy(details) if isinstance(details, dict) else {}
 
 
 def build_lens_request(base_request, spec, capabilities=()):
@@ -215,9 +239,17 @@ def normalize_worker_result(result, spec):
     rules such as documentation quote requirements.
     """
     if not isinstance(result, dict) or result.get("schema") != WORKER_RESULT_SCHEMA:
-        raise LensResultError(f"{spec.name} worker result has the wrong schema")
+        raise LensResultError(
+            f"{spec.name} worker result has the wrong schema",
+            details=({"received_status": _received_status(result.get("status"))}
+                     if isinstance(result, dict) and "status" in result else {}),
+        )
     if result.get("status") not in ("success", "completed", "completed_with_warnings"):
-        raise LensResultError(f"{spec.name} worker did not complete successfully")
+        received = _received_status(result.get("status"))
+        raise LensResultError(
+            f"{spec.name} worker did not complete successfully (status={received!r})",
+            details={"received_status": received},
+        )
     raw_findings = result.get("findings")
     raw_warnings = result.get("warnings", [])
     raw_unreviewed = result.get("unreviewed") or []
@@ -274,10 +306,11 @@ def normalize_worker_result(result, spec):
 
 def _failed_outcome(spec, error):
     message = str(error)
+    details = {"error": message, **_error_details(error), "required": True}
     warning = _normal_warning({
         "code": "required-lens-failed",
         "message": f"Required {spec.name} lens did not complete: {message}",
-        "details": {"error": message, "required": True},
+        "details": details,
     }, spec.name)
     return LensOutcome(
         name=spec.name,
@@ -322,21 +355,101 @@ def failed_lens_aggregation(error, specs=REQUIRED_LENSES):
     return aggregate_lenses([_failed_outcome(spec, error) for spec in specs])
 
 
-def run_independent_lenses(base_request, worker, specs=REQUIRED_LENSES):
+def _clamped_lens_workers(value):
+    try:
+        count = int(str(value).strip()) if value is not None and str(value).strip() else 4
+    except (TypeError, ValueError):
+        count = DEFAULT_LENS_WORKERS
+    return min(MAX_LENS_WORKERS, max(1, count))
+
+
+def lens_worker_limit(environ=None):
+    """Resolve RG_FINAL_LENS_WORKERS, defaulting/clamping to one through four."""
+    source = os.environ if environ is None else environ
+    return _clamped_lens_workers(source.get("RG_FINAL_LENS_WORKERS", ""))
+
+
+def _run_bounded_lenses(base_request, worker, specs, *, normalize_result,
+                        failed_result, skipped_result=None, max_workers=None, environ=None):
+    """Map detached raw requests to outcomes with bounded in-flight workers.
+
+    Futures retain their specification index, so completion order cannot swap a
+    raw response onto a different lens. A stopped outcome prevents new requests
+    only when the execution layer supplies ``skipped_result``; every already
+    running safe peer is joined before this function returns any outcomes.
+    """
+    specs = tuple(specs)
+    if not specs:
+        return ()
+    limit = (lens_worker_limit(environ) if max_workers is None
+             else _clamped_lens_workers(max_workers))
+    limit = min(limit, len(specs))
+    outcomes = [None] * len(specs)
+    futures = {}
+    next_index = 0
+    stopping = False
+    started = [threading.Event() for _spec in specs]
+
+    def invoke(index, spec):
+        if index:
+            # Preserve deterministic request/startup order without waiting for a
+            # response. The short hand-off also keeps external worker audit logs
+            # in dispatch order; model execution itself remains fully concurrent.
+            started[index - 1].wait()
+            time.sleep(_LENS_START_INTERVAL_SECONDS)
+        started[index].set()
+        return worker(build_lens_request(base_request, spec))
+
+    with ThreadPoolExecutor(max_workers=limit, thread_name_prefix="final-lens") as executor:
+        def fill_slots():
+            nonlocal next_index
+            # With stop handling, the first response is a sentinel: an immediate
+            # unsafe STOP launches no additional work. An ordinary/failed sentinel
+            # never suppresses the remaining independent evidence.
+            slot_limit = (1 if skipped_result is not None and outcomes[0] is None
+                          else limit)
+            while not stopping and next_index < len(specs) and len(futures) < slot_limit:
+                index = next_index
+                spec = specs[index]
+                future = executor.submit(invoke, index, spec)
+                futures[future] = (index, spec)
+                next_index += 1
+
+        fill_slots()
+        while futures:
+            done, _pending = wait(tuple(futures), return_when=FIRST_COMPLETED)
+            # Stable processing also makes simultaneous validated STOP selection
+            # deterministic; outcome ordering never depends on thread timing.
+            for future in sorted(done, key=lambda item: futures[item][0]):
+                index, spec = futures.pop(future)
+                try:
+                    outcome = normalize_result(future.result(), spec)
+                except Exception as exc:
+                    outcome = failed_result(spec, exc)
+                outcomes[index] = outcome
+                if outcome.state == "stopped" and skipped_result is not None:
+                    stopping = True
+            fill_slots()
+
+    if stopping:
+        for index, outcome in enumerate(outcomes):
+            if outcome is None:
+                outcomes[index] = skipped_result(specs[index])
+    return tuple(outcomes)
+
+
+def run_independent_lenses(base_request, worker, specs=REQUIRED_LENSES, *,
+                           max_workers=None, environ=None):
     """Run every applicable lens and aggregate only after all have returned.
 
     ``worker`` is the standalone orchestrator/worker boundary: it receives one
     detached request and returns one raw result. Any ordinary worker exception
     becomes an incomplete required outcome, never a warning-only completion,
-    and does not short-circuit other independent evidence gathering.
+    and does not short-circuit other independent evidence gathering. At most
+    four requests run concurrently; no provider or checkout work is parallelized.
     """
-    outcomes = []
-    for spec in specs:
-        try:
-            request = build_lens_request(base_request, spec)
-            raw_result = worker(request)
-            outcome = normalize_worker_result(raw_result, spec)
-        except Exception as exc:
-            outcome = _failed_outcome(spec, exc)
-        outcomes.append(outcome)
+    outcomes = _run_bounded_lenses(
+        base_request, worker, specs, normalize_result=normalize_worker_result,
+        failed_result=_failed_outcome, max_workers=max_workers, environ=environ,
+    )
     return aggregate_lenses(outcomes)

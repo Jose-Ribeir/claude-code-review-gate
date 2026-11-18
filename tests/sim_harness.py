@@ -57,6 +57,9 @@ GIT_PUSH_FAILED = "failed to push some refs"
 GATE_MARKER_RE = re.compile(r"review-gate", re.IGNORECASE)
 
 _SCRIPTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts")
+if _SCRIPTS not in sys.path:
+    sys.path.insert(0, _SCRIPTS)
+from rg_final_review import run_owned_process  # noqa: E402
 
 
 class SimError(RuntimeError):
@@ -672,21 +675,41 @@ def run_final_review_simulation(reference, *, repo_root, artifact_dir, environ=N
     before = repo_snapshot(repo_root)
     gate = Path(_SCRIPTS) / "review-gate.py"
     command = [sys.executable, str(gate), "final-review", str(reference)]
-    execute = subprocess.run if runner is None else runner
     process = None
     error = ""
+    stdout = stderr = ""
+    returncode = None
     try:
-        process = execute(
-            command, cwd=str(repo_root), env=env, capture_output=True, text=True,
-            encoding="utf-8", errors="replace", timeout=float(timeout), check=False,
-        )
+        if runner is None:
+            # Bounded independent lens waves fit inside the existing two-hour
+            # outer allowance; no model depth or individual coverage is removed.
+            process = run_owned_process(
+                command, cwd=str(repo_root), env=env, timeout=float(timeout),
+            )
+        else:
+            process = runner(
+                command, cwd=str(repo_root), env=env, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=float(timeout), check=False,
+            )
+    except subprocess.TimeoutExpired as exc:
+        error = f"real-model final-review invocation unavailable: TimeoutExpired: {exc}"
+        stdout = exc.output or ""
+        stderr = exc.stderr or ""
+        returncode = getattr(exc, "returncode", None)
     except (OSError, subprocess.SubprocessError) as exc:
         error = f"real-model final-review invocation unavailable: {type(exc).__name__}: {exc}"
-    stdout = getattr(process, "stdout", "") or ""
-    stderr = getattr(process, "stderr", "") or ""
-    returncode = getattr(process, "returncode", None)
+    if process is not None:
+        stdout = process.stdout or ""
+        stderr = process.stderr or ""
+        returncode = process.returncode
+    if isinstance(stdout, bytes):
+        stdout = stdout.decode("utf-8", "replace")
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", "replace")
     try:
-        result = json.loads(stdout) if stdout.strip() else None
+        # Partial output from a killed deadline is evidence, never a completed
+        # operator result (and must not replace the exact timeout diagnosis).
+        result = json.loads(stdout) if process is not None and stdout.strip() else None
     except ValueError:
         result = None
         error = "real-model final-review returned non-JSON operator output"

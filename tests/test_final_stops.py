@@ -4,6 +4,7 @@ from __future__ import annotations
 from copy import deepcopy
 from pathlib import Path
 import sys
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import rg_final_review  # noqa: E402
+from rg_final_execution import execute_unit  # noqa: E402
 from rg_final_lenses import REQUIRED_LENS_NAMES  # noqa: E402
 from rg_final_store import FinalStore  # noqa: E402
 
@@ -182,7 +184,9 @@ def test_valid_unsafe_sandbox_stop_records_original_finding_and_every_skip(
 
     def worker(request, **kwargs):
         requests.append(request["lens"])
-        return _stop_result() if request["lens"] == "correctness" else _worker_result()
+        if request["lens"] == "correctness":
+            return _stop_result()
+        return _worker_result()
 
     def forbidden(*args, **kwargs):
         raise AssertionError("dependent tests must not execute after an unsafe sandbox STOP")
@@ -220,6 +224,46 @@ def test_valid_unsafe_sandbox_stop_records_original_finding_and_every_skip(
         assert report["publications"] == []
 
 
+def test_later_stop_joins_running_safe_peers_and_marks_pending_lenses(tmp_path):
+    request = {
+        "unit_key": "individual:1",
+        "repository": {"path": str(tmp_path), "access": "full_tree",
+                       "head_sha": "a" * 40, "target_sha": "b" * 40},
+        "diff": "diff --git a/app.py b/app.py\n",
+    }
+    requests = []
+
+    def worker(lens_request):
+        lens = lens_request["lens"]
+        requests.append(lens)
+        if lens == "repository-standards":
+            return _stop_result()
+        if lens not in ("correctness", "compatibility/migrations", "change-intent"):
+            time.sleep(0.15)
+        return _worker_result()
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("dependent tests must not run after a validated STOP")
+
+    execution = execute_unit(
+        request, worker, required_runner=forbidden, dynamic_runner=forbidden,
+        environ={},
+    )
+
+    assert requests == list(REQUIRED_LENS_NAMES[:5])
+    assert [outcome.state for outcome in execution.aggregation.outcomes] == [
+        "completed", "stopped", "completed", "completed", "completed",
+        "skipped", "skipped",
+    ]
+    assert execution.aggregation.complete is False
+    assert execution.checks_complete is False
+    assert execution.stop["stage"] == "lens:repository-standards"
+    assert execution.required is None and execution.dynamic is None
+    assert {item["name"] for item in execution.skipped_work} >= {
+        "compatibility/migrations", "change-intent", "required_tests", "dynamic_tests",
+    }
+
+
 def test_stack_supervisor_scopes_stop_to_dependents_and_preserves_safe_individuals(
         tmp_path, monkeypatch):
     from test_final_composition import StackProvider, _repository
@@ -252,7 +296,11 @@ def test_stack_supervisor_scopes_stop_to_dependents_and_preserves_safe_individua
     )
 
     traces = [__import__('json').loads(line) for line in trace.read_text().splitlines()]
+    # The combined correctness sentinel stops before another request is started;
+    # every dependent mandatory lens/test remains explicitly skipped, not green.
     assert len(traces) == 2 * len(REQUIRED_LENS_NAMES) + 1
+    assert any(item["unit"] == "combined" and item["lens"] == "correctness"
+               for item in traces)
     assert [unit["unit_key"] for unit in output["units"]] == [
         "individual:1", "individual:2", "combined", "prospective"]
     assert output["units"][0]["execution_complete"] is True

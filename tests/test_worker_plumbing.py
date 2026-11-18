@@ -10,16 +10,23 @@ tests pin the builder's contract at its own seam; the spawn loops, prompts,
 stub argv modes, output parsing and error wrapping stay per-caller and are
 covered by the argv goldens, the deny-canary suite and the generator suites.
 """
+import json
 import os
+from pathlib import Path
+import signal
 import sys
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from test_async_gate import review_gate  # noqa: E402
 from test_process_groups import _wait_gone  # noqa: E402
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
+import rg_final_review as final_review  # noqa: E402
 
 _FAKE_KIMI = "/fake/bin/kimchi"
 
@@ -233,3 +240,117 @@ def test_an_in_flight_generator_worker_is_supervisor_killable(
     assert "could not regenerate" in str(err)
     assert _wait_gone(worker_pid)
     assert review_gate._active_children() == []
+
+
+# --- R8: the final-review worker's exact completion contract and owned tree ---
+
+def test_default_final_worker_prompt_states_exact_success_status_contract(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(final_review.ocr_profile, "select_backend", lambda **kwargs: (
+        SimpleNamespace(name="claude")
+    ))
+    monkeypatch.setattr(final_review.shutil, "which", lambda *args, **kwargs: "/bin/claude")
+    command = final_review._default_worker_command(
+        "/tmp/request.json", tmp_path, {},
+        {"lens": "correctness", "review_duty": "Check behavior."},
+    )
+    prompt = command[command.index("-p") + 1]
+
+    assert '"schema":"final-review-worker-result/v1"' in prompt
+    assert '"status":"success"' in prompt
+    assert '"success" | "completed" | "completed_with_warnings"' in prompt
+    assert "success and completed both mean" in prompt
+    assert "completed_with_warnings means" in prompt
+    assert "only successful completion values" in prompt
+
+
+def _final_request(tmp_path):
+    return {
+        "lens": "correctness",
+        "repository": {"path": str(tmp_path)},
+        "diff": "diff --git a/app.py b/app.py\n",
+    }
+
+
+def test_final_worker_rejection_has_bounded_sanitized_structured_diagnostics(tmp_path):
+    script = tmp_path / "invalid-status.py"
+    script.write_text(
+        "import json\n"
+        "print(json.dumps({'schema':'final-review-worker-result/v1',"
+        "'status':'finished','summary':'token=do-not-log-known-model-secret-' + 'x'*2000,"
+        "'findings':[],'warnings':[]}))\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(final_review.WorkerError) as captured:
+        final_review.invoke_worker(
+            _final_request(tmp_path), command=[sys.executable, str(script)],
+            environ={"PATH": os.environ.get("PATH", ""),
+                     "OPENAI_API_KEY": "known-model-secret"},
+        )
+
+    details = captured.value.details
+    assert details["received_status"] == "finished"
+    assert details["return_code"] == 0
+    assert details["expected_status"] == [
+        "success", "completed", "completed_with_warnings",
+    ]
+    assert 0 < len(details["stdout_tail"]) <= 600
+    assert "do-not-log" not in json.dumps(details)
+    assert "known-model-secret" not in json.dumps(details)
+    assert "x" * 700 not in details["stdout_tail"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group ownership")
+def test_process_group_guard_never_targets_the_callers_group(monkeypatch):
+    process = SimpleNamespace(pid=os.getpgrp(), killed=False)
+    process.poll = lambda: None
+    process.kill = lambda: setattr(process, "killed", True)
+    monkeypatch.setattr(
+        final_review.os, "killpg",
+        lambda *args: (_ for _ in ()).throw(AssertionError("current group targeted")),
+    )
+    final_review._kill_owned_process(process)
+    assert process.killed is True
+
+
+def test_final_worker_timeout_kills_grandchild_and_cleans_request(tmp_path):
+    marker = tmp_path / "grandchild-survived"
+    pid_file = tmp_path / "grandchild.pid"
+    request_path_record = tmp_path / "request-path"
+    script = tmp_path / "slow-worker.py"
+    script.write_text(
+        "import pathlib, subprocess, sys, time\n"
+        "child_code = \"import pathlib,sys,time; time.sleep(1); "
+        "pathlib.Path(sys.argv[1]).write_text('survived')\"\n"
+        f"child = subprocess.Popen([sys.executable, '-c', child_code, {str(marker)!r}], "
+        "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+        f"pathlib.Path({str(pid_file)!r}).write_text(str(child.pid))\n"
+        f"pathlib.Path({str(request_path_record)!r}).write_text(sys.argv[-1])\n"
+        "print('worker-ready', flush=True)\n"
+        "time.sleep(120)\n",
+        encoding="utf-8",
+    )
+    grandchild = None
+    try:
+        with pytest.raises(final_review.WorkerError) as captured:
+            final_review.invoke_worker(
+                _final_request(tmp_path), command=[sys.executable, str(script)],
+                environ={"PATH": os.environ.get("PATH", "")}, timeout=0.3,
+            )
+        grandchild = int(pid_file.read_text())
+        time.sleep(1.2)
+        assert not marker.exists(), "timed-out worker grandchild created a side effect"
+        assert _wait_gone(grandchild), "timed-out worker grandchild remained in flight"
+        details = captured.value.details
+        assert details["reason"] == "timeout"
+        assert details["return_code"] not in (None, 0)
+        assert "worker-ready" in details["stdout_tail"]
+        request_path = Path(request_path_record.read_text())
+        assert not request_path.exists(), "the isolated request directory was not cleaned"
+    finally:
+        if grandchild is not None and not _wait_gone(grandchild, timeout=0.1):
+            try:
+                os.kill(grandchild, signal.SIGKILL)
+            except OSError:
+                pass

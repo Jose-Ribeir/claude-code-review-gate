@@ -21,6 +21,7 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -117,6 +118,76 @@ def _read_standalone_observed(provider, reference, repo_root):
 class WorkerError(RuntimeError):
     """A lens worker did not produce a trustworthy completed result."""
 
+    def __init__(self, message, *, details=None):
+        super().__init__(message)
+        self.details = deepcopy(details) if isinstance(details, dict) else {}
+
+
+def _kill_owned_process(process):
+    """Kill only the tree owned by ``run_owned_process`` and never our group."""
+    if os.name == "posix":
+        try:
+            # start_new_session=True makes the child PID its process-group ID.
+            # The explicit inequality prevents an accidental kill of the caller.
+            if process.pid == os.getpgrp():
+                if process.poll() is None:
+                    process.kill()
+                return
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            if process.poll() is None:
+                process.kill()
+    elif os.name == "nt":
+        try:
+            # /T includes descendants; invoke it before reaping the direct child.
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                stdin=subprocess.DEVNULL, capture_output=True, check=False,
+            )
+        except OSError:
+            # Safe Windows fallback when taskkill is unavailable: reap the owned
+            # direct child rather than risking any unrelated process/group.
+            if process.poll() is None:
+                process.kill()
+    elif process.poll() is None:
+        # Explicit conservative fallback on unknown platforms.
+        process.kill()
+
+
+def run_owned_process(command, *, cwd, env, timeout):
+    """Run a captured text subprocess whose deadline owns its descendant tree.
+
+    Timeout re-raises ``TimeoutExpired`` with the exact captured partial output
+    and an additional ``returncode`` attribute after the direct child is reaped.
+    POSIX uses a new session/process group. Windows uses a new process group and
+    taskkill's tree mode, with direct-child-only fallback if taskkill is absent.
+    """
+    options = {"start_new_session": True} if os.name == "posix" else {}
+    if os.name == "nt":
+        options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    process = subprocess.Popen(
+        command, cwd=str(cwd), env=env, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        encoding="utf-8", errors="replace", **options,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=float(timeout))
+    except subprocess.TimeoutExpired as exc:
+        _kill_owned_process(process)
+        stdout, stderr = process.communicate()
+        timeout_error = subprocess.TimeoutExpired(
+            command, timeout, output=stdout, stderr=stderr,
+        )
+        timeout_error.returncode = process.returncode
+        raise timeout_error from exc
+    except BaseException:
+        _kill_owned_process(process)
+        process.communicate()
+        raise
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
 
 def _sha256(text):
     return hashlib.sha256(text.encode("utf-8", "surrogateescape")).hexdigest()
@@ -186,8 +257,16 @@ def _default_worker_command(request_path, repo_root, environ, request):
         "diff is the complete merge-base patch. Iteratively inspect unchanged code, "
         "docs, callers and tests as needed. Your assigned evidence duty is: "
         f"{request['review_duty']} Do not use or wait for another lens's conclusions. "
-        f"Return only a {WORKER_RESULT_SCHEMA} JSON object with status, summary, findings "
-        "and warnings; do not trust your own verdict field to determine the gate result. "
+        f"Return only one JSON object of the exact ordinary-completion shape "
+        f"{{\"schema\":\"{WORKER_RESULT_SCHEMA}\",\"status\":\"success\","
+        "\"summary\":\"...\",\"findings\":[],\"warnings\":[],\"unreviewed\":[]}. "
+        "The ordinary status enum is exactly \"success\" | \"completed\" | "
+        "\"completed_with_warnings\": success and completed both mean the assigned review "
+        "completed successfully; completed_with_warnings means the assigned review completed "
+        "with explicit warnings or unreviewed limitations to preserve. These three are the "
+        "only successful completion values; do not invent another status spelling. summary "
+        "must be a string, findings and warnings must be arrays, and unreviewed must be an "
+        "array when present. Do not trust your own verdict field to determine the gate result. "
         "If finding_memory contains prior findings, omission never resolves them. Explicit "
         "closure may use finding_resolutions entries with finding_id, content_anchor, "
         "resolution_evidence.source (path, start_line, end_line, exact body, unit_key, head_sha) "
@@ -256,6 +335,54 @@ def _object_from_text(text):
     return None
 
 
+WORKER_COMPLETION_STATUSES = ("success", "completed", "completed_with_warnings")
+_STDOUT_DIAGNOSTIC_LIMIT = 512
+_SENSITIVE_DIAGNOSTIC = re.compile(
+    r"(?i)(\b(?:api[_-]?key|token|secret|password|credential|authorization)\b"
+    r"[\"']?\s*[:=]\s*[\"']?)([^\s,\"'\}\]]+)",
+)
+_BEARER_DIAGNOSTIC = re.compile(r"(?i)(\bbearer\s+)[^\s,\"']+")
+_URI_CREDENTIAL_DIAGNOSTIC = re.compile(
+    r"([A-Za-z][A-Za-z0-9+.-]*://)[^\s/?#@]+@"
+)
+
+
+def _sanitize_worker_diagnostic(value, environ):
+    """Return a bounded tail with credential-shaped and known secret text removed."""
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", "replace")
+    text = str(value or "")
+    sensitive_parts = (
+        "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "COOKIE", "PRIVATE_KEY",
+        "API_KEY", "ASKPASS", "AUTHORIZATION", "AUTH",
+    )
+    known = []
+    for key, value in dict(environ).items():
+        if len(str(value)) >= 4 and any(part in str(key).upper()
+                                       for part in sensitive_parts):
+            known.append(str(value))
+    for secret in sorted(set(known), key=len, reverse=True):
+        text = text.replace(secret, "[redacted]")
+    text = _URI_CREDENTIAL_DIAGNOSTIC.sub(r"\1[redacted]@", text)
+    text = _BEARER_DIAGNOSTIC.sub(r"\1[redacted]", text)
+    text = _SENSITIVE_DIAGNOSTIC.sub(r"\1[redacted]", text)
+    text = "".join(
+        char if char.isprintable() or char in "\n\t" else " " for char in text
+    )
+    return text[-_STDOUT_DIAGNOSTIC_LIMIT:]
+
+
+def _worker_diagnostics(source, *, reason, status=None, return_code=None, stdout=None):
+    received = _sanitize_worker_diagnostic(status, source)[-128:] if status is not None else None
+    return {
+        "reason": reason,
+        "received_status": received,
+        "return_code": return_code,
+        "stdout_tail": _sanitize_worker_diagnostic(stdout, source),
+        "expected_status": list(WORKER_COMPLETION_STATUSES),
+    }
+
+
 def invoke_worker(request, *, command=None, repo_root=None, environ=None, timeout=900):
     """Execute one credential-isolated worker and decode its contracted result."""
     source = os.environ if environ is None else environ
@@ -279,19 +406,54 @@ def invoke_worker(request, *, command=None, repo_root=None, environ=None, timeou
         else:
             command = [*(str(part) for part in command), str(request_path)]
         try:
-            process = subprocess.run(
-                command, cwd=str(request["repository"]["path"]),
-                env=worker_environment(source), stdin=subprocess.DEVNULL,
-                capture_output=True, text=True, encoding="utf-8", errors="replace",
-                timeout=float(timeout), check=False,
+            process = run_owned_process(
+                command, cwd=request["repository"]["path"],
+                env=worker_environment(source), timeout=float(timeout),
             )
+        except subprocess.TimeoutExpired as exc:
+            details = _worker_diagnostics(
+                source, reason="timeout", return_code=getattr(exc, "returncode", None),
+                stdout=exc.output,
+            )
+            raise WorkerError(
+                f"{request['lens']} worker timed out after {float(timeout):g}s",
+                details=details,
+            ) from exc
         except (OSError, subprocess.SubprocessError) as exc:
-            raise WorkerError(f"{request['lens']} worker could not run: {exc}") from exc
-    if process.returncode:
-        raise WorkerError(f"{request['lens']} worker exited {process.returncode}")
-    result = _object_from_text(process.stdout)
-    if result is None:
-        raise WorkerError(f"{request['lens']} worker returned no valid contracted JSON result")
+            details = _worker_diagnostics(source, reason="invocation-error")
+            raise WorkerError(
+                f"{request['lens']} worker could not run: {type(exc).__name__}: {exc}",
+                details=details,
+            ) from exc
+        result = _object_from_text(process.stdout)
+        if process.returncode:
+            details = _worker_diagnostics(
+                source, reason="exit-status", status=(result or {}).get("status"),
+                return_code=process.returncode, stdout=process.stdout,
+            )
+            raise WorkerError(
+                f"{request['lens']} worker exited {process.returncode}", details=details,
+            )
+        if result is None:
+            details = _worker_diagnostics(
+                source, reason="invalid-json", return_code=process.returncode,
+                stdout=process.stdout,
+            )
+            raise WorkerError(
+                f"{request['lens']} worker returned no valid contracted JSON result",
+                details=details,
+            )
+        status = result.get("status")
+        if status not in WORKER_COMPLETION_STATUSES and str(status).upper() != "STOP":
+            details = _worker_diagnostics(
+                source, reason="invalid-status", status=status,
+                return_code=process.returncode, stdout=process.stdout,
+            )
+            raise WorkerError(
+                f"{request['lens']} worker returned unsupported completion status "
+                f"{details['received_status']!r}",
+                details=details,
+            )
     return result
 
 
@@ -594,7 +756,7 @@ def _run_static_final_review(reference, *, repo_root=None, provider=None, store_
                                      if execute_checks else None),
                     dynamic_runner=((dynamic_runner or run_dynamic_checks)
                                     if execute_checks else None),
-                    dynamic_kwargs=dynamic_kwargs,
+                    dynamic_kwargs=dynamic_kwargs, environ=environ,
                 )
                 aggregation = execution.aggregation
                 finding_verdict = (execution.finding_verdict if execute_checks
@@ -999,7 +1161,7 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
                         request, isolated_worker, unit_id=current_id,
                         required_runner=required_runner or run_required_verification,
                         dynamic_runner=dynamic_runner or run_dynamic_checks,
-                        dynamic_kwargs=standalone_dynamic_kwargs,
+                        dynamic_kwargs=standalone_dynamic_kwargs, environ=environ,
                     )
                     aggregations[current_id] = executions[current_id].aggregation
                     observations = _record_lens_aggregation(
@@ -1370,7 +1532,7 @@ def _run_stack_unit(store, identity, graph, unit_key, unit_id, *, item=None,
                                  if execute_checks else None),
                 dynamic_runner=((dynamic_runner or run_dynamic_checks)
                                 if execute_checks else None),
-                dynamic_kwargs=dynamic_kwargs,
+                dynamic_kwargs=dynamic_kwargs, environ=environ,
             )
             aggregation = execution.aggregation
             _record_lens_aggregation(store, unit_id, aggregation, materialized)

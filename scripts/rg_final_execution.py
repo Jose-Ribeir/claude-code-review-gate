@@ -17,8 +17,9 @@ from rg_final_dynamic import record_dynamic_result
 from rg_final_lenses import (
     LensOutcome,
     REQUIRED_LENSES,
+    _error_details,
+    _run_bounded_lenses,
     aggregate_lenses,
-    build_lens_request,
     normalize_worker_result,
 )
 
@@ -190,11 +191,13 @@ def _rejected_result(result, error):
 
 def _failed_lens(spec, error):
     message = str(error)
+    details = {"error": message, **_error_details(error),
+               "required": True, "lens": spec.name}
     warning = {
         "code": "required-lens-failed",
         "message": f"Required {spec.name} lens did not complete: {message}",
         "scope": spec.name,
-        "details": {"error": message, "required": True, "lens": spec.name},
+        "details": details,
         "lens": spec.name,
     }
     return LensOutcome(name=spec.name, state="incomplete", summary=message,
@@ -258,7 +261,8 @@ def _run_test_stage(name, runner, call):
 
 
 def execute_unit(request, worker, *, required_runner=None, dynamic_runner=None,
-                 unit_id=None, dynamic_kwargs=None, specs=REQUIRED_LENSES):
+                 unit_id=None, dynamic_kwargs=None, specs=REQUIRED_LENSES,
+                 max_workers=None, environ=None):
     """Execute one materialized unit through safe static/test completion.
 
     ``required_runner`` and ``dynamic_runner`` use the existing
@@ -269,30 +273,41 @@ def execute_unit(request, worker, *, required_runner=None, dynamic_runner=None,
     """
     from pathlib import Path
 
-    outcomes = []
     stop = None
     rejected = []
     skipped = []
-    for spec in specs:
-        if stop is not None:
-            outcomes.append(_stop_lens(spec, stop, skipped=True))
-            skipped.append(_skip(stop, "lens", spec.name, unit_id))
-            continue
+
+    def normalize(raw, spec):
+        nonlocal stop
         try:
-            lens_request = build_lens_request(request, spec)
-            raw = worker(lens_request)
-            try:
-                stop = validate_stop(raw, stage=f"lens:{spec.name}")
-            except StopRequestError as exc:
-                rejected.append({"stage": f"lens:{spec.name}", "error": str(exc)})
-                raw = _rejected_result(raw, exc)
-            if stop is not None:
-                outcomes.append(_stop_lens(spec, stop, skipped=False))
-                skipped.append(_skip(stop, "stage", f"lens:{spec.name}", unit_id))
-            else:
-                outcomes.append(normalize_worker_result(raw, spec))
-        except Exception as exc:
-            outcomes.append(_failed_lens(spec, exc))
+            stage_stop = validate_stop(raw, stage=f"lens:{spec.name}")
+        except StopRequestError as exc:
+            rejected.append({"stage": f"lens:{spec.name}", "error": str(exc)})
+            raw = _rejected_result(raw, exc)
+            stage_stop = None
+        if stage_stop is not None:
+            # The first stable lens-order STOP owns dependent test scope. Safe
+            # peers already in flight still return full, separately attributable
+            # evidence and are joined before aggregation.
+            if stop is None:
+                stop = stage_stop
+            return _stop_lens(spec, stage_stop, skipped=False)
+        return normalize_worker_result(raw, spec)
+
+    def skip_lens(spec):
+        return _stop_lens(spec, stop, skipped=True)
+
+    outcomes = _run_bounded_lenses(
+        request, worker, specs, normalize_result=normalize,
+        failed_result=_failed_lens, skipped_result=skip_lens,
+        max_workers=max_workers, environ=environ,
+    )
+    for spec, outcome in zip(specs, outcomes):
+        if outcome.state == "stopped":
+            owned_stop = outcome.warnings[0]["details"]["stop"]
+            skipped.append(_skip(owned_stop, "stage", f"lens:{spec.name}", unit_id))
+        elif outcome.state == "skipped":
+            skipped.append(_skip(stop, "lens", spec.name, unit_id))
     aggregation = aggregate_lenses(outcomes)
 
     required = dynamic = None

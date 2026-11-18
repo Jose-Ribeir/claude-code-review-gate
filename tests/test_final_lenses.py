@@ -4,6 +4,8 @@ from __future__ import annotations
 from copy import deepcopy
 from pathlib import Path
 import sys
+import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import rg_final_review  # noqa: E402
+import rg_final_lenses  # noqa: E402
 from rg_final_lenses import (  # noqa: E402
     CROSS_ITEM_CONTRACTS,
     INTEGRATION_BEHAVIOR,
@@ -99,6 +102,67 @@ def test_all_mandatory_lenses_run_independently_with_full_repository_requests(tm
     assert [outcome.state for outcome in aggregate.outcomes] == ["completed"] * 7
 
 
+def test_lenses_are_bounded_concurrent_but_keep_raw_identity_and_result_order(tmp_path):
+    lock = threading.Lock()
+    active = 0
+    maximum = 0
+
+    def worker(request):
+        nonlocal active, maximum
+        with lock:
+            active += 1
+            maximum = max(maximum, active)
+        try:
+            # Deliberately finish in a different order from dispatch. A response
+            # must still be normalized against the request's own raw lens ID.
+            delay = (len(LENS_NAMES) - LENS_NAMES.index(request["lens"])) * 0.08
+            time.sleep(delay)
+            return _response(summary=request["lens"], findings=[{
+                "path": "app.py", "start_line": 2, "end_line": 2,
+                "severity": "low", "confidence": 0.9,
+                "content": request["lens"],
+            }])
+        finally:
+            with lock:
+                active -= 1
+
+    aggregate = run_independent_lenses(
+        _request(tmp_path), worker, max_workers=4, environ={},
+    )
+
+    assert 2 <= maximum <= 4
+    assert aggregate.complete is True
+    assert [outcome.name for outcome in aggregate.outcomes] == list(LENS_NAMES)
+    assert [outcome.summary for outcome in aggregate.outcomes] == list(LENS_NAMES)
+    assert [finding["lens"] for finding in aggregate.findings] == list(LENS_NAMES)
+    assert [finding["content"] for finding in aggregate.findings] == list(LENS_NAMES)
+
+
+@pytest.mark.parametrize("value,expected", [
+    (None, 4), ("", 4), ("invalid", 4), ("0", 1), ("-8", 1),
+    ("1", 1), ("2", 2), ("4", 4), ("99", 4),
+])
+def test_lens_worker_operator_limit_is_clamped(value, expected):
+    environ = {} if value is None else {"RG_FINAL_LENS_WORKERS": value}
+    assert rg_final_lenses.lens_worker_limit(environ) == expected
+
+
+@pytest.mark.parametrize("status", ["success", "completed", "completed_with_warnings"])
+def test_only_the_exact_successful_status_enum_is_accepted(tmp_path, status):
+    aggregate = run_independent_lenses(
+        _request(tmp_path), lambda request: _response(status=status), max_workers=1,
+    )
+    assert aggregate.complete is True
+
+    rejected = run_independent_lenses(
+        _request(tmp_path), lambda request: _response(status=status.upper()),
+        max_workers=1,
+    )
+    assert rejected.complete is False
+    assert all(outcome.state == "incomplete" for outcome in rejected.outcomes)
+    assert rejected.outcomes[0].warnings[0]["details"]["received_status"] == status.upper()
+
+
 def test_blocking_finding_does_not_short_circuit_lenses_and_model_verdict_is_ignored(tmp_path):
     requests = []
 
@@ -152,7 +216,11 @@ def test_required_lens_failure_is_incomplete_and_other_lenses_still_finish(tmp_p
     def worker(request):
         calls.append(request["lens"])
         if request["lens"] == "security":
-            raise RuntimeError("security backend failed")
+            raise rg_final_review.WorkerError(
+                "security backend failed",
+                details={"received_status": "finished", "return_code": 0,
+                         "stdout_tail": "status diagnostic", "reason": "invalid-status"},
+            )
         return _response()
 
     aggregate = run_independent_lenses(_request(tmp_path), worker)
@@ -165,6 +233,9 @@ def test_required_lens_failure_is_incomplete_and_other_lenses_still_finish(tmp_p
     assert "security backend failed" in security.error
     assert security.warnings[0]["code"] == "required-lens-failed"
     assert security.warnings[0]["lens"] == "security"
+    assert security.warnings[0]["details"]["received_status"] == "finished"
+    assert security.warnings[0]["details"]["return_code"] == 0
+    assert security.warnings[0]["details"]["stdout_tail"] == "status diagnostic"
     assert [outcome.state for outcome in aggregate.outcomes if outcome.name != "security"] == [
         "completed"
     ] * 6

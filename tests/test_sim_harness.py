@@ -9,6 +9,7 @@ then its block/allow verdicts, so no `kimchi` worker ever runs.
 import hashlib
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -21,6 +22,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 import sim_harness as sim  # noqa: E402
 from conftest import force_rmtree  # noqa: E402
+from test_process_groups import _wait_gone  # noqa: E402
 
 
 def _git(args, cwd, check=True):
@@ -578,6 +580,62 @@ def test_final_review_simulation_never_hides_timeout_or_provider_mutation(tmp_pa
     )
     assert mutation["provider"]["provider_writes"] is True
     assert "forbidden provider mutation" in mutation["error"]
+
+
+def test_final_review_simulation_timeout_kills_tree_and_cleans_scratch_clones(
+        tmp_path, monkeypatch):
+    target = _toy_repo(tmp_path)
+    fake_scripts = tmp_path / "fake-final-scripts"
+    fake_scripts.mkdir()
+    marker = tmp_path / "outer-grandchild-survived"
+    pid_file = tmp_path / "outer-grandchild.pid"
+    (fake_scripts / "review-gate.py").write_text(
+        "import os, pathlib, subprocess, sys, time\n"
+        "clone = pathlib.Path(os.environ['OCR_STATE_DIR']) / 'clones' / 'abc-final-timeout'\n"
+        "clone.mkdir(parents=True, exist_ok=True)\n"
+        "child_code = \"import pathlib,sys,time; time.sleep(1); "
+        "pathlib.Path(sys.argv[1]).write_text('survived')\"\n"
+        "child = subprocess.Popen([sys.executable, '-c', child_code, "
+        "os.environ['GRANDCHILD_MARKER']], stdin=subprocess.DEVNULL, "
+        "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+        "pathlib.Path(os.environ['GRANDCHILD_PID']).write_text(str(child.pid))\n"
+        "print('outer-ready', flush=True)\n"
+        "time.sleep(120)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sim, "_SCRIPTS", str(fake_scripts))
+    monkeypatch.setattr(sim, "selected_inference_backend", lambda *args, **kwargs: {
+        "name": "claude", "reason": "test", "executable": "/bin/claude", "notes": [],
+    })
+    grandchild = None
+    try:
+        report = sim.run_final_review_simulation(
+            "ref", repo_root=target, artifact_dir=tmp_path / "outer-timeout",
+            environ={
+                "PATH": os.environ.get("PATH", ""),
+                "GRANDCHILD_MARKER": str(marker),
+                "GRANDCHILD_PID": str(pid_file),
+            },
+            timeout=0.3,
+        )
+        grandchild = int(pid_file.read_text())
+        time.sleep(1.2)
+        assert not marker.exists(), "outer CLI grandchild created a post-timeout side effect"
+        assert _wait_gone(grandchild), "outer CLI grandchild remained in flight"
+        assert report["state"] == "incomplete"
+        assert "TimeoutExpired" in report["error"]
+        assert report["returncode"] not in (None, 0)
+        assert "outer-ready" in report["stdout"]
+        abandoned = tmp_path / "outer-timeout" / "state" / "clones" / "abc-final-timeout"
+        assert not abandoned.exists()
+        assert report["cleanup"]["registered_clones_removed_after_timeout"] == [str(abandoned)]
+        assert report["cleanup"]["clean"] is True
+    finally:
+        if grandchild is not None and not _wait_gone(grandchild, timeout=0.1):
+            try:
+                os.kill(grandchild, signal.SIGKILL)
+            except OSError:
+                pass
 
 
 def test_dynamic_simulation_executes_pinned_seam_and_verifies_cleanup(tmp_path, monkeypatch):
