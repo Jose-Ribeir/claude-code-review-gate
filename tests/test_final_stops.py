@@ -360,7 +360,7 @@ def test_stack_supervisor_scopes_stop_to_dependents_and_preserves_safe_individua
     worker_script.write_text(
         "import json, os, pathlib, sys\n"
         "r=json.loads(pathlib.Path(sys.argv[-1]).read_text())\n"
-        "with pathlib.Path(os.environ['TRACE']).open('a') as f: f.write(json.dumps({" 
+        "with pathlib.Path(os.environ['TRACE']).open('a') as f: f.write(json.dumps({"
         "'unit':r['unit_key'],'lens':r['lens']})+'\\n')\n"
         "stop=r['unit_key']=='combined' and r['lens']=='correctness'\n"
         "data={'schema':'final-review-worker-result/v1',"
