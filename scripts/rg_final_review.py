@@ -525,12 +525,14 @@ def _run_static_final_review(reference, *, repo_root=None, provider=None, store_
     source = item["source"]
     target = item["target"]
     with FinalStore(store_path) as store:
-        identity = store.start_run(_stack(item), metadata={
-            "stage": stage,
-            "complete": False,
-            "missing_stages": missing_stages,
-            "standalone": True,
-        }, telemetry=telemetry)
+        identity = store.start_run(
+            _stack(item), acceptance_version=store.resolve_acceptance_version(), metadata={
+                "stage": stage,
+                "complete": False,
+                "missing_stages": missing_stages,
+                "standalone": True,
+            }, telemetry=telemetry,
+        )
         run_id = identity["run_id"]
         unit_id = identity["unit_ids"]["individual:1"]
         combined_id = identity["unit_ids"]["combined"]
@@ -879,10 +881,12 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
     source = item["source"]
     target = item["target"]
     with FinalStore(store_path) as store:
-        identity = store.start_run(_stack(item), metadata={
-            "stage": COMPLETE_STAGE, "complete": True, "missing_stages": [],
-            "standalone": True,
-        }, telemetry=telemetry)
+        identity = store.start_run(
+            _stack(item), acceptance_version=store.resolve_acceptance_version(), metadata={
+                "stage": COMPLETE_STAGE, "complete": True, "missing_stages": [],
+                "standalone": True,
+            }, telemetry=telemetry,
+        )
         run_id = identity["run_id"]
         unit_id = identity["unit_ids"]["individual:1"]
         combined_id = identity["unit_ids"]["combined"]
@@ -1549,11 +1553,13 @@ def run_final_stack(references, *, repo_root=None, provider=None, store_path=Non
     )
     items = graph["items"]
     with FinalStore(store_path) as store:
-        identity = store.start_run(_graph_stack(graph), metadata={
-            "stage": stage, "complete": False,
-            "missing_stages": missing_stages, "standalone": False,
-            "graph": {"schema": graph["schema"], "item_keys": graph["item_keys"]},
-        }, telemetry=telemetry)
+        identity = store.start_run(
+            _graph_stack(graph), acceptance_version=store.resolve_acceptance_version(), metadata={
+                "stage": stage, "complete": False,
+                "missing_stages": missing_stages, "standalone": False,
+                "graph": {"schema": graph["schema"], "item_keys": graph["item_keys"]},
+            }, telemetry=telemetry,
+        )
         run_id = identity["run_id"]
         combined_id = identity["unit_ids"]["combined"]
         unit_results = []

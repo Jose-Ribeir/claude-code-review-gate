@@ -22,6 +22,9 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import rg_final_acceptance as acceptance  # noqa: E402
 import rg_final_contract as contract  # noqa: E402
 from rg_final_store import FinalStore  # noqa: E402
+import test_final_complete_standalone as standalone_case  # noqa: E402
+from test_final_complete_standalone import standalone as standalone_harness  # noqa: E402, F401
+import test_final_stack as stack_case  # noqa: E402
 
 
 OLD_CONTRACT = contract.CURRENT_CONTRACT_VERSION
@@ -181,6 +184,104 @@ def json_view(path, *args):
     return json.loads(process.stdout)
 
 
+def install_current_acceptance(path):
+    with FinalStore(path) as store:
+        _contract, acceptance_document = upgraded_documents()
+        acceptance.AcceptanceRegistry(store).install(acceptance_document)
+
+
+def assert_supervisor_acceptance_identity(path, output, *, version=NEW_ACCEPTANCE):
+    """Check one real supervisor result, its reports, and an explicit linked attempt."""
+    run_id = output["run_id"]
+    assert output["acceptance_version"] == version
+    report_paths = {Path(output["machine_report_path"])}
+    human_paths = {Path(output["human_report_path"])}
+    for unit in output.get("units", ()):
+        if unit.get("machine_report_path"):
+            report_paths.add(Path(unit["machine_report_path"]))
+        if unit.get("human_report_path"):
+            human_paths.add(Path(unit["human_report_path"]))
+    for report_path in report_paths:
+        assert json.loads(report_path.read_text(encoding="utf-8"))["run"][
+            "acceptance_version"
+        ] == version
+    for human_path in human_paths:
+        assert f"Acceptance: {version}" in human_path.read_text(encoding="utf-8")
+
+    with FinalStore(path) as store:
+        assert store.resolve_acceptance_version() == version
+        assert store.machine_report(run_id)["run"]["acceptance_version"] == version
+        assert f"Acceptance: {version}" in store.human_report(run_id)
+        registry = acceptance.AcceptanceRegistry(store)
+        # Run metadata never manufactures acceptance evidence or an attempt.
+        assert registry.history(review_run_id=run_id) == []
+        attempt = registry.start(SCENARIO_ID, review_run_id=run_id)
+        assert attempt["version"] == version
+        assert attempt["review_run_id"] == run_id
+        assert attempt["state"] == "running"
+        assert attempt["result"] is None
+
+    listed = json_view(path, "final-report", "list")
+    listed_run = next(run for run in listed["runs"] if run["run_id"] == run_id)
+    assert listed_run["acceptance_version"] == version
+    assert json_view(path, "final-report", "show", run_id)["run"][
+        "acceptance_version"
+    ] == version
+    assert f"Acceptance: {version}" in invoke(path, "final-report", "show", run_id).stdout
+    history = json_view(
+        path, "acceptance", "history", SCENARIO_ID, "--review-run-id", run_id,
+    )
+    assert [item["acceptance_run_id"] for item in history["acceptance_runs"]] == [
+        attempt["acceptance_run_id"],
+    ]
+    assert history["acceptance_runs"][0]["review_run_id"] == run_id
+    assert history["acceptance_runs"][0]["result"] is None
+    readable = invoke(
+        path, "acceptance", "history", SCENARIO_ID, "--review-run-id", run_id,
+    ).stdout
+    assert f"Review run: {run_id}" in readable
+    assert "No result recorded." in readable
+
+
+def test_standalone_supervisor_resolves_current_acceptance_into_all_public_reports(
+        standalone_harness, tmp_path):  # noqa: F811
+    path = tmp_path / "standalone-current-acceptance.sqlite3"
+    install_current_acceptance(path)
+
+    output = standalone_case.run(
+        standalone_harness, standalone_case.Provider(), path,
+    )
+    execution = standalone_case.rg_final_review.execute_final_review(
+        standalone_case.item()["url"], provider=standalone_case.Provider(), store_path=path,
+        required_runner=standalone_harness.required, dynamic_runner=standalone_harness.dynamic,
+        environ={},
+    )
+
+    assert output["state"] == "pass"
+    assert execution["stage"] == standalone_case.rg_final_review.EXECUTION_STAGE
+    assert_supervisor_acceptance_identity(path, output)
+    assert_supervisor_acceptance_identity(path, execution)
+
+
+def test_stack_supervisor_resolves_current_acceptance_into_every_public_report(tmp_path):
+    path = tmp_path / "stack-current-acceptance.sqlite3"
+    install_current_acceptance(path)
+    harness = stack_case.Harness(tmp_path)
+
+    output = harness.run(path)
+    execution = stack_case.rg_final_review.execute_final_stack(
+        harness.references, provider=harness.provider, repo_root=harness.repo,
+        store_path=path, worker=[sys.executable, str(harness.worker)],
+        environ=harness.environ, current_root_sha=harness.current_sha,
+        required_runner=harness.required, dynamic_runner=harness.dynamic,
+    )
+
+    assert output["state"] == "pass"
+    assert execution["stage"] == stack_case.rg_final_review.EXECUTION_STAGE
+    assert_supervisor_acceptance_identity(path, output)
+    assert_supervisor_acceptance_identity(path, execution)
+
+
 def test_contract_show_is_database_backed_current_and_explicit_historical(tmp_path):
     path = tmp_path / "contract.sqlite3"
     fixture = upgraded_history(path)
@@ -269,6 +370,11 @@ def test_acceptance_status_and_history_include_definitions_attempts_and_results(
         fixture["old_acceptance"]["scenario"]["required_evidence"]
     assert current_status["acceptance_run"] == fixture["new_acceptance"]
     assert current_status["acceptance_version"] == NEW_ACCEPTANCE
+    assert retained["review_run_id"] == fixture["old_run"]["run_id"]
+    assert current_status["acceptance_run"]["review_run_id"] == fixture["new_run"]["run_id"]
+    assert [item["review_run_id"] for item in history["acceptance_runs"]] == [
+        fixture["old_run"]["run_id"], fixture["new_run"]["run_id"],
+    ]
     assert [item["acceptance_run_id"] for item in history["acceptance_runs"]] == [
         fixture["old_acceptance"]["acceptance_run_id"],
         fixture["new_acceptance"]["acceptance_run_id"],
@@ -284,6 +390,7 @@ def test_acceptance_status_and_history_include_definitions_attempts_and_results(
     ).stdout
     assert "Acceptance run:" in readable
     assert fixture["old_acceptance"]["acceptance_run_id"] in readable
+    assert f"Review run: {fixture['old_run']['run_id']}" in readable
     assert "Result: pass" in readable
     assert "Expected evidence:" in readable
     assert "Result evidence:" in readable
@@ -497,3 +604,100 @@ def test_store_option_uses_requested_database_not_process_default(tmp_path, monk
     assert json.loads(direct.stdout)["store_instance_id"] == fixture["store_id"]
     assert view["store_instance_id"] == fixture["store_id"]
     assert not (default_root / "final-review.sqlite3").exists()
+
+
+def test_legacy_null_and_old_contract_continuation_remain_exact_after_upgrade(tmp_path):
+    path = tmp_path / "legacy-and-continuation.sqlite3"
+    with FinalStore(path) as store:
+        registry = acceptance.AcceptanceRegistry(store)
+        legacy = store.start_run(
+            review_stack(), acceptance_version=OLD_ACCEPTANCE,
+            metadata={"fixture": "pre-acceptance-identity"},
+        )
+        store.connection.execute(
+            "UPDATE runs SET acceptance_version = NULL WHERE run_id = ?", (legacy["run_id"],),
+        )
+        contract_document, acceptance_document = upgraded_documents()
+        store.install_contract(contract_document)
+        registry.install(acceptance_document)
+
+        current = store.start_run(review_stack(source_sha="c" * 40, target_sha="d" * 40))
+        continuation = store.start_run(
+            review_stack(source_sha="e" * 40, target_sha="f" * 40),
+            contract_version=OLD_CONTRACT, acceptance_version=OLD_ACCEPTANCE,
+            metadata={"continues_run_id": legacy["run_id"]},
+        )
+        old_attempt = complete_scenario(
+            store, version=OLD_ACCEPTANCE, review_run_id=continuation["run_id"],
+        )
+        new_attempt = complete_scenario(store, review_run_id=current["run_id"])
+        legacy_before_views = copy.deepcopy(store.manifest(legacy["run_id"]))
+
+    assert current["acceptance_version"] == NEW_ACCEPTANCE
+    assert continuation["acceptance_version"] == OLD_ACCEPTANCE
+    assert continuation["contract_version"] == OLD_CONTRACT
+    assert old_attempt["version"] == continuation["acceptance_version"]
+    assert new_attempt["version"] == current["acceptance_version"]
+
+    legacy_report = json_view(path, "final-report", "show", legacy["run_id"])
+    current_report = json_view(path, "final-report", "show", current["run_id"])
+    continued_report = json_view(path, "final-report", "show", continuation["run_id"])
+    assert legacy_report["run"]["acceptance_version"] is None
+    assert current_report["run"]["acceptance_version"] == NEW_ACCEPTANCE
+    assert continued_report["run"]["acceptance_version"] == OLD_ACCEPTANCE
+    assert continued_report["run"]["contract_version"] == OLD_CONTRACT
+    assert "Acceptance: not recorded" in invoke(
+        path, "final-report", "show", legacy["run_id"],
+    ).stdout
+
+    listed = json_view(path, "final-report", "list")
+    identities = {run["run_id"]: run["acceptance_version"] for run in listed["runs"]}
+    assert identities == {
+        legacy["run_id"]: None,
+        current["run_id"]: NEW_ACCEPTANCE,
+        continuation["run_id"]: OLD_ACCEPTANCE,
+    }
+    old_status = json_view(
+        path, "acceptance", "status", "--acceptance-run-id",
+        old_attempt["acceptance_run_id"],
+    )
+    new_status = json_view(
+        path, "acceptance", "status", "--acceptance-run-id",
+        new_attempt["acceptance_run_id"],
+    )
+    assert old_status["acceptance_run"]["review_run_id"] == continuation["run_id"]
+    assert old_status["acceptance_version"] == OLD_ACCEPTANCE
+    assert new_status["acceptance_run"]["review_run_id"] == current["run_id"]
+    assert new_status["acceptance_version"] == NEW_ACCEPTANCE
+
+    with FinalStore(path) as reopened:
+        assert reopened.manifest(legacy["run_id"]) == legacy_before_views
+
+
+def test_acceptance_and_final_report_scope_mismatches_do_not_cross_link(tmp_path):
+    path = tmp_path / "scope-mismatches.sqlite3"
+    fixture = upgraded_history(path)
+    old_run_id = fixture["old_run"]["run_id"]
+    new_run_id = fixture["new_run"]["run_id"]
+    old_attempt_id = fixture["old_acceptance"]["acceptance_run_id"]
+    new_unit_id = fixture["new_run"]["unit_ids"]["individual:1"]
+
+    mismatches = [
+        (("acceptance", "status", "--acceptance-run-id", old_attempt_id,
+          "--version", NEW_ACCEPTANCE), "not at version"),
+        (("acceptance", "status", "--acceptance-run-id", old_attempt_id,
+          "--review-run-id", new_run_id), "does not belong to review run"),
+        (("acceptance", "history", SCENARIO_ID, "--version", NEW_ACCEPTANCE,
+          "--review-run-id", old_run_id), "no acceptance attempts"),
+        (("acceptance", "status", SCENARIO_ID, "--version", OLD_ACCEPTANCE,
+          "--review-run-id", new_run_id), "no acceptance attempts"),
+        (("final-report", "show", old_run_id, "--unit", new_unit_id), "unknown unit"),
+    ]
+    for args, message in mismatches:
+        process = invoke(path, *args, expected=1)
+        assert message in process.stderr
+
+    with FinalStore(path) as store:
+        assert store.acceptance_history() == fixture["history_before_views"]
+        assert store.manifest(old_run_id)["run"]["acceptance_version"] == OLD_ACCEPTANCE
+        assert store.manifest(new_run_id)["run"]["acceptance_version"] == NEW_ACCEPTANCE

@@ -432,11 +432,13 @@ def run_final_stack(references, *, repo_root=None, provider=None, store_path=Non
     )
     items = graph["items"]
     with FinalStore(store_path) as store:
-        identity = store.start_run(_store_stack(graph), metadata={
-            "stage": standalone.COMPLETE_STAGE, "complete": True, "missing_stages": [],
-            "standalone": False,
-            "graph": {"schema": graph["schema"], "item_keys": graph["item_keys"]},
-        }, telemetry=telemetry)
+        identity = store.start_run(
+            _store_stack(graph), acceptance_version=store.resolve_acceptance_version(), metadata={
+                "stage": standalone.COMPLETE_STAGE, "complete": True, "missing_stages": [],
+                "standalone": False,
+                "graph": {"schema": graph["schema"], "item_keys": graph["item_keys"]},
+            }, telemetry=telemetry,
+        )
         run_id = identity["run_id"]
         combined_id = identity["unit_ids"]["combined"]
         prior = rerun_context(store, run_id)
