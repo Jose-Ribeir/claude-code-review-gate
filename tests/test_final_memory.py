@@ -256,6 +256,76 @@ def test_falsification_is_explicit_rationaled_and_does_not_need_a_code_change(st
     assert event["previous_evidence_anchor"] == event["evidence_anchor"]
 
 
+def test_closure_processing_binds_id_anchor_and_unit_before_persisting(store):
+    first = begin(store)
+    record_open(store, first)
+    second = begin(store, provider_item(source_sha="f" * 40))
+    unit_id = second["unit_ids"]["individual:1"]
+    prior = memory.rerun_context(store, second["run_id"])
+    pending = prior["findings"][0]
+
+    outcomes = memory.process_finding_closures(
+        store, second["run_id"], unit_id, prior,
+        [{
+            "closure_type": "falsified", "finding_id": "current-or-unknown",
+            "content_anchor": pending["content_anchor"],
+            "rationale": "An arbitrary cleanup claim", "evidence": {"worker": "cleanup"},
+        }],
+    )
+
+    assert outcomes[0]["state"] == "rejected"
+    assert "inherited finding for this unit" in outcomes[0]["reason"]
+    assert store.memory_status(second["run_id"])["pending_thread_ids"] == [
+        pending["thread_id"]]
+    assert [event["event_type"] for event in store.finding_history(
+        pending["thread_id"])["events"]] == ["observed"]
+
+    mismatched_unit = memory.finding_memory_for_unit(prior, "combined")
+    assert mismatched_unit["required"] is False
+    assert mismatched_unit["findings"] == []
+    rejected = memory.process_finding_closures(
+        store, second["run_id"], second["unit_ids"]["combined"], mismatched_unit,
+        [{
+            "closure_type": "falsified", "finding_id": pending["finding_id"],
+            "content_anchor": pending["content_anchor"],
+            "rationale": "Cross-unit cleanup must not work", "evidence": {"worker": "combined"},
+        }],
+    )
+    assert rejected[0]["state"] == "rejected"
+
+    absent_evidence = memory.process_finding_closures(
+        store, second["run_id"], unit_id, prior,
+        [{
+            "closure_type": "falsified", "finding_id": pending["finding_id"],
+            "content_anchor": pending["content_anchor"], "rationale": "False positive",
+            "evidence": {},
+        }],
+    )
+    assert absent_evidence[0]["state"] == "rejected"
+
+    recorded = memory.process_finding_closures(
+        store, second["run_id"], unit_id, prior,
+        [{
+            "closure_type": "falsified", "finding_id": pending["finding_id"],
+            "content_anchor": pending["content_anchor"],
+            "thread_id": pending["thread_id"],
+            "rationale": "The configured wrapper persists before returning",
+            "evidence": {"inspection": "widget.py:41-48"},
+        }],
+    )
+    assert recorded[0]["state"] == "recorded"
+    assert recorded[0]["event_type"] == "falsified"
+    assert recorded[0]["history"]["events"][-1]["rationale"].startswith(
+        "The configured wrapper")
+    assert store.memory_status(second["run_id"])["clear_allowed"] is True
+    with pytest.raises(ValueError, match="not open"):
+        store.resolve_finding(
+            second["run_id"], pending["thread_id"], anchors=anchors(NEW_EVIDENCE),
+            resolution_evidence={"fix": "already closed"},
+            revalidation={"status": "passed"},
+        )
+
+
 def test_a_resolved_defect_reopening_preserves_the_whole_thread(store):
     first = begin(store)
     record_open(store, first)

@@ -432,14 +432,18 @@ def test_multi_ref_operator_main_runs_validated_stack_and_emits_linked_reports(
     captured = capsys.readouterr()
     output = json.loads(captured.out)
 
-    assert exit_code == 2
+    assert exit_code in (0, 1)
     assert output["item_keys"] == [item["id"] for item in items]
-    assert output["complete"] is False
+    assert output["stage"] == "S16-07"
+    assert output["complete"] is True
+    assert output["state"] in ("pass", "findings")
     assert output["composition"]["complete"] is True
+    assert output["graph"]["references"] == [item["url"] for item in items]
+    assert output["item_keys"] == [item["id"] for item in items]
     assert output["units"][2]["individual_reports"]
     assert Path(output["machine_report_path"]).is_file()
     assert Path(output["units"][2]["combined_report_path"]).is_file()
-    assert "stage S16-06B is incomplete" in captured.err
+    assert "stage S16-07 is complete" in captured.err
     assert len(trace.read_text().splitlines()) == 28
 
 

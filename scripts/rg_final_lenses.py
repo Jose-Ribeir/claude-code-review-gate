@@ -46,6 +46,7 @@ class LensOutcome:
     unreviewed: tuple = ()
     capabilities: tuple = ()
     error: str = ""
+    finding_closures: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,7 @@ class LensAggregation:
     finding_verdict: object
     complete: bool
     missing_lenses: tuple = ()
+    finding_closures: tuple = ()
 
 
 REQUIRED_LENSES = (
@@ -161,6 +163,48 @@ def _normal_warning(warning, lens):
     return normalized
 
 
+def _finding_closures(result, spec):
+    """Detach explicit prior-finding closure claims for trusted finalization.
+
+    These are claims, not instructions to mutate memory directly. The trusted
+    orchestrator later binds each prior finding ID and content anchor to the
+    same unit's inherited context before calling the store's closure APIs.
+    """
+    closures = []
+    for field, closure_type in (
+            ("finding_resolutions", "resolved"),
+            ("finding_falsifications", "falsified")):
+        raw = result.get(field, [])
+        if not isinstance(raw, list):
+            raise LensResultError(f"{spec.name} worker {field} must be an array")
+        for supplied in raw:
+            if not isinstance(supplied, dict):
+                raise LensResultError(f"{spec.name} worker {field} entries must be objects")
+            closure = deepcopy(supplied)
+            closure["closure_type"] = closure_type
+            closure["lens"] = spec.name
+            closures.append(closure)
+    raw = result.get("finding_closures", [])
+    if not isinstance(raw, list):
+        raise LensResultError(f"{spec.name} worker finding_closures must be an array")
+    for supplied in raw:
+        if not isinstance(supplied, dict):
+            raise LensResultError(
+                f"{spec.name} worker finding_closures entries must be objects")
+        closure_type = str(
+            supplied.get("closure_type") or supplied.get("event_type")
+            or supplied.get("type") or "",
+        ).strip().lower()
+        if closure_type not in ("resolved", "falsified"):
+            raise LensResultError(
+                f"{spec.name} worker finding closure must be resolved or falsified")
+        closure = deepcopy(supplied)
+        closure["closure_type"] = closure_type
+        closure["lens"] = spec.name
+        closures.append(closure)
+    return tuple(closures)
+
+
 def normalize_worker_result(result, spec):
     """Normalize one response without trusting its model-declared verdict.
 
@@ -215,6 +259,7 @@ def normalize_worker_result(result, spec):
             "details": {"excluded": len(findings) - len(retained)},
         }, spec.name))
     state = "completed_with_warnings" if warnings or raw_unreviewed else "completed"
+    finding_closures = _finding_closures(result, spec)
     return LensOutcome(
         name=spec.name,
         state=state,
@@ -223,6 +268,7 @@ def normalize_worker_result(result, spec):
         warnings=tuple(warnings),
         unreviewed=tuple(raw_unreviewed),
         capabilities=tuple(spec.capabilities),
+        finding_closures=finding_closures,
     )
 
 
@@ -257,6 +303,8 @@ def aggregate_lenses(outcomes):
     finding_verdict = ocr_verdict.compute_verdict({
         "findings": list(findings), "unreviewed": list(unreviewed),
     }) if complete else None
+    finding_closures = tuple(
+        closure for outcome in outcomes for closure in outcome.finding_closures)
     return LensAggregation(
         outcomes=outcomes,
         findings=findings,
@@ -265,6 +313,7 @@ def aggregate_lenses(outcomes):
         finding_verdict=finding_verdict,
         complete=complete,
         missing_lenses=missing,
+        finding_closures=finding_closures,
     )
 
 

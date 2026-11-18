@@ -188,12 +188,7 @@ def _run_unit(store, identity, graph, unit_key, unit_id, *, item=None, composed=
                 "The individual unit uses its provider-pinned tree" if item is not None
                 else "The composition unit uses its verified immutable tree",
             )
-            unit_prior = {
-                **deepcopy(prior),
-                "findings": [deepcopy(finding) for finding in prior["findings"]
-                             if finding.get("unit_key") == unit_key],
-            }
-            unit_prior["required"] = bool(unit_prior["findings"])
+            unit_prior = standalone.finding_memory_for_unit(prior, unit_key)
             public_item = (standalone._public_item(item) if item is not None
                            else standalone._combined_item(graph, unit_key))
             request = {
@@ -543,6 +538,13 @@ def run_final_stack(references, *, repo_root=None, provider=None, store_path=Non
             for unit in units:
                 store.record_warning(unit["unit_id"], "freshness-check", str(exc), "freshness")
 
+        for unit in units:
+            unit["finding_closures"] = standalone._process_unit_finding_closures(
+                store, run_id, unit["unit_id"],
+                standalone.finding_memory_for_unit(prior, unit["unit_key"]),
+                unit["_execution"],
+            )
+
         static_complete = all(unit["static_lenses_complete"] for unit in units)
         checks_complete = bool(
             current_error is None and not has_stops
@@ -729,6 +731,8 @@ def run_final_stack(references, *, repo_root=None, provider=None, store_path=Non
             "trust": trust,
             "freshness": deepcopy(freshness),
             "finding_memory": deepcopy(store.memory_status(run_id)),
+            "finding_closures": [deepcopy(outcome) for unit in units
+                                 for outcome in unit["finding_closures"]],
             "stops": [stop for unit in units for stop in unit["stops"]
                       if not unit.get("inherited_stop")],
             "rejected_stops": [entry for unit in units for entry in unit["rejected_stops"]],

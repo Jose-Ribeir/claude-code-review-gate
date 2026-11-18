@@ -399,26 +399,17 @@ def establish_continuity(standalone, provider, store_path):
     return first
 
 
-@pytest.mark.parametrize("missing", ["intent", "context", "lens", "required", "dynamic"])
-def test_missing_intent_context_or_mandatory_stage_is_not_complete(
-        standalone, missing):
+@pytest.mark.parametrize("missing", ["context", "lens", "required"])
+def test_missing_context_or_mandatory_stage_is_not_complete(standalone, missing):
     store_path = standalone.tmp_path / f"{missing.replace('/', '-')}.sqlite3"
     provider = Provider()
     establish_continuity(standalone, provider, store_path)
     original_context = rg_final_review.collect_review_context
-    original_required = standalone.required
-    original_dynamic = standalone.dynamic
 
-    if missing in ("intent", "context"):
+    if missing == "context":
         def incomplete_context(review, **kwargs):
             acquired = deepcopy(original_context(review, **kwargs))
-            if missing == "intent":
-                acquired["intent"].update({
-                    "description": None, "tickets": [],
-                    "warnings": ["#88: scripted tracker unavailable"],
-                })
-            else:
-                acquired["completeness"]["complete"] = False
+            acquired["completeness"]["complete"] = False
             return acquired
         standalone.monkeypatch.setattr(rg_final_review, "collect_review_context", incomplete_context)
     elif missing == "lens":
@@ -429,18 +420,11 @@ def test_missing_intent_context_or_mandatory_stage_is_not_complete(
                 raise RuntimeError("scripted mandatory lens failure")
             return original_worker(request, **kwargs)
         standalone.monkeypatch.setattr(rg_final_review, "invoke_worker", incomplete_worker)
-    elif missing == "required":
+    else:
         def incomplete_required(repository, commit):
             standalone.stages.append("required")
             return required_result("incomplete")
         standalone.required = incomplete_required
-    else:
-        def incomplete_dynamic(repository, target_sha, head_sha, **kwargs):
-            standalone.stages.append("dynamic")
-            result = dynamic_result("degraded", complete=False)
-            result["coverage"]["status"] = "unknown"
-            return result
-        standalone.dynamic = incomplete_dynamic
 
     writer = StatusWriter()
     output = run(standalone, provider, store_path, publish=True, publication_runner=writer)
@@ -451,14 +435,164 @@ def test_missing_intent_context_or_mandatory_stage_is_not_complete(
     assert output["freshness"]["state"] == "fresh"
     assert_enforced_adverse(output, writer, "incomplete")
     assert standalone.cleaned == [True, True]
-    if missing in ("required", "dynamic"):
+    if missing == "required":
         assert "dynamic" in standalone.stages[-4:]
         assert output["dynamic_checks"] is not None
     if missing == "lens":
         assert output["static_lenses_complete"] is False
         assert output["finding_verdict"] is None
-    standalone.required = original_required
-    standalone.dynamic = original_dynamic
+
+
+def test_unavailable_intent_is_a_permanent_warning_but_compatible_with_completion(standalone):
+    store_path = standalone.tmp_path / "intent-warning.sqlite3"
+    provider = Provider()
+    establish_continuity(standalone, provider, store_path)
+    original_context = rg_final_review.collect_review_context
+
+    def no_intent(review, **kwargs):
+        acquired = deepcopy(original_context(review, **kwargs))
+        acquired["intent"].update({
+            "description": None, "tickets": [], "references": [], "listed_only": [],
+            "warnings": ["#88: scripted tracker unavailable"],
+        })
+        return acquired
+
+    standalone.monkeypatch.setattr(rg_final_review, "collect_review_context", no_intent)
+    output = run(standalone, provider, store_path)
+
+    assert output["state"] == "pass"
+    assert output["complete"] is True
+    assert output["execution_complete"] is True
+    assert output["intent_complete"] is True
+    with FinalStore(store_path) as store:
+        report = store.machine_report(output["run_id"])
+        for unit in report["units"]:
+            coverage = {row["kind"]: row for row in unit["coverage"]}
+            assert coverage["intent"]["status"] == "complete"
+            assert coverage["intent"]["details"]["available"] is False
+            assert [warning["code"] for warning in unit["warnings"]] == [
+                "intent-acquisition"]
+
+
+@pytest.mark.parametrize("code,coverage,telemetry", [
+    ("dynamic-flake", "existing_tests", {"runs": 2, "flake": 1}),
+    ("dynamic-coverage", "uncovered", {"tests_selected": 0, "probes_authored": 0}),
+    ("dynamic-probe", "unknown", {"probe_build_failed": 1}),
+    ("dynamic-selector", "unknown", {"selector_attempts": 1}),
+    ("dynamic-timeout", "unknown", {"executor_timeouts": 1}),
+])
+def test_dynamic_degradation_preserves_warnings_and_telemetry_without_incomplete(
+        standalone, code, coverage, telemetry):
+    store_path = standalone.tmp_path / f"{code}.sqlite3"
+    provider = Provider()
+    establish_continuity(standalone, provider, store_path)
+
+    def degraded(repository, target_sha, head_sha, **kwargs):
+        standalone.stages.append("dynamic")
+        result = dynamic_result("degraded", complete=False)
+        result["coverage"]["status"] = coverage
+        result["warnings"] = [{
+            "code": code, "message": f"Injected {code} limitation", "scope": "dynamic",
+            "details": {"best_effort": True},
+        }]
+        result["telemetry"] = deepcopy(telemetry)
+        return result
+
+    standalone.dynamic = degraded
+    output = run(standalone, provider, store_path)
+
+    assert output["state"] == "pass"
+    assert output["complete"] is True
+    assert output["execution_complete"] is True
+    assert output["finding_verdict"] == "pass"
+    with FinalStore(store_path) as store:
+        report = store.machine_report(output["run_id"])
+        for unit in report["units"]:
+            warning = next(row for row in unit["warnings"] if row["code"] == code)
+            assert warning["details"]["best_effort"] is True
+            dynamic_coverage = next(
+                row for row in unit["coverage"] if row["kind"] == "dynamic_tests")
+            assert dynamic_coverage["status"] == coverage
+            assert dynamic_coverage["details"]["telemetry"] == telemetry
+        assert not [test for unit in report["units"] for test in unit["tests"]
+                    if test["kind"] in ("existing_test", "ephemeral_test")
+                    and test["state"] == "pass"]
+
+
+def test_unwarned_dynamic_degradation_cannot_manufacture_complete_evidence(standalone):
+    store_path = standalone.tmp_path / "dynamic-malformed.sqlite3"
+    provider = Provider()
+    establish_continuity(standalone, provider, store_path)
+
+    def degraded(repository, target_sha, head_sha, **kwargs):
+        result = dynamic_result("degraded", complete=False)
+        result["coverage"]["status"] = "unknown"
+        return result
+
+    standalone.dynamic = degraded
+    output = run(standalone, provider, store_path)
+
+    assert output["state"] == "incomplete"
+    assert output["complete"] is False
+    assert output["execution_complete"] is False
+
+
+def test_worker_resolution_retires_real_prior_finding_during_finalization(standalone):
+    store_path = standalone.tmp_path / "resolution.sqlite3"
+    provider = Provider()
+
+    def finding_worker(request, **kwargs):
+        finding = [blocking_finding()] if (
+            request["unit_key"] == "individual:1" and request["lens"] == "correctness") else []
+        return worker_result(finding)
+
+    standalone.monkeypatch.setattr(rg_final_review, "invoke_worker", finding_worker)
+    first = run(standalone, provider, store_path)
+    assert first["state"] == "findings"
+    resolved = {}
+
+    def resolving_worker(request, **kwargs):
+        result = worker_result()
+        if request["unit_key"] == "individual:1" and request["lens"] == "correctness":
+            pending = request["finding_memory"]["findings"][0]
+            current_anchors = deepcopy(pending["anchors"])
+            for anchor in current_anchors:
+                anchor["evidence_fingerprint"] = "current-fixed-tree-and-test"
+            result["finding_resolutions"] = [{
+                "finding_id": pending["finding_id"],
+                "content_anchor": pending["content_anchor"],
+                "thread_id": pending["thread_id"],
+                "anchors": current_anchors,
+                "resolution_evidence": {
+                    "current_diff": "The caller now receives the normalized return shape",
+                },
+                "revalidation": {
+                    "status": "passed", "test": "test_return_contract",
+                    "evidence_fingerprint": "current-required-suite",
+                },
+            }]
+            resolved.update(pending)
+        return result
+
+    standalone.monkeypatch.setattr(rg_final_review, "invoke_worker", resolving_worker)
+    second = run(standalone, provider, store_path)
+
+    assert second["state"] == "pass"
+    assert second["complete"] is True
+    assert second["finding_verdict"] == "pass"
+    assert second["finding_memory"]["clear_allowed"] is True
+    assert second["finding_memory"]["pending_thread_ids"] == []
+    assert second["finding_closures"][0]["state"] == "recorded"
+    assert second["finding_closures"][0]["event_type"] == "resolved"
+    with FinalStore(store_path) as store:
+        history = store.finding_history(resolved["thread_id"])
+        assert [event["event_type"] for event in history["events"]] == [
+            "observed", "resolved"]
+        closure = history["events"][-1]
+        assert closure["resolution_evidence"]["current_diff"]
+        assert closure["revalidation"]["test"] == "test_return_contract"
+        assert closure["previous_evidence_anchor"] != closure["evidence_anchor"]
+        assert store.official_findings(second["run_id"]) == []
 
 
 def test_memory_is_carried_explicitly_and_a_quiet_rerun_is_not_clean(standalone):

@@ -30,8 +30,13 @@ from rg_final_context import collect_review_context
 from rg_final_graph import discover_linear_graph, record_graph_observation
 from rg_final_gitlab import GitLabProvider
 from rg_final_dynamic import run_dynamic_checks
-from rg_final_memory import carry_forward, rerun_context
-from rg_final_memory import refresh_run_freshness
+from rg_final_memory import (
+    carry_forward,
+    finding_memory_for_unit,
+    process_finding_closures,
+    refresh_run_freshness,
+    rerun_context,
+)
 from rg_final_publish import FinalPublisher
 from rg_final_execution import (
     execute_unit,
@@ -195,7 +200,12 @@ def _default_worker_command(request_path, repo_root, environ, request):
         "docs, callers and tests as needed. Your assigned evidence duty is: "
         f"{request['review_duty']} Do not use or wait for another lens's conclusions. "
         f"Return only a {WORKER_RESULT_SCHEMA} JSON object with status, summary, findings "
-        "and warnings; do not trust your own verdict field to determine the gate result."
+        "and warnings; do not trust your own verdict field to determine the gate result. "
+        "If finding_memory contains prior findings, omission never resolves them. Explicit "
+        "closure may use finding_resolutions entries with finding_id, content_anchor, anchors, "
+        "resolution_evidence and successful revalidation, or finding_falsifications entries "
+        "with finding_id, content_anchor, rationale and evidence. Only close a named prior "
+        "finding when the current pinned-tree evidence supports that conclusion."
     )
     if selection.name == "claude":
         args = [
@@ -710,12 +720,21 @@ def _record_standalone_context(store, unit_ids, context):
         and completeness.get("complete") is True
         and bool(context.get("search_roots"))
     )
-    intent = context.get("intent") or {}
+    intent = context.get("intent")
+    intent_attempted = isinstance(intent, dict) and all(
+        key in intent for key in ("description", "tickets", "references", "warnings"))
+    intent = intent if isinstance(intent, dict) else {}
     description = intent.get("description") or {}
     has_description = bool(str(description.get("text") or "").strip())
     tickets = intent.get("tickets") or []
+    references = intent.get("references") or []
+    listed_only = intent.get("listed_only") or []
     intent_warnings = [str(warning) for warning in intent.get("warnings") or ()]
-    intent_complete = (has_description or bool(tickets)) and not intent_warnings
+    has_intent = has_description or bool(tickets) or bool(references) or bool(listed_only)
+    intent_complete = intent_attempted
+    if intent_attempted and not has_intent and not intent_warnings:
+        intent_warnings.append(
+            "No provider description, linked ticket, or intent reference was available")
     for unit_id in unit_ids:
         store.record_coverage(
             unit_id, "review_context", "complete" if context_complete else "incomplete",
@@ -726,10 +745,14 @@ def _record_standalone_context(store, unit_ids, context):
         )
         store.record_coverage(
             unit_id, "intent", "complete" if intent_complete else "incomplete",
-            "Provider/linked intent acquisition completed" if intent_complete
-            else "Intent or a required linked-intent acquisition is unavailable",
+            ("Provider/linked intent acquisition completed"
+             if has_intent else
+             "Intent acquisition was attempted; no description, ticket, or link was available")
+            if intent_complete else "Mandatory intent acquisition did not complete",
             {"description_available": has_description,
-             "ticket_count": len(tickets), "warnings": intent_warnings},
+             "ticket_count": len(tickets), "reference_count": len(references) + len(listed_only),
+             "attempted": intent_attempted, "available": has_intent,
+             "warnings": intent_warnings},
         )
         for warning in context.get("warnings") or ():
             if isinstance(warning, dict):
@@ -748,19 +771,36 @@ def _record_standalone_context(store, unit_ids, context):
 
 
 def _complete_checks(execution):
-    """Require completed declared verification and non-degraded dynamic evidence."""
+    """Require mandatory evidence while retaining best-effort dynamic warnings."""
     if execution is None or not execution.aggregation.complete or execution.stop is not None:
         return False
     required = execution.required or {}
-    dynamic = execution.dynamic or {}
+    dynamic = execution.dynamic
     required_done = required.get("status") in ("pass", "absent", "block")
-    dynamic_done = (
-        dynamic.get("complete") is True
-        and dynamic.get("state") in ("passed", "not_applicable", "findings")
-        and (dynamic.get("coverage") or {}).get("status") not in (
-            None, "unknown", "uncovered", "incomplete", "error",
-        )
+    if not isinstance(dynamic, dict) or dynamic.get("schema") != \
+            "final-review-dynamic-result/v1":
+        return False
+    if not all(isinstance(dynamic.get(key), list)
+               for key in ("findings", "warnings", "tests")):
+        return False
+    if not isinstance(dynamic.get("coverage"), dict) or \
+            not isinstance(dynamic.get("telemetry"), dict):
+        return False
+    state = dynamic.get("state")
+    if state not in ("passed", "not_applicable", "findings", "degraded", "error"):
+        return False
+    coverage_status = dynamic["coverage"].get("status")
+    if not coverage_status:
+        return False
+    degraded = (
+        state in ("degraded", "error")
+        or (dynamic.get("complete") is not True and state != "findings")
+        or coverage_status in ("unknown", "uncovered", "incomplete", "error")
     )
+    # Dynamic limitations are compatible with completion only when their
+    # warning and telemetry are persisted. They never fabricate a suite/probe
+    # pass; reproduced findings still flow to the sole verdict authority.
+    dynamic_done = not degraded or bool(dynamic["warnings"])
     return required_done and dynamic_done
 
 
@@ -783,6 +823,13 @@ def _carry_observed_findings(store, run_id, unit_id, prior, observations):
                 unit_id, "finding-carry-forward", str(exc), "finding-memory",
                 {"thread_id": pending["thread_id"], "finding_id": observed["finding_id"]},
             )
+
+
+def _process_unit_finding_closures(store, run_id, unit_id, unit_prior, execution):
+    if execution is None:
+        return []
+    return process_finding_closures(
+        store, run_id, unit_id, unit_prior, execution.aggregation.finding_closures)
 
 
 def run_final_review(reference, *, repo_root=None, provider=None, store_path=None,
@@ -903,12 +950,7 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
                         executions[current_id] = skipped_execution(
                             executions[unit_id].stop, unit_id=current_id, run_tests=True)
                         continue
-                    unit_prior = {
-                        **deepcopy(prior),
-                        "findings": [deepcopy(finding) for finding in prior["findings"]
-                                     if finding.get("unit_key") == unit_key],
-                    }
-                    unit_prior["required"] = bool(unit_prior["findings"])
+                    unit_prior = finding_memory_for_unit(prior, unit_key)
                     public_item = _public_item(item)
                     if unit_key == "combined":
                         public_item.update({
@@ -1004,6 +1046,13 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
             for current_id in unit_ids:
                 store.record_warning(current_id, "freshness-check", str(exc), "freshness")
 
+        closure_outcomes = {}
+        for current_id, unit_key in ((unit_id, "individual:1"), (combined_id, "combined")):
+            closure_outcomes[unit_key] = _process_unit_finding_closures(
+                store, run_id, current_id, finding_memory_for_unit(prior, unit_key),
+                executions[current_id],
+            )
+
         execution_list = [executions[unit_id], executions[combined_id]]
         stopped = any(execution and execution.stop for execution in execution_list)
         lenses_complete = len(aggregations) == 2 and all(
@@ -1093,6 +1142,7 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
                            for outcome in (aggregation.outcomes if aggregation else ())],
                 "required_verification": deepcopy(execution.required) if execution else None,
                 "dynamic_checks": deepcopy(execution.dynamic) if execution else None,
+                "finding_closures": deepcopy(closure_outcomes[unit_key]),
                 **_execution_result_fields(execution),
             })
         result = {
@@ -1115,6 +1165,8 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
                           "merge_base_sha": merge_base},
             "trust": trust, "freshness": deepcopy(freshness),
             "finding_memory": deepcopy(store.memory_status(run_id)),
+            "finding_closures": [deepcopy(outcome) for outcomes in closure_outcomes.values()
+                                 for outcome in outcomes],
             "execution_complete": checks_complete,
             "stops": [stop for output in unit_outputs for stop in output["stops"]],
             "rejected_stops": [entry for output in unit_outputs

@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import rg_final_github  # noqa: E402
 import rg_final_review  # noqa: E402
+from rg_final_graph import GraphOmissionError  # noqa: E402
 from rg_final_publish import STATUS_CONTEXT  # noqa: E402
 from rg_final_store import FinalStore  # noqa: E402
 import test_final_stack as shared  # noqa: E402
@@ -90,32 +91,42 @@ def test_one_standalone_github_pr_runs_individual_combined_and_status_on_shared_
     auto_provider(monkeypatch, harness)
     store_path = tmp_path / "standalone.sqlite3"
 
-    first = harness.standalone(store_path, provider=None)
-    assert first["complete"] is True
+    with pytest.raises(GraphOmissionError) as omitted:
+        harness.standalone(store_path, provider=None)
+    assert omitted.value.corrected_argv[-3:] == tuple(harness.references)
+    assert harness.writer.calls == []
+
+    first = harness.run(store_path, provider=None)
     assert first["state"] == "pass"
-    assert first["trust"]["independent"] is True
-    output = harness.standalone(
+    assert first["graph"]["references"] == harness.references
+    output = harness.run(
         store_path, provider=None, publish=True, publication_runner=harness.writer)
 
+    assert output["stage"] == "S16-07"
     assert output["complete"] is True
     assert output["state"] == "pass"
     assert output["exit_code"] == 0
     assert output["finding_verdict"] == "pass"
-    assert [unit["unit_key"] for unit in output["units"]] == ["individual:1", "combined"]
+    assert output["graph"]["references"] == harness.references
+    assert output["item_keys"] == [f"github:111#{number}" for number in (1, 2, 3)]
+    assert [unit["unit_key"] for unit in output["units"]] == [
+        "individual:1", "individual:2", "individual:3", "combined", "prospective"]
     assert all(unit["execution_complete"] for unit in output["units"])
-    assert output["publication"]["official_green"] is True
-    assert len(harness.writer.calls) == 1
-    argv = harness.writer.calls[0]
-    assert argv[:2] == ["gh", "api"]
-    assert f"repos/group/project/statuses/{harness.items[0]['source']['sha']}" in argv
-    assert "state=success" in argv
-    assert f"context={STATUS_CONTEXT}" in argv
+    assert len(output["publications"]) == 3
+    assert all(publication["official_green"] for publication in output["publications"])
+    assert len(harness.writer.calls) == 3
+    for item, argv in zip(harness.items, harness.writer.calls):
+        assert argv[:2] == ["gh", "api"]
+        assert f"repos/group/project/statuses/{item['source']['sha']}" in argv
+        assert "state=success" in argv
+        assert f"context={STATUS_CONTEXT}" in argv
     with FinalStore(store_path) as store:
         report = store.machine_report(output["run_id"])
-        assert report["revisions"]["items"][0]["provider_data"]["url"] == \
-            harness.references[0]
-        assert report["revisions"]["items"][0]["provider_data"]["provider"] == "github"
-        assert len(report["publications"]) == 1
+        assert [entry["provider_data"]["url"] for entry in report["revisions"]["items"]] == \
+            harness.references
+        assert all(entry["provider_data"]["provider"] == "github"
+                   for entry in report["revisions"]["items"])
+        assert len(report["publications"]) == 3
 
 
 def test_three_github_prs_run_five_units_and_publish_each_head_on_shared_harness(
@@ -156,6 +167,70 @@ def test_three_github_prs_run_five_units_and_publish_each_head_on_shared_harness
         assert report["run"]["state"] == "pass"
         assert len(report["publications"]) == 3
         assert report["finding_memory"]["clear_allowed"] is True
+
+
+def test_composed_worker_resolution_closes_only_its_inherited_unit_finding(tmp_path):
+    harness = Harness(tmp_path)
+    store_path = tmp_path / "composed-resolution.sqlite3"
+    harness.environ["STACK_FINDING_UNIT"] = "combined"
+    first = harness.run(store_path)
+    assert first["state"] == "findings"
+    harness.environ.pop("STACK_FINDING_UNIT")
+
+    trace = tmp_path / "resolution-trace.jsonl"
+    harness.environ["RESOLUTION_TRACE"] = str(trace)
+    worker = tmp_path / "resolution-worker.py"
+    worker.write_text(
+        "import json, os, pathlib, sys\n"
+        "request = json.loads(pathlib.Path(sys.argv[-1]).read_text())\n"
+        "prior = request['finding_memory']['findings']\n"
+        "with pathlib.Path(os.environ['RESOLUTION_TRACE']).open('a') as stream:\n"
+        "    stream.write(json.dumps({'unit_key': request['unit_key'],"
+        " 'lens': request['lens'], 'memory_required': bool(prior),"
+        " 'pending': prior[0] if prior and request['unit_key'] == 'combined'"
+        " and request['lens'] == 'correctness' else None}) + '\\n')\n"
+        "result = {'schema': 'final-review-worker-result/v1', 'status': 'success',"
+        " 'summary': request['lens'] + ' complete', 'findings': [],"
+        " 'warnings': [], 'unreviewed': []}\n"
+        "if prior and request['unit_key'] == 'combined'"
+        " and request['lens'] == 'correctness':\n"
+        "    pending = prior[0]\n"
+        "    anchors = pending['anchors']\n"
+        "    for anchor in anchors: anchor['evidence_fingerprint'] = 'fixed-composed-tree'\n"
+        "    result['finding_resolutions'] = [{"
+        " 'finding_id': pending['finding_id'],"
+        " 'content_anchor': pending['content_anchor'],"
+        " 'thread_id': pending['thread_id'], 'anchors': anchors,"
+        " 'resolution_evidence': {'composition': 'combined caller contract restored'},"
+        " 'revalidation': {'status': 'passed', 'test': 'composed_required_suite'}}]\n"
+        "print(json.dumps(result))\n",
+        encoding="utf-8",
+    )
+
+    second = harness.run(
+        store_path, worker=[sys.executable, str(worker)], environ=harness.environ)
+
+    assert second["state"] == "pass"
+    assert second["complete"] is True
+    assert second["finding_memory"]["clear_allowed"] is True
+    recorded = [entry for entry in second["finding_closures"] if entry["state"] == "recorded"]
+    assert len(recorded) == 1
+    assert recorded[0]["event_type"] == "resolved"
+    traces = [json.loads(line) for line in trace.read_text().splitlines()]
+    assert len(traces) == 5 * 7
+    combined = [entry for entry in traces if entry["unit_key"] == "combined"]
+    assert len(combined) == 7
+    assert all(entry["memory_required"] for entry in combined)
+    assert not any(entry["memory_required"] for entry in traces
+                   if entry["unit_key"].startswith("individual:"))
+    pending = next(entry["pending"] for entry in combined if entry["pending"])
+    with FinalStore(store_path) as store:
+        history = store.finding_history(pending["thread_id"])
+        assert [event["event_type"] for event in history["events"]] == [
+            "observed", "resolved"]
+        assert history["events"][-1]["revalidation"]["test"] == \
+            "composed_required_suite"
+        assert store.official_findings(second["run_id"]) == []
 
 
 @pytest.mark.parametrize("blocked_key", ["individual:1", "individual:2", "individual:3", "combined"])

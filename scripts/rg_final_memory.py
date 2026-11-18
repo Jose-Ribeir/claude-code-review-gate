@@ -322,6 +322,100 @@ def falsify_finding(store, run_id, thread_id, rationale, *, evidence=None):
     return store.falsify_finding(run_id, thread_id, rationale, evidence=evidence)
 
 
+def finding_memory_for_unit(prior, unit_key):
+    """Restrict inherited context so one unit cannot close another unit's thread."""
+    selected = copy.deepcopy(prior or {})
+    selected["findings"] = [
+        finding for finding in selected.get("findings", [])
+        if finding.get("unit_key") == unit_key
+    ]
+    selected["required"] = bool(selected["findings"])
+    return selected
+
+
+def _closure_reference(closure, prior_by_id):
+    finding_id = str(
+        closure.get("finding_id") or closure.get("prior_finding_id") or "").strip()
+    content_anchor = str(
+        closure.get("content_anchor") or closure.get("prior_content_anchor") or "").strip()
+    if not finding_id or not content_anchor:
+        raise ValueError("finding closure requires a prior finding ID and content anchor")
+    prior = prior_by_id.get(finding_id)
+    if prior is None:
+        raise ValueError("finding closure does not identify an inherited finding for this unit")
+    if content_anchor != prior.get("content_anchor"):
+        raise ValueError("finding closure content anchor does not match its prior finding")
+    thread_id = closure.get("thread_id") or closure.get("memory_thread_id")
+    if thread_id is not None and str(thread_id) != str(prior.get("thread_id")):
+        raise ValueError("finding closure thread does not match its prior finding")
+    return prior
+
+
+def _recorded_evidence(value):
+    return bool(value.strip()) if isinstance(value, str) else bool(value)
+
+
+def process_finding_closures(store, run_id, unit_id, prior, closures):
+    """Validate and persist explicit worker/provider closure claims.
+
+    Only findings present in this unit's inherited ``rerun_context`` are
+    eligible. Unknown IDs, current-run findings, anchor mismatches, and
+    cross-unit requests become visible rejected claims and cannot erase any
+    finding. Store APIs perform the final open-state, changed-evidence, and
+    positive-revalidation checks before appending an immutable event.
+    """
+    prior_by_id = {
+        str(finding.get("finding_id")): finding
+        for finding in (prior or {}).get("findings", [])
+    }
+    outcomes = []
+    for supplied in closures or ():
+        closure = copy.deepcopy(supplied)
+        reference = {}
+        try:
+            if not isinstance(closure, dict):
+                raise ValueError("finding closure must be an object")
+            reference = {
+                "finding_id": closure.get("finding_id") or closure.get("prior_finding_id"),
+                "content_anchor": closure.get("content_anchor")
+                or closure.get("prior_content_anchor"),
+            }
+            prior_finding = _closure_reference(closure, prior_by_id)
+            thread_id = prior_finding["thread_id"]
+            closure_type = str(closure.get("closure_type") or "").strip().lower()
+            if closure_type == "resolved":
+                history = resolve_finding(
+                    store, run_id, thread_id,
+                    anchors=closure.get("anchors"),
+                    resolution_evidence=closure.get("resolution_evidence"),
+                    revalidation=closure.get("revalidation"),
+                )
+            elif closure_type == "falsified":
+                evidence = closure.get("evidence")
+                if not _recorded_evidence(evidence):
+                    raise ValueError("finding falsification requires recorded evidence")
+                history = falsify_finding(
+                    store, run_id, thread_id, closure.get("rationale"), evidence=evidence)
+            else:
+                raise ValueError("finding closure must be resolved or falsified")
+            outcomes.append({
+                "state": "recorded", "event_type": closure_type,
+                "thread_id": thread_id, "finding_id": prior_finding["finding_id"],
+                "content_anchor": prior_finding["content_anchor"],
+                "lens": closure.get("lens"), "history": history,
+            })
+        except Exception as exc:
+            store.record_warning(
+                unit_id, "finding-closure-rejected", str(exc), "finding-memory",
+                {**reference, "lens": closure.get("lens") if isinstance(closure, dict) else None},
+            )
+            outcomes.append({
+                "state": "rejected", "reason": str(exc), **reference,
+                "lens": closure.get("lens") if isinstance(closure, dict) else None,
+            })
+    return outcomes
+
+
 def local_waiver_context(findings, local_waivers=()):
     """Describe local waiver matches without suppressing or editing findings."""
     context = []

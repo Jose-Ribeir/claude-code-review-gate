@@ -208,6 +208,51 @@ def test_intent_falsification_filter_applies_to_every_lens_and_is_visible(tmp_pa
     assert intent.warnings[0]["details"] == {"excluded": 1}
 
 
+def test_explicit_finding_closures_are_detached_for_trusted_finalization(tmp_path):
+    resolution = {
+        "finding_id": "prior-id", "content_anchor": "sha256:prior",
+        "anchors": [{"anchor_type": "content", "anchor": "sha256:prior",
+                     "evidence_fingerprint": "new-tree"}],
+        "resolution_evidence": {"diff": "the offending assignment was removed"},
+        "revalidation": {"status": "passed", "test": "test_caller_contract"},
+    }
+    falsification = {
+        "finding_id": "other-prior", "content_anchor": "sha256:other",
+        "rationale": "The existing transaction wrapper already persists the value",
+        "evidence": {"inspection": "app.py:40-49"},
+    }
+    original = deepcopy(resolution)
+
+    def worker(request):
+        if request["lens"] == "correctness":
+            return _response(
+                finding_resolutions=[resolution], finding_falsifications=[falsification])
+        return _response()
+
+    aggregate = run_independent_lenses(_request(tmp_path), worker)
+
+    assert aggregate.complete is True
+    assert [entry["closure_type"] for entry in aggregate.finding_closures] == [
+        "resolved", "falsified",
+    ]
+    assert all(entry["lens"] == "correctness" for entry in aggregate.finding_closures)
+    assert aggregate.finding_closures[0]["revalidation"]["status"] == "passed"
+    assert resolution == original
+
+
+def test_malformed_closure_claim_is_an_incomplete_lens_not_a_memory_write(tmp_path):
+    def worker(request):
+        if request["lens"] == "correctness":
+            return _response(finding_resolutions={"finding_id": "not-a-list"})
+        return _response()
+
+    aggregate = run_independent_lenses(_request(tmp_path), worker)
+
+    assert aggregate.complete is False
+    assert aggregate.finding_closures == ()
+    assert "finding_resolutions must be an array" in aggregate.outcomes[0].error
+
+
 def test_unreviewed_scope_warns_but_does_not_manufacture_a_block(tmp_path):
     def worker(request):
         if request["lens"] == "compatibility/migrations":
@@ -288,6 +333,7 @@ def orchestrated(tmp_path, monkeypatch):
     item = _provider_item()
     provider = SimpleNamespace(
         read=lambda reference, repo_root=None: deepcopy(item),
+        list_open=lambda pinned, repo_root=None: [item["url"]],
         revalidate=lambda pinned, repo_root=None: None,
     )
     requests = []
