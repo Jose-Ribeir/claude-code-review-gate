@@ -180,7 +180,24 @@ def main(argv):
         sys.stdout.write(proc.stdout)
         sys.stderr.write(proc.stderr)
         return proc.returncode
-    sys.stdout.write(_wrap(flavor, proc.stdout))
+    output = proc.stdout
+    pf = re.search(r'--paths-file "([^"]+)"', prompt)
+    if pf:
+        with open(pf.group(1), encoding="utf-8") as fh:
+            manifest = json.load(fh)
+        task = manifest.get("native_deep_task")
+        if task:
+            payload = json.loads(output)
+            input_sha = re.search(r'"input_sha256": "([0-9a-f]{64})"', prompt)
+            payload["native_deep_evidence"] = {
+                "task_id": task["task_id"],
+                "input_sha256": input_sha.group(1),
+                "manifest_sha256": manifest["manifest_sha256"],
+                "reviewed_paths": manifest["paths"],
+                "completed_duties": task["duties"],
+            }
+            output = json.dumps(payload)
+    sys.stdout.write(_wrap(flavor, output))
     return 0
 
 
