@@ -77,6 +77,10 @@ def _repository_url(side):
     return str(side.get("http_url") or side.get("url") or "").strip()
 
 
+def _branch_coordinate(side):
+    return side.get("project_id"), side.get("branch")
+
+
 def _validate_graph(graph):
     if not isinstance(graph, dict) or graph.get("schema") != rg_final_graph.GRAPH_SCHEMA:
         raise ValueError("composition requires a validated final-review-graph/v1 graph")
@@ -103,8 +107,10 @@ def _validate_graph(graph):
         if not _repository_url(item["source"]):
             raise ValueError("composition requires a readable source repository")
         expected_target = root if previous is None else previous["source"]
-        if item["target"].get("branch") != expected_target.get("branch"):
-            raise ValueError("composition cannot reorder a non-linear provider graph")
+        if _branch_coordinate(item["target"]) != _branch_coordinate(expected_target):
+            raise ValueError(
+                "composition cannot join mismatched project coordinates or reorder "
+                "a non-linear provider graph")
         previous = item
     return items, root
 

@@ -454,3 +454,39 @@ def test_invalid_or_reordered_graph_is_rejected_before_worktree_creation(tmp_pat
             pass
 
     assert _git(repo, "worktree", "list", "--porcelain").stdout.count("worktree ") == 1
+
+
+@pytest.mark.parametrize("coordinate", ["root", "source", "target"])
+def test_composition_enforces_project_coordinates_before_worktree_creation(
+        tmp_path, coordinate):
+    repo, root_target, items, current_sha = _repository(tmp_path)
+    graph = _graph(items, root_target)
+    if coordinate == "root":
+        graph["root_target"] = {**root_target, "project_id": 999}
+    elif coordinate == "source":
+        graph["items"][0]["source"]["project_id"] = 999
+    else:
+        graph["items"][1]["target"]["project_id"] = 999
+
+    with pytest.raises(ValueError, match="project coordinates"):
+        with rg_final_compose.compose_stack(graph, current_root_sha=current_sha):
+            pass
+
+    assert _git(repo, "worktree", "list", "--porcelain").stdout.count("worktree ") == 1
+
+
+def test_composition_preserves_valid_fork_source_coordinates(tmp_path):
+    repo, root_target, items, current_sha = _repository(tmp_path)
+    items[1]["source"].update({
+        "project_id": 222,
+        "project_path": "contributor/fork",
+    })
+
+    with rg_final_compose.compose_stack(
+        _graph(items, root_target), current_root_sha=current_sha,
+    ) as composition:
+        assert composition["complete"] is True
+        assert composition["combined"]["applied_item_keys"] == [
+            item["id"] for item in items
+        ]
+        assert composition["prospective"]["complete"] is True

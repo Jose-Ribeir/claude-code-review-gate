@@ -140,21 +140,25 @@ _PROSE_DEPENDENCY = re.compile(
     r"\b(?:depends?\s+on|blocked\s+by|stacked\s+on)\b", re.IGNORECASE)
 
 
+def _branch_coordinate(side):
+    return side["project_id"], side["branch"]
+
+
 def _linear_component(supplied, items):
     by_id = {item["id"]: item for item in items}
     by_source = {}
     by_target = {}
     for item in items:
-        by_source.setdefault(item["source"]["branch"], []).append(item)
-        by_target.setdefault(item["target"]["branch"], []).append(item)
+        by_source.setdefault(_branch_coordinate(item["source"]), []).append(item)
+        by_target.setdefault(_branch_coordinate(item["target"]), []).append(item)
 
     first = supplied[0]
     visited = {first["id"]}
     queue = [first]
     while queue:
         item = queue.pop(0)
-        parents = by_source.get(item["target"]["branch"], [])
-        children = by_target.get(item["source"]["branch"], [])
+        parents = by_source.get(_branch_coordinate(item["target"]), [])
+        children = by_target.get(_branch_coordinate(item["source"]), [])
         if len(parents) > 1 or len(children) > 1:
             raise BranchPointError(
                 f"{item['id']} has multiple provider parents or children; linear order is ambiguous",
@@ -190,7 +194,7 @@ def _linear_component(supplied, items):
         )
 
     roots = [by_id[key] for key in visited
-             if not by_source.get(by_id[key]["target"]["branch"])]
+             if not by_source.get(_branch_coordinate(by_id[key]["target"]))]
     if not roots:
         raise GraphCycleError("provider source/target branches contain no root and form a cycle",
                               code="cycle")
@@ -207,7 +211,7 @@ def _linear_component(supplied, items):
             raise GraphCycleError(f"provider cycle reaches {current['id']} twice", code="cycle")
         ordered.append(current)
         ordered_ids.add(current["id"])
-        children = by_target.get(current["source"]["branch"], [])
+        children = by_target.get(_branch_coordinate(current["source"]), [])
         if not children:
             break
         current = children[0]

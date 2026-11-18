@@ -95,12 +95,24 @@ def test_single_item_preserves_provider_metadata_and_exposes_composition_identit
     assert provider.list_calls == [(item["id"], tmp_path)]
 
 
+def use_project(item, side, project):
+    item[side].update({
+        key: project[key]
+        for key in ("project_id", "project_path", "url", "http_url", "ssh_url")
+    })
+
+
 def three_items():
-    return [
+    items = [
         linear_item(1, "feature/base", "main"),
         linear_item(2, "feature/middle", "feature/base"),
         linear_item(3, "feature/head", "feature/middle"),
     ]
+    # Every non-root target is in the upstream project. Match each parent's
+    # source coordinates to the child target instead of relying on branch text.
+    for item in items:
+        use_project(item, "source", item["target"])
+    return items
 
 
 def test_omitted_ancestors_abort_with_complete_base_most_corrected_command():
@@ -202,9 +214,38 @@ def test_gap_between_supplied_items_cannot_be_filled_by_inference():
     assert captured.value.code == "graph-gap"
 
 
+def test_same_named_branches_from_distinct_projects_cannot_form_an_edge():
+    first = linear_item(1, "feature/shared", "main")
+    second = linear_item(2, "feature/head", "feature/shared")
+    assert first["source"]["project_id"] != second["target"]["project_id"]
+    provider = ScriptedOpenProvider([first, second])
+
+    with pytest.raises(rg_final_graph.GraphGapError) as captured:
+        rg_final_graph.discover_linear_graph(
+            [first["url"], second["url"]], provider=provider)
+
+    assert captured.value.code == "graph-gap"
+
+
+def test_matching_project_coordinates_preserve_fork_dependencies():
+    first = linear_item(1, "feature/base", "main")
+    use_project(first, "source", first["target"])
+    second = linear_item(2, "feature/head", "feature/base")
+    provider = ScriptedOpenProvider([first, second])
+
+    graph = rg_final_graph.discover_linear_graph(
+        [first["url"], second["url"]], provider=provider)
+
+    assert graph["item_keys"] == [first["id"], second["id"]]
+    assert graph["items"][1]["source"]["project_id"] == 222
+    assert graph["root_target"]["project_id"] == 111
+
+
 def test_provider_branch_cycle_is_rejected():
     first = linear_item(1, "feature/one", "feature/two")
     second = linear_item(2, "feature/two", "feature/one")
+    use_project(first, "source", first["target"])
+    use_project(second, "source", second["target"])
     provider = ScriptedOpenProvider([first, second])
 
     with pytest.raises(rg_final_graph.GraphCycleError) as captured:
@@ -308,7 +349,7 @@ class ScriptedGlab:
 
 
 def test_real_gitlab_adapter_discovers_open_references_with_read_only_paginated_api():
-    items = three_items()[:2]
+    items = [linear_item(1, "feature/base", "main")]
     runner = ScriptedGlab(items)
     provider = rg_final_gitlab.GitLabProvider(runner=runner)
 
