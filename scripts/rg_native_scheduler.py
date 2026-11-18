@@ -33,6 +33,7 @@ class ScheduledResult:
     artifact: Optional[NativeArtifact]
     eligible: bool
     error: Optional[str] = None
+    source_artifact: Optional[NativeArtifact] = None
 
 
 @dataclass
@@ -43,15 +44,18 @@ class _Entry:
     state: str = "queued"
     handle: object = None
     artifact: Optional[NativeArtifact] = None
+    source_artifact: Optional[NativeArtifact] = None
     error: Optional[str] = None
     eligible: bool = True
     callback_received: bool = False
+    completion_notified: bool = False
     finalized: bool = False
 
     def result(self):
         return ScheduledResult(
             task=self.definition, state=self.state, artifact=self.artifact,
             eligible=self.eligible, error=self.error,
+            source_artifact=self.source_artifact,
         )
 
 
@@ -172,6 +176,7 @@ class NativeScheduler:
                            for parent in entry.definition.dependencies):
                         affected.add(task_id)
                         changed = True
+            skipped = []
             for task_id in affected:
                 entry = self._entries[task_id]
                 entry.eligible = False
@@ -179,6 +184,18 @@ class NativeScheduler:
                     entry.state = "skipped"
                     if entry in self._pending:
                         self._pending.remove(entry)
+                    skipped.append(entry)
+        for entry in skipped:
+            self._notify_complete(entry)
+
+    def _notify_complete(self, entry):
+        with self._lock:
+            if entry.completion_notified:
+                return
+            entry.completion_notified = True
+            callback = entry.on_complete
+        if callback is not None:
+            callback(entry.result())
 
     def _completed(self, entry, completion):
         with self._lock:
@@ -186,6 +203,7 @@ class NativeScheduler:
                 return
             entry.callback_received = True
         artifact = completion.artifact
+        source_artifact = artifact
         stop = None
         error = completion.error
         state = completion.state
@@ -208,14 +226,13 @@ class NativeScheduler:
         with self._lock:
             entry.state = state
             entry.artifact = artifact
+            entry.source_artifact = source_artifact
             entry.error = error
             self._active[entry.definition.resource] -= 1
         if stop is not None and entry.eligible:
             self._apply_stop(entry, stop)
-        on_complete = entry.on_complete
         self._drain()
-        if on_complete is not None:
-            on_complete(entry.result())
+        self._notify_complete(entry)
         self._maybe_finalize(entry.definition.task.run_id)
 
     def _maybe_finalize(self, run_id):
@@ -289,6 +306,9 @@ class NativeScheduler:
         for entry in entries:
             if entry.state not in ("completed", "failed", "skipped"):
                 self._record_cleanup(entry, reason)
+        for entry in entries:
+            if entry.state in _TERMINAL_STATES:
+                self._notify_complete(entry)
         with self._lock:
             run["cleaning"] = False
         self._maybe_finalize(run_id)

@@ -1223,6 +1223,13 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
     """
     repo_root = str(repo_root or os.getcwd())
     provider = _selected_provider(reference, provider, repo_root)
+    environ = os.environ if environ is None else environ
+    transport = str(environ.get("RG_FINAL_REVIEW_TRANSPORT", "")).strip().lower()
+    if transport == "native" and isinstance(reference, (list, tuple)) and len(reference) > 1:
+        raise ValueError(
+            "native final-review transport currently supports standalone reviews only; "
+            "legacy stack execution was not selected"
+        )
     if isinstance(reference, (list, tuple)) and len(reference) == 1:
         reference = reference[0]
     if isinstance(reference, (list, tuple)):
@@ -1235,7 +1242,6 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
             publication_runner=publication_runner, report_url=report_url,
             local_waivers=local_waivers, complete=True,
         )
-    environ = os.environ if environ is None else environ
     standalone_dynamic_kwargs = dict(dynamic_kwargs or {})
     configured_executor = environ.get("RG_FINAL_DYNAMIC_EXECUTOR", "").strip()
     if configured_executor:
@@ -1388,7 +1394,7 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
                         executions[current_id] = skipped_execution(
                             executions[unit_id].stop, unit_id=current_id, run_tests=True)
                         continue
-                    unit_prior = finding_memory_for_unit(prior, unit_key)
+                    unit_prior = unit_priors[current_id]
                     public_item = _public_item(item)
                     if unit_key == "combined":
                         public_item.update({

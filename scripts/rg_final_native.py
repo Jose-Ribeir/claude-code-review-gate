@@ -13,7 +13,7 @@ import time
 from rg_final_lenses import lens_worker_limit
 from rg_native_executor import NativeExecutor, NativeTask
 from rg_native_scheduler import NativeScheduler, SchedulerTask
-from rg_run_lifecycle import RunDeadline, run_timeout_from_env
+from rg_run_lifecycle import RunDeadline, RunDeadlineExpired, run_timeout_from_env
 
 
 class NativeStandaloneExecution:
@@ -140,12 +140,18 @@ class NativeStandaloneExecution:
         ready.wait()
         with self._lock:
             result = self._results[task_id]
-        if result.state != "completed" or result.artifact is None:
+        if self.deadline.expired:
+            raise RunDeadlineExpired(self.deadline.run_id)
+        artifact = result.source_artifact or result.artifact
+        if result.state != "completed" or artifact is None:
             raise RuntimeError(
                 f"native {request['lens']} task {result.state}: "
                 f"{result.error or 'mandatory work was not eligible'}"
             )
-        return deepcopy(result.artifact.payload)
+        # Reuse the original worker envelope: execute_unit owns rejection and
+        # normalization once, while the scheduler's committed downgrade stays
+        # available as the stable native transport artifact.
+        return deepcopy(artifact.payload)
 
     def close(self):
         if self._closed:
