@@ -637,7 +637,7 @@ def test_executor_subject_timeout_is_a_warning_without_a_second_run(
 
 
 def _run_spec16_dynamic_with_selector(tmp_path, monkeypatch, probe_source,
-                                      run_id="race-evidence"):
+                                      run_id="race-evidence", run_cmd=None):
     """Run the real acceptance fixture/executor with only inference doubled."""
     import rg_final_dynamic
     import sim_scenarios_spec16 as scenarios
@@ -647,7 +647,7 @@ def _run_spec16_dynamic_with_selector(tmp_path, monkeypatch, probe_source,
         "probes": [{
             "name": "direct-race-oracle", "language": "python",
             "source": probe_source,
-            "run_cmd": '"%s" {probe_file}' % _PY,
+            "run_cmd": run_cmd or '"%s" {probe_file}' % _PY,
             "path": "dsl.py",
         }],
     })
@@ -740,6 +740,73 @@ def test_correct_direct_probe_deterministically_reproduces_planted_race(
     assert os.stat(artifact_path).st_mode & 0o777 == 0o600
     assert not os.path.exists(os.path.join(
         os.path.dirname(artifact_path), "selector-diagnostics.json"))
+
+
+def test_diagnostics_redact_complete_credentials_before_simulation_persistence(
+        tmp_path, monkeypatch):
+    probe = (
+        "import os, sys\n"
+        "sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(\n"
+        "    os.path.abspath(__file__)))))\n"
+        "from dsl import verdict\n"
+        "# Authorization: Basic dXNlcjpwYXNz\n"
+        "# proxy_authorization=Bearer bearer.token.value\n"
+        '# {\"access_token\":\"token with spaces\",\n'
+        '#  \"client_secret\":\"client secret with spaces\"}\n'
+        "# CLAUDE_TChoices=valid-diagnostic /Users/alice/private/app.py\n"
+        "retry = os.path.exists('credential-retry.flag')\n"
+        "if retry:\n"
+        "    print('Authorization: Basic dXNlcjpwYXNz')\n"
+        "    print('proxy_authorization=Bearer bearer.token.value')\n"
+        '    print(\'{"access_token":"token with spaces"}\')\n'
+        '    print(\'{"client_secret":"client secret with spaces"}\')\n'
+        "    print('CLAUDE_TChoices=valid-diagnostic /Users/alice/private/app.py',\n"
+        "          file=sys.stderr)\n"
+        "else:\n"
+        "    open('credential-retry.flag', 'w').close()\n"
+        "    print('safe initial dynamic failure')\n"
+        "expected = 2 * 20\n"
+        "observations = [verdict() for _ in range(6)]\n"
+        "assert observations == [expected] * len(observations), (\n"
+        "    f'lost updates: expected {expected}, observed {observations}')\n"
+    )
+    run_cmd = (
+        "proxy_authorization='Bearer bearer.token.value' "
+        "access_token='token with spaces' "
+        "client_secret='client secret with spaces' "
+        'CLAUDE_TChoices=valid-diagnostic "%s" {probe_file}' % _PY
+    )
+
+    result, persisted = _run_spec16_dynamic_with_selector(
+        tmp_path, monkeypatch, probe, run_id="credential-redaction", run_cmd=run_cmd)
+
+    assert result["state"] == "findings", result
+    diagnostics = persisted["result"]["selector_diagnostics"]
+    assert diagnostics["selector"]["valid"] is True
+    (record,) = diagnostics["probes"]
+    assert [run["returncode"] for run in record["runs"]] == [1, 1]
+    assert "safe initial dynamic failure" in record["runs"][0]["output"]
+    scrubbed_fields = (
+        diagnostics["selector"]["raw_response"], diagnostics["selector"]["json"],
+        record["source_excerpt"], record["run_command"], record["runs"][1]["output"],
+    )
+    for text in scrubbed_fields:
+        assert "[redacted]" in text
+    assert "CLAUDE_TChoices=valid-diagnostic" in record["run_command"]
+    assert "CLAUDE_TChoices=valid-diagnostic" in record["runs"][1]["output"]
+
+    serialized = json.dumps(persisted)
+    for secret in (
+            "dXNlcjpwYXNz", "bearer.token.value", "token with spaces",
+            "client secret with spaces"):
+        assert secret not in serialized
+    assert "/Users/alice" not in serialized
+    assert "Basic [redacted]" not in serialized
+    assert "Bearer [redacted]" not in serialized
+    assert str(tmp_path) not in json.dumps(diagnostics)
+    artifact = result["evidence"]["reproduced_failure"]["simulation_artifact"]
+    assert not os.path.exists(os.path.join(
+        os.path.dirname(artifact["artifact"]), "selector-diagnostics.json"))
 
 
 def test_repeated_print_only_probe_cannot_satisfy_race_scenario(

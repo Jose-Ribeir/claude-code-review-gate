@@ -346,6 +346,64 @@ def test_worker_evidence_is_bounded_anchored_and_sanitized(tmp_path):
                for entry in evidence["sources_read"])
 
 
+def test_lens_credentials_are_fully_redacted_before_worker_evidence_persistence(orchestrated):
+    secrets = (
+        "dXNlcjpwYXNz", "bearer.token.value", "token with spaces",
+        "client secret with spaces", "proxy-secret",
+    )
+    response = _response(
+        summary=("Reviewed Authorization: Basic dXNlcjpwYXNz and "
+                 "Authorization: Bearer bearer.token.value; CLAUDE_TChoices=valid-diagnostic"),
+        sources_read=[{
+            "path": "app.py",
+            "rationale": (
+                '{"access_token":"token with spaces",'
+                '"client_secret":"client secret with spaces"}; '
+                "proxy_authorization=Bearer proxy-secret; /Users/alice/private/app.py"
+            ),
+        }],
+    )
+
+    outcome = rg_final_lenses.normalize_worker_result(response, REQUIRED_LENSES[0])
+    normalized = outcome.summary + json.dumps(outcome.worker_evidence)
+
+    assert outcome.state == "completed"
+    assert "Authorization: [redacted]" in outcome.summary
+    assert "CLAUDE_TChoices=valid-diagnostic" in outcome.summary
+    assert outcome.worker_evidence["sources_read"][0]["path"] == "app.py"
+    for secret in secrets:
+        assert secret not in normalized
+    assert "/Users/alice" not in normalized
+    assert "Basic [redacted]" not in normalized
+    assert "Bearer [redacted]" not in normalized
+
+    def worker(request):
+        if request["lens"] == "correctness":
+            return deepcopy(response)
+        return _response(summary="Inspected app.py and completed this lens without findings")
+
+    output, manifest = orchestrated.run(worker)
+    persisted = json.dumps({"output": output, "manifest": manifest})
+
+    assert output["state"] == "pass"
+    for secret in secrets:
+        assert secret not in persisted
+    assert "/Users/alice" not in persisted
+    assert "CLAUDE_TChoices=valid-diagnostic" in persisted
+    for unit in manifest["units"]:
+        correctness = next(lens for lens in unit["lenses"] if lens["name"] == "correctness")
+        evidence = correctness["evidence"]["worker_evidence"]
+        assert "Authorization: [redacted]" in correctness["summary"]
+        assert "Authorization: [redacted]" in evidence["received_summary"]
+        assert '[redacted]' in evidence["sources_read"][0]["rationale"]
+
+    rejected = _response(status="bad-request Authorization: Basic dXNlcjpwYXNz")
+    with pytest.raises(rg_final_lenses.LensResultError) as captured:
+        rg_final_lenses.normalize_worker_result(rejected, REQUIRED_LENSES[0])
+    assert "dXNlcjpwYXNz" not in json.dumps(captured.value.details)
+    assert "Authorization: [redacted]" in captured.value.details["received_status"]
+
+
 def test_references_without_read_disclosure_stay_distinct_from_no_disclosure(tmp_path):
     references = [{"path": "app.py", "location": "line 2", "rationale": "Changed return"}]
     referenced = rg_final_lenses.normalize_worker_result(

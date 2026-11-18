@@ -135,11 +135,21 @@ MAX_WORKER_EVIDENCE_PATH = 240
 MAX_WORKER_EVIDENCE_TEXT = 320
 MAX_WORKER_SUMMARY = 1000
 
-_LENS_SECRET_ASSIGNMENT = re.compile(
-    r"(?i)((?:api[_-]?key|token|secret|password|credential|cookie|authorization|auth)"
-    r"[A-Za-z0-9_.-]*\s*[\":']?\s*[:=]\s*)(?:\\?\"[^\"]*\"|\\?'[^']*'|[^\s,;}\]]+)",
+_LENS_SENSITIVE_KEY = (
+    r"(?:api[_-]?key|token|secret|password|credential|cookie|authorization|auth)"
+    r"[A-Za-z0-9_.-]*"
 )
-_LENS_BEARER = re.compile(r"(?i)(\bbearer\s+)[^\s,\"']+")
+_LENS_SECRET_ASSIGNMENT = re.compile(
+    rf"(?i)({_LENS_SENSITIVE_KEY}\s*\\?[\"']?\s*[:=]\s*)"
+    r"(?!\[redacted\])"
+    r"(?:(\\?[\"'])(.*?)\2|([^\s,;\"'\}\]&]+))",
+    re.DOTALL,
+)
+_LENS_AUTHORIZATION = re.compile(
+    r"(?i)(?<![A-Za-z0-9_])([A-Za-z0-9_-]{0,128}authorization"
+    r"\\?[\"']?\s*[:=]\s*\\?[\"']?)(?:basic|bearer)\s+[^\s,\"'\}\]]+",
+)
+_LENS_BEARER = re.compile(r"(?i)\bbearer\s+[^\s,\"']+")
 _LENS_PROVIDER_TOKEN = re.compile(
     r"(?i)(?<![A-Za-z0-9_])(?:glpat-|gh[pousr]_|github_pat_|sk-)[A-Za-z0-9_-]{4,}",
 )
@@ -157,18 +167,22 @@ _LENS_PLACEHOLDER = re.compile(
 )
 
 
+def _redact_lens_assignment(match):
+    quote = match.group(2) or ""
+    return match.group(1) + quote + "[redacted]" + quote
+
+
 def _sanitize_lens_text(value, limit=MAX_WORKER_EVIDENCE_TEXT):
     """Return one bounded line with credentials and host paths removed."""
     if not isinstance(value, str):
         return ""
-    # Bound regex work on attacker-controlled response fields. Anything beyond
-    # this prefix is deliberately not part of the concise diagnostic record.
-    text = value[:16384]
+    text = value
     text = _LENS_PRIVATE_KEY.sub("[redacted]", text)
     text = _LENS_URI_CREDENTIAL.sub(r"\1[redacted]@", text)
-    text = _LENS_BEARER.sub(r"\1[redacted]", text)
+    text = _LENS_AUTHORIZATION.sub(r"\1[redacted]", text)
+    text = _LENS_BEARER.sub("[redacted]", text)
     text = _LENS_PROVIDER_TOKEN.sub("[redacted]", text)
-    text = _LENS_SECRET_ASSIGNMENT.sub(lambda match: match.group(1) + "[redacted]", text)
+    text = _LENS_SECRET_ASSIGNMENT.sub(_redact_lens_assignment, text)
     text = _LENS_WINDOWS_HOST_PATH.sub("[host-path]", text)
     text = _LENS_HOME_HOST_PATH.sub("[host-path]", text)
     text = _LENS_ABSOLUTE_HOST_PATH.sub("[host-path]", text)
@@ -317,8 +331,8 @@ def _received_status(value):
     """Bound an untrusted status diagnostic without serializing nested content."""
     if value is not None and not isinstance(value, (str, int, float, bool)):
         return f"<{type(value).__name__}>"
-    text = str(value)
-    return "".join(char if char.isprintable() else " " for char in text)[:128]
+    text = "".join(char if char.isprintable() else " " for char in str(value))
+    return _sanitize_lens_text(text, 128)
 
 
 def _error_details(error):

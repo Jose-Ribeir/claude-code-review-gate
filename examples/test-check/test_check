@@ -240,17 +240,34 @@ an empty existing_tests array with it. Return both arrays empty when nothing
 is worth running."""
 
 
+_DIAGNOSTIC_SENSITIVE_KEY = (
+    r"(?:api[_-]?key|token|secret|password|credential|authorization|auth)"
+    r"[A-Za-z0-9_.-]*"
+)
 _DIAGNOSTIC_SECRET = re.compile(
-    r"(?i)((?:api[_-]?key|token|secret|password|credential|authorization)"
-    r"[a-z0-9_.-]*\s*[\"']?\s*[:=]\s*[\"']?)[^\s,;\"'}]+")
+    rf"(?i)({_DIAGNOSTIC_SENSITIVE_KEY}\s*\\?[\"']?\s*[:=]\s*)"
+    r"(?!\[redacted\])"
+    r"(?:(\\?[\"'])(.*?)\2|([^\s,;\"'\}\]&]+))",
+    re.DOTALL,
+)
+_DIAGNOSTIC_AUTHORIZATION = re.compile(
+    r"(?i)(?<![A-Za-z0-9_])([A-Za-z0-9_-]{0,128}authorization"
+    r"\\?[\"']?\s*[:=]\s*\\?[\"']?)(?:basic|bearer)\s+[^\s,\"'\}\]]+",
+)
+_DIAGNOSTIC_BEARER = re.compile(r"(?i)\bbearer\s+[^\s,\"']+")
 _DIAGNOSTIC_POSIX_PATH = re.compile(
     r"(?<![A-Za-z0-9_.-])/(?:[^/\s\"']+/)+[^/\s\"']*")
 _DIAGNOSTIC_WINDOWS_PATH = re.compile(
     r"(?i)[a-z]:[\\/](?:[^\\/\s\"']+[\\/])+[^\\/\s\"']*")
 
 
+def _redact_diagnostic_assignment(match):
+    quote = match.group(2) or ""
+    return match.group(1) + quote + "[redacted]" + quote
+
+
 def _diagnostic_text(value, cap):
-    """Bound and sanitize one untrusted diagnostic string."""
+    """Redact complete credentials, then bound one untrusted diagnostic string."""
     text = str(value or "")
     sensitive = ("TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "COOKIE",
                  "PRIVATE_KEY", "API_KEY", "ASKPASS", "AUTHORIZATION", "AUTH")
@@ -258,7 +275,9 @@ def _diagnostic_text(value, cap):
              if len(value) >= 4 and any(part in key.upper() for part in sensitive)]
     for secret in sorted(set(known), key=len, reverse=True):
         text = text.replace(secret, "[redacted]")
-    text = _DIAGNOSTIC_SECRET.sub(r"\1[redacted]", text)
+    text = _DIAGNOSTIC_AUTHORIZATION.sub(r"\1[redacted]", text)
+    text = _DIAGNOSTIC_BEARER.sub("[redacted]", text)
+    text = _DIAGNOSTIC_SECRET.sub(_redact_diagnostic_assignment, text)
     text = _DIAGNOSTIC_WINDOWS_PATH.sub("<path>", text)
     text = _DIAGNOSTIC_POSIX_PATH.sub("<path>", text)
     text = "".join(char if char.isprintable() or char in "\n\t" else " "
