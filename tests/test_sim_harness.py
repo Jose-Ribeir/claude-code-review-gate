@@ -6,11 +6,15 @@ applier, and the async two-step push driver -- the last exercised against a
 FAKE pre-push hook script that plays the gate's "is still running" answer and
 then its block/allow verdicts, so no `kimchi` worker ever runs.
 """
+import hashlib
+import json
 import os
+import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -18,6 +22,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 import sim_harness as sim  # noqa: E402
 from conftest import force_rmtree  # noqa: E402
+from test_process_groups import _wait_gone  # noqa: E402
 
 
 def _git(args, cwd, check=True):
@@ -357,6 +362,71 @@ def test_reset_to_origin_discards_a_blocked_commit_but_keeps_gitignored_cache(tm
 
 
 # --------------------------------------------------------------------------
+# Finding-id placeholders (operator-command argv expansion)
+# --------------------------------------------------------------------------
+
+def _write_findings_log(scratch, entries):
+    """Fabricate the append-only findings log the placeholders read: one
+    JSON verdict entry per line, oldest first (the gate's _record_review
+    shape -- head plus a findings list)."""
+    log = scratch.work / ".git" / "review-gate-findings.jsonl"
+    with log.open("w", encoding="utf-8") as fh:
+        for e in entries:
+            fh.write(json.dumps(e) + "\n")
+
+
+def test_placeholders_expand_singular_and_plural_ids(tmp_path):
+    """{finding:<path>} stays the FIRST id recorded on the path; the plural
+    {findings:<path>} expands to EVERY accepted display id on that path in
+    the LATEST verdict -- reviewer ids verbatim, else the gate's stable
+    sha256(path, existing_code, content)[:12] -- one argv token each, in
+    recorded order. A stale id from an OLDER verdict is never resurrected:
+    the latest verdict is what the gate's waive resolves against."""
+    target = _toy_repo(tmp_path)
+    scratch = sim.make_scratch(target, tmp_path / "scratch")
+    older = {"head": "old", "findings": [
+        {"path": "app.py", "id": "stale-1", "content": "old"}]}
+    latest = {"head": "new", "findings": [
+        {"path": "app.py", "id": "rev-42", "content": "c1"},
+        {"path": "other.py", "id": "rev-9", "content": "c2"},
+        {"path": "app.py", "existing_code": "print('v1')",
+         "content": "boom"},
+    ]}
+    _write_findings_log(scratch, [older, latest])
+    sha = hashlib.sha256(
+        "\x00".join(("app.py", "print('v1')", "boom")).encode("utf-8")
+    ).hexdigest()[:12]
+    argv = ["{python}", "-c",
+            "import json,sys;print(json.dumps(sys.argv[1:]))",
+            "{finding:app.py}", "{findings:app.py}", "{finding:other.py}"]
+    rc, out = sim._run_gate_command(
+        scratch, {"PATH": os.environ.get("PATH", "")}, argv, _SCRIPTS_DIR)
+    assert rc == 0, out
+    assert json.loads(out.strip().splitlines()[-1]) == [
+        "rev-42",              # singular: first match only
+        "rev-42", sha,         # plural: every match, in recorded order
+        "rev-9"]
+
+
+def test_plural_placeholder_omits_unmatched_paths_and_raises_when_empty(tmp_path):
+    """A path the latest verdict says nothing about resolves to nothing,
+    and an empty log is a harness error -- a scenario that waives a finding
+    nothing recorded is broken, not silently passing."""
+    target = _toy_repo(tmp_path)
+    scratch = sim.make_scratch(target, tmp_path / "scratch")
+    _write_findings_log(scratch, [{"head": "new", "findings": [
+        {"path": "other.py", "id": "rev-9", "content": "c"}]}])
+    with pytest.raises(sim.SimError, match="no recorded finding"):
+        sim._finding_ids_for_path(scratch, "app.py")
+    with pytest.raises(sim.SimError, match="no recorded finding"):
+        sim._last_finding_id_for_path(scratch, "app.py")
+    (scratch.work / ".git" / "review-gate-findings.jsonl").unlink(missing_ok=True)
+    assert sim._read_findings_log(scratch) == []
+    with pytest.raises(sim.SimError, match="no recorded finding"):
+        sim._finding_ids_for_path(scratch, "other.py")
+
+
+# --------------------------------------------------------------------------
 # Original-repo integrity
 # --------------------------------------------------------------------------
 
@@ -405,6 +475,211 @@ def _fake_gate_scripts(tmp_path):
     dest.mkdir()
     (dest / "plugin.json").write_text(plugin_json.read_text())
     return str(fake)
+
+
+# --------------------------------------------------------------------------
+# SPEC-16 real-model simulation boundary (all transport/model calls doubled)
+# --------------------------------------------------------------------------
+
+def test_real_model_environment_removes_every_double_and_provider_secret(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "model-auth-may-remain")
+    monkeypatch.setenv("GITLAB_WRITE_TOKEN", "must-not-survive")
+    monkeypatch.setenv("GH_TOKEN", "must-not-survive")
+    monkeypatch.setenv("RG_FINAL_WORKER", "stub-reviewer")
+    monkeypatch.setenv("RG_FINAL_DYNAMIC_EXECUTOR", "stub-executor")
+    monkeypatch.setenv("OCR_TEST_SELECTOR_CMD", "stub-selector")
+    monkeypatch.setenv("STUB_FINAL_RESULT", '{"findings":[]}')
+    env = sim.real_model_environment({
+        **os.environ, "RG_TEST_PROVIDER_SCRIPT": str(tmp_path / "provider.json"),
+    }, artifact_dir=tmp_path / "artifacts")
+
+    assert env["OPENAI_API_KEY"] == "model-auth-may-remain"
+    assert env["GLAB_TOKEN"] == "recorded-read-only-provider-fixture"
+    assert env["OCR_STATE_DIR"] == str((tmp_path / "artifacts").resolve() / "state")
+    for key in (
+        "GITLAB_WRITE_TOKEN", "GH_TOKEN", "RG_FINAL_WORKER",
+        "RG_FINAL_DYNAMIC_EXECUTOR", "OCR_TEST_SELECTOR_CMD", "STUB_FINAL_RESULT",
+    ):
+        assert key not in env
+
+
+def test_selected_inference_backend_is_an_exact_incomplete_reason(tmp_path, monkeypatch):
+    monkeypatch.setattr(sim.shutil, "which", lambda _name, path=None: None)
+    with pytest.raises(sim.SimError, match="not on PATH") as captured:
+        sim.selected_inference_backend({"OCR_BACKEND": "kimchi", "PATH": "/bin"}, repo_root=tmp_path)
+    assert "not executed" in str(captured.value)
+
+
+def test_final_review_simulation_persists_real_cli_evidence_and_read_audit(tmp_path, monkeypatch):
+    target = _toy_repo(tmp_path)
+    calls = tmp_path / "calls.json"
+    calls.write_text(json.dumps([{"argv": ["--glab", "api", "projects/111"]}]))
+    script = tmp_path / "provider.json"
+    script.write_text(json.dumps({"calls": str(calls)}))
+    monkeypatch.setattr(sim, "selected_inference_backend", lambda *args, **kwargs: {
+        "name": "kimchi", "reason": "test", "executable": "/bin/kimchi", "notes": [],
+    })
+    result = {
+        "state": "pass", "run_id": "real-run",
+        "units": [{"unit_key": "individual:1", "repository_path": str(tmp_path / "removed")}],
+    }
+    observed = {}
+
+    def runner(command, **kwargs):
+        observed.update(kwargs)
+        return SimpleNamespace(returncode=0, stdout=json.dumps(result), stderr="")
+
+    report = sim.run_final_review_simulation(
+        "https://gitlab.example.test/group/project/-/merge_requests/17",
+        repo_root=target, artifact_dir=tmp_path / "simulation",
+        environ={**os.environ, "RG_TEST_PROVIDER_SCRIPT": str(script)}, runner=runner,
+    )
+
+    assert report["state"] == "pass" and report["source_unchanged"] is True
+    assert report["provider"] == {
+        "calls": 1, "provider_writes": False, "mutating_argv": [], "audit": str(calls),
+    }
+    assert report["cleanup"]["clean"] is True
+    assert report["artifact"]["evidence_id"].startswith("sha256:")
+    assert Path(report["artifact"]["artifact"]).is_file()
+    assert observed["env"]["GLAB_TOKEN"] == "recorded-read-only-provider-fixture"
+    assert "RG_FINAL_WORKER" not in observed["env"]
+    assert json.loads(Path(report["artifact"]["artifact"]).read_text())["result"] == result
+
+
+def test_final_review_simulation_never_hides_timeout_or_provider_mutation(tmp_path, monkeypatch):
+    target = _toy_repo(tmp_path)
+    calls = tmp_path / "calls.json"
+    calls.write_text(json.dumps([{"argv": ["--glab", "api", "-f", "state=success"]}]))
+    script = tmp_path / "provider.json"
+    script.write_text(json.dumps({"calls": str(calls)}))
+    monkeypatch.setattr(sim, "selected_inference_backend", lambda *args, **kwargs: {
+        "name": "kimchi", "reason": "test", "executable": "/bin/kimchi", "notes": [],
+    })
+
+    def timeout_runner(*args, **kwargs):
+        raise subprocess.TimeoutExpired("kimchi", 1)
+
+    timeout_root = tmp_path / "timeout"
+    abandoned = timeout_root / "state" / "clones" / "abc-final-timeout"
+    abandoned.mkdir(parents=True)
+    timed_out = sim.run_final_review_simulation(
+        "ref", repo_root=target, artifact_dir=timeout_root, environ={},
+        runner=timeout_runner,
+    )
+    assert timed_out["state"] == "incomplete"
+    assert "TimeoutExpired" in timed_out["error"]
+    assert not abandoned.exists()
+    assert timed_out["cleanup"]["clean"] is True
+    assert timed_out["cleanup"]["registered_clones_removed_after_timeout"] == [str(abandoned)]
+
+    mutation = sim.run_final_review_simulation(
+        "ref", repo_root=target, artifact_dir=tmp_path / "mutation",
+        environ={"RG_TEST_PROVIDER_SCRIPT": str(script)},
+        runner=lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout='{"state":"pass"}', stderr=""),
+    )
+    assert mutation["provider"]["provider_writes"] is True
+    assert "forbidden provider mutation" in mutation["error"]
+
+
+def test_final_review_simulation_timeout_kills_tree_and_cleans_scratch_clones(
+        tmp_path, monkeypatch):
+    target = _toy_repo(tmp_path)
+    fake_scripts = tmp_path / "fake-final-scripts"
+    fake_scripts.mkdir()
+    marker = tmp_path / "outer-grandchild-survived"
+    pid_file = tmp_path / "outer-grandchild.pid"
+    (fake_scripts / "review-gate.py").write_text(
+        "import os, pathlib, subprocess, sys, time\n"
+        "clone = pathlib.Path(os.environ['OCR_STATE_DIR']) / 'clones' / 'abc-final-timeout'\n"
+        "clone.mkdir(parents=True, exist_ok=True)\n"
+        "child_code = \"import pathlib,sys,time; time.sleep(1); "
+        "pathlib.Path(sys.argv[1]).write_text('survived')\"\n"
+        "child = subprocess.Popen([sys.executable, '-c', child_code, "
+        "os.environ['GRANDCHILD_MARKER']], stdin=subprocess.DEVNULL, "
+        "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+        "pathlib.Path(os.environ['GRANDCHILD_PID']).write_text(str(child.pid))\n"
+        "print('outer-ready', flush=True)\n"
+        "time.sleep(120)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sim, "_SCRIPTS", str(fake_scripts))
+    monkeypatch.setattr(sim, "selected_inference_backend", lambda *args, **kwargs: {
+        "name": "claude", "reason": "test", "executable": "/bin/claude", "notes": [],
+    })
+    grandchild = None
+    try:
+        report = sim.run_final_review_simulation(
+            "ref", repo_root=target, artifact_dir=tmp_path / "outer-timeout",
+            environ={
+                "PATH": os.environ.get("PATH", ""),
+                "GRANDCHILD_MARKER": str(marker),
+                "GRANDCHILD_PID": str(pid_file),
+            },
+            timeout=0.3,
+        )
+        grandchild = int(pid_file.read_text())
+        time.sleep(1.2)
+        assert not marker.exists(), "outer CLI grandchild created a post-timeout side effect"
+        assert _wait_gone(grandchild), "outer CLI grandchild remained in flight"
+        assert report["state"] == "incomplete"
+        assert "TimeoutExpired" in report["error"]
+        assert report["returncode"] not in (None, 0)
+        assert "outer-ready" in report["stdout"]
+        abandoned = tmp_path / "outer-timeout" / "state" / "clones" / "abc-final-timeout"
+        assert not abandoned.exists()
+        assert report["cleanup"]["registered_clones_removed_after_timeout"] == [str(abandoned)]
+        assert report["cleanup"]["clean"] is True
+    finally:
+        if grandchild is not None and not _wait_gone(grandchild, timeout=0.1):
+            try:
+                os.kill(grandchild, signal.SIGKILL)
+            except OSError:
+                pass
+
+
+def test_dynamic_simulation_executes_pinned_seam_and_verifies_cleanup(tmp_path, monkeypatch):
+    target = _toy_repo(tmp_path)
+    head = _git(["rev-parse", "HEAD"], target)
+    monkeypatch.setattr(sim, "selected_inference_backend", lambda *args, **kwargs: {
+        "name": "kimchi", "reason": "test", "executable": "/bin/kimchi", "notes": [],
+    })
+    observed = {}
+
+    def dynamic_runner(repository, target_sha, head_sha, **kwargs):
+        observed.update(kwargs)
+        observed["process_state_dir"] = os.environ.get("OCR_STATE_DIR")
+        return {
+            "schema": "final-review-dynamic-result/v1", "state": "findings",
+            "findings": [{"evidence_source": "existing_test"}], "warnings": [],
+        }
+
+    report = sim.run_dynamic_simulation(
+        target, head, head, artifact_dir=tmp_path / "dynamic",
+        environ={"RG_FINAL_DYNAMIC_EXECUTOR": "must-be-removed"},
+        dynamic_runner=dynamic_runner,
+    )
+
+    assert report["state"] == "findings" and report["source_unchanged"] is True
+    assert report["cleanup"] == {
+        "registered_scratch_clones": [], "materialized_repositories_remaining": [],
+        "clean": True, "source_probe_root_remaining": False,
+    }
+    assert observed["unit_key"] == "individual:1"
+    assert observed["process_state_dir"] == str(
+        (tmp_path / "dynamic").resolve() / "state"
+    )
+    assert "RG_FINAL_DYNAMIC_EXECUTOR" not in observed["environ"]
+    assert Path(report["artifact"]["artifact"]).is_file()
+
+
+def test_dynamic_simulation_refuses_an_unsupported_selected_backend(tmp_path, monkeypatch):
+    target = _toy_repo(tmp_path)
+    monkeypatch.setattr(sim, "selected_inference_backend", lambda *args, **kwargs: {
+        "name": "claude", "reason": "test", "executable": "/bin/claude", "notes": [],
+    })
+    with pytest.raises(sim.SimError, match="reference dynamic selector requires"):
+        sim.run_dynamic_simulation(target, "a" * 40, "b" * 40, artifact_dir=tmp_path / "dynamic")
 
 
 def test_main_end_to_end_with_a_fake_gate(tmp_path, capsys):

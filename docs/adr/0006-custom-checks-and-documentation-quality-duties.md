@@ -110,7 +110,13 @@ exactly the keys it shipped and nothing else.
    Execution contract: the repo-relative executable runs with cwd at the
    review tree root, receives the matched changed files as a JSON array on
    stdin, and answers with a findings JSON array (bare or wrapped in
-   `{"findings": [...]}`) on stdout, within 60 seconds. Nonzero exit,
+   `{"findings": [...]}`, optionally with the check's own degradations:
+   `{"findings": [...], "warnings": [...]}` — a malformed warnings field
+   degrades to a note, never a failure) on stdout, within 60 seconds.
+   Findings may carry `evidence_source: "existing_test" | "ephemeral_test"`;
+   an unknown value drops the tag with a note while the finding survives,
+   and an `ephemeral_test` finding without the check's no-permanent-coverage
+   warning gains a gate-side note (never a verdict change). Nonzero exit,
    timeout, or malformed output discards the check's findings and records a
    warning plus telemetry — never a silent pass, never a crash. `"warn"`
    mode clamps severity to at most medium and confidence to at most 0.5;

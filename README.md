@@ -86,8 +86,10 @@ natural way to disable the gate without uninstalling) — then it prints a
 warning (`WARNING: <dir>/pre-push exists and is not ours; leaving it in place
 and keeping <dir>/pre-push.user untouched.`), leaves that file in place, and
 leaves `pre-push.user` untouched.
-(`scripts/install-git-hook.sh` / `uninstall-git-hook.sh` are upstream
-holdovers that manage only the pre-push layer.)
+(`scripts/install-git-hook.sh` is the default-on installer for the universal
+pre-push layer — plain runs install the global hook with chaining, and
+`--no-git-hook` keeps the legacy opt-in; `uninstall-git-hook.sh` reverses it.
+See ADR 0006.)
 
 The explicit human escape is `git push --no-verify` (or `OCR_FAIL_OPEN=1`) —
 see the threat model above.
@@ -322,6 +324,8 @@ object; switches accept booleans, `0`/`1`, and on/off-style words):
 | `checks.<name>.template` | — | path to an ADR template file for `adr-wait-what` |
 | `checks.<name>.sentence_cap` | — | positive integer; STE sentence-length cap for `adr-wait-what` |
 | `checks.<name>.sweep` | `false` | widen ADR-duty evidence to every `*.md` under the records root; the findings scope stays the change set |
+| `checks.<name>.parallel` | `false` | command checks only: declares the check runs concurrently with the review session, against its own throwaway tip clone (SPEC-15.3) — the clone is removed with the run's other temporaries; if it cannot be created the check is skipped with a warning (isolation is never traded for throughput). Non-parallel checks stay sequential, post-review, against the review tree |
+| `checks.<name>.timeout` | `60` | command checks only: the check's answer budget in seconds, clamped to 1–3600 (SPEC-15.1; the default matches the 60 s budget every check already got) |
 
 The `checks` object resolves through the same layering as everything else —
 built-in defaults, then the store-root `config.json`, then the per-repo
@@ -427,13 +431,63 @@ Declare any executable in your repo as a push check:
   repo-relative paths.
 - Findings come back on **stdout** as a JSON array (bare or wrapped as
   `{"findings": [...]}`) of finding objects in the gate's findings shape.
-- The check gets **60 seconds**. Nonzero exit, timeout, or malformed output
-  discards that check's findings and records a warning plus telemetry —
-  never a silent pass, never a gate crash.
+  A check may additionally report its own degradations in a `warnings`
+  array (`{"findings": [...], "warnings": [...]}`) — coverage gaps,
+  unbuildable probes, flake demotions; they surface in the gate output and
+  telemetry like every other check degradation, and a malformed warnings
+  field degrades to a note, never a failure.
+- A finding may carry `evidence_source: "existing_test" | "ephemeral_test"`
+  (which kind of test evidenced it). The gate validates the value against
+  that enumeration: absent is fine (non-test checks), an unknown value
+  drops the tag with a note while the finding survives. A finding tagged
+  `ephemeral_test` should come with the check's no-permanent-coverage
+  warning — wording that states the lack (a negation near "permanent
+  test"/"coverage", e.g. "no permanent coverage for the race probe");
+  its absence surfaces a gate-side warning naming no-permanent-coverage,
+  never a verdict change. A warning that merely mentions coverage does
+  not pair. The tag flows into the verdict output and telemetry untouched
+  by demotion passes.
+- The check gets **60 seconds by default**, configurable per check via
+  `timeout` (SPEC-15.1; clamped to 1–3600 s). Nonzero exit, timeout, or
+  malformed output discards that check's findings and records a warning
+  plus telemetry — never a silent pass, never a gate crash.
 - `mode: "warn"` clamps severity to at most medium and confidence to at most
   0.5; mode only downgrades, and `compute_verdict` stays the sole verdict
   authority.
 - A check whose globs match nothing in the diff costs nothing.
+
+A complete, working example lives in **`examples/test-check/`**: the
+reference race & regression test executor (selector-driven, runs selected
+repo tests and ephemeral `-race` probes in its own tip clone, reproduces
+failures before blocking) plus its install guide.
+
+### Finding waivers
+
+`--no-verify` is the nuclear option. For the case of expected findings you
+accept, the gate offers narrow, per-finding acknowledgment (ADR 0007):
+
+```console
+$ python3 scripts/review-gate.py waive F2 F3 --note "expected during the migration"
+$ python3 scripts/review-gate.py waive --list
+$ python3 scripts/review-gate.py unwaive F2
+```
+
+- Waiving is a **between-pushes act** on the repo you push from: after a
+  blocked push, waive the findings you accept by id; your next push is
+  judged on what is left.
+- A waiver keys on the finding's **content anchor** (path + signature + the
+  tip's local text window around the finding), so it survives rebases and
+  line movement — and **lapses automatically when the code under the
+  finding changes**: anything new or altered can never ride an old waiver.
+  Findings without diff hunks (command checks) anchor on the tip text at
+  the finding's own location instead, so they are waivable too.
+- Suppression is **loud, always**: the verdict text, the recorded JSON, and
+telemetry list what was waived; the findings log keeps every finding
+  (waived findings are never deleted from the record).
+- The ledger is store-root, **repo-scoped, machine-local, no expiry** —
+  like the verdict store. Waivers apply to every finding class (reviewer,
+  deep reviewer, docs checker, command checks) and only filter what
+  `compute_verdict` sees; they never alter the verdict rule.
 
 ## Relationship to upstream
 

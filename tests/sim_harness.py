@@ -31,10 +31,12 @@ and what did the pusher read -- never on gate internals.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -55,6 +57,9 @@ GIT_PUSH_FAILED = "failed to push some refs"
 GATE_MARKER_RE = re.compile(r"review-gate", re.IGNORECASE)
 
 _SCRIPTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts")
+if _SCRIPTS not in sys.path:
+    sys.path.insert(0, _SCRIPTS)
+from rg_final_review import run_owned_process  # noqa: E402
 
 
 class SimError(RuntimeError):
@@ -75,10 +80,33 @@ class CommitSpec:
 class Scenario:
     name: str
     description: str
-    commits: list                    # [CommitSpec]
+    commits: list                    # [CommitSpec] (single-push form)
     expect: str                      # "block" | "pass"
     expect_message: list = field(default_factory=list)   # required substrings (ci)
     forbid_message: list = field(default_factory=list)   # forbidden substrings (ci)
+    steps: list = field(default_factory=list)  # [PushStep] (multi-push form)
+
+
+@dataclass
+class PushStep:
+    """One push inside a multi-push scenario (SPEC-15 acceptance: waiver
+    scenarios need a block push, an operator command, then another push).
+    Commits apply on top of the previous step's tip; `commands` run between
+    the commits and the push, in the work clone with the push environment --
+    gate operator commands (waive/unwaive/--list). argv tokens may use the
+    placeholders "{python}" (this interpreter), "{gate}" (the gate script
+    under test), "{finding:<path>}" (the display id of the last recorded
+    verdict's finding on <path>, read from the append-only findings log --
+    the same id a pusher reads from --history), and "{findings:<path>}"
+    (the PLURAL: EVERY accepted display id on <path> in the latest recorded
+    verdict, one argv token each, in recorded order -- a waiver scenario
+    pre-waives all the expected findings on a path, not just the first)."""
+    label: str
+    commits: list = field(default_factory=list)            # [CommitSpec]
+    commands: list = field(default_factory=list)            # [argv tokens]
+    expect: str = "block"
+    expect_message: list = field(default_factory=list)
+    forbid_message: list = field(default_factory=list)
 
 
 @dataclass
@@ -175,10 +203,13 @@ def assert_remote_isolation(scratch, env=None):
                     raise SimError(f"remote {name!r} {kind} escapes the scratch root: {url!r}")
 
 
-def make_scratch(target, root, branch=None, seed_files=None):
+def make_scratch(target, root, branch=None, seed_files=None, seed_executables=None):
     """Clone `target` into root/work, seed an optional baseline commit, rewrite
     every remote to a local bare fake origin, and push the baseline with
-    --no-verify (before the gate hook is installed)."""
+    --no-verify (before the gate hook is installed). Paths listed in
+    `seed_executables` are chmod +x before the baseline commit so a seeded
+    command-check executor survives the clone with its exec bit (the gate's
+    command-check contract requires a repo-relative EXECUTABLE)."""
     target, root = Path(target).resolve(), Path(root).resolve()
     if not (target / ".git").exists():
         raise SimError(f"not a git repository: {target}")
@@ -190,6 +221,11 @@ def make_scratch(target, root, branch=None, seed_files=None):
             p = work / rel
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(text, encoding="utf-8")
+        for rel in seed_executables or []:
+            p = work / rel
+            if not p.is_file():
+                raise SimError(f"seeded executable missing from SEED_FILES: {rel}")
+            os.chmod(str(p), 0o755)
         _git(["add", "-A"], work)
         _git(["-c", "user.email=sim@harness.local", "-c", "user.name=sim-harness",
               "commit", "-q", "-m", "sim-harness seed: baseline decision record"], work)
@@ -364,30 +400,430 @@ def reset_to_origin(scratch):
     _git(["clean", "-fdq"], scratch.work)
 
 
-def run_scenario(scratch, env, scenario, timeout_s=5400):
+def _display_id(f):
+    """The id the gate shows, waives, and unwaives by (review-gate.py
+    _waiver_display_id over _finding_id): the reviewer-assigned id verbatim,
+    else the stable sha256(path, existing_code, content) truncated to 12
+    characters -- the fallback command checks (no reviewer id) get."""
+    sid = f.get("id")
+    if sid:
+        return str(sid)
+    raw = "\x00".join(str(v) for v in (
+        f.get("path") or "", f.get("existing_code") or "",
+        f.get("content") or ""))
+    return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()[:12]
+
+
+def _read_findings_log(scratch):
+    """The append-only findings log's entries, oldest first; [] when the
+    log does not exist yet (nothing has been recorded to waive from)."""
+    log = scratch.work / ".git" / "review-gate-findings.jsonl"
+    try:
+        lines = [ln for ln in log.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    except OSError:
+        return []
+    entries = []
+    for ln in lines:
+        try:
+            entries.append(json.loads(ln))
+        except ValueError:
+            continue
+    return entries
+
+
+def _last_finding_id_for_path(scratch, path):
+    """The display id accepted by the gate for the finding on `path`
+    (reviewer id verbatim, else the stable sha fallback)."""
+    for entry in reversed(_read_findings_log(scratch)):
+        for f in entry.get("findings") or []:
+            if isinstance(f, dict) and f.get("path") == path:
+                return _display_id(f)
+    raise SimError(f"no recorded finding on {path!r} in the findings log")
+
+
+def _finding_ids_for_path(scratch, path):
+    """EVERY accepted display id on `path` in the latest recorded verdict,
+    in recorded order (the singular picks only the first). A blocking push
+    can record SEVERAL findings on one path -- a reviewer correctness
+    finding, an existing-test reproduction, an ephemeral probe of any
+    shape -- and a waiver scenario must pre-waive them all or the ones
+    left out keep blocking. Still surgical per content anchor: a finding
+    that appears differently on the next push gets a different stable id,
+    misses the waived ledger entry, and blocks."""
+    for entry in reversed(_read_findings_log(scratch)):
+        ids = [_display_id(f) for f in entry.get("findings") or []
+               if isinstance(f, dict) and f.get("path") == path]
+        if ids:
+            return ids
+    raise SimError(f"no recorded finding on {path!r} in the findings log")
+
+
+def _run_gate_command(scratch, env, argv, gate_scripts):
+    """One operator command between pushes: placeholders resolved, run in
+    the work clone with the push env (the ledger and history the gate reads
+    are the same ones the pushes use). Returns (rc, output)."""
+    resolved = []
+    for tok in argv:
+        if tok == "{python}":
+            resolved.append(sys.executable)
+        elif tok == "{gate}":
+            resolved.append(os.path.join(str(gate_scripts), "review-gate.py"))
+        elif tok.startswith("{findings:") and tok.endswith("}"):
+            # The PLURAL: every accepted id on that path, one token each.
+            resolved.extend(
+                _finding_ids_for_path(scratch, tok[len("{findings:"):-1]))
+        elif tok.startswith("{finding:") and tok.endswith("}"):
+            resolved.append(_last_finding_id_for_path(scratch, tok[len("{finding:"):-1]))
+        else:
+            resolved.append(tok)
+    proc = subprocess.run(resolved, cwd=str(scratch.work), env=env,
+                          capture_output=True, text=True)
+    return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+
+
+def run_scenario(scratch, env, scenario, timeout_s=5400, gate_scripts=None):
     t0 = time.monotonic()
-    failures, outcome, transcript, attempts = [], "error", "", []
+    failures, pushes, transcripts = [], 0, []
     reset_to_origin(scratch)
-    for spec in scenario.commits:
-        apply_commit(scratch.work, spec)
-    outcome, transcript, attempts = drive_push(scratch, env, timeout_s=timeout_s)
-    if outcome != scenario.expect:
-        failures.append(f"expected {scenario.expect!r}, got {outcome!r}")
-    if outcome == "block" and BLOCK_BANNER not in transcript:
-        failures.append(f"denial lacks the gate's block banner {BLOCK_BANNER!r}")
-    if outcome == "pass" and BLOCK_BANNER.lower() in transcript.lower():
-        failures.append("approval transcript contains the block banner")
-    low = transcript.lower()
-    for sub in scenario.expect_message:
-        if sub.lower() not in low:
-            failures.append(f"message missing required text: {sub!r}")
-    for sub in scenario.forbid_message:
-        if sub.lower() in low:
-            failures.append(f"message contains forbidden text: {sub!r}")
+    if scenario.steps:
+        steps = scenario.steps
+    else:
+        steps = [PushStep(label=scenario.name, commits=scenario.commits,
+                          expect=scenario.expect,
+                          expect_message=scenario.expect_message,
+                          forbid_message=scenario.forbid_message)]
+    outcome = "error"
+    for step in steps:
+        step_text = []   # this step's commands + push transcript (assertions
+        for spec in step.commits or []:   # see both: an operator command's
+            apply_commit(scratch.work, spec)   # output is part of what the
+        for argv in step.commands or []:  # pusher reads, e.g. a waiver's
+            rc, out = _run_gate_command(scratch, env, argv, gate_scripts)  # loud
+            step_text.append(f"$ {' '.join(argv)}\n{out}")  # listing or a
+            transcripts.append(step_text[-1])  # recorded warning read back
+            if rc != 0:
+                failures.append(f"command step {step.label!r} exited {rc}: "
+                                f"{argv}")
+        outcome, transcript, attempts = drive_push(scratch, env, timeout_s=timeout_s)
+        pushes += len(attempts)
+        step_text.append(transcript)
+        transcripts.append(transcript)
+        if outcome != step.expect:
+            failures.append(f"step {step.label!r}: expected {step.expect!r}, "
+                            f"got {outcome!r}")
+        if outcome == "block" and BLOCK_BANNER not in transcript:
+            failures.append(f"step {step.label!r}: denial lacks the gate's "
+                            f"block banner {BLOCK_BANNER!r}")
+        if outcome == "pass" and BLOCK_BANNER.lower() in transcript.lower():
+            failures.append(f"step {step.label!r}: approval transcript contains "
+                            "the block banner")
+        low = "\n".join(step_text).lower()
+        for sub in step.expect_message:
+            if sub.lower() not in low:
+                failures.append(f"step {step.label!r}: message missing required "
+                                f"text: {sub!r}")
+        for sub in step.forbid_message:
+            if sub.lower() in low:
+                failures.append(f"step {step.label!r}: message contains forbidden "
+                                f"text: {sub!r}")
+    transcript = "\n".join(transcripts)
     return ScenarioResult(name=scenario.name, expect=scenario.expect, outcome=outcome,
-                          ok=not failures, pushes=len(attempts),
+                          ok=not failures, pushes=pushes,
                           elapsed_s=round(time.monotonic() - t0, 1),
                           transcript=transcript, failures=failures)
+
+
+# --------------------------------------------------------------------------
+# SPEC-16 real-model final-review simulations
+# --------------------------------------------------------------------------
+
+_REAL_WORKER_OVERRIDES = (
+    "OCR_REVIEWER_CMD", "OCR_STUB_WORKER", "RG_FINAL_WORKER",
+    "RG_FINAL_DYNAMIC_EXECUTOR", "OCR_TEST_SELECTOR_CMD",
+)
+_PROVIDER_SECRET_PARTS = ("GITLAB", "GITHUB", "GLAB_", "GH_")
+
+
+def real_model_environment(environ=None, *, artifact_dir):
+    """Return an inference-capable, recorded-provider simulation environment.
+
+    No reviewer/selector test double can leak into a real-model run. Provider
+    credentials from the caller are discarded; the local recorded GitLab
+    transport receives only a non-secret marker so its read audit remains
+    explicit. Model authentication is retained for the selected gate backend.
+    """
+    source = os.environ if environ is None else environ
+    env = dict(source)
+    for key in list(env):
+        upper = key.upper()
+        if upper.startswith(("STUB_", "GIT_TRACE")) or any(
+            part in upper for part in _PROVIDER_SECRET_PARTS
+        ):
+            env.pop(key, None)
+    for key in _REAL_WORKER_OVERRIDES:
+        env.pop(key, None)
+    for key in ("SSH_AUTH_SOCK", "GIT_ASKPASS", "SSH_ASKPASS", "GIT_CONFIG_COUNT"):
+        env.pop(key, None)
+    root = Path(artifact_dir).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    env["OCR_STATE_DIR"] = str(root / "state")
+    if env.get("RG_TEST_PROVIDER_SCRIPT"):
+        env["GLAB_TOKEN"] = "recorded-read-only-provider-fixture"
+    return env
+
+
+def selected_inference_backend(environ=None, *, repo_root=None):
+    """Resolve the gate's real backend and fail exactly when it is unavailable."""
+    if _SCRIPTS not in sys.path:
+        sys.path.insert(0, _SCRIPTS)
+    import ocr_profile
+
+    env = os.environ if environ is None else environ
+    try:
+        selection = ocr_profile.select_backend(env=env, repo_root=repo_root)
+    except ocr_profile.BackendError as exc:
+        raise SimError(f"selected inference backend is unavailable: {exc}") from exc
+    executable = shutil.which(selection.name, path=env.get("PATH"))
+    if not executable:
+        raise SimError(
+            f"selected inference backend {selection.name!r} is not on PATH "
+            f"({selection.reason}); real-model simulation was not executed"
+        )
+    return {
+        "name": selection.name,
+        "reason": selection.reason,
+        "executable": executable,
+        "notes": list(selection.notes),
+    }
+
+
+def persist_simulation_artifact(artifact_dir, name, payload):
+    """Persist one human/machine inspectable artifact and return its identity."""
+    root = Path(artifact_dir).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / name
+    serialized = json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False, default=str)
+    path.write_text(serialized + "\n", encoding="utf-8")
+    digest = hashlib.sha256((serialized + "\n").encode("utf-8")).hexdigest()
+    return {
+        "evidence_id": "sha256:" + digest,
+        "artifact": str(path),
+        "sha256": digest,
+        "bytes": path.stat().st_size,
+    }
+
+
+def _recorded_provider_writes(script_path):
+    """Audit recorded provider CLI calls; any mutation is a hard failure."""
+    if not script_path:
+        return {"calls": 0, "provider_writes": False, "audit": "no provider fixture"}
+    script = json.loads(Path(script_path).read_text(encoding="utf-8"))
+    calls_path = Path(script["calls"])
+    calls = json.loads(calls_path.read_text(encoding="utf-8")) if calls_path.exists() else []
+    mutations = []
+    for call in calls:
+        argv = [str(part) for part in call.get("argv") or []]
+        lowered = [part.lower() for part in argv]
+        mutating_flags = {
+            "-x", "--method", "-f", "--raw-field", "-f", "--field", "--input",
+        }
+        method_write = any(
+            part in {"post", "put", "patch", "delete"}
+            for index, part in enumerate(lowered)
+            if index and lowered[index - 1] in {"-x", "--method"}
+        )
+        if mutating_flags.intersection(lowered) or method_write:
+            mutations.append(argv)
+    return {
+        "calls": len(calls),
+        "provider_writes": bool(mutations),
+        "mutating_argv": mutations,
+        "audit": str(calls_path),
+    }
+
+
+def _simulation_cleanup(artifact_dir, result=None):
+    clone_root = Path(artifact_dir).resolve() / "state" / "clones"
+    registered = sorted(str(path) for path in clone_root.glob("*-final-*")) \
+        if clone_root.exists() else []
+    repository_paths = []
+    for unit in (result or {}).get("units") or []:
+        value = unit.get("repository_path")
+        if value:
+            repository_paths.append(str(value))
+    return {
+        "registered_scratch_clones": registered,
+        "materialized_repositories_remaining": [path for path in repository_paths if Path(path).exists()],
+        "clean": not registered and not any(Path(path).exists() for path in repository_paths),
+    }
+
+
+def run_final_review_simulation(reference, *, repo_root, artifact_dir, environ=None,
+                                timeout=7200, runner=None):
+    """Invoke the public final-review CLI with the selected real backend.
+
+    Provider reads may come from ``RG_TEST_PROVIDER_SCRIPT``; every recorded
+    call is audited for writes. The source snapshot, CLI result, inference
+    diagnostics, and cleanup proof are persisted before a verdict is returned.
+    """
+    root = Path(artifact_dir).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    env = real_model_environment(environ, artifact_dir=root)
+    backend = selected_inference_backend(env, repo_root=repo_root)
+    if backend["name"] == "kimchi":
+        env["KIMCHI_BIN"] = backend["executable"]
+    before = repo_snapshot(repo_root)
+    gate = Path(_SCRIPTS) / "review-gate.py"
+    command = [sys.executable, str(gate), "final-review", str(reference)]
+    process = None
+    error = ""
+    stdout = stderr = ""
+    returncode = None
+    process_cleanup = None
+    try:
+        if runner is None:
+            # Bounded independent lens waves fit inside the existing two-hour
+            # outer allowance; no model depth or individual coverage is removed.
+            process = run_owned_process(
+                command, cwd=str(repo_root), env=env, timeout=float(timeout),
+            )
+        else:
+            process = runner(
+                command, cwd=str(repo_root), env=env, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=float(timeout), check=False,
+            )
+    except subprocess.TimeoutExpired as exc:
+        error = f"real-model final-review invocation unavailable: TimeoutExpired: {exc}"
+        stdout = exc.output or ""
+        stderr = exc.stderr or ""
+        returncode = getattr(exc, "returncode", None)
+        process_cleanup = getattr(exc, "cleanup", None)
+    except (OSError, subprocess.SubprocessError) as exc:
+        error = f"real-model final-review invocation unavailable: {type(exc).__name__}: {exc}"
+    if process is not None:
+        stdout = process.stdout or ""
+        stderr = process.stderr or ""
+        returncode = process.returncode
+    if isinstance(stdout, bytes):
+        stdout = stdout.decode("utf-8", "replace")
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", "replace")
+    try:
+        # Partial output from a killed deadline is evidence, never a completed
+        # operator result (and must not replace the exact timeout diagnosis).
+        result = json.loads(stdout) if process is not None and stdout.strip() else None
+    except ValueError:
+        result = None
+        error = "real-model final-review returned non-JSON operator output"
+    provider = _recorded_provider_writes(env.get("RG_TEST_PROVIDER_SCRIPT"))
+    after = repo_snapshot(repo_root)
+    source_unchanged = before == after
+    if not source_unchanged:
+        error = "real-model simulation mutated the source repository"
+    if provider["provider_writes"]:
+        error = "recorded provider audit contains a forbidden provider mutation"
+    cleanup = _simulation_cleanup(root, result)
+    if process_cleanup is not None:
+        cleanup["process"] = process_cleanup
+        cleanup["clean"] = bool(
+            cleanup["clean"] and process_cleanup.get("status") == "complete"
+        )
+    cleanup_verified = process_cleanup is None or bool(
+        process_cleanup.get("direct_child_reaped")
+        and process_cleanup.get("tree_termination_verified")
+        and process_cleanup.get("status") == "complete"
+    )
+    if process is None and "TimeoutExpired" in error and cleanup_verified:
+        # Only registered clones inside this simulation's private state root
+        # are eligible for harness cleanup; never touch the caller's store. An
+        # unverified Windows descendant tree keeps its directories as evidence.
+        removed = []
+        clone_root = (root / "state" / "clones").resolve()
+        for registered in cleanup["registered_scratch_clones"]:
+            path = Path(registered).resolve()
+            if path.is_relative_to(clone_root) and "-final-" in path.name:
+                shutil.rmtree(path, ignore_errors=True)
+                removed.append(str(path))
+        cleanup = _simulation_cleanup(root, result)
+        if process_cleanup is not None:
+            cleanup["process"] = process_cleanup
+        cleanup["registered_clones_removed_after_timeout"] = removed
+    elif process is None and "TimeoutExpired" in error and process_cleanup is not None:
+        cleanup["registered_clones_removed_after_timeout"] = []
+    report = {
+        "schema": "spec16-real-model-simulation/v1",
+        "kind": "final-review",
+        "evidence_type": "real-model-simulation",
+        "backend": backend,
+        "provider": provider,
+        "command": ["review-gate.py", "final-review", str(reference)],
+        "returncode": returncode,
+        "result": result,
+        "stdout": stdout,
+        "stderr": stderr,
+        "error": error,
+        "source_unchanged": source_unchanged,
+        "cleanup": cleanup,
+        "state": (result or {}).get("state", "incomplete"),
+    }
+    report["artifact"] = persist_simulation_artifact(root, "final-review-simulation.json", report)
+    return report
+
+
+def run_dynamic_simulation(repository, target_sha, head_sha, *, artifact_dir,
+                           environ=None, timeout=600, dynamic_runner=None):
+    """Run the reference dynamic selector/executor against a real pinned Git unit."""
+    if _SCRIPTS not in sys.path:
+        sys.path.insert(0, _SCRIPTS)
+    import rg_final_dynamic
+
+    root = Path(artifact_dir).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    env = real_model_environment(environ, artifact_dir=root)
+    backend = selected_inference_backend(env, repo_root=repository)
+    if backend["name"] != "kimchi":
+        raise SimError(
+            "the reference dynamic selector requires the kimchi launch shape; "
+            f"selected gate backend is {backend['name']!r}; dynamic simulation was not executed"
+        )
+    env["KIMCHI_BIN"] = backend["executable"]
+    before = repo_snapshot(repository)
+    execute = rg_final_dynamic.run_dynamic_checks if dynamic_runner is None else dynamic_runner
+    # materialize_review reads the process environment (its public API has no
+    # environ argument), so the mapping passed to the executor alone is not a
+    # sufficient scratch-store sandbox. Temporarily bind the actual process
+    # too, restoring the caller even when inference or execution raises.
+    previous_state_dir = os.environ.get("OCR_STATE_DIR")
+    os.environ["OCR_STATE_DIR"] = env["OCR_STATE_DIR"]
+    try:
+        result = execute(
+            repository, target_sha, head_sha, environ=env, timeout=float(timeout),
+            unit_key="individual:1",
+        )
+    finally:
+        if previous_state_dir is None:
+            os.environ.pop("OCR_STATE_DIR", None)
+        else:
+            os.environ["OCR_STATE_DIR"] = previous_state_dir
+    after = repo_snapshot(repository)
+    cleanup = _simulation_cleanup(root)
+    probe_root = Path(repository) / rg_final_dynamic.PROBE_ROOT
+    cleanup["source_probe_root_remaining"] = probe_root.exists()
+    cleanup["clean"] = cleanup["clean"] and not probe_root.exists()
+    report = {
+        "schema": "spec16-real-model-simulation/v1",
+        "kind": "dynamic",
+        "evidence_type": "real-model-simulation",
+        "backend": backend,
+        "provider": {"calls": 0, "provider_writes": False, "audit": "no provider transport"},
+        "result": result,
+        "state": (result or {}).get("state", "degraded"),
+        "source_unchanged": before == after,
+        "cleanup": cleanup,
+        "error": "" if before == after else "real-model dynamic simulation mutated the source repository",
+    }
+    report["artifact"] = persist_simulation_artifact(root, "dynamic-simulation.json", report)
+    return report
 
 
 # --------------------------------------------------------------------------
@@ -426,6 +862,8 @@ def main(argv=None):
                          "including an inline docs-summary regeneration (measured "
                          "~1100s combined on kimchi-studio, docs-gate 07)")
     ap.add_argument("--inline-budget", type=int, default=120, help="OCR_INLINE_BUDGET_GIT (s)")
+    ap.add_argument("--only", default="", help="comma-separated scenario names to run "
+                    "(default: all in the module)")
     args = ap.parse_args(argv)
     t_start = time.monotonic()
 
@@ -433,6 +871,13 @@ def main(argv=None):
     mod_path = Path(args.scenarios).resolve()
     mod, scenarios = load_scenario_module(str(mod_path))
     seed_files = getattr(mod, "SEED_FILES", None)
+    seed_executables = getattr(mod, "SEED_EXECUTABLES", None)
+    if args.only:
+        wanted = {n.strip() for n in args.only.split(",") if n.strip()}
+        missing = wanted - {s.name for s in scenarios}
+        if missing:
+            raise SimError(f"--only names unknown scenario(s): {sorted(missing)}")
+        scenarios = [s for s in scenarios if s.name in wanted]
     root = Path(args.workdir).resolve() if args.workdir else (
         Path.cwd() / f"sim-scratch-{time.strftime('%Y%m%d-%H%M%S')}")
 
@@ -444,7 +889,9 @@ def main(argv=None):
         print(f"[sim] seeded into the scratch baseline: {', '.join(sorted(seed_files))}")
 
     before = repo_snapshot(target)
-    scratch = make_scratch(target, root, branch=args.branch or None, seed_files=seed_files)
+    scratch = make_scratch(target, root, branch=args.branch or None,
+                           seed_files=seed_files,
+                           seed_executables=seed_executables)
     hook = install_gate_hook(scratch, args.gate_scripts)
     print(f"[sim] gate hook installed via the repo installer: {hook}")
     env = push_env(scratch, args.gate_scripts, inline_budget=args.inline_budget)
@@ -454,7 +901,8 @@ def main(argv=None):
         print(f"[sim] --- {scenario.name}: {scenario.description}")
         print(f"[sim]     expect: {scenario.expect}")
         try:
-            r = run_scenario(scratch, env, scenario, timeout_s=args.timeout)
+            r = run_scenario(scratch, env, scenario, timeout_s=args.timeout,
+                             gate_scripts=args.gate_scripts)
         except SimError as exc:
             killed = str(exc)
             r = ScenarioResult(name=scenario.name, expect=scenario.expect, outcome="error",

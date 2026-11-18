@@ -1505,6 +1505,210 @@ def test_command_check_config_load_failure_is_observed(monkeypatch, tmp_path, ca
     assert "synthetic store failure" in capsys.readouterr().err
 
 
+# --- SPEC-15.4: warnings field + evidence_source (executor contract) --------
+
+def _run_check(tmp_path, body):
+    """Direct seam: run ONE repo-relative command check body against
+    app.py and hand back the executor-contract triple
+    (findings, warnings, error_note) -- no push, no reviewer. (The fourth
+    element, the executor's telemetry object, is covered by the SPEC-15
+    suites.)"""
+    p = tmp_path / "scripts" / "dslcheck.sh"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(body, encoding="utf-8")
+    p.chmod(0o755)
+    got = review_gate._run_one_command_check(
+        str(tmp_path), "scripts/dslcheck.sh", ["app.py"])
+    return got[0], got[1], got[2]
+
+
+def _evidence_body(evidence_source=None, warnings=None):
+    """A check body answering with a findings+warnings wrapper; the finding
+    carries the given evidence_source and the wrapper the given warnings."""
+    finding = {"path": "app.py", "start_line": 1, "end_line": 1,
+               "severity": "high", "confidence": 0.95,
+               "category": "custom", "content": "race check tripped"}
+    if evidence_source is not None:
+        finding["evidence_source"] = evidence_source
+    payload = {"findings": [finding]}
+    if warnings is not None:
+        payload["warnings"] = warnings
+    return ("#!/bin/sh\ncat >/dev/null\ncat <<'OCRJSON'\n"
+            + json.dumps(payload) + "\nOCRJSON\n")
+
+
+def test_command_check_findings_plus_warnings_wrapper_parses_both_arrays(tmp_path):
+    """SPEC-15.4: a check may answer {"findings": [...], "warnings": [...]};
+    both arrays parse -- the findings survive and the warnings surface in
+    the same (findings, warnings) channel every other check degradation
+    uses."""
+    findings, warnings, note = _run_check(
+        tmp_path, _evidence_body(warnings=["no permanent coverage for the "
+                                           "race probe: tests/dsl.py missing"]))
+    assert note is None
+    assert [f["content"] for f in findings] == ["race check tripped"]
+    assert len(warnings) == 1
+    assert "no permanent coverage" in str(warnings[0].get("message"))
+
+
+def test_command_check_bare_and_findings_only_shapes_unchanged(tmp_path):
+    """Regression: the pre-15.4 shapes still work exactly as before -- a
+    bare findings array and a findings-only wrapper carry no warnings."""
+    bare = ("#!/bin/sh\ncat >/dev/null\n"
+            "printf '[{\"path\": \"app.py\", \"start_line\": 1, \"end_line\": 1, "
+            "\"severity\": \"high\", \"confidence\": 0.95, "
+            "\"category\": \"custom\", \"content\": \"bare tripped\"}]'\n")
+    findings, warnings, note = _run_check(tmp_path, bare)
+    assert note is None and warnings == []
+    assert [f["content"] for f in findings] == ["bare tripped"]
+    findings, warnings, note = _run_check(tmp_path, _evidence_body())
+    assert note is None and warnings == []
+    assert [f["content"] for f in findings] == ["race check tripped"]
+
+
+def test_command_check_malformed_warnings_field_degrades_never_fails(tmp_path):
+    """A malformed warnings field (not an array, or junk entries) degrades
+    to a note and the findings survive -- never a failure, never a discard."""
+    findings, warnings, note = _run_check(
+        tmp_path, _evidence_body(warnings="oops, a string"))
+    assert note is None, "a malformed warnings field is never a failure"
+    assert [f["content"] for f in findings] == ["race check tripped"]
+    assert any("warnings" in str(w.get("message")) for w in warnings), warnings
+    findings, warnings, note = _run_check(
+        tmp_path, _evidence_body(warnings=["ok", 7]))
+    assert note is None
+    assert [f["content"] for f in findings] == ["race check tripped"]
+    messages = [str(w.get("message")) for w in warnings]
+    assert any("ok" in m for m in messages), messages
+    assert any("ignored" in m for m in messages), messages
+
+
+def test_command_check_valid_evidence_source_flows_to_output_and_telemetry(tmp_path):
+    """A valid evidence_source tag (existing_test) flows through the findings
+    stream into the verdict output and telemetry, and the check's warnings
+    surface alongside it (per-check warnings count included)."""
+    work = _repo_with_check(
+        tmp_path, _evidence_body(evidence_source="existing_test",
+                                 warnings=["no permanent coverage yet"]))
+    tip = _commit(work, {"app.py": _APP_V2})
+    decision, reason = _push(work, _env(tmp_path, "t.trace"))
+    assert decision == "deny", reason
+    assert "race check tripped" in reason, reason
+    st = _state(work, tip)
+    assert st.get("verdict") == "block", st
+    records = [r for r in _tele_run_records(work) if r.get("command_checks")]
+    assert records, "telemetry carries the command-check run"
+    entry = records[-1]["command_checks"][0]
+    assert entry.get("warnings") == 1, entry
+    tagged = [f for f in records[-1].get("findings") or []
+              if f.get("path") == "app.py"]
+    assert tagged and tagged[0].get("evidence_source") == "existing_test", tagged
+    run_warnings = [str(w.get("message")) for w in records[-1].get("warnings") or []]
+    assert any("no permanent coverage" in m for m in run_warnings), run_warnings
+
+
+def test_command_check_unknown_evidence_source_degrades_tag_not_finding(tmp_path):
+    """An unknown evidence_source value degrades the tag with a note while
+    the finding itself survives (still blocks); the tag is dropped from
+    output and telemetry."""
+    work = _repo_with_check(
+        tmp_path, _evidence_body(evidence_source="gut_feeling"))
+    tip = _commit(work, {"app.py": _APP_V2})
+    decision, reason = _push(work, _env(tmp_path, "t.trace"))
+    assert decision == "deny", reason
+    assert "race check tripped" in reason, "the finding survives the tag degrade"
+    st = _state(work, tip)
+    assert st.get("verdict") == "block", st
+    records = [r for r in _tele_run_records(work) if r.get("command_checks")]
+    assert records
+    tagged = [f for f in records[-1].get("findings") or []
+              if f.get("path") == "app.py"]
+    assert tagged and not tagged[0].get("evidence_source"), tagged
+    run_warnings = [str(w.get("message")) for w in records[-1].get("warnings") or []]
+    assert any("evidence_source" in m for m in run_warnings), run_warnings
+
+
+def test_command_check_ephemeral_pairing_warning_lands_in_warnings_not_findings(tmp_path):
+    """Provenance pairing (SPEC-15.4): an ephemeral_test finding without the
+    check's no-permanent-coverage warning produces a gate-side WARNING on
+    the same channel as the check's own degradations -- never a finding
+    (findings counts stay honest, the note is not itself waivable), never
+    a verdict change, never fatal. With the coverage warning present, no
+    pairing warning fires."""
+    findings, warnings, note = _run_check(
+        tmp_path, _evidence_body(evidence_source="ephemeral_test"))
+    assert note is None
+    # Only the real finding rides the findings stream.
+    assert [f.get("content") for f in findings] == ["race check tripped"], findings
+    msgs = [str(w.get("message")) for w in warnings]
+    assert any("no-permanent-coverage" in m for m in msgs), msgs
+    findings, warnings, note = _run_check(
+        tmp_path, _evidence_body(evidence_source="ephemeral_test",
+                                 warnings=["no permanent coverage for the probe"]))
+    assert note is None
+    assert not [w for w in warnings
+                if "no-permanent-coverage" in str(w.get("message"))], warnings
+
+
+def test_command_check_coverage_pairing_needs_a_negation_not_a_mention(tmp_path):
+    """The pairing heuristic matches the no-permanent-coverage SEMANTIC only:
+    a warning that states the lack ("missing test coverage") pairs, one that
+    merely MENTIONS coverage ("coverage is 82%") does not -- the reference
+    executor (SPEC-15.5) must word its warning as a stated lack."""
+    findings, warnings, note = _run_check(
+        tmp_path, _evidence_body(evidence_source="ephemeral_test",
+                                 warnings=["coverage is 82% on this branch"]))
+    assert note is None
+    msgs = [str(w.get("message")) for w in warnings]
+    assert any("no-permanent-coverage" in m for m in msgs), msgs
+    findings, warnings, note = _run_check(
+        tmp_path, _evidence_body(evidence_source="ephemeral_test",
+                                 warnings=["missing test coverage for the probe"]))
+    assert note is None
+    assert not [w for w in warnings
+                if "no-permanent-coverage" in str(w.get("message"))], warnings
+
+
+def test_command_check_ephemeral_pairing_warning_reaches_telemetry(tmp_path):
+    """The pairing warning rides the warnings channel end to end: a push whose
+    ephemeral finding lacks the coverage warning lands the pairing message in
+    telemetry warnings (never in the findings list, never a verdict change
+    on its own)."""
+    work = _repo_with_check(
+        tmp_path, _evidence_body(evidence_source="ephemeral_test"))
+    tip = _commit(work, {"app.py": _APP_V2})
+    decision, reason = _push(work, _env(tmp_path, "t.trace"))
+    assert decision == "deny", reason  # the high finding blocks, not the warning
+    records = [r for r in _tele_run_records(work) if r.get("command_checks")]
+    assert records
+    rec = records[-1]
+    assert not [f for f in rec.get("findings") or []
+                if f.get("severity") == "note"], rec.get("findings")
+    run_warnings = [str(w.get("message")) for w in rec.get("warnings") or []]
+    assert any("no-permanent-coverage" in m for m in run_warnings), run_warnings
+
+
+def test_command_check_per_check_timeout_degrades_with_its_own_message(tmp_path):
+    """SPEC-15.1: a check's `timeout` config is consumed -- a check with
+    timeout: 1 whose command sleeps 2 degrades with the per-check timeout
+    message ("timed out after 1s"), findings discarded, warning plus
+    telemetry, never a stuck gate."""
+    body = ("#!/bin/sh\ncat >/dev/null\nsleep 2\n"
+            "printf '[]'\n")
+    work = _repo_with_check(tmp_path, body)
+    _write_checks_config(work, {
+        "slow": {"command": "scripts/dslcheck.sh", "globs": ["**/*.py"],
+                 "timeout": 1}})
+    tip = _commit(work, {"app.py": _APP_V2})
+    decision, reason = _push(work, _env(tmp_path, "t.trace"))
+    assert decision == "pass", reason
+    records = [r for r in _tele_run_records(work) if r.get("command_checks")]
+    assert records
+    error = str(records[-1]["command_checks"][0].get("error") or "")
+    assert "timed out after 1s" in error, error
+    assert "findings discarded" in error, error
+
+
 # --- the sweep option (story 20) ----------------------------------------------
 
 def test_sweep_true_expands_integrity_evidence_to_the_whole_records_root(tmp_path):
@@ -1728,3 +1932,94 @@ def test_forward_looking_statement_produces_no_integrity_finding(tmp_path):
     entry = _findings_log_last(work)
     assert not any(x.get("docs_quality_duty") == "adr-integrity"
                    for x in (entry.get("findings") or []))
+
+
+# --- W9: the telemetry field + the exported per-check budget (SPEC-15.4) ----
+
+def _run_check_four(tmp_path, body, timeout=None):
+    """Direct seam returning the full executor-contract quadruple
+    (findings, warnings, error_note, telemetry)."""
+    p = tmp_path / "scripts" / "dslcheck.sh"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(body, encoding="utf-8")
+    p.chmod(0o755)
+    kw = {} if timeout is None else {"timeout": timeout}
+    return review_gate._run_one_command_check(
+        str(tmp_path), "scripts/dslcheck.sh", ["app.py"], **kw)
+
+
+def test_per_check_budget_is_exported_without_losing_the_base_env(
+        tmp_path, monkeypatch):
+    """The resolved per-check timeout reaches the executor's environment as
+    OCR_CHECK_TIMEOUT_S (string seconds) ON TOP of the gate's own
+    environment -- a cooperative executor can clamp its phases to finish
+    before the gate's kill."""
+    monkeypatch.setenv("OCR_TEST_BASE_ENV_MARK", "yes")
+    body = ("#!/bin/sh\n"
+            "cat >/dev/null\n"
+            "printf '{\"findings\": [{\"path\": \"app.py\", "
+            "\"start_line\": 1, \"end_line\": 1, \"severity\": \"high\", "
+            "\"confidence\": 0.95, \"category\": \"custom\", "
+            "\"content\": \"%s %s\"}]}' "
+            "\"$OCR_CHECK_TIMEOUT_S\" \"$OCR_TEST_BASE_ENV_MARK\"\n")
+    findings, warnings, note, tele = _run_check_four(tmp_path, body, timeout=120)
+    assert note is None, note
+    assert [f["content"] for f in findings] == ["120 yes"], findings
+
+
+def test_malformed_telemetry_field_degrades_to_a_note(tmp_path):
+    """A malformed telemetry field (not an object) is a note, the findings
+    survive, and nothing merges -- never a failure, never a discard."""
+    payload = {"findings": [{"path": "app.py", "start_line": 1,
+                             "end_line": 1, "severity": "high",
+                             "confidence": 0.95, "category": "custom",
+                             "content": "race check tripped"}],
+               "telemetry": "oops, a string"}
+    body = ("#!/bin/sh\ncat >/dev/null\ncat <<'OCRJSON'\n"
+            + json.dumps(payload) + "\nOCRJSON\n")
+    findings, warnings, note, tele = _run_check_four(tmp_path, body)
+    assert note is None and tele == {}
+    assert [f["content"] for f in findings] == ["race check tripped"]
+    assert any("malformed telemetry field" in str(w.get("message"))
+              for w in warnings), warnings
+
+
+def test_malformed_telemetry_values_drop_only_the_bad_entries(tmp_path):
+    """Non-scalar telemetry values drop their own entries with a note;
+    the well-formed counts still merge."""
+    payload = {"findings": [], "telemetry": {"runs": 2, "bad": [1, 2]}}
+    body = ("#!/bin/sh\ncat >/dev/null\ncat <<'OCRJSON'\n"
+            + json.dumps(payload) + "\nOCRJSON\n")
+    findings, warnings, note, tele = _run_check_four(tmp_path, body)
+    assert note is None and findings == []
+    assert tele == {"runs": 2}, tele
+    assert any("malformed telemetry values for bad" in str(w.get("message"))
+               for w in warnings), warnings
+
+
+def test_command_checks_telemetry_object_merges_into_the_check_entry(
+        tmp_path, monkeypatch):
+    """A well-formed telemetry object merges into THAT check's
+    command_checks entry (the tele_sink path the parallel worker uses
+    included): counts observed by the executor ride the gate's telemetry."""
+    import rg_config
+
+    payload = {"findings": [], "telemetry": {"tests_selected": 1,
+                                             "selector_attempts": 1}}
+    body = ("#!/bin/sh\ncat >/dev/null\ncat <<'OCRJSON'\n"
+            + json.dumps(payload) + "\nOCRJSON\n")
+    work = _repo_with_check(tmp_path, body)
+    monkeypatch.setattr(rg_config, "load_settings",
+                        lambda repo_root=None: {
+                            "checks": {"dsl-check": {
+                                "command": "scripts/dslcheck.sh",
+                                "globs": ["**/*.py"]}}})
+    review_gate._TELE.pop("command_checks", None)
+    sink = []
+    findings, warnings = review_gate._command_check_findings(
+        str(work), str(work), None, None,
+        entries=[{"path": "app.py", "status": "A"}], tele_sink=sink)
+    assert findings == [] and warnings == []
+    assert sink and sink[0]["name"] == "dsl-check", sink
+    assert sink[0]["tests_selected"] == 1, sink
+    assert sink[0]["selector_attempts"] == 1, sink

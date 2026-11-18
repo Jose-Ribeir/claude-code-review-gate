@@ -466,3 +466,132 @@ def test_unknown_keys_inside_a_check_are_noted_and_ignored():
     settings = rg_config.load_settings()
     assert "goblin" not in settings["checks"]["docs-deslop"]
     assert any("goblin" in n for n in settings["notes"])
+
+
+# --- command-check parallel + timeout (SPEC-15.1) ----------------------------
+
+# A user command check may declare that its executor may run concurrently
+# ("parallel", default False -- the scheduler lands in SPEC-15.3) and may
+# pin its own answer budget ("timeout" seconds, default 60 -- the budget
+# review-gate.py's _COMMAND_CHECK_TIMEOUT_S already gives a command check).
+# Pure config expand: nothing consumes them yet.
+
+
+def test_command_check_parallel_and_timeout_defaults_resolve():
+    _write(rg_config.global_config_path(), {
+        "checks": {"my-lint": {"command": "tools/lint.sh",
+                               "globs": ["**/*.py"]}},
+    })
+    settings = rg_config.load_settings()
+    check = settings["checks"]["my-lint"]
+    assert check["parallel"] is False
+    assert check["timeout"] == 60
+    assert settings["notes"] == []
+
+
+def test_builtin_checks_do_not_carry_the_command_check_keys(tmp_path):
+    settings = rg_config.load_settings(tmp_path)
+    for name in ("docs-deslop", "adr-wait-what", "adr-integrity"):
+        assert "parallel" not in settings["checks"][name]
+        assert "timeout" not in settings["checks"][name]
+    assert settings["notes"] == []
+
+
+def test_command_check_parallel_true_and_timeout_300_survive_resolution():
+    _write(rg_config.global_config_path(), {
+        "checks": {"my-lint": {"command": "tools/lint.sh",
+                               "globs": ["**/*.py"],
+                               "parallel": True, "timeout": 300}},
+    })
+    settings = rg_config.load_settings()
+    check = settings["checks"]["my-lint"]
+    assert check["parallel"] is True
+    assert check["timeout"] == 300
+    assert settings["notes"] == []
+
+
+def test_command_check_parallel_and_timeout_repo_wins_over_global(tmp_path):
+    _write(rg_config.global_config_path(), {
+        "checks": {"my-lint": {"command": "tools/lint.sh",
+                               "globs": ["**/*.py"],
+                               "parallel": True, "timeout": 120}},
+    })
+    _write(tmp_path / ".ocr" / "config.json", {
+        "checks": {"my-lint": {"parallel": False, "timeout": 300}},
+    })
+    check = rg_config.load_settings(tmp_path)["checks"]["my-lint"]
+    assert check["parallel"] is False     # repo wins
+    assert check["timeout"] == 300        # repo wins
+    assert check["globs"] == ["**/*.py"]  # global still applies
+
+
+def test_command_check_invalid_parallel_degrades_with_a_note():
+    _write(rg_config.global_config_path(), {
+        "checks": {"my-lint": {"command": "tools/lint.sh",
+                               "globs": ["**/*.py"],
+                               "parallel": "banana", "timeout": 300}},
+    })
+    settings = rg_config.load_settings()
+    check = settings["checks"]["my-lint"]
+    assert check["parallel"] is False    # default kept, noted
+    assert check["timeout"] == 300       # the valid sibling applies
+    assert any("parallel" in n for n in settings["notes"])
+
+
+def test_command_check_parallel_accepts_switch_words():
+    _write(rg_config.global_config_path(), {
+        "checks": {"my-lint": {"command": "tools/lint.sh",
+                               "globs": ["**/*.py"],
+                               "parallel": "on"}},
+    })
+    check = rg_config.load_settings()["checks"]["my-lint"]
+    assert check["parallel"] is True
+
+
+def test_command_check_non_numeric_timeout_degrades_with_a_note():
+    _write(rg_config.global_config_path(), {
+        "checks": {"my-lint": {"command": "tools/lint.sh",
+                               "globs": ["**/*.py"],
+                               "timeout": "300", "parallel": True}},
+    })
+    settings = rg_config.load_settings()
+    check = settings["checks"]["my-lint"]
+    assert check["timeout"] == 60        # default kept, noted
+    assert check["parallel"] is True     # the valid sibling applies
+    assert any("timeout" in n for n in settings["notes"])
+
+
+def test_command_check_boolean_timeout_degrades_with_a_note():
+    _write(rg_config.global_config_path(), {
+        "checks": {"my-lint": {"command": "tools/lint.sh",
+                               "globs": ["**/*.py"],
+                               "timeout": True}},
+    })
+    settings = rg_config.load_settings()
+    assert settings["checks"]["my-lint"]["timeout"] == 60
+    assert any("timeout" in n for n in settings["notes"])
+
+
+def test_command_check_non_positive_timeout_degrades_with_a_note():
+    for bad in (0, -5):
+        _write(rg_config.global_config_path(), {
+            "checks": {"my-lint": {"command": "tools/lint.sh",
+                                   "globs": ["**/*.py"],
+                                   "timeout": bad}},
+        })
+        settings = rg_config.load_settings()
+        assert settings["checks"]["my-lint"]["timeout"] == 60
+        assert any("timeout" in n for n in settings["notes"]), bad
+
+
+def test_command_check_timeout_floors_at_one_second():
+    """A positive value under one second is floored, not rejected -- the
+    same clamp the env-int timeouts apply (max(floor, val))."""
+    _write(rg_config.global_config_path(), {
+        "checks": {"my-lint": {"command": "tools/lint.sh",
+                               "globs": ["**/*.py"],
+                               "timeout": 0.5}},
+    })
+    settings = rg_config.load_settings()
+    assert settings["checks"]["my-lint"]["timeout"] == 1
+    assert settings["notes"] == []

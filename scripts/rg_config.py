@@ -28,19 +28,55 @@ Resolution order -- later wins, key by key:
                       "globs" list of repo-relative globs the check runs
                       over, and pass-through options ("sections",
                       "template", "sentence_cap", "sweep"). A "command"
-                      string names a repo-relative executable the gate runs
-                      over matched changed files. Command checks may define
-                      new check names;
-                      other unknown names are typos and are ignored.
+                      string names a repo-relative executable (run in a later
+                      ticket); a command check also takes "parallel"
+                      (default False -- its executor may run concurrently
+                      against its own tip clone; SPEC-15.1), "required"
+                      (default False -- opt in to final-review required
+                      verification without adding a pre-push duty), and
+                      "timeout" (seconds, default 60 -- its answer budget). Command
+                      checks may define new check names; other unknown names
+                      are typos and are ignored.
 
 Missing files degrade to defaults silently -- that is the normal state for
 most installs. Unreadable/invalid files, and invalid VALUES for known keys,
 degrade to defaults WITH A NOTE in "notes" (a note is for a human reading a
 report or a doctor run; the gate itself never fails on config).
 
+Second surface (pg1): the user-level RUN configuration the gate consults
+when deciding how a push is reviewed:
+
+    load_config() -> GateConfig(depth, timeout_seconds, fail_open, warnings)
+
+File: ~/.config/review-gate/config.json (override with OCR_CONFIG_FILE).
+Shape: {"review": {"depth": ..., "timeoutSeconds": ..., "failOpen": ...}}.
+Keys: review.depth ("full"|"structural"|"large-diff-scoped", default
+"full"), review.timeoutSeconds (int >= 0, 0 = no wall-clock cap, default 0),
+review.failOpen (bool, default false -- the gate is fail-CLOSED by default).
+Precedence, key by key: env var > config file > built-in default; an invalid
+value at a higher level is warned about and the next level is consulted, so
+one bad key never masks a good one beneath it.
+
+Environment switches this module reads (switches are decisions; ADR 0006
+cites this list):
+
+    OCR_CONFIG_FILE             (pg1) override for the run-config file
+                                location; tests and hermetic installs point
+                                it at a private path.
+    OCR_REVIEW_DEPTH            (pg1) override for review.depth.
+    OCR_REVIEW_TIMEOUT_SECONDS  (pg1) override for review.timeoutSeconds.
+    OCR_FAIL_OPEN               (pre-dates pg1: the gate's documented
+                                one-shot escape hatch -- "1"/"true"/"yes"
+                                per review-gate.py) overrides
+                                review.failOpen.
+    (OCR_STATE_DIR is read by rg_store, whose store_root() locates the
+    settings surface above.)
+
 This module reads config; it never writes it.
 """
 import json
+import os
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import rg_store
@@ -71,8 +107,13 @@ _BUILT_IN_CHECKS = {
 }
 # A user-declared command check defaults to on and empty-scoped: the
 # declaration itself is the enabling act, and how an empty glob list scopes a
-# run is the execution ticket's call (SPEC-14.4).
-_COMMAND_CHECK_DEFAULTS = {"enabled": True, "mode": "block", "globs": []}
+# run is the execution ticket's call (SPEC-14.4). A command check also
+# declares its execution posture (SPEC-15.1): "parallel" says its executor
+# may run concurrently against its own tip clone (scheduling lands in
+# SPEC-15.3), and "timeout" pins its answer budget -- 60 s, the budget the
+# gate already gives every command check (_COMMAND_CHECK_TIMEOUT_S).
+_COMMAND_CHECK_DEFAULTS = {"enabled": True, "mode": "block", "globs": [],
+                            "parallel": False, "required": False, "timeout": 60}
 
 
 def _defaults():
@@ -310,6 +351,27 @@ def _as_check_value(key, value, notes, path, label, name):
         notes.append(f"{note}invalid checks.{name}.sweep value {value!r}; "
                      "current value kept")
         return False, None
+    if key in ("parallel", "required"):
+        ok, parsed = _as_switch(value)
+        if ok:
+            return True, parsed
+        notes.append(f"{note}invalid checks.{name}.{key} value {value!r}; "
+                     "current value kept")
+        return False, None
+    if key == "timeout":
+        # Command-check answer budget in seconds (SPEC-15.1). Numeric and
+        # positive; a positive value under one second is floored to one the
+        # same way the env-int timeouts floor (max(floor, val)) -- a budget
+        # under a second is a disallow, which no positive config value means.
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            notes.append(f"{note}checks.{name}.timeout must be a number of "
+                         "seconds; current value kept")
+            return False, None
+        if value <= 0:
+            notes.append(f"{note}checks.{name}.timeout must be a positive "
+                         "number of seconds; current value kept")
+            return False, None
+        return True, max(1, value)
     if key == "command":
         if isinstance(value, str):
             return True, value
@@ -321,7 +383,11 @@ def _as_check_value(key, value, notes, path, label, name):
 
 
 def _as_switch(value):
-    """(ok, bool). Accepts booleans, 0/1, and on/off-style words."""
+    """(ok, bool). Accepts booleans, 0/1, and on/off-style words. A null
+    (explicit JSON null for review.failOpen) is an invalid value, not a
+    missing one -- the caller distinguishes with _MISSING."""
+    if value is None:
+        return False, None
     if isinstance(value, bool):
         return True, value
     if isinstance(value, int):
@@ -358,3 +424,134 @@ def _as_tracker_order(value, notes, path, label):
                      "tracker; current order kept")
         return False, None
     return True, order
+
+
+# --- the user-level run configuration (pg1) ------------------------------------
+
+REVIEW_DEPTHS = ("full", "structural", "large-diff-scoped")
+
+_MISSING = object()  # a key/env var that is absent -- distinct from a null value
+
+
+@dataclass(frozen=True)
+class GateConfig:
+    """The resolved run configuration for one gate invocation.
+
+    warnings holds human-readable advisories about degraded config (bad
+    JSON, invalid values) for the gate to print; nothing here ever raises
+    on bad input -- the gate's posture is set by fail_open, not by config
+    file health."""
+    depth: str
+    timeout_seconds: int
+    fail_open: bool
+    warnings: list = field(default_factory=list)
+
+
+def user_config_path():
+    """The run-config file: ~/.config/review-gate/config.json unless
+    OCR_CONFIG_FILE redirects it (pathlib only -- no POSIX assumptions)."""
+    override = os.environ.get("OCR_CONFIG_FILE", "").strip()
+    if override:
+        return Path(override)
+    return Path.home() / ".config" / "review-gate" / "config.json"
+
+
+def load_config():
+    """The resolved run configuration plus advisory warnings.
+
+    Precedence, key by key: env var > config file > built-in default.
+    Missing files and absent keys are silent; unreadable files, malformed
+    JSON, and invalid values add a warning and fall to the next level (or
+    the default).
+    """
+    path = user_config_path()
+    warnings = []
+    review = _read_review_block(path, warnings)
+    return GateConfig(
+        depth=_resolve(warnings, "review.depth", "full", _as_depth,
+                       ("env OCR_REVIEW_DEPTH", _env("OCR_REVIEW_DEPTH")),
+                       (f"user config {path}", review.get("depth", _MISSING))),
+        timeout_seconds=_resolve(warnings, "review.timeoutSeconds", 0, _as_timeout,
+                                 ("env OCR_REVIEW_TIMEOUT_SECONDS",
+                                  _env("OCR_REVIEW_TIMEOUT_SECONDS")),
+                                 (f"user config {path}",
+                                  review.get("timeoutSeconds", _MISSING))),
+        fail_open=_resolve(warnings, "review.failOpen", False, _as_switch,
+                           ("env OCR_FAIL_OPEN", _env("OCR_FAIL_OPEN")),
+                           (f"user config {path}",
+                            review.get("failOpen", _MISSING))),
+        warnings=warnings,
+    )
+
+
+def _env(name):
+    """An env override's value, or _MISSING when unset/blank (blank is unset)."""
+    value = os.environ.get(name, "").strip()
+    return value if value else _MISSING
+
+
+def _resolve(warnings, key, default, parse, *levels):
+    """First valid value across (label, raw) precedence levels; invalid
+    values warn and fall through; default when nothing valid appears. An
+    explicit JSON null is an invalid value (warned), not an absent key."""
+    for label, raw in levels:
+        if raw is _MISSING:
+            continue
+        ok, value = parse(raw)
+        if ok:
+            return value
+        warnings.append(f"{label}: invalid {key} value {raw!r}; ignored")
+    return default
+
+
+def _read_review_block(path, warnings):
+    """The "review" object of the run-config file, or {} when absent or
+    unusable (with a warning unless the file simply does not exist)."""
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        warnings.append(f"user config {path} unreadable ({exc}); "
+                        "defaults used for its values")
+        return {}
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        warnings.append(f"user config {path} is not valid JSON; "
+                        "defaults used for its values")
+        return {}
+    if not isinstance(data, dict):
+        warnings.append(f"user config {path} is not a JSON object; "
+                        "defaults used for its values")
+        return {}
+    review = data.get("review")
+    if review is None:
+        return {}
+    if not isinstance(review, dict):
+        warnings.append(f'user config {path}: "review" must be an object; '
+                        "its values ignored")
+        return {}
+    return review
+
+
+def _as_depth(value):
+    """(ok, depth). Depths are exact strings; no case-folding."""
+    if isinstance(value, str) and value in REVIEW_DEPTHS:
+        return True, value
+    return False, None
+
+
+def _as_timeout(value):
+    """(ok, seconds). ints >= 0 from the file (booleans refused); integer
+    strings from the env. 0 means no cap."""
+    if isinstance(value, bool):
+        return False, None
+    if isinstance(value, str):
+        try:
+            value = int(value)
+        except ValueError:
+            return False, None
+    if isinstance(value, int) and value >= 0:
+        return True, value
+    return False, None

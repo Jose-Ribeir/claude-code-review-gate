@@ -89,12 +89,16 @@ def force_rmtree(path):
     refuses to unlink a read-only file, where POSIX only checks the directory)."""
     import shutil
     import stat
+    import sys
 
     def _chmod_and_retry(func, target, exc):
         os.chmod(target, stat.S_IWRITE)
         func(target)
 
-    shutil.rmtree(str(path), onexc=_chmod_and_retry)
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(str(path), onexc=_chmod_and_retry)
+    else:
+        shutil.rmtree(str(path), onerror=_chmod_and_retry)
 
 
 def posix_path(path):

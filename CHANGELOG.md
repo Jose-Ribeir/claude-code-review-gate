@@ -7,6 +7,108 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Universal local-only push gate (ADR 0006).** `install-git-hook.sh`
+  installs the global pre-push gate by default (pass `--no-git-hook` for the
+  legacy opt-in), chaining any pre-existing global `core.hooksPath` through an
+  installer-written wrapper whose exit code defers to the previous hook; a
+  repo with its own hooks dir gets the cure via `--chain-into <repo>`.
+- **User-level run config.** `~/.config/review-gate/config.json` (override
+  with `OCR_CONFIG_FILE`) exposes `review.depth` (`full` | `structural` |
+  `large-diff-scoped`), `review.timeoutSeconds` and `review.failOpen`, with
+  env > file > default precedence; a `timeoutSeconds` past the `hooks.json`
+  900s hook timeout warns loudly (a killed hook is a silent fail-open) instead
+  of clamping. See `docs/config-reference.md`.
+- **MR/PR context consult.** On a push to a branch with an open MR/PR (24h
+  cached, read-only `gh`/`glab` lookups, fail-open to "no context"), declared
+  scope, claimed counts and the recorded head are checked against the pushed
+  diff and block with `MR-CONSISTENCY:` findings; a recorded head that is an
+  ANCESTOR of the pushed tip (normal iteration) is a non-blocking advisory
+  instead — only rewritten history blocks. Above the large-diff threshold, a
+  fourth check flags path overlap with other open MRs. The review base
+  resolves against the MR's target branch before the legacy fallbacks.
+- **Tip-bound verdicts with wider carry-forward.** A recorded pass now also
+  carries forward when the pushed range's patch-ids equal the reviewed
+  range's — a rebase onto an advanced upstream — in addition to the
+  identical-tip-tree fast path; ref-deletion pushes invalidate that ref's
+  verdicts immediately, in both spellings of the ref.
+- **Ledger hygiene, wired in.** Verdict records expire after 90 days and the
+  lazy daily prune now actually runs on each gate invocation; reviewer
+  sandboxes expire after 7 days; corrupt entries are warned about and kept.
+- **Audited bypasses.** Every honored `OCR_FAIL_OPEN=1`/`review.failOpen`
+  bypass — including one overriding a BLOCKING verdict in git mode — lands in
+  `bypasses.jsonl` with mechanism, remote, ref, tip and reason, and is
+  announced loudly. `git push --no-verify` never invokes the hook, so it is
+  unrecordable by design (docs corrected to say so).
+- **Explicit final whole-stack review (ADR 0008, SPEC-16).**
+  `review-gate.py final-review <ref>…` reviews provider-pinned, immutable
+  complete trees rather than local working-tree content: every explicitly
+  supplied item receives an independent full-tree review and the linear stack
+  also receives combined and prospective-integration reviews. Mandatory
+  correctness, standards, documentation/domain, testing, security,
+  compatibility/migration, and intent lenses share the existing sole verdict
+  authority; required repository/CI suites use isolated credential-free
+  execution, while SPEC-15 dynamic checks retain warning-only degradation.
+  Findings, warnings, coverage, stops, exact revisions, freshness, memory,
+  contract rules/decisions, contract/acceptance versions, acceptance records,
+  evidence, migrations, and publication attempts persist in one dedicated,
+  tool-independent SQLite database with bounded structured telemetry. An
+  explicit API path or CLI `--store` wins, then non-empty `FINAL_REVIEW_STORE`,
+  then the neutral default `~/.final-review/final-review.sqlite3` (blank values
+  are ignored). Store selection never consults `OCR_STATE_DIR`, Kimchi/Claude
+  paths or configuration, review-gate configuration, `.git`, or other source
+  repository state; the abandoned external review-gate store-root default is
+  not used or implicitly migrated. This is a standalone SQLite file, not
+  Kimchi's application DB, and arbitrary local tools can reopen or attach it
+  with raw `sqlite3` while directory/file permission tightening is retained.
+  GitHub, GitLab, and inference integrations remain adapters. Results
+  distinguish `pass`, `findings`, `stale`, and `incomplete` (exit 0/1/3/2),
+  keep same-store continuity separate from independent local evidence, and
+  permit official provider statuses only through the trusted publication
+  boundary; denied or failed publication leaves local-only, unenforced
+  evidence. Database-backed `contract show`, `acceptance list/status/history`,
+  and `final-report list/show/export` commands expose current and historical
+  records without maintaining a parallel report authority. Command checks
+  gain `required` (default `false`) to opt a pinned repository declaration
+  into final-review required verification without changing incremental
+  pre-push defaults.
+- **Race & regression test checks and granular finding waivers (ADR 0007,
+  SPEC-15).** Command checks gain `parallel` (default `false`; run the
+  executor concurrently with the review session against its own throwaway
+  tip clone — probe files can never leak into reviewer evidence; a
+  clone-creation failure skips the check with a warning, never a fallback
+  to the review tree) and `timeout` (default 60 s, clamped to 1–3600).
+  The executor contract extends to `warnings` and
+  `evidence_source: "existing_test" | "ephemeral_test"` (validated;
+  `ephemeral_test` findings pair with the canonical no-permanent-coverage
+  warning). A **reference executor** ships in `examples/test-check/`:
+  a pinned one-shot selector model reads the matched diff, runs selected
+  repo tests (`go test -race` for Go) and authors ephemeral probes inside
+  its own clone, re-runs every failure exactly once (reproduce-then-block),
+  and quotes verbatim output; flakes, unbuildable probes, and coverage gaps
+  degrade to warnings plus telemetry, never blocks. The executor contract
+  also carries an optional `telemetry` object (actual counts:
+  `selector_attempts`, `tests_selected`, `probes_authored`, `runs`,
+  `reproduce_results`) merged into that check's `command_checks` entry
+  (malformed values degrade to a warning), the resolved per-check budget
+  is exported to the executor as `OCR_CHECK_TIMEOUT_S` so it can finish
+  its internal phases before the gate's kill, the selector's optional
+  probe `path` field is documented in the contract, and the parallel
+  runner is self-cleaning on every start failure with a bounded (5 s)
+  cleanup join that discards-and-warns instead of hanging the push.
+- **Finding waivers (ADR 0007).** `review-gate.py waive <id>… [--note]`,
+  `unwaive <id>…`, and `waive --list` record narrow, per-finding
+  acknowledgments in a store-root, repo-scoped ledger (machine-local, no
+  expiry). A waiver keys on the finding's content anchor — including a
+  tip-location fallback for command-check findings that carry no diff
+  hunk — so it survives rebases and line movement, **lapses automatically
+  when the code under the finding changes**, and stays loud. For
+  test-evidenced findings (`evidence_source`) the anchor also binds a
+  deterministic fingerprint of the finding's quoted evidence, so the
+  same reproduced failure stays waived while a DIFFERENT failure output
+  under the same location is judged fresh and blocks again: verdict
+  text, recorded JSON, and telemetry all list what was suppressed, and
+  the findings log keeps every waived finding. Waivers apply to every
+  finding class and only filter `compute_verdict`'s inputs.
 - **Custom checks and documentation-quality duties (`checks` config, ADR 0006).**
   The settings gain a top-level `checks` object resolving through the usual
   layering (built-in defaults, store-root `config.json`, per-repo

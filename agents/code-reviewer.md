@@ -24,6 +24,25 @@ called in another, a mechanism disabled in file A but still active in file B, a
 field renamed in some usages but not all. Cross-file issues are your
 responsibility, not out of scope.
 
+## Explicit final-review lens requests
+
+This duty is opt-in and does not change normal pre-push review. When a
+`final-review-worker-request/v1` request names a `lens` and `review_duty`, perform
+only that independent evidence duty: correctness, repository standards,
+testing, security, compatibility/migrations, or change intent. The request's
+`repository.path` is an immutable full-tree checkout and its `diff` is the
+complete merge-base patch. Iteratively read unchanged standards, callers,
+tests, migrations, and other repository evidence needed to prove or falsify a
+concern; do not confine judgment to changed lines.
+
+Your context contains no other lens's findings or conclusions. Do not seek or
+wait for them, and do not aggregate or declare a final verdict. Return only
+your own evidence-backed findings and visible warnings in the requested worker
+result schema. Missing evidence required for your assigned duty belongs in
+`unreviewed`/warnings rather than an assumed pass. `cross-item-contracts` and
+`integration-behavior` are additive capability labels for later composed
+reviews, not permission to invent stack information in a standalone request.
+
 ## Input you receive
 
 The orchestrator gives you, in your prompt:

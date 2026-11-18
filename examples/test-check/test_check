@@ -1,0 +1,894 @@
+#!/usr/bin/env python3
+"""Reference test-check executor (SPEC-15.5): a selector-driven test runner.
+
+A gated repo copies this executable and ``rg_final_env.py`` in together
+(e.g. ``scripts/rg_test_check`` and ``scripts/rg_final_env.py``) and declares
+the executor as a command check in ``.ocr/config.json`` (see README.md next
+to this file):
+
+    "test-check": {"command": "scripts/rg_test_check", "globs": [...],
+                   "parallel": true, "timeout": 600, "mode": "block"}
+
+The gate runs it with cwd the check's own throwaway clone of the tip and the
+matched changed paths as a JSON array on stdin (the SPEC-15.4 command-check
+contract, scripts/review-gate.py ``_run_one_command_check``); the answer on
+stdout is ``{"findings": [...], "warnings": [...]}`` -- warnings entries are
+``{"file": <path-or-null>, "message": str}``, findings carry
+severity/confidence/path/content plus ``evidence_source``:
+
+* ``existing_test`` -- a repo test selected by the selector that failed,
+  was re-run, and failed AGAIN (reproduce-then-block); the finding quotes
+  the failing output verbatim.
+* ``ephemeral_test`` -- same, but the test was a throwaway probe authored
+  by the selector for changed behavior with no covering test. Every run
+  that attempted a probe also emits the canonical no-permanent-coverage
+  warning (see ``_coverage_warning``).
+
+The wrapper may also carry a ``telemetry`` object (SPEC-15.4): actual
+run counts -- ``selector_attempts``, ``tests_selected``, ``probes_authored``,
+``runs``, and ``reproduce_results`` (``fail``/``pass``/``flake``/``build``/
+``error``) -- which the gate merges into that check's command_checks
+telemetry entry. When the gate exports the per-check budget
+(``OCR_CHECK_TIMEOUT_S``) every internal timeout is clamped to finish
+BEFORE the gate's kill (a small grace margin is left for the answer
+write).
+
+Four phases:
+
+1. SELECT -- assemble a bounded manifest of the matched files (path, content
+   capped per file and in total, diff vs HEAD~1 when git can produce one) and
+   make ONE selector call (the cheap one-shot model, pinned) asking for a
+   STRICT JSON object ``{"existing_tests": [...], "probes": [{"name",
+   "language", "source", "run_cmd", "path"}]}``. Malformed output = ONE warning
+   "selector failed; no tests selected"; there is never a retry.
+2. RUN existing -- run each selected repo test with an inferred runner
+   (``go test -race`` for ``*_test.go``, pytest/plain python for test
+   ``*.py``, ``node --test`` for ``*.test.js``, ``sh`` for ``*.sh``); an
+   uninferrable runner is a warning, never a guess.
+3. RUN probes -- ONLY when step 2 selected no existing test (the
+   deterministic coverage rule: existing tests OR probes, never both).
+   When the selection names any existing test, the reply's probes are
+   discarded unauthored and unrun -- a re-push of a known defect must
+   reproduce the SAME finding a waiver was granted for, never mint a
+   semantically new ephemeral probe (new output, new anchor) every push.
+   Otherwise: write each probe's source into a scratch subdir of cwd
+   (``.test-check-probes/<nn>-<slug>/``, the executor's clone only: NEVER the
+   user's tree, never committed), execute its ``run_cmd`` there, then remove
+   the scratch dir.
+4. CLASSIFY -- reproduced failure (failed twice) -> finding; failed once then
+   passed -> flake warning; build/run error (syntax error, missing module,
+   unexecutable) or timeout -> warning; pass -> silent. Selector
+   authentication and publication/provider credentials are stripped before
+   untrusted tests/probes execute. Fail-soft everywhere: exit 0 unless stdin
+   itself violates the contract.
+
+Python 3, stdlib only. POSIX (probe run_cmd goes through /bin/sh).
+"""
+import hashlib
+import importlib.util
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+
+
+def _load_credential_scrubber():
+    """Load the portable sibling policy, or this checkout's canonical copy.
+
+    A copied installation has no review-gate checkout to fall back to. Missing
+    policy is therefore a hard startup error, never permission to run subjects
+    with an inherited environment or a second locally maintained scrub loop.
+    """
+    here = os.path.dirname(os.path.realpath(__file__))
+    sibling = os.path.join(here, "rg_final_env.py")
+    checkout = os.path.abspath(os.path.join(
+        here, os.pardir, os.pardir, "scripts", "rg_final_env.py"))
+    for candidate in (sibling, checkout):
+        if not os.path.isfile(candidate):
+            continue
+        spec = importlib.util.spec_from_file_location("rg_final_env", candidate)
+        if spec is None or spec.loader is None:
+            continue
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.scrub_environment
+    raise RuntimeError(
+        "test_check requires rg_final_env.py alongside the executable; "
+        "install both files as documented (credential scrubbing is mandatory)")
+
+
+scrub_environment = _load_credential_scrubber()
+
+# The selector model pin (grilling decision: cheap, one-shot -- a selection
+# failure must never slow the pipeline).
+MODEL = "deepseek-v4.1-flash"
+# One selector attempt, bounded: a model-plus-tests budget needs more than the
+# 60 s command-check default (the README recommends declaring timeout: 600).
+SELECTOR_TIMEOUT_S = 240.0   # env OCR_TEST_SELECTOR_TIMEOUT
+RUN_TIMEOUT_S = 180.0
+# The gate's per-check answer budget (OCR_CHECK_TIMEOUT_S, string seconds)
+# exported by _run_one_command_check. When present, every internal timeout
+# is clamped to finish BEFORE the gate's kill, leaving a small grace margin
+# (5 s or 5% of the budget, whichever is SMALLER, floored at 1 s) for
+# bookkeeping and the answer write. Absent (standalone runs) the knobs and
+# defaults stand unchanged.
+
+
+def _check_budget():
+    """The gate's per-check budget in seconds, or None when the executor
+    runs standalone (no OCR_CHECK_TIMEOUT_S in the environment)."""
+    try:
+        value = float(os.environ.get("OCR_CHECK_TIMEOUT_S", ""))
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def _clamp_to_budget(timeout):
+    """One internal timeout, clamped under the gate's per-check budget so
+    the phase finishes BEFORE the gate's kill (see _check_budget). Each
+    phase is bounded individually; the budget remains the hard outer bound
+    the gate enforces either way."""
+    budget = _check_budget()
+    if budget is None:
+        return timeout
+    grace = max(1.0, min(5.0, 0.05 * budget))
+    return max(1.0, min(timeout, budget - grace))
+# The manifest sent to the selector is bounded so one huge push cannot turn
+# into an unbounded model bill: per-file and total caps on content/diff text.
+MANIFEST_PER_FILE_CAP = 20000
+MANIFEST_TOTAL_CAP = 120000
+# A runaway selector cannot turn into an unbounded probe batch.
+MAX_PROBES = 10
+# A finding quotes verbatim output, trimmed -- and capped so a chatty test
+# suite cannot balloon the review stream.
+CONTENT_CAP = 8000
+# Simulation-only, explicit opt-in diagnostics. No path means no log file.
+DIAGNOSTICS_ENV = "OCR_TEST_DIAGNOSTICS_FILE"
+DIAGNOSTIC_RAW_CAP = 6000
+DIAGNOSTIC_SOURCE_CAP = 2048
+DIAGNOSTIC_COMMAND_CAP = 1000
+DIAGNOSTIC_OUTPUT_CAP = 2000
+# Probes live only here, inside the executor's own clone, and are removed
+# when the run ends (SPEC-15 "No gate-authored tests in the user's tree").
+PROBE_ROOT = ".test-check-probes"
+DEFAULT_SEVERITY = "high"    # env OCR_TEST_SEVERITY
+DEFAULT_CONFIDENCE = 0.9     # env OCR_TEST_CONFIDENCE
+# The file a probe's ``source`` is written to, by language. The name is part
+# of the selector contract: the model knows it when authoring ``run_cmd``.
+# A Go probe is a *_test.go in a directory INSIDE the repo's module, so
+# ``go test -race .`` in the probe dir uses the repo's own go.mod and can
+# import the repo's packages.
+PROBE_FILENAMES = {
+    "go": "probe_test.go",
+    "python": "probe_test.py",
+    "py": "probe_test.py",
+    "javascript": "probe.test.js",
+    "js": "probe.test.js",
+    "shell": "probe.sh",
+    "sh": "probe.sh",
+    "bash": "probe.sh",
+}
+# Output shapes that mean "this never became a running test": a probe (or
+# test) that cannot even compile is the selector's/environment's limitation,
+# never evidence about the push -- a warning, never a block (the SPEC-15
+# degrade contract). Matched case-insensitively against the combined output.
+_BUILD_ERROR_MARKERS = (
+    "syntaxerror",
+    "indentationerror",
+    "modulenotfounderror",
+    "build failed",
+    "[setup]",
+    "cannot find package",
+    "compilation failed",
+    "expected declaration",
+    "no required module provides",
+)
+
+_SELECTOR_PROMPT = """You are the test selector of a code review gate. You see
+ONE push's changed files (paths, diffs where git could produce them, contents
+at the tip). Never review the code: only decide what to EXECUTE to verify the
+push.
+
+Changed files:
+{manifest}
+
+Answer with a STRICT JSON object and nothing else (no markdown fences, no
+prose, no trailing text):
+{{"existing_tests": [<repo-relative paths of EXISTING test files worth running
+against this change; empty when none apply>],
+  "probes": [<throwaway probe objects>]}}
+Each probe object is {{"name": <short-slug string>, "language":
+"go"|"python"|"javascript"|"shell", "source": <the COMPLETE source file>,
+"run_cmd": <shell command string>, "path": <OPTIONAL repo-relative file
+whose behavior the probe targets; omit it when the probe targets the
+first matched file, which is the default>}}. The source is written verbatim to a file
+inside a scratch directory of the review clone (file name by language:
+go -> probe_test.go, python -> probe_test.py, javascript -> probe.test.js,
+shell -> probe.sh) and run_cmd executes with that directory as its cwd; the
+placeholder {{probe_file}} in run_cmd is replaced with the written file's
+name. Example probe: a Go test file exercising the changed behavior with the
+race detector, run_cmd "go test -race -count=1 ." (the probe directory lives
+inside the repo's module, so repo packages can be imported). The probe file
+is two scratch-directory levels below the clone root; resolve imports to that
+root rather than assuming the probe's cwd is the repository root.
+Every probe must directly call the changed public API with concrete inputs
+and assert behavior with an independently derived expected value or invariant
+from the contract, inputs, or operation counts. A sentinel such as 'ok' is an
+oracle only when that contract independently requires it; never compare an
+API result with itself, accept any non-None/truthy result, or turn the observed
+buggy value into the expectation. Import-only, print-only, and
+exit-without-assertion probes are invalid.
+When the changed behavior itself involves concurrency, use multiple
+independent invocations and assert shared-state and interleaving invariants,
+not one fortunate scheduler execution. Prefer deterministic test-owned
+barriers/events or the toolchain race detector where appropriate, keep all
+waits bounded, and emit only bounded observation/counter output (for example,
+a short list of exact final counts) that makes the failed invariant visible.
+Do not invent concurrency or races outside the changed behavior.
+Deterministic coverage rule, enforced by the executor: existing_tests OR
+probes, NEVER both. When existing_tests is non-empty, every probe in this
+reply is DISCARDED unauthored and unrun; probes execute only when
+existing_tests is empty. So prefer existing_tests whenever real coverage
+exists -- a partial existing test beats a probe: list it and drop the probe.
+Author a probe ONLY for changed behavior no existing test covers, and return
+an empty existing_tests array with it. Return both arrays empty when nothing
+is worth running."""
+
+
+_DIAGNOSTIC_SENSITIVE_KEY = (
+    r"(?:api[_-]?key|token|secret|password|credential|authorization|auth)"
+    r"[A-Za-z0-9_.-]*"
+)
+_DIAGNOSTIC_SECRET = re.compile(
+    rf"(?i)({_DIAGNOSTIC_SENSITIVE_KEY}\s*\\?[\"']?\s*[:=]\s*)"
+    r"(?!\[redacted\])"
+    r"(?:(\\?[\"'])(.*?)\2|([^\s,;\"'\}\]&]+))",
+    re.DOTALL,
+)
+_DIAGNOSTIC_AUTHORIZATION = re.compile(
+    r"(?i)(?<![A-Za-z0-9_])([A-Za-z0-9_-]{0,128}authorization"
+    r"\\?[\"']?\s*[:=]\s*\\?[\"']?)(?:basic|bearer)\s+[^\s,\"'\}\]]+",
+)
+_DIAGNOSTIC_BEARER = re.compile(r"(?i)\bbearer\s+[^\s,\"']+")
+_DIAGNOSTIC_POSIX_PATH = re.compile(
+    r"(?<![A-Za-z0-9_.-])/(?:[^/\s\"']+/)+[^/\s\"']*")
+_DIAGNOSTIC_WINDOWS_PATH = re.compile(
+    r"(?i)[a-z]:[\\/](?:[^\\/\s\"']+[\\/])+[^\\/\s\"']*")
+
+
+def _redact_diagnostic_assignment(match):
+    quote = match.group(2) or ""
+    return match.group(1) + quote + "[redacted]" + quote
+
+
+def _diagnostic_text(value, cap):
+    """Redact complete credentials, then bound one untrusted diagnostic string."""
+    text = str(value or "")
+    sensitive = ("TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "COOKIE",
+                 "PRIVATE_KEY", "API_KEY", "ASKPASS", "AUTHORIZATION", "AUTH")
+    known = [value for key, value in os.environ.items()
+             if len(value) >= 4 and any(part in key.upper() for part in sensitive)]
+    for secret in sorted(set(known), key=len, reverse=True):
+        text = text.replace(secret, "[redacted]")
+    text = _DIAGNOSTIC_AUTHORIZATION.sub(r"\1[redacted]", text)
+    text = _DIAGNOSTIC_BEARER.sub("[redacted]", text)
+    text = _DIAGNOSTIC_SECRET.sub(_redact_diagnostic_assignment, text)
+    text = _DIAGNOSTIC_WINDOWS_PATH.sub("<path>", text)
+    text = _DIAGNOSTIC_POSIX_PATH.sub("<path>", text)
+    text = "".join(char if char.isprintable() or char in "\n\t" else " "
+                   for char in text)
+    if len(text) <= cap:
+        return text
+    marker = "\n[...diagnostic truncated...]"
+    return text[:cap - len(marker)] + marker
+
+
+def _diagnostics_path():
+    path = os.environ.get(DIAGNOSTICS_ENV, "").strip()
+    return path if path and os.path.isabs(path) else ""
+
+
+def _write_diagnostics(path, diagnostics):
+    """Best-effort restricted capture; a log failure never affects the gate."""
+    if not path:
+        return
+    diagnostics["cleanup"] = {"probe_root_removed": not os.path.exists(PROBE_ROOT)}
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            os.fchmod(descriptor, 0o600)
+            json.dump(diagnostics, handle, sort_keys=True)
+            handle.write("\n")
+    except OSError as exc:
+        _note("diagnostics unavailable: %s" % type(exc).__name__)
+
+
+def _capture_run(capture, returncode, output, note=None):
+    if capture is not None:
+        capture.append({
+            "returncode": returncode,
+            "output": _diagnostic_text(output or note or "", DIAGNOSTIC_OUTPUT_CAP),
+        })
+
+
+def _note(message):
+    """Operator-debug line on stderr (per test, per probe, per phase). The
+    gate ignores stderr on success; a human running the executor by hand
+    sees the whole run."""
+    try:
+        sys.stderr.write("[test-check] " + message + "\n")
+    except Exception:  # noqa: BLE001 -- a log line must never crash the run
+        pass
+
+
+def _severity():
+    return os.environ.get("OCR_TEST_SEVERITY", "").strip() or DEFAULT_SEVERITY
+
+
+def _confidence():
+    try:
+        return float(os.environ.get("OCR_TEST_CONFIDENCE", ""))
+    except ValueError:
+        return DEFAULT_CONFIDENCE
+
+
+def _selector_timeout():
+    try:
+        value = float(os.environ.get("OCR_TEST_SELECTOR_TIMEOUT", ""))
+    except ValueError:
+        return _clamp_to_budget(SELECTOR_TIMEOUT_S)
+    return _clamp_to_budget(value if value > 0 else SELECTOR_TIMEOUT_S)
+
+
+def _run_timeout():
+    """The per-subject run budget, clamped under the gate's exported
+    per-check budget (see _clamp_to_budget)."""
+    return _clamp_to_budget(RUN_TIMEOUT_S)
+
+
+def _reproduce_key(outcome):
+    """The telemetry bucket a classified outcome lands in (the gate's
+    contract names fail/pass/flake/build/error)."""
+    return {"finding": "fail", "pass": "pass", "flake": "flake",
+            "build": "build", "error": "error", "timeout": "error"}[outcome]
+
+
+def _bump(counts, group, key=None):
+    """Count one event in the run's telemetry object (absent counts are
+    simply not tracked -- never invented)."""
+    if counts is None:
+        return
+    if key is None:
+        counts[group] = counts.get(group, 0) + 1
+    else:
+        counts.setdefault(group, {})[key] = counts[group].get(key, 0) + 1
+
+
+def _cap(text, cap):
+    """Trim to ``cap`` chars with an explicit marker -- verbatim within the
+    cap, never a silent truncation."""
+    if len(text) <= cap:
+        return text
+    return text[:cap] + "\n[...truncated at %d chars...]" % cap
+
+
+def _run(argv, cwd, timeout, stdin=None, env=None):
+    """(rc, combined_output, note): one bounded subprocess run, never an
+    exception. ``note`` is set only when argv could not be executed at all
+    (binary missing); a timeout is reported through rc None + output text
+    and is classified as a visible timeout gap by the caller."""
+    try:
+        proc = subprocess.run(argv, cwd=cwd, input=stdin, capture_output=True,
+                              text=True, errors="replace", timeout=timeout,
+                              env=env)
+        return (proc.returncode,
+                (proc.stdout or "") + (proc.stderr or ""), None)
+    except subprocess.TimeoutExpired as exc:
+        partial = ""
+        for chunk in (exc.stdout, exc.stderr):
+            partial += chunk if isinstance(chunk, str) else ""
+        return None, "(timed out after %gs)\n%s" % (timeout, partial), None
+    except OSError as exc:
+        return None, "", "could not execute %s: %s" % (argv[0], exc)
+
+
+def _git_output(args):
+    """(stdout, ok): a git query in cwd, or ("", False) when git is missing
+    or the query fails (e.g. HEAD~1 on a one-commit repo)."""
+    try:
+        proc = subprocess.run(["git"] + args, capture_output=True, text=True,
+                              errors="replace", timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return "", False
+    return proc.stdout or "", proc.returncode == 0
+
+
+def _read_text(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+
+
+def build_manifest(matched):
+    """The bounded selector manifest: one entry per matched path with the
+    content at the tip (capped per file and in total) and the HEAD~1..HEAD
+    diff when git can produce one. Once the total cap is spent, later entries
+    degrade to paths-only -- a huge push still gets a selection, just a
+    leaner one."""
+    entries, used = [], 0
+    for path in matched:
+        entry = {"path": path}
+        diff, ok = _git_output(
+            ["diff", "--no-color", "-M", "HEAD~1..HEAD", "--", path])
+        if ok and diff.strip():
+            entry["diff"] = _cap(diff, MANIFEST_PER_FILE_CAP)
+        content = _read_text(path)
+        if content is not None and used < MANIFEST_TOTAL_CAP:
+            entry["content"] = _cap(
+                content, min(MANIFEST_PER_FILE_CAP, MANIFEST_TOTAL_CAP - used))
+            used += len(entry["content"])
+        entries.append(entry)
+    return entries
+
+
+def _validate_selection(data):
+    """(existing_tests, probes) or None when the reply does not match the
+    strict schema. Missing keys default to empty arrays; anything else --
+    a non-object, a non-string entry, a probe missing one of its four string
+    fields -- is malformed, whole selection discarded, no partial trust."""
+    if not isinstance(data, dict):
+        return None
+    existing, probes = data.get("existing_tests", []), data.get("probes", [])
+    if not isinstance(existing, list) or any(
+            not isinstance(p, str) or not p.strip() for p in existing):
+        return None
+    if not isinstance(probes, list):
+        return None
+    for probe in probes:
+        if not isinstance(probe, dict):
+            return None
+        for key in ("name", "language", "source", "run_cmd"):
+            value = probe.get(key)
+            if not isinstance(value, str) or not value.strip():
+                return None
+    return existing, probes
+
+
+def call_selector(manifest, diagnostics=None):
+    """ONE selector attempt: (existing_tests, probes, failed). ``failed``
+    collapses every degrade path -- exec error, timeout, nonzero exit,
+    unparseable or schema-invalid reply -- into a single flag; the caller
+    emits exactly one warning and never retries.
+
+    The real call is the house headless shape (rg_jira_fetch.py):
+    ``kimchi -p <prompt> --no-session --mcp-config <temp file>`` with the
+    model pinned. OCR_TEST_SELECTOR_CMD replaces the whole invocation for
+    tests (the OCR_REVIEWER_CMD stub pattern); the stub receives the same
+    manifest JSON on stdin."""
+    payload = json.dumps(manifest, indent=1)
+    override = os.environ.get("OCR_TEST_SELECTOR_CMD", "").strip()
+    if override:
+        try:
+            argv = [t[1:-1] if len(t) > 1 and t[0] == t[-1]
+                    and t[0] in "\"'" else t
+                    for t in shlex.split(override, posix=False)]
+        except ValueError:
+            return None, None, True
+        if not argv:
+            return None, None, True
+        rc, reply, note = _run(argv, os.getcwd(), _selector_timeout(),
+                               stdin=payload)
+        if diagnostics is not None:
+            diagnostics["selector"]["raw_response"] = _diagnostic_text(
+                reply, DIAGNOSTIC_RAW_CAP)
+        if rc != 0 or note:
+            _note("selector stub failed (exit %s)" % rc)
+            return None, None, True
+    else:
+        binary = (os.environ.get("KIMCHI_BIN", "").strip()
+                  or shutil.which("kimchi") or "kimchi")
+        fd, tmp_path = tempfile.mkstemp(prefix="ocr-test-check-mcp-",
+                                        suffix=".json")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump({"mcpServers": {}}, fh)
+            argv = [binary, "-p",
+                    _SELECTOR_PROMPT.format(manifest=payload),
+                    "--no-session", "--model", MODEL,
+                    "--mcp-config", tmp_path]
+            _note("selector: %s (model %s)" % (binary, MODEL))
+            rc, reply, note = _run(argv, os.getcwd(), _selector_timeout())
+            if diagnostics is not None:
+                diagnostics["selector"]["raw_response"] = _diagnostic_text(
+                    reply, DIAGNOSTIC_RAW_CAP)
+            if rc != 0 or note:
+                _note("selector failed (exit %s)" % rc)
+                return None, None, True
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+    try:
+        data = json.loads(reply)
+        if diagnostics is not None:
+            diagnostics["selector"]["json"] = _diagnostic_text(
+                json.dumps(data, sort_keys=True), DIAGNOSTIC_RAW_CAP)
+    except ValueError:
+        _note("selector reply is not JSON")
+        return None, None, True
+    selection = _validate_selection(data)
+    if selection is None:
+        _note("selector reply failed schema validation")
+        return None, None, True
+    existing, probes = selection
+    if diagnostics is not None:
+        diagnostics["selector"]["valid"] = True
+    _note("selector: %d existing test(s), %d probe(s)"
+          % (len(existing), len(probes)))
+    return existing, probes, False
+
+
+_PYTEST = None
+
+
+def _pytest_available():
+    """Memoized: can this interpreter import pytest? Python test files run
+    under pytest when present, else as plain scripts."""
+    global _PYTEST
+    if _PYTEST is None:
+        try:
+            proc = subprocess.run([sys.executable, "-c", "import pytest"],
+                                 capture_output=True, timeout=30)
+            _PYTEST = proc.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            _PYTEST = False
+    return _PYTEST
+
+
+def _subject_environment():
+    """Credential-free environment for untrusted repo tests and probes.
+
+    Selector model authentication is needed only by the trusted selector
+    process.  Tests receive neither it nor publication/provider credentials.
+    Non-secret test knobs such as FLAKE_STATE remain available to fixtures.
+    """
+    environment = scrub_environment()
+    environment.pop(DIAGNOSTICS_ENV, None)
+    return environment
+
+
+def _runner_for(path):
+    """(argv, cwd, env) to run ONE existing repo test, or (None, reason)
+    when no runner can be inferred -- an unknown shape is a warning, never a
+    wild guess. Python runs get PYTHONDONTWRITEBYTECODE and pytest runs drop
+    the cache provider so a test run leaves no artifacts in the clone."""
+    base = os.path.basename(path)
+    directory = os.path.dirname(path) or "."
+    env = _subject_environment()
+    if base.endswith("_test.go"):
+        return (["go", "test", "-race", "-count=1", "."], directory, env)
+    if base.endswith((".test.js", ".test.mjs", ".test.cjs")):
+        return (["node", "--test", base], directory, env)
+    if base.endswith(".py"):
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        if _pytest_available():
+            return ([sys.executable, "-m", "pytest", "-q", "-p",
+                     "no:cacheprovider", base], directory, env)
+        return ([sys.executable, base], directory, env)
+    if base.endswith(".sh"):
+        return (["sh", base], directory, env)
+    return (None, None, "runner unknown for this file type")
+
+
+def _looks_like_build_error(output):
+    lowered = (output or "").lower()
+    return any(marker in lowered for marker in _BUILD_ERROR_MARKERS)
+
+
+def _execute_subject(argv, cwd, label, env=None, counts=None, capture=None):
+    """Run once, classify, and re-run a failure EXACTLY once (the
+    reproduce-then-block rule). Returns (outcome, first_output) with
+    outcome in {"pass", "finding", "flake", "build", "error", "timeout"}:
+
+    * pass        -- exited 0.
+    * finding     -- failed, re-run failed again: a reproduced failure.
+    * flake       -- failed, re-run passed: repro-free, demoted.
+    * build       -- failed with a compile/setup shape: never a block.
+    * error       -- could not be executed at all (missing binary).
+    * timeout     -- a subject exceeded its bound: dynamic evidence is unknown.
+    """
+    rc, out, note = _run(argv, cwd, _run_timeout(), env=env)
+    _capture_run(capture, rc, out, note)
+    _bump(counts, "runs")
+    _note("run %s -> exit %s" % (label, rc))
+    if rc is None and note:
+        _bump(counts, "reproduce_results", "error")
+        return "error", out or note
+    if rc is None:
+        _bump(counts, "timeouts")
+        _bump(counts, "reproduce_results", "error")
+        return "timeout", out
+    if rc == 0:
+        _bump(counts, "reproduce_results", "pass")
+        return "pass", out
+    if _looks_like_build_error(out):
+        _note("run %s classified as build/run error" % label)
+        _bump(counts, "reproduce_results", "build")
+        return "build", out
+    rc2, _out2, note2 = _run(argv, cwd, _run_timeout(), env=env)
+    _capture_run(capture, rc2, _out2, note2)
+    _bump(counts, "runs")
+    _note("re-run %s -> exit %s" % (label, rc2))
+    if rc2 is None and note2:
+        _bump(counts, "reproduce_results", "error")
+        return "error", out
+    if rc2 is None:
+        _bump(counts, "timeouts")
+        _bump(counts, "reproduce_results", "error")
+        return "timeout", out
+    if rc2 == 0:
+        _bump(counts, "reproduce_results", "flake")
+        return "flake", out
+    _bump(counts, "reproduce_results", "fail")
+    return "finding", out
+
+
+def _handle(outcome, out, kind, name, path, evidence, findings, warnings,
+             counts=None):
+    """Phase 4 for one subject: translate a classified outcome into the
+    findings/warnings contract. A reproduced failure is a finding quoting the
+    verbatim (trimmed, capped) output and naming the test; everything else
+    degrades to a warning or silence."""
+    if outcome == "pass":
+        return
+    if outcome == "error":
+        warnings.append({"file": path,
+                         "message": "%s %s could not be executed (%s); skipped"
+                                    % (kind, name, out.strip())})
+        return
+    if outcome == "timeout":
+        warnings.append({"file": path,
+                         "message": "%s %s timed out; the dynamic check was "
+                                    "demoted to a warning (no finding): %s"
+                                    % (kind, name, _cap(out.strip(),
+                                                        CONTENT_CAP))})
+        return
+    if outcome == "build":
+        warnings.append({"file": path,
+                         "message": "%s %s failed to build or run (the probe "
+                                    "never became a running test); demoted "
+                                    "to a warning: %s"
+                                    % (kind, name, _cap(out.strip(),
+                                                        CONTENT_CAP))})
+        return
+    if outcome == "flake":
+        warnings.append({"file": path,
+                         "message": "flaky %s %s: failed once and passed on "
+                                    "the re-run; demoted to a warning (no "
+                                    "finding)" % (kind, name)})
+        return
+    # outcome == "finding": failed twice -- reproduce-then-block (the
+    # reproduce_results counts are bumped in _execute_subject, the
+    # classifier, exactly once per classified subject).
+    findings.append({
+        "path": path,
+        "start_line": 1,
+        "end_line": 1,
+        "severity": _severity(),
+        "confidence": _confidence(),
+        "category": "test",
+        "content": "reproduced failure of %s %s (failed the run and the "
+                   "re-run):\n%s" % (kind, name, _cap(out.strip(),
+                                                     CONTENT_CAP)),
+        "evidence_source": evidence,
+    })
+
+
+def _coverage_warning(matched, probes):
+    """The canonical no-permanent-coverage warning. WORDING CONTRACT pinned
+    by the gate (SPEC-15.4 ``_COVERAGE_WARNING_RE``): the message must STATE
+    the lack -- a negation near "permanent test" / "coverage" -- or the gate
+    will not pair it with ephemeral_test findings. Both variants below match
+    the pinned example "no permanent test coverage for <paths>; ephemeral
+    probe was the only evidence"."""
+    paths = ", ".join(matched[:8])
+    if len(matched) > 8:
+        paths += " (+%d more)" % (len(matched) - 8)
+    paths = paths or "(no matched paths)"
+    if probes:
+        return ("no permanent test coverage for %s; ephemeral probe was "
+                "the only evidence" % paths)
+    return ("no permanent test coverage for %s; the selector found nothing "
+            "to run (no existing tests, no probes)" % paths)
+
+
+def _slug(name):
+    """A safe directory name for a probe: no path traversal, no spaces."""
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-.")[:40]
+    return slug or "probe"
+
+
+def run(matched):
+    """Execute with diagnostics only when the acceptance harness opted in."""
+    path = _diagnostics_path()
+    diagnostics = None
+    if path:
+        diagnostics = {
+            "schema": "test-check-selector-diagnostics/v1",
+            "selector": {"raw_response": "", "json": None, "valid": False},
+            "probes": [],
+        }
+    try:
+        return _run_with_diagnostics(matched, diagnostics)
+    finally:
+        _write_diagnostics(path, diagnostics)
+
+
+def _run_with_diagnostics(matched, diagnostics):
+    """The whole executor, fail-soft: returns (findings, warnings,
+    telemetry) -- telemetry is the SPEC-15.4 counts object the gate merges
+    into the check's command_checks entry: actual counts (selector
+    attempts, tests selected, probes authored, subject runs, reproduce
+    results), never invented numbers."""
+    findings, warnings = [], []
+    counts = {"selector_attempts": 0, "tests_selected": 0,
+              "probes_authored": 0, "runs": 0,
+              "reproduce_results": {"fail": 0, "pass": 0, "flake": 0,
+                                    "build": 0, "error": 0}}
+    manifest = build_manifest(matched)
+    _note("manifest: %d file(s), %d byte(s)"
+          % (len(manifest), len(json.dumps(manifest))))
+    counts["selector_attempts"] += 1   # exactly one, never retried
+    existing, probes, failed = call_selector(manifest, diagnostics=diagnostics)
+    if failed:
+        warnings.append({"file": None,
+                         "message": "selector failed; no tests selected"})
+        return findings, warnings, counts
+    ordered, seen = [], set()
+    for path in existing:
+        if path not in seen:
+            seen.add(path)
+            ordered.append(path)
+    # DETERMINISTIC COVERAGE RULE (SPEC-15): existing tests OR probes, never
+    # both. When the selection names any existing test, the executor runs
+    # those and DISCARDS the reply's probes -- they are never authored or
+    # run; probes run only when no existing test was selected. Without this
+    # rule every re-push of a known defect could mint a semantically new
+    # ephemeral finding (a fresh probe, fresh output, fresh anchor) that no
+    # waiver ever matches, so waiver acceptance could never stabilize; with
+    # it the re-push reproduces the same existing-test finding the waiver
+    # was granted for.
+    if ordered and probes:
+        _note("existing test(s) selected; discarding %d selector probe(s) "
+              "(probes run only when no existing test was selected)"
+              % len(probes))
+        probes = []
+    counts["tests_selected"] = len(ordered)
+    counts["probes_authored"] = len(probes)
+    if not ordered and not probes:
+        warnings.append({"file": None,
+                         "message": _coverage_warning(matched, probes=False)})
+    for path in ordered:
+        if not os.path.isfile(path):
+            warnings.append({"file": path,
+                             "message": "existing test not found in the "
+                                        "clone: %s" % path})
+            continue
+        argv, cwd, env = _runner_for(path)
+        if argv is None:
+            warnings.append({"file": path,
+                             "message": "skipped existing test %s: %s"
+                                        % (path, cwd)})
+            continue
+        outcome, out = _execute_subject(argv, cwd, path, env=env, counts=counts)
+        _handle(outcome, out, "existing test", path, path,
+                "existing_test", findings, warnings)
+    _run_probes(probes, matched, findings, warnings, counts, diagnostics)
+    return findings, warnings, counts
+
+
+def _run_probes(probes, matched, findings, warnings, counts=None, diagnostics=None):
+    """Phase 3 + the probe half of phase 4. Probe sources are materialized
+    ONLY inside ``.test-check-probes/`` under the executor's own cwd (the
+    throwaway clone), run there, and destroyed afterwards -- nothing is
+    committed and nothing ever reaches the user's tree."""
+    if not probes:
+        return
+    if len(probes) > MAX_PROBES:
+        warnings.append({"file": None,
+                         "message": "selector returned %d probes; only the "
+                                    "first %d were run" % (len(probes),
+                                                            MAX_PROBES)})
+        probes = probes[:MAX_PROBES]
+    # Any probe attempt means the push's evidence for that behavior rested
+    # on an ephemeral test: the canonical coverage warning rides along
+    # whether the probe passed, failed, or never built.
+    warnings.append({"file": None,
+                     "message": _coverage_warning(matched, probes=True)})
+    default_path = matched[0] if matched else ""
+    try:
+        for index, probe in enumerate(probes):
+            name = _slug(probe["name"])
+            language = probe["language"].strip().lower()
+            filename = PROBE_FILENAMES.get(language)
+            record = {
+                "name": name, "language": language,
+                "source_excerpt": _diagnostic_text(
+                    probe["source"], DIAGNOSTIC_SOURCE_CAP),
+                "source_sha256": hashlib.sha256(
+                    probe["source"].encode("utf-8")).hexdigest(),
+                "source_chars": len(probe["source"]),
+                "run_command": _diagnostic_text(
+                    probe["run_cmd"].replace("{probe_file}", filename or ""),
+                    DIAGNOSTIC_COMMAND_CAP),
+                "outcome": "skipped", "runs": [],
+            }
+            if diagnostics is not None:
+                diagnostics["probes"].append(record)
+            if filename is None:
+                warnings.append({"file": default_path,
+                                 "message": "probe %s skipped: unknown "
+                                            "language %r"
+                                            % (name, probe["language"])})
+                continue
+            directory = os.path.join(PROBE_ROOT, "%02d-%s" % (index + 1, name))
+            os.makedirs(directory, exist_ok=True)
+            with open(os.path.join(directory, filename), "w",
+                      encoding="utf-8") as fh:
+                fh.write(probe["source"])
+            run_cmd = probe["run_cmd"].replace("{probe_file}", filename)
+            _note("probe %s: source at %s, run_cmd %r"
+                  % (name, os.path.join(directory, filename), run_cmd))
+            path = probe.get("path")
+            if not isinstance(path, str) or not path.strip():
+                path = default_path or name
+            outcome, out = _execute_subject(
+                ["/bin/sh", "-c", run_cmd], directory, name,
+                env=_subject_environment(), counts=counts, capture=record["runs"])
+            record["outcome"] = outcome
+            _handle(outcome, out, "ephemeral probe", name, path,
+                    "ephemeral_test", findings, warnings)
+    finally:
+        shutil.rmtree(PROBE_ROOT, ignore_errors=True)
+
+
+def main():
+    try:
+        matched = json.loads(sys.stdin.read())
+    except ValueError:
+        sys.stderr.write("test_check: stdin must be the matched changed "
+                         "paths as a JSON array\n")
+        return 2
+    if not isinstance(matched, list) or any(
+            not isinstance(p, str) for p in matched):
+        sys.stderr.write("test_check: stdin must be a JSON array of path "
+                         "strings\n")
+        return 2
+    try:
+        findings, warnings, telemetry = run(matched)
+    except Exception as exc:  # noqa: BLE001 -- fail-soft: never raise out
+        findings, warnings = [], [{"file": None,
+                                   "message": "test-check executor failed "
+                                              "internally (%s: %s); no "
+                                              "findings"
+                                              % (type(exc).__name__, exc)}]
+        telemetry = {"selector_attempts": 1}   # what actually happened
+        _note("internal failure: %s: %s" % (type(exc).__name__, exc))
+    json.dump({"findings": findings, "warnings": warnings,
+               "telemetry": telemetry}, sys.stdout)
+    sys.stdout.write("\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
