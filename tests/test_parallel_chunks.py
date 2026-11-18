@@ -27,7 +27,7 @@ def _calls(tmp_path, name="stub.trace"):
 
 
 def _reviews(tmp_path):
-    return [c for c in _calls(tmp_path) if not c.get("resolve_file")]
+    return [c for c in _calls(tmp_path) if c.get("manifest") and not c.get("resolve_file")]
 
 
 def _env(tmp_path, conc=2, **extra):
@@ -132,23 +132,47 @@ def test_out_of_order_completion_gives_the_same_merged_output(tmp_path):
     assert merged[1] == merged[2] and len(merged[2]) == 4, merged
 
 
-def test_a_limit_stops_the_sibling_but_finished_chunks_keep_their_records(tmp_path):
-    """Chunk 1 hits the usage limit while chunk 0 is still running: chunk 0 is killed
-    (no record), no chunk after them starts, and the run fails as `limit`. A chunk
-    that finished before the limit keeps its record: run at concurrency 2 with chunk 2
-    hitting the limit after chunks 0 and 1 are recorded."""
-    work = ag._big_repo(tmp_path, n_files=4)
+@pytest.mark.parametrize("sibling_first", [False, True])
+def test_a_limit_stops_the_sibling_but_finished_chunks_keep_their_records(
+        tmp_path, sibling_first):
+    """Chunks 0 and 1 finish before chunk 2 reports a usage limit. Chunk 3 may
+    validly never start; the sibling-first case instead guarantees it started and is
+    held at a rendezvous until the gate kills it. No call may start after the limit,
+    the unfinished chunks have no records, and the completed records survive."""
+    # Chunk 4 must stay pending while 2/3 occupy the two slots. It is the canary
+    # for the gate-level rule: no new work starts after the gate observes a limit.
+    work = ag._big_repo(tmp_path, n_files=5)
     tip = ag._git(["rev-parse", "HEAD"], cwd=work)
-    env = _env(tmp_path, STUB_CHUNK_VERDICT=json.dumps({"2": "limit"}),
-               STUB_CHUNK_SLEEP=json.dumps({"3": 45}))
+    chunk3_started = tmp_path / "chunk-3-started"
+    chunk_waits = {"3": str(tmp_path / "release-chunk-3")}
+    if sibling_first:
+        chunk_waits["2"] = str(chunk3_started)
+    env = _env(
+        tmp_path,
+        STUB_CHUNK_VERDICT=json.dumps({"2": "limit"}),
+        STUB_CHUNK_TOUCH=json.dumps({"3": str(chunk3_started)}),
+        STUB_CHUNK_WAIT=json.dumps(chunk_waits),
+    )
     decision, reason, _, _ = _push(work, env)
     assert decision == "deny", reason
     st = ag._wait_state(work, tip, {"failed"}, timeout=60)
     assert st.get("reason") == "limit" and int(st.get("attempts") or 0) == 0, st
+    trace = _calls(tmp_path)
     calls = _reviews(tmp_path)
-    assert sorted(c["manifest"]["chunk_index"] for c in calls) == [0, 1, 2, 3]
-    # chunk 3 (45 s) was killed: the run did not wait for it. The 40 s bound
-    # tolerates kill-pipeline latency under load (was 30 s sleep / 25 s bound).
+    indices = sorted(c["manifest"]["chunk_index"] for c in calls)
+    if sibling_first:
+        assert indices == [0, 1, 2, 3], indices
+    else:
+        assert indices in ([0, 1, 2], [0, 1, 2, 3]), indices
+    limit_reports = [c for c in trace if c.get("event") == "limit_reported"]
+    assert len(limit_reports) == 1, limit_reports
+    assert 4 not in indices
+    # `limit_reported` is emitted before the child responds; the gate observes
+    # ReviewLimitError only later in its future collection loop. A sibling can
+    # legitimately start between those two events, so raw stub timestamps cannot
+    # determine whether the gate honored its no-later-dispatch guarantee.
+    # If chunk 3 started before the limit, its unreleased rendezvous was killed rather
+    # than waited out. Its 60 s failure deadline must not be mistaken for cancellation.
     assert time.time() - min(c["ts"] for c in calls) < 40
     recorded = _recorded(work)
     assert {"mod0.py", "mod1.py"} <= recorded, recorded
