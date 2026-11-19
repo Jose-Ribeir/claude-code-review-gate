@@ -7,6 +7,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Opt-in native review execution (SPEC-16).** Explicit final and deep reviews
+  can use correlated `prompt`/`abort` JSONL RPC workers with explicit run/task
+  identities, per-worker and whole-run deadlines, and bounded process cleanup.
+  Independent inference and repository execution slots schedule mandatory lenses
+  and tests without a unit barrier. Supervisors fence late results before durable
+  artifact publication, resume valid legacy deep journals, and accept unquoted
+  numeric CI matrix scalars. Deep native execution remains opt-in while #21
+  real-session acceptance is incomplete. Configuration and failure meanings are
+  documented in `docs/native-review-operations.md`.
 - **Explicit final whole-stack review (ADR 0008, SPEC-16).**
   `review-gate.py final-review <ref>…` reviews provider-pinned, immutable
   complete trees rather than local working-tree content: every explicitly

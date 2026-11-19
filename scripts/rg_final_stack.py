@@ -293,8 +293,16 @@ def _run_unit(store, identity, graph, unit_key, unit_id, *, item=None, composed=
 
             execution = execute_unit(
                 request, isolated_worker, unit_id=unit_id,
-                required_runner=required_runner or run_required_verification,
-                dynamic_runner=dynamic_runner or run_dynamic_checks,
+                required_runner=(
+                    native_execution.required_runner(request)
+                    if native_execution is not None
+                    else required_runner or run_required_verification
+                ),
+                dynamic_runner=(
+                    native_execution.dynamic_runner(request)
+                    if native_execution is not None
+                    else dynamic_runner or run_dynamic_checks
+                ),
                 dynamic_kwargs=dynamic_kwargs, environ=environ,
             )
             aggregation = execution.aggregation
@@ -628,6 +636,9 @@ def run_final_stack(references, *, repo_root=None, provider=None, store_path=Non
             native_execution = NativeStandaloneExecution(
                 store, host, environ=environ, run_id=run_id,
                 prompt_factory=standalone._worker_prompt,
+                required_runner=required_runner or standalone.run_required_verification,
+                dynamic_runner=dynamic_runner or run_dynamic_checks,
+                dynamic_kwargs=options,
             )
         common = {
             "worker": worker, "environ": environ, "repo_root": repo_root,

@@ -410,7 +410,7 @@ def test_native_multi_reference_stack_uses_global_native_execution_without_fallb
         unit["unit_id"] for unit in output["units"]
     }
     assert len(harness.required_calls) == len(harness.dynamic_calls) == 5
-    assert task_counts_at_required == [35] * 5
+    assert task_counts_at_required == [7, 14, 21, 28, 35]
     requests = [native_request(task) for task in host.tasks]
     for unit_key in ("combined", "prospective"):
         composed = [request for request in requests if request["unit_key"] == unit_key]
@@ -421,7 +421,14 @@ def test_native_multi_reference_stack_uses_global_native_execution_without_fallb
                    for request in composed)
     with FinalStore(output["store_path"]) as store:
         report = store.machine_report(output["run_id"])
-        assert len(report["native_tasks"]) == 35
+        lens_tasks = [task for task in report["native_tasks"]
+                      if task["identity"]["stage"].startswith("lens:")]
+        execution_tasks = [task for task in report["native_tasks"]
+                           if task["identity"]["stage"].startswith("execution:")]
+        assert len(lens_tasks) == 35
+        assert all(len(task["artifacts"]) == 1 for task in lens_tasks)
+        assert len(execution_tasks) == 10
+        assert all(not task["artifacts"] for task in execution_tasks)
         assert all(len(unit["lenses"]) == 7 for unit in report["units"])
         assert all(unit["tests"] for unit in report["units"])
 
@@ -576,7 +583,7 @@ def test_native_stack_expiry_notifies_every_unit_without_running_tests(
     for unit in outputs[0]["units"]:
         unit_progress = [line for line in progress
                          if f": {unit['unit_id']}/" in line]
-        assert len(unit_progress) == len(REQUIRED_LENS_NAMES)
+        assert len(unit_progress) == len(REQUIRED_LENS_NAMES) + 2
         assert all(line.endswith(" cancelled") for line in unit_progress)
 
 
@@ -611,7 +618,7 @@ def test_native_stack_stop_skips_all_registered_descendants_without_waiting(
                 if line.startswith("review-gate final-review native:")]
     for unit in output["units"][2:]:
         unit_progress = [line for line in progress if f": {unit['unit_id']}/" in line]
-        assert len(unit_progress) == len(REQUIRED_LENS_NAMES)
+        assert len(unit_progress) == len(REQUIRED_LENS_NAMES) + 2
         assert all(line.endswith(" skipped") for line in unit_progress)
 
 

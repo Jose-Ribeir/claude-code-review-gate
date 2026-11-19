@@ -129,11 +129,18 @@ def main(argv):
         return 0
     if cli == ["--help"]:
         sys.stdout.write(
-            "-p --mode --no-session --no-approve --approve --no-auto-update "
+            "-p --mode rpc --no-session --no-approve --approve --no-auto-update "
             "--model --mcp-config --allow-tool --deny-tool -e\n"
         )
         return 0
-    prompt = cli[cli.index("-p") + 1] if "-p" in cli and cli.index("-p") + 1 < len(cli) else ""
+    rpc_id = None
+    rpc_mode = "--mode" in cli and cli[cli.index("--mode") + 1] == "rpc"
+    if rpc_mode:
+        command = json.loads(sys.stdin.buffer.readline())
+        rpc_id = command["id"]
+        prompt = command["message"]
+    else:
+        prompt = cli[cli.index("-p") + 1] if "-p" in cli and cli.index("-p") + 1 < len(cli) else ""
     trace = os.environ.get("FAKE_TRACE")
     if trace:
         with open(trace, "a", encoding="utf-8") as fh:
@@ -165,6 +172,31 @@ def main(argv):
         child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
         with open(os.environ["FAKE_TIMEOUT_CHILD"], "w", encoding="utf-8") as fh:
             fh.write(str(child.pid))
+        if rpc_mode:
+            sys.stdout.write(json.dumps({
+                "id": rpc_id, "type": "response", "command": "prompt",
+                "success": True, "data": {"disposition": "started"},
+            }) + "\n" + json.dumps({
+                "type": "message_end", "message": {
+                    "role": "assistant", "stopReason": "stop",
+                    "content": [{"type": "text", "text": "api_key=stdout-secret"}],
+                },
+            }) + "\n")
+            sys.stdout.flush()
+            sys.stderr.write("model tool failed: bearer stderr-secret\n")
+            sys.stderr.flush()
+            while True:
+                line = sys.stdin.buffer.readline()
+                if not line:
+                    return 0
+                abort = json.loads(line)
+                if abort["type"] == "abort":
+                    sys.stdout.write(json.dumps({
+                        "id": abort["id"], "type": "response", "command": "abort",
+                        "success": True,
+                    }) + "\n" + json.dumps({"type": "agent_settled", "aborted": True}) + "\n")
+                    sys.stdout.flush()
+                    return 0
         sys.stdout.write(json.dumps({
             "type": "model_tool", "status": "api_key=stdout-secret",
         }) + "\n")
@@ -197,7 +229,23 @@ def main(argv):
                 "completed_duties": task["duties"],
             }
             output = json.dumps(payload)
-    sys.stdout.write(_wrap(flavor, output))
+    if rpc_mode:
+        sys.stdout.write(json.dumps({
+            "id": rpc_id, "type": "response", "command": "prompt",
+            "success": True, "data": {"disposition": "started"},
+        }) + "\n" + json.dumps({
+            "type": "message_end", "message": {
+                "role": "assistant", "stopReason": "stop",
+                "content": [{"type": "text", "text": output}],
+            },
+        }) + "\n" + json.dumps({
+            "type": "agent_end", "messages": [], "willRetry": False,
+        }) + "\n" + json.dumps({"type": "agent_settled", "aborted": False}) + "\n")
+        sys.stdout.flush()
+        while sys.stdin.buffer.readline():
+            pass
+    else:
+        sys.stdout.write(_wrap(flavor, output))
     return 0
 
 

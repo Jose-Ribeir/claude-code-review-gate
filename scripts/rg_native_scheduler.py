@@ -14,6 +14,11 @@ from rg_run_lifecycle import RunDeadlineExpired
 _TERMINAL_STATES = frozenset(("completed", "failed", "cancelled", "skipped"))
 
 
+def _event_id(task, kind):
+    prefix = "scheduler" if task.attempt == 1 else f"scheduler:attempt-{task.attempt}"
+    return f"{prefix}:{kind}:{task.task_id}"
+
+
 @dataclass(frozen=True)
 class SchedulerTask:
     """One native worker and its scheduler-owned resource/dependency metadata."""
@@ -22,6 +27,7 @@ class SchedulerTask:
     resource: str = "inference"
     dependencies: Tuple[str, ...] = ()
     speculative: bool = False
+    publish_artifact: bool = True
 
 
 @dataclass(frozen=True)
@@ -34,6 +40,7 @@ class ScheduledResult:
     eligible: bool
     error: Optional[str] = None
     source_artifact: Optional[NativeArtifact] = None
+    output: Optional[dict] = None
 
 
 @dataclass
@@ -45,17 +52,20 @@ class _Entry:
     handle: object = None
     artifact: Optional[NativeArtifact] = None
     source_artifact: Optional[NativeArtifact] = None
+    output: Optional[dict] = None
     error: Optional[str] = None
     eligible: bool = True
     callback_received: bool = False
     completion_notified: bool = False
     finalized: bool = False
+    fence_recorded: bool = False
+    cleanup_recorded: bool = False
 
     def result(self):
         return ScheduledResult(
             task=self.definition, state=self.state, artifact=self.artifact,
             eligible=self.eligible, error=self.error,
-            source_artifact=self.source_artifact,
+            source_artifact=self.source_artifact, output=self.output,
         )
 
 
@@ -64,12 +74,14 @@ class NativeScheduler:
 
     def __init__(self, executor: NativeExecutor, *, store=None, clock=time.time,
                  inference_limit=4, execution_limit=2, stop_validator=validate_stop,
-                 on_start=None, on_completion=None, on_finalized=None):
+                 on_start=None, on_completion=None, on_finalized=None,
+                 execution_executor=None):
         for name, value in (("inference_limit", inference_limit),
                             ("execution_limit", execution_limit)):
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
         self._executor = executor
+        self._execution_executor = execution_executor
         self._store = executor.store if store is None else store
         self._clock = clock
         self._stop_validator = stop_validator
@@ -83,13 +95,21 @@ class NativeScheduler:
         self._runs = {}
         self._lock = threading.RLock()
 
+    def _engine(self, entry):
+        if entry.definition.resource == "execution" and self._execution_executor is not None:
+            return self._execution_executor
+        return self._executor
+
+    def _run_state(self, run_id):
+        return self._runs.setdefault(run_id, {
+            "closed": False, "finalized": False, "cancelled": None, "cleaning": False,
+            "stopped": set(),
+        })
+
     def submit(self, definition: SchedulerTask, *, on_finalize=None, on_complete=None):
         task = definition.task
         with self._lock:
-            run = self._runs.setdefault(task.run_id, {
-                "closed": False, "finalized": False, "cancelled": None, "cleaning": False,
-                "stopped": set(),
-            })
+            run = self._run_state(task.run_id)
             if run["closed"] or run["cancelled"] is not None:
                 raise RuntimeError(f"run {task.run_id} is closed or cancelled")
             if task.task_id in self._entries:
@@ -129,7 +149,9 @@ class NativeScheduler:
                 continue
             ancestors.add(task_id)
             pending.extend(self._entries[task_id].definition.dependencies)
-        return all(self._entries[task_id].state == "completed" for task_id in ancestors)
+        # Ordinary failures preserve independent work. Only dependency terminality
+        # gates dispatch; trusted STOP eligibility is handled separately.
+        return all(self._entries[task_id].state in _TERMINAL_STATES for task_id in ancestors)
 
     def _drain(self):
         while True:
@@ -148,7 +170,7 @@ class NativeScheduler:
                 entry.state = "running"
                 self._active[entry.definition.resource] += 1
             try:
-                handle = self._executor.start(
+                handle = self._engine(entry).start(
                     entry.definition.task,
                     lambda completion, current=entry: self._completed(current, completion),
                 )
@@ -168,10 +190,10 @@ class NativeScheduler:
                     task = entry.definition.task
                     self._store.record_native_event({
                         "schema": "native-review-event/v1",
-                        "event_id": "scheduler:launch-failed:" + task.task_id,
+                        "event_id": _event_id(task, "launch-failed"),
                         "event_type": "failed",
                         "identity": task.identity(),
-                        "transport": self._executor.transport,
+                        "transport": self._engine(entry).transport,
                         "native_session_id": None,
                         "timing": {
                             "occurred_at_unix": self._clock(),
@@ -239,6 +261,24 @@ class NativeScheduler:
         if callback is not None:
             callback(entry.result())
 
+    def _record_supervisor_failure(self, entry, error):
+        if self._store is None:
+            return
+        task = entry.definition.task
+        self._store.record_native_event({
+            "schema": "native-review-event/v1",
+            "event_id": _event_id(task, "failed"),
+            "event_type": "failed",
+            "identity": task.identity(),
+            "transport": self._engine(entry).transport,
+            "native_session_id": entry.handle.native_session_id if entry.handle else None,
+            "timing": {
+                "occurred_at_unix": self._clock(), "started_at_unix": None,
+                "finished_at_unix": None, "duration_seconds": None,
+            },
+            "details": {"error": error, "publication": "rejected"},
+        })
+
     def _completed(self, entry, completion):
         with self._lock:
             if entry.state != "running" or entry.callback_received:
@@ -249,6 +289,11 @@ class NativeScheduler:
         stop = None
         error = completion.error
         state = completion.state
+        output = None
+        if completion.state == "completed" and artifact is not None and \
+                not entry.definition.publish_artifact:
+            output = artifact.payload.get("execution_result")
+            artifact = None
         if completion.state == "completed" and artifact is not None:
             try:
                 if self._store is None:
@@ -259,22 +304,32 @@ class NativeScheduler:
                     "native-completion:" + entry.definition.task.task_id,
                     artifact=artifact.as_dict(),
                     received_at_unix=self._clock(),
+                    artifact_path=entry.definition.task.artifact_path,
                 )
             except Exception as exc:
                 artifact = None
                 stop = None
                 state = "failed"
                 error = f"native supervisor rejected completion: {exc}"
+                try:
+                    self._record_supervisor_failure(entry, error)
+                except Exception as event_exc:
+                    error += f"; native failure event failed: {event_exc}"
         with self._lock:
             entry.state = state
             entry.artifact = artifact
             entry.source_artifact = source_artifact
+            entry.output = output
             entry.error = error
             self._active[entry.definition.resource] -= 1
+        run_id = entry.definition.task.run_id
+        with self._lock:
+            run_cancelled = self._runs[run_id]["cancelled"] is not None
+        if run_cancelled:
+            self._record_cleanup(entry, self._runs[run_id]["cancelled"])
         if state == "cancelled":
             self.cancel_run(
-                entry.definition.task.run_id,
-                completion.details.get("reason") or "operator-cancelled",
+                run_id, completion.details.get("reason") or "operator-cancelled",
             )
         if stop is not None and entry.eligible:
             self._apply_stop(entry, stop)
@@ -286,57 +341,75 @@ class NativeScheduler:
 
     def _maybe_finalize(self, run_id):
         callbacks = []
-        newly_finalized = False
         with self._lock:
             run = self._runs[run_id]
-            if run["cancelled"] is not None:
-                if run["cleaning"]:
-                    return False
-                newly_finalized = not run["finalized"]
-                run["finalized"] = True
-            else:
-                if not run["closed"] or run["finalized"] or run["cleaning"]:
-                    return run["finalized"]
-                entries = [entry for entry in self._entries.values()
-                           if entry.definition.task.run_id == run_id]
-                if any(entry.state not in _TERMINAL_STATES for entry in entries):
-                    return False
-                newly_finalized = True
-                run["finalized"] = True
-                for entry in entries:
-                    entry.finalized = True
-                    if entry.eligible and entry.state == "completed" and \
-                            entry.on_finalize is not None:
-                        callbacks.append((entry.on_finalize, entry.result()))
+            if run["finalized"] or run["cleaning"]:
+                return run["finalized"]
+            if run["cancelled"] is None and not run["closed"]:
+                return False
+            entries = [entry for entry in self._entries.values()
+                       if entry.definition.task.run_id == run_id]
+            if any(entry.state not in _TERMINAL_STATES for entry in entries):
+                return False
+            for entry in entries:
+                self._record_finalization(entry, run["cancelled"])
+            run["finalized"] = True
+            for entry in entries:
+                entry.finalized = True
+                if run["cancelled"] is None and entry.eligible and \
+                        entry.state == "completed" and entry.on_finalize is not None:
+                    callbacks.append((entry.on_finalize, entry.result()))
         for callback, result in callbacks:
             callback(result)
-        if newly_finalized and self._on_finalized is not None:
+        if self._on_finalized is not None:
             self._on_finalized(run_id)
         return True
 
-    def _record_cleanup(self, entry, reason):
+    def _record_lifecycle(self, entry, suffix, event_type, reason):
         if self._store is None:
             return
         task = entry.definition.task
         self._store.register_native_task({
             "schema": "native-review-task/v1",
             "identity": task.identity(),
-            "transport": self._executor.transport,
+            "transport": self._engine(entry).transport,
         })
         occurred = self._clock()
         self._store.record_native_event({
             "schema": "native-review-event/v1",
-            "event_id": "scheduler:cleanup:" + task.task_id,
-            "event_type": "cleanup",
+            "event_id": _event_id(task, suffix),
+            "event_type": event_type,
             "identity": task.identity(),
-            "transport": self._executor.transport,
-            "native_session_id": None,
+            "transport": self._engine(entry).transport,
+            "native_session_id": (
+                entry.handle.native_session_id if entry.handle else task.session_name
+            ),
             "timing": {
                 "occurred_at_unix": occurred, "started_at_unix": None,
                 "finished_at_unix": None, "duration_seconds": None,
             },
             "details": {"reason": reason, "resource": entry.definition.resource},
         })
+
+    def _record_fence(self, entry, reason):
+        with self._lock:
+            if entry.fence_recorded:
+                return
+            entry.fence_recorded = True
+        event_type = "timeout" if "deadline" in str(reason) else "cancelled"
+        self._record_lifecycle(entry, "fence", event_type, reason)
+
+    def _record_cleanup(self, entry, reason):
+        with self._lock:
+            if entry.cleanup_recorded:
+                return
+            entry.cleanup_recorded = True
+        self._record_lifecycle(entry, "cleanup", "cleanup", reason)
+
+    def _record_finalization(self, entry, reason):
+        self._record_lifecycle(
+            entry, "finalization", "finalization", reason or "run-closed",
+        )
 
     def cancel_run(self, run_id, reason="operator-cancelled"):
         """Fence one run and cancel only its exact native session handles."""
@@ -349,18 +422,23 @@ class NativeScheduler:
             entries = [entry for entry in self._entries.values()
                        if entry.definition.task.run_id == run_id]
             handles = []
+            cancelled_entries = []
             for entry in entries:
                 entry.eligible = False
+                if entry.state in ("queued", "waiting", "running"):
+                    cancelled_entries.append(entry)
                 if entry.state in ("queued", "waiting"):
                     entry.state = "cancelled"
                     if entry in self._pending:
                         self._pending.remove(entry)
                 elif entry.state == "running" and entry.handle is not None:
                     handles.append(entry.handle)
+        for entry in cancelled_entries:
+            self._record_fence(entry, reason)
         for handle in handles:
             handle.cancel()
-        for entry in entries:
-            if entry.state not in ("completed", "failed", "skipped"):
+        for entry in cancelled_entries:
+            if entry.state in _TERMINAL_STATES:
                 self._record_cleanup(entry, reason)
         for entry in entries:
             if entry.state in _TERMINAL_STATES:
@@ -375,13 +453,13 @@ class NativeScheduler:
     def close_run(self, run_id):
         """Close admission and finalize only after every submitted task is terminal."""
         with self._lock:
-            self._runs[run_id]["closed"] = True
+            self._run_state(run_id)["closed"] = True
         self._drain()
         return self._maybe_finalize(run_id)
 
     def snapshot(self, run_id):
         with self._lock:
-            run = self._runs[run_id]
+            run = self._run_state(run_id)
             return {
                 "run_id": run_id,
                 "closed": run["closed"],

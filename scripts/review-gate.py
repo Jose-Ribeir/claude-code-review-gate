@@ -3868,7 +3868,7 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
     # skew.
     started_at = time.time()
     started_mono = time.monotonic()
-    deep_transport = os.environ.get("OCR_DEEP_TRANSPORT", "native").strip().lower()
+    deep_transport = os.environ.get("OCR_DEEP_TRANSPORT", "legacy").strip().lower()
     if native and deep_transport not in ("native", "legacy"):
         raise ReviewGateError("OCR_DEEP_TRANSPORT must be 'native' or 'legacy'")
     if native and deep_transport == "native" and not stub and launch.name == "kimchi":
@@ -4109,7 +4109,9 @@ def _run_native_process(kimi, prompt, repo_root, head_sha, push_range, timeout,
                         run_id, common_dir, child_env, started_at, git_dir,
                         resolve_file):
     """Run the one monolithic legacy deep task through the shared native host."""
+    from dataclasses import replace
     from rg_final_review import _PIPE_CLOSE_TIMEOUT, _REAP_TIMEOUT
+    from rg_legacy_deep import LegacyDeepStore
     from rg_native_executor import KimchiNativeHost, NativeExecutor, NativeTask
     from rg_run_lifecycle import RunDeadline
 
@@ -4135,9 +4137,48 @@ def _run_native_process(kimi, prompt, repo_root, head_sha, push_range, timeout,
     )
     completions = []
     delivered = threading.Event()
+    deadline_logged = threading.Event()
+
+    def log_deadline(details):
+        if deadline_logged.is_set():
+            return
+        deadline_logged.set()
+        _supervisor_event(
+            native_run_id, "deadline-exceeded",
+            expiry_count=details.get("expiry_count") or 0,
+            owned_cancellation_count=details.get("owned_cancellation_count") or 0,
+        )
 
     def completed(completion):
+        if completion.state == "completed":
+            try:
+                store.commit_native_artifact(
+                    task.identity(), "native-completion:" + task.task_id,
+                    artifact=completion.artifact.as_dict(),
+                    received_at_unix=time.time(), artifact_path=artifact_path,
+                )
+            except Exception as exc:
+                error = f"native supervisor rejected completion: {exc}"
+                store.record_native_event({
+                    "schema": "native-review-event/v1",
+                    "event_id": "legacy-supervisor-failed:" + task.task_id,
+                    "event_type": "failed",
+                    "identity": task.identity(),
+                    "transport": completion.handle.transport,
+                    "native_session_id": completion.handle.native_session_id,
+                    "timing": {
+                        "occurred_at_unix": time.time(), "started_at_unix": None,
+                        "finished_at_unix": None, "duration_seconds": None,
+                    },
+                    "details": {"error": error},
+                })
+                completion = replace(
+                    completion, state="failed", artifact=None, error=error,
+                    details={**completion.details, "error": error},
+                )
         completions.append(completion)
+        if "deadline" in str(completion.details.get("reason") or ""):
+            log_deadline(completion.details)
         duration = (
             completion.artifact.duration_seconds if completion.artifact is not None
             else time.time() - started_at
@@ -4160,15 +4201,13 @@ def _run_native_process(kimi, prompt, repo_root, head_sha, push_range, timeout,
         delivered.set()
 
     def expired(details):
-        _supervisor_event(
-            native_run_id, "deadline-exceeded",
-            expiry_count=details.get("expiry_count") or 0,
-            owned_cancellation_count=details.get("owned_cancellation_count") or 0,
-        )
+        log_deadline(details)
 
     deadline = RunDeadline(native_run_id, timeout, on_expire=expired)
+    journal_dir = _async_dir(common_dir or git_dir or repo_root)
+    store = LegacyDeepStore(journal_dir / f"native-{native_run_id}-deep-journal.json")
     executor = NativeExecutor(
-        host, deadline=deadline,
+        host, deadline=deadline, store=store,
         result_parser=lambda text: (
             _extract_from_stream_json(text, resolver=bool(resolve_file))
             or _extract_json(text, resolver=bool(resolve_file))
@@ -4176,7 +4215,7 @@ def _run_native_process(kimi, prompt, repo_root, head_sha, push_range, timeout,
         diagnostic_environ=child_env,
     )
     task_id = native_run_id + "-deep"
-    artifact_path = _async_dir(common_dir or git_dir or repo_root) / f"native-{task_id}.json"
+    artifact_path = journal_dir / f"native-{task_id}.json"
     task = NativeTask(
         run_id=native_run_id,
         task_id=task_id,
@@ -4214,7 +4253,7 @@ def _run_native_process(kimi, prompt, repo_root, head_sha, push_range, timeout,
         if not delivered.wait(timeout + cleanup_bound):
             handle.cancel()
             _supervisor_event(native_run_id, "native-cleanup-timeout", timeout_s=timeout)
-            error = subprocess.TimeoutExpired([kimi, "-p"], timeout)
+            error = subprocess.TimeoutExpired([kimi, "--mode", "rpc"], timeout)
             error.cleanup = None
             raise error
     finally:
@@ -4223,12 +4262,17 @@ def _run_native_process(kimi, prompt, repo_root, head_sha, push_range, timeout,
         deadline.close()
 
     completion = completions[0]
+    if completion.state == "failed":
+        return 1, completion.error or "native deep review failed", completion.stderr
     if completion.state == "cancelled":
-        if not deadline.expired:
+        reason = completion.details.get("reason")
+        if not deadline.expired and reason not in (
+                "run-deadline-exceeded", "worker-deadline-exceeded"):
             raise _Fenced()
         _note_call_stats(completion.stdout, started_at)
         error = subprocess.TimeoutExpired(
-            [kimi, "-p"], timeout, output=completion.stdout, stderr=completion.stderr,
+            [kimi, "--mode", "rpc"], timeout,
+            output=completion.stdout, stderr=completion.stderr,
         )
         error.returncode = completion.details.get("return_code")
         error.cleanup = completion.details.get("cleanup")

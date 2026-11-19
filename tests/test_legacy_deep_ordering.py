@@ -2,6 +2,7 @@
 import itertools
 import json
 import threading
+import time
 
 import pytest
 
@@ -97,6 +98,23 @@ def test_interruption_retains_completed_artifacts_and_fences_late_completion(
         for key in old if old[key] != new[key]
     ]
     assert after == before, differences
+
+    class ResumedHost(_CoverageHost):
+        def __init__(self):
+            super().__init__()
+            self.launched = []
+
+        def launch(self, task, callback):
+            self.launched.append(task)
+            return super().launch(task, callback)
+
+    resumed_host = ResumedHost()
+    resumed = _run_deep(tmp_path, monkeypatch, resumed_host, paths)
+
+    assert resumed["verdict"] == "pass"
+    assert len(resumed_host.launched) == 2
+    assert all(task.runtime_deadline_at_unix > time.time() - 5
+               for task in resumed_host.launched)
 
 
 def test_supervisor_cancellation_owns_active_partitioned_sessions(tmp_path, monkeypatch):

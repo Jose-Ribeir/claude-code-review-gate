@@ -308,6 +308,78 @@ def test_artifact_commit_rolls_back_partial_state_and_preserves_lens_evidence(tm
         assert after["units"] == before["units"]
 
 
+def test_artifact_file_failure_rolls_back_the_entire_success_commit(tmp_path, monkeypatch):
+    with FinalStore(tmp_path / "artifact-io.sqlite3") as store:
+        started = store.start_run(review_stack())
+        identity = native_identity(started)
+        store.register_native_task(native_task(identity))
+        artifact_path = tmp_path / "rejected.json"
+
+        def fail_write(_path, _artifact):
+            raise OSError("injected artifact I/O failure")
+
+        monkeypatch.setattr(final_store, "_atomic_artifact_write", fail_write)
+        with pytest.raises(OSError, match="injected artifact I/O failure"):
+            store.commit_native_artifact(
+                identity, "message-correctness", artifact=native_artifact(identity),
+                received_at_unix=13.5, artifact_path=artifact_path,
+            )
+
+        recorded = store.manifest(started["run_id"])["native_tasks"][0]
+        assert recorded["artifacts"] == []
+        assert not any(event["event_type"] == "completed" for event in recorded["events"])
+        assert not artifact_path.exists()
+
+
+def test_database_commit_failure_removes_newly_published_artifact(tmp_path, monkeypatch):
+    with FinalStore(tmp_path / "artifact-db-commit.sqlite3") as store:
+        started = store.start_run(review_stack())
+        identity = native_identity(started)
+        store.register_native_task(native_task(identity))
+        artifact_path = tmp_path / "uncommitted.json"
+        class CommitFailure:
+            def __init__(self, connection):
+                self.connection = connection
+
+            def __getattr__(self, name):
+                return getattr(self.connection, name)
+
+            def commit(self):
+                raise sqlite3.OperationalError("injected database commit failure")
+
+        monkeypatch.setattr(store, "_conn", CommitFailure(store._conn))
+        with pytest.raises(sqlite3.DatabaseError, match="injected database commit failure"):
+            store.commit_native_artifact(
+                identity, "message-correctness", artifact=native_artifact(identity),
+                received_at_unix=13.5, artifact_path=artifact_path,
+            )
+
+        assert not artifact_path.exists()
+        recorded = store.manifest(started["run_id"])["native_tasks"][0]
+        assert recorded["artifacts"] == []
+        assert not any(event["event_type"] == "completed" for event in recorded["events"])
+
+
+def test_superseded_run_cannot_commit_late_artifact_even_without_scheduler(tmp_path):
+    with FinalStore(tmp_path / "artifact-superseded.sqlite3") as store:
+        first = store.start_run(review_stack())
+        store.start_run(review_stack(source_sha="c" * 40))
+        identity = native_identity(first)
+        store.register_native_task(native_task(identity))
+        artifact_path = tmp_path / "late.json"
+
+        with pytest.raises(StoreError, match="superseded"):
+            store.commit_native_artifact(
+                identity, "message-correctness", artifact=native_artifact(identity),
+                received_at_unix=13.5, artifact_path=artifact_path,
+            )
+
+        recorded = store.manifest(first["run_id"])["native_tasks"][0]
+        assert recorded["artifacts"] == []
+        assert not any(event["event_type"] == "completed" for event in recorded["events"])
+        assert not artifact_path.exists()
+
+
 def test_executor_records_expiry_cancellation_through_existing_native_store(tmp_path):
     with FinalStore(tmp_path / "executor-events.sqlite3") as store:
         started = store.start_run(review_stack())
@@ -338,7 +410,7 @@ def test_executor_records_expiry_cancellation_through_existing_native_store(tmp_
 
         events = store.manifest(run_id)["native_tasks"][0]["events"]
         assert [event["event_type"] for event in events] == [
-            "queued", "started", "cancelled",
+            "queued", "started", "timeout",
         ]
         assert events[0]["details"]["run_timeout_seconds"] == 30.0
         assert events[0]["details"]["watchdog"]["warnings"]
