@@ -293,7 +293,11 @@ External watchdogs remain backstops. They should not be the normal way a native
 run ends. Native cancellation uses owned handles/process groups and bounded
 pipe drain/reap; it never matches unrelated processes by name. Sanitized
 stdout/stderr tails are bounded diagnostics, not substitutes for missing
-artifacts.
+artifacts. For a failed native worker, nonempty bounded output and cleanup
+metadata are retained in an additional `warning` event whose `details` contain
+`diagnostic: true`. The established failure or timeout event is unchanged.
+This supplemental event is operator diagnostics, never a review artifact or
+a finding-verdict input.
 
 ## 6. Deterministic aggregation, migration, and publication
 

@@ -691,6 +691,16 @@ def test_malformed_native_result_is_a_durable_failed_event(tmp_path):
         assert [event["event_type"] for event in events].count("failed") == 1
         assert completions[0].state == "failed"
         assert not task.artifact_path.exists()
+        failure = next(event for event in events if event["event_type"] == "failed")
+        assert failure["details"] == {"error": "native session returned no valid final-review worker result"}
+        diagnostic = next(
+            event for event in events
+            if event["event_type"] == "warning" and event["details"].get("diagnostic") is True
+        )
+        assert diagnostic["details"]["stdout_tail"] == "not-json"
+        assert diagnostic["details"]["cleanup"] is None
+        assert diagnostic["details"]["return_code"] == 0
+        assert diagnostic["details"]["stderr_tail"] == ""
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX descendant process-group control")

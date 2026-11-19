@@ -238,6 +238,18 @@ class NativeExecutor:
                 native_session_id=handle.native_session_id,
                 started=started, finished=finished, details=details,
             )
+            diagnostic = {
+                key: completion.details[key]
+                for key in ("return_code", "stdout_tail", "stderr_tail", "cleanup")
+                if key in completion.details
+            }
+            if any(diagnostic.get(key) for key in ("stdout_tail", "stderr_tail", "cleanup")):
+                diagnostic["diagnostic"] = True
+                self._record(
+                    handle.task, "warning", finished,
+                    native_session_id=handle.native_session_id,
+                    started=started, finished=finished, details=diagnostic,
+                )
         except Exception as exc:
             error = f"native completion event failed: {exc}"
             completion = NativeCompletion(
