@@ -1225,11 +1225,6 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
     provider = _selected_provider(reference, provider, repo_root)
     environ = os.environ if environ is None else environ
     transport = str(environ.get("RG_FINAL_REVIEW_TRANSPORT", "")).strip().lower()
-    if transport == "native" and isinstance(reference, (list, tuple)) and len(reference) > 1:
-        raise ValueError(
-            "native final-review transport currently supports standalone reviews only; "
-            "legacy stack execution was not selected"
-        )
     if isinstance(reference, (list, tuple)) and len(reference) == 1:
         reference = reference[0]
     if isinstance(reference, (list, tuple)):
@@ -1240,7 +1235,7 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
             dynamic_kwargs=dynamic_kwargs, current_root_sha=current_root_sha,
             context_kwargs=context_kwargs, publish=publish,
             publication_runner=publication_runner, report_url=report_url,
-            local_waivers=local_waivers, complete=True,
+            local_waivers=local_waivers, complete=True, native_host=native_host,
         )
     standalone_dynamic_kwargs = dict(dynamic_kwargs or {})
     configured_executor = environ.get("RG_FINAL_DYNAMIC_EXECUTOR", "").strip()
@@ -1986,7 +1981,7 @@ def run_final_stack(references, *, repo_root=None, provider=None, store_path=Non
                     worker=None, environ=None, current_root_sha=None, execute_checks=False,
                     required_runner=None, dynamic_runner=None, dynamic_kwargs=None,
                     context_kwargs=None, publish=False, publication_runner=None,
-                    report_url=None, local_waivers=(), complete=False):
+                    report_url=None, local_waivers=(), complete=False, native_host=None):
     """Validate and review a complete base-first stack through composition.
 
     The returned units and per-unit report paths are the C14 publication
@@ -2001,7 +1996,7 @@ def run_final_stack(references, *, repo_root=None, provider=None, store_path=Non
             required_runner=required_runner, dynamic_runner=dynamic_runner,
             dynamic_kwargs=dynamic_kwargs, context_kwargs=context_kwargs,
             publish=publish, publication_runner=publication_runner,
-            report_url=report_url, local_waivers=local_waivers,
+            report_url=report_url, local_waivers=local_waivers, native_host=native_host,
         )
     environ = os.environ if environ is None else environ
     repo_root = str(repo_root or os.getcwd())

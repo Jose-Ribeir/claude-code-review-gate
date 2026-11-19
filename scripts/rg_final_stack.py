@@ -8,6 +8,7 @@ dynamic checks, finding memory, freshness, and explicit publication gating.
 """
 from __future__ import annotations
 
+from contextlib import ExitStack, contextmanager, nullcontext
 from copy import deepcopy
 import json
 import os
@@ -25,6 +26,8 @@ from rg_final_graph import discover_linear_graph
 from rg_final_lenses import (
     CROSS_ITEM_CONTRACTS,
     INTEGRATION_BEHAVIOR,
+    REQUIRED_LENSES,
+    build_lens_request,
     failed_lens_aggregation,
 )
 from rg_final_materialize import materialize_review
@@ -144,10 +147,108 @@ def _unit_output(unit_id, unit_key, kind, execution, aggregation, *, context_com
     }
 
 
+@contextmanager
+def _prepare_unit(store, identity, graph, unit_key, unit_id, *, item=None, composed=None,
+                  source_repository, target_repository=None, target_sha, head_sha,
+                  context_kwargs, prior):
+    """Materialize and validate one unit request without starting unit aggregation."""
+    with materialize_review(
+        source_repository, target_sha, head_sha,
+        target_repository=(target_repository if target_repository
+                           and target_repository != source_repository else None),
+        require_lfs=True,
+        lfs_irrelevance=(context_kwargs or {}).get("binary_irrelevance"),
+    ) as materialized:
+        merge_base = materialized.merge_base_sha
+        review_context = _collect_context(materialized, graph, item, context_kwargs)
+        context_complete, intent_complete = standalone._record_standalone_context(
+            store, (unit_id,), review_context)
+        store.record_coverage(
+            unit_id, "repository", "complete", "Complete immutable checkout available",
+            {"submodules": list(materialized.submodules),
+             "lfs_files": list(materialized.lfs_files),
+             "lfs_complete": materialized.lfs_complete},
+        )
+        store.record_coverage(
+            unit_id, "diff", "complete", "Complete binary-capable merge-base diff",
+            {"merge_base_sha": merge_base,
+             "sha256": standalone._sha256(materialized.diff)},
+        )
+        store.record_coverage(
+            unit_id, "composition", "not_applicable" if item is not None else "complete",
+            "The individual unit uses its provider-pinned tree" if item is not None
+            else "The composition unit uses its verified immutable tree",
+        )
+        unit_prior = standalone.finding_memory_for_unit(prior, unit_key)
+        public_item = (standalone._public_item(item) if item is not None
+                       else standalone._combined_item(graph, unit_key))
+        request = {
+            "schema": standalone.WORKER_REQUEST_SCHEMA,
+            "stage": standalone.COMPLETE_STAGE,
+            "run_id": identity["run_id"],
+            "unit_id": unit_id,
+            "unit_key": unit_key,
+            "store_instance_id": identity["store_instance_id"],
+            "contract_version": identity["contract_version"],
+            "revision_tuple": (list(standalone.revision_tuple(item)) if item is not None
+                               else deepcopy(graph["revisions"])),
+            "item": public_item,
+            "repository": {
+                "path": str(materialized.path), "access": "full_tree",
+                "head_sha": materialized.head_sha,
+                "target_sha": materialized.target_sha,
+                "merge_base_sha": merge_base,
+                "submodules": list(materialized.submodules),
+                "lfs_files": list(materialized.lfs_files),
+                "lfs_complete": materialized.lfs_complete,
+            },
+            "diff": materialized.diff,
+            "review_context": deepcopy(review_context),
+            "finding_memory": unit_prior,
+        }
+        if composed is not None:
+            request["composition"] = {
+                "schema": composed.get("schema", "final-review-composition-unit/v1"),
+                "kind": unit_key,
+                "item_keys": list(graph["item_keys"]),
+                "root_target_sha": graph["root_target"]["sha"],
+                "current_root_sha": composed["target_sha"],
+                "applied_item_keys": list(composed["applied_item_keys"]),
+                "evidence_only_commit": unit_key == "prospective",
+            }
+        yield {
+            "request": request,
+            "materialized": materialized,
+            "unit_prior": unit_prior,
+            "context_complete": context_complete,
+            "intent_complete": intent_complete,
+            "native_prepared": False,
+        }
+
+
+def _enrich_unit_lens(lens_request, capabilities):
+    lens_request["capabilities"] = list(capabilities)
+    if capabilities:
+        lens_request["review_duty"] += (
+            " Review cross-item contracts and actual integration behavior, not "
+            "just the sum of isolated changes."
+        )
+    return lens_request
+
+
+def _prepare_native_unit(native_execution, request, capabilities, *, dependencies=None):
+    requests = [
+        _enrich_unit_lens(build_lens_request(request, spec), capabilities)
+        for spec in REQUIRED_LENSES
+    ]
+    native_execution.prepare(requests, dependencies=dependencies)
+    return tuple(native_execution.task_id(request) for request in requests)
+
+
 def _run_unit(store, identity, graph, unit_key, unit_id, *, item=None, composed=None,
               source_repository, target_repository=None, target_sha, head_sha,
               worker, environ, repo_root, required_runner, dynamic_runner,
-              dynamic_kwargs, context_kwargs, prior):
+              dynamic_kwargs, context_kwargs, prior, native_execution=None, prepared=None):
     """Execute one fully materialized unit without publishing or revalidation."""
     capabilities = () if item is not None else (CROSS_ITEM_CONTRACTS, INTEGRATION_BEHAVIOR)
     kind = "individual" if item is not None else unit_key
@@ -161,79 +262,30 @@ def _run_unit(store, identity, graph, unit_key, unit_id, *, item=None, composed=
     composition_errors = [] if composed is None else composed["errors"]
     composition_complete = True if composed is None else bool(composed["complete"])
     try:
-        with materialize_review(
-            source_repository, target_sha, head_sha,
-            target_repository=(target_repository if target_repository
-                               and target_repository != source_repository else None),
-            require_lfs=True,
-            lfs_irrelevance=(context_kwargs or {}).get("binary_irrelevance"),
-        ) as materialized:
+        if prepared is not None and "error" in prepared:
+            raise prepared["error"]
+        preparation = (nullcontext(prepared) if prepared is not None else _prepare_unit(
+            store, identity, graph, unit_key, unit_id, item=item, composed=composed,
+            source_repository=source_repository, target_repository=target_repository,
+            target_sha=target_sha, head_sha=head_sha,
+            context_kwargs=context_kwargs, prior=prior,
+        ))
+        with preparation as plan:
+            materialized = plan["materialized"]
+            request = plan["request"]
+            unit_prior = plan["unit_prior"]
+            context_complete = plan["context_complete"]
+            intent_complete = plan["intent_complete"]
             merge_base = materialized.merge_base_sha
             repository_path = str(materialized.path)
-            review_context = _collect_context(materialized, graph, item, context_kwargs)
-            context_complete, intent_complete = standalone._record_standalone_context(
-                store, (unit_id,), review_context)
-            store.record_coverage(
-                unit_id, "repository", "complete", "Complete immutable checkout available",
-                {"submodules": list(materialized.submodules),
-                 "lfs_files": list(materialized.lfs_files),
-                 "lfs_complete": materialized.lfs_complete},
-            )
-            store.record_coverage(
-                unit_id, "diff", "complete", "Complete binary-capable merge-base diff",
-                {"merge_base_sha": merge_base,
-                 "sha256": standalone._sha256(materialized.diff)},
-            )
-            store.record_coverage(
-                unit_id, "composition", "not_applicable" if item is not None else "complete",
-                "The individual unit uses its provider-pinned tree" if item is not None
-                else "The composition unit uses its verified immutable tree",
-            )
-            unit_prior = standalone.finding_memory_for_unit(prior, unit_key)
-            public_item = (standalone._public_item(item) if item is not None
-                           else standalone._combined_item(graph, unit_key))
-            request = {
-                "schema": standalone.WORKER_REQUEST_SCHEMA,
-                "stage": standalone.COMPLETE_STAGE,
-                "run_id": identity["run_id"],
-                "unit_id": unit_id,
-                "unit_key": unit_key,
-                "store_instance_id": identity["store_instance_id"],
-                "contract_version": identity["contract_version"],
-                "revision_tuple": (list(standalone.revision_tuple(item)) if item is not None
-                                   else deepcopy(graph["revisions"])),
-                "item": public_item,
-                "repository": {
-                    "path": str(materialized.path), "access": "full_tree",
-                    "head_sha": materialized.head_sha,
-                    "target_sha": materialized.target_sha,
-                    "merge_base_sha": merge_base,
-                    "submodules": list(materialized.submodules),
-                    "lfs_files": list(materialized.lfs_files),
-                    "lfs_complete": materialized.lfs_complete,
-                },
-                "diff": materialized.diff,
-                "review_context": deepcopy(review_context),
-                "finding_memory": unit_prior,
-            }
-            if composed is not None:
-                request["composition"] = {
-                    "schema": composed.get("schema", "final-review-composition-unit/v1"),
-                    "kind": unit_key,
-                    "item_keys": list(graph["item_keys"]),
-                    "root_target_sha": graph["root_target"]["sha"],
-                    "current_root_sha": composed["target_sha"],
-                    "applied_item_keys": list(composed["applied_item_keys"]),
-                    "evidence_only_commit": unit_key == "prospective",
-                }
+
+            if native_execution is not None and not plan["native_prepared"]:
+                _prepare_native_unit(native_execution, request, capabilities)
 
             def isolated_worker(lens_request):
-                lens_request["capabilities"] = list(capabilities)
-                if capabilities:
-                    lens_request["review_duty"] += (
-                        " Review cross-item contracts and actual integration behavior, not "
-                        "just the sum of isolated changes."
-                    )
+                lens_request = _enrich_unit_lens(lens_request, capabilities)
+                if native_execution is not None:
+                    return native_execution.worker(lens_request)
                 return standalone.invoke_worker(
                     lens_request, command=worker, repo_root=repo_root, environ=environ,
                     timeout=float(environ.get("RG_FINAL_WORKER_TIMEOUT", "900")),
@@ -343,6 +395,119 @@ def _execute_composed(store, identity, graph, unit_key, unit_id, composed, **kwa
     )
 
 
+def _run_native_units(store, identity, graph, items, composition, common, native_execution):
+    """Register all immutable units, then aggregate and test in stack order."""
+    descriptors = []
+    for position, item in enumerate(items, 1):
+        unit_key = f"individual:{position}"
+        source = item["source"]
+        target = item["target"]
+        descriptors.append({
+            "unit_key": unit_key,
+            "unit_id": identity["unit_ids"][unit_key],
+            "kind": "individual",
+            "kwargs": {
+                "item": item,
+                "source_repository": source.get("http_url") or source["url"],
+                "target_repository": target.get("http_url") or target["url"],
+                "target_sha": target["sha"], "head_sha": source["sha"],
+            },
+        })
+
+    prospective = composition["prospective"]
+    prospective_id = store.add_unit(
+        identity["run_id"], "prospective", "prospective", prospective["target_sha"],
+        prospective["head_sha"], target_ref=graph["root_target"]["branch"],
+        metadata={"schema": "final-review-composition-unit/v1",
+                  "complete": prospective["complete"],
+                  "head_sha_role": "composed" if prospective["complete"]
+                  else "pinned_candidate_only", "errors": prospective["errors"]},
+    )
+    for unit_key, unit_id in (
+        ("combined", identity["unit_ids"]["combined"]),
+        ("prospective", prospective_id),
+    ):
+        composed = composition[unit_key]
+        standalone._record_stack_composition(store, unit_id, composed)
+        descriptor = {
+            "unit_key": unit_key, "unit_id": unit_id, "kind": unit_key,
+            "kwargs": {
+                "composed": composed,
+                "source_repository": (composed["repository"]["source_repository"]
+                                      if composed["complete"] else ""),
+                "target_sha": composed["target_sha"], "head_sha": composed["head_sha"],
+            },
+        }
+        if not composed["complete"]:
+            descriptor["output"] = _incomplete_composition(
+                store, identity, graph, unit_key, unit_id, composed)
+        descriptors.append(descriptor)
+
+    units = []
+    stopped_dependents = {}
+    unit_task_ids = {}
+    individual_keys = [descriptor["unit_key"] for descriptor in descriptors
+                       if descriptor["kind"] == "individual"]
+    with ExitStack() as materializations:
+        for descriptor in descriptors:
+            if "output" in descriptor:
+                continue
+            unit_key = descriptor["unit_key"]
+            unit_id = descriptor["unit_id"]
+            try:
+                prepared = materializations.enter_context(_prepare_unit(
+                    store, identity, graph, unit_key, unit_id,
+                    context_kwargs=common["context_kwargs"], prior=common["prior"],
+                    **descriptor["kwargs"],
+                ))
+                capabilities = (() if descriptor["kind"] == "individual" else
+                                (CROSS_ITEM_CONTRACTS, INTEGRATION_BEHAVIOR))
+                position = descriptors.index(descriptor)
+                if descriptor["kind"] == "individual":
+                    parent_keys = individual_keys[max(0, position - 1):position]
+                elif unit_key == "combined":
+                    parent_keys = individual_keys
+                else:
+                    parent_keys = ["combined"]
+                dependencies = tuple(
+                    task_id for parent in parent_keys for task_id in unit_task_ids.get(parent, ())
+                )
+                unit_task_ids[unit_key] = _prepare_native_unit(
+                    native_execution, prepared["request"], capabilities,
+                    dependencies=dependencies,
+                )
+                prepared["native_prepared"] = True
+            except Exception as exc:
+                prepared = {"error": exc}
+            descriptor["prepared"] = prepared
+
+        for descriptor in descriptors:
+            unit_key = descriptor["unit_key"]
+            unit_id = descriptor["unit_id"]
+            if "output" in descriptor:
+                result = descriptor["output"]
+            elif unit_key in stopped_dependents:
+                composed = descriptor["kwargs"].get("composed")
+                result = _skip_unit(
+                    store, unit_key, unit_id, stopped_dependents[unit_key],
+                    kind=descriptor["kind"],
+                    base_sha=descriptor["kwargs"]["target_sha"],
+                    head_sha=descriptor["kwargs"]["head_sha"],
+                    composition_complete=(composed["complete"] if composed is not None else True),
+                )
+            else:
+                result = _run_unit(
+                    store, identity, graph, unit_key, unit_id,
+                    prepared=descriptor["prepared"], **descriptor["kwargs"], **common,
+                )
+            units.append(result)
+            execution = result["_execution"]
+            if execution and execution.stop and not result.get("inherited_stop"):
+                for dependent in standalone._stop_dependents(unit_key):
+                    stopped_dependents.setdefault(dependent, execution.stop)
+    return units, prospective_id
+
+
 def _record_origin_stops(store, run_id, units):
     origins = []
     for origin in units:
@@ -417,7 +582,7 @@ def run_final_stack(references, *, repo_root=None, provider=None, store_path=Non
                     worker=None, environ=None, current_root_sha=None,
                     required_runner=None, dynamic_runner=None, dynamic_kwargs=None,
                     context_kwargs=None, publish=False, publication_runner=None,
-                    report_url=None, local_waivers=()):
+                    report_url=None, local_waivers=(), native_host=None):
     """Run complete C14 stack orchestration and return detached public evidence.
 
     Publication is requested for every authoritative completed outcome. Store
@@ -454,72 +619,90 @@ def run_final_stack(references, *, repo_root=None, provider=None, store_path=Non
         stopped_dependents = {}
         current_sha, current_error = standalone._current_stack_root(
             provider, graph, repo_root, current_root_sha)
+        native_execution = None
+        if str(environ.get("RG_FINAL_REVIEW_TRANSPORT", "")).strip().lower() == "native":
+            from rg_final_native import NativeStandaloneExecution
+            from rg_native_executor import KimchiNativeHost
+
+            host = native_host or KimchiNativeHost.checked(environ=environ)
+            native_execution = NativeStandaloneExecution(
+                store, host, environ=environ, run_id=run_id,
+                prompt_factory=standalone._worker_prompt,
+            )
         common = {
             "worker": worker, "environ": environ, "repo_root": repo_root,
             "required_runner": required_runner, "dynamic_runner": dynamic_runner,
             "dynamic_kwargs": options, "context_kwargs": context_kwargs, "prior": prior,
+            "native_execution": native_execution,
         }
         with compose_stack(graph, current_root_sha=current_sha) as composition:
-            for position, item in enumerate(items, 1):
-                unit_key = f"individual:{position}"
-                unit_id = identity["unit_ids"][unit_key]
-                if unit_key in stopped_dependents:
-                    result = _skip_unit(
-                        store, unit_key, unit_id, stopped_dependents[unit_key],
-                        kind="individual", base_sha=item["target"]["sha"],
-                        head_sha=item["source"]["sha"], composition_complete=True,
-                    )
+            if native_execution is not None:
+                units, prospective_id = _run_native_units(
+                    store, identity, graph, items, composition, common, native_execution)
+            else:
+                for position, item in enumerate(items, 1):
+                    unit_key = f"individual:{position}"
+                    unit_id = identity["unit_ids"][unit_key]
+                    if unit_key in stopped_dependents:
+                        result = _skip_unit(
+                            store, unit_key, unit_id, stopped_dependents[unit_key],
+                            kind="individual", base_sha=item["target"]["sha"],
+                            head_sha=item["source"]["sha"], composition_complete=True,
+                        )
+                    else:
+                        source = item["source"]
+                        target = item["target"]
+                        result = _run_unit(
+                            store, identity, graph, unit_key, unit_id, item=item,
+                            source_repository=source.get("http_url") or source["url"],
+                            target_repository=(target.get("http_url") or target["url"]),
+                            target_sha=target["sha"], head_sha=source["sha"], **common,
+                        )
+                    units.append(result)
+                    execution = result["_execution"]
+                    if execution and execution.stop and not result.get("inherited_stop"):
+                        for dependent in standalone._stop_dependents(unit_key):
+                            stopped_dependents.setdefault(dependent, execution.stop)
+
+                if "combined" in stopped_dependents:
+                    combined = composition["combined"]
+                    units.append(_skip_unit(
+                        store, "combined", combined_id, stopped_dependents["combined"],
+                        kind="combined", base_sha=combined["target_sha"],
+                        head_sha=combined["head_sha"], composition_complete=combined["complete"],
+                    ))
                 else:
-                    source = item["source"]
-                    target = item["target"]
-                    result = _run_unit(
-                        store, identity, graph, unit_key, unit_id, item=item,
-                        source_repository=source.get("http_url") or source["url"],
-                        target_repository=(target.get("http_url") or target["url"]),
-                        target_sha=target["sha"], head_sha=source["sha"], **common,
-                    )
-                units.append(result)
-                execution = result["_execution"]
-                if execution and execution.stop and not result.get("inherited_stop"):
-                    for dependent in standalone._stop_dependents(unit_key):
-                        stopped_dependents.setdefault(dependent, execution.stop)
+                    units.append(_execute_composed(
+                        store, identity, graph, "combined", combined_id,
+                        composition["combined"], **common))
+                combined_execution = units[-1]["_execution"]
+                if combined_execution and combined_execution.stop and \
+                        not units[-1].get("inherited_stop"):
+                    stopped_dependents.setdefault("prospective", combined_execution.stop)
 
-            if "combined" in stopped_dependents:
-                combined = composition["combined"]
-                units.append(_skip_unit(
-                    store, "combined", combined_id, stopped_dependents["combined"],
-                    kind="combined", base_sha=combined["target_sha"],
-                    head_sha=combined["head_sha"], composition_complete=combined["complete"],
-                ))
-            else:
-                units.append(_execute_composed(
-                    store, identity, graph, "combined", combined_id,
-                    composition["combined"], **common))
-            combined_execution = units[-1]["_execution"]
-            if combined_execution and combined_execution.stop and \
-                    not units[-1].get("inherited_stop"):
-                stopped_dependents.setdefault("prospective", combined_execution.stop)
+                prospective = composition["prospective"]
+                prospective_id = store.add_unit(
+                    run_id, "prospective", "prospective", prospective["target_sha"],
+                    prospective["head_sha"], target_ref=graph["root_target"]["branch"],
+                    metadata={"schema": "final-review-composition-unit/v1",
+                              "complete": prospective["complete"],
+                              "head_sha_role": "composed" if prospective["complete"]
+                              else "pinned_candidate_only", "errors": prospective["errors"]},
+                )
+                if "prospective" in stopped_dependents:
+                    units.append(_skip_unit(
+                        store, "prospective", prospective_id,
+                        stopped_dependents["prospective"], kind="prospective",
+                        base_sha=prospective["target_sha"], head_sha=prospective["head_sha"],
+                        composition_complete=prospective["complete"],
+                    ))
+                else:
+                    units.append(_execute_composed(
+                        store, identity, graph, "prospective", prospective_id,
+                        prospective, **common))
 
-            prospective = composition["prospective"]
-            prospective_id = store.add_unit(
-                run_id, "prospective", "prospective", prospective["target_sha"],
-                prospective["head_sha"], target_ref=graph["root_target"]["branch"],
-                metadata={"schema": "final-review-composition-unit/v1",
-                          "complete": prospective["complete"],
-                          "head_sha_role": "composed" if prospective["complete"]
-                          else "pinned_candidate_only", "errors": prospective["errors"]},
-            )
-            if "prospective" in stopped_dependents:
-                units.append(_skip_unit(
-                    store, "prospective", prospective_id, stopped_dependents["prospective"],
-                    kind="prospective", base_sha=prospective["target_sha"],
-                    head_sha=prospective["head_sha"], composition_complete=prospective["complete"],
-                ))
-            else:
-                units.append(_execute_composed(
-                    store, identity, graph, "prospective", prospective_id,
-                    prospective, **common))
-
+        if native_execution is not None:
+            native_execution.close()
         prospective_output = next(unit for unit in units if unit["unit_key"] == "prospective")
         if current_error is None:
             store.record_coverage(

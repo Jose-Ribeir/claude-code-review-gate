@@ -51,8 +51,15 @@ class NativeStandaloneExecution:
     def task_id(request):
         return f"{request['unit_id']}:{request['lens']}"
 
-    def prepare(self, requests):
-        """Register all individual work before speculative combined peers."""
+    def prepare(self, requests, *, dependencies=None, speculative=None):
+        """Register standalone peers or explicitly scoped speculative stack work."""
+        if dependencies is not None:
+            for request in requests:
+                self._submit(
+                    request, self.task_id(request), dependencies=dependencies,
+                    speculative=bool(dependencies) if speculative is None else speculative,
+                )
+            return
         individual_ids = []
         combined = []
         for request in requests:

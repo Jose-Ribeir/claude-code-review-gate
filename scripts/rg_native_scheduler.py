@@ -84,6 +84,7 @@ class NativeScheduler:
         with self._lock:
             run = self._runs.setdefault(task.run_id, {
                 "closed": False, "finalized": False, "cancelled": None, "cleaning": False,
+                "stopped": set(),
             })
             if run["closed"] or run["cancelled"] is not None:
                 raise RuntimeError(f"run {task.run_id} is closed or cancelled")
@@ -100,11 +101,18 @@ class NativeScheduler:
                 raise ValueError("native task dependencies must belong to the same run")
             entry = _Entry(definition, on_finalize, on_complete)
             entry.eligible = all(
-                self._entries[task_id].eligible for task_id in definition.dependencies
+                self._entries[task_id].eligible and task_id not in run["stopped"]
+                for task_id in definition.dependencies
             )
             self._entries[task.task_id] = entry
-            self._pending.append(entry)
-        self._drain()
+            if entry.eligible:
+                self._pending.append(entry)
+            else:
+                entry.state = "skipped"
+        if entry.eligible:
+            self._drain()
+        else:
+            self._notify_complete(entry)
         self._maybe_finalize(task.run_id)
         return definition
 
@@ -147,6 +155,29 @@ class NativeScheduler:
                     self._pending.append(entry)
                 self.expire_run(entry.definition.task.run_id)
                 return
+            except Exception as exc:
+                with self._lock:
+                    self._active[entry.definition.resource] -= 1
+                    entry.state = "failed"
+                    entry.error = f"native launch failed: {exc}"
+                if self._store is not None:
+                    task = entry.definition.task
+                    self._store.record_native_event({
+                        "schema": "native-review-event/v1",
+                        "event_id": "scheduler:launch-failed:" + task.task_id,
+                        "event_type": "failed",
+                        "identity": task.identity(),
+                        "transport": self._executor.transport,
+                        "native_session_id": None,
+                        "timing": {
+                            "occurred_at_unix": self._clock(),
+                            "started_at_unix": None, "finished_at_unix": None,
+                            "duration_seconds": None,
+                        },
+                        "details": {"error": entry.error},
+                    })
+                self._notify_complete(entry)
+                continue
             entry.handle = handle
 
     def _validated_artifact(self, entry, artifact):
@@ -165,6 +196,7 @@ class NativeScheduler:
         with self._lock:
             source_id = source.definition.task.task_id
             run_id = source.definition.task.run_id
+            self._runs[run_id]["stopped"].add(source_id)
             affected = set()
             changed = True
             while changed:
