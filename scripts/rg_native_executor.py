@@ -482,6 +482,7 @@ class _RpcSession:
         self._error = None
         self._provider_error = None
         self._cancel_reason = None
+        self._latest_result_valid = None
         self._latest_result_text = None
         self._stdout = ""
         self._stderr = []
@@ -617,7 +618,8 @@ class _RpcSession:
             if candidate is not None:
                 with self._state:
                     self._latest_result_text = text
-                    if self._valid_worker_result(candidate):
+                    self._latest_result_valid = self._valid_worker_result(candidate)
+                    if self._latest_result_valid:
                         self._provider_error = None
             if reason in ("error", "aborted") and not cancelling:
                 detail = message.get("errorMessage") or "provider supplied no error detail"
@@ -703,6 +705,9 @@ class _RpcSession:
                 self._error = self._provider_error or (
                     "native RPC agent aborted before a successful settlement"
                 )
+            elif self._latest_result_valid is False:
+                self._outcome = "failed"
+                self._error = "native RPC newest structured worker result is invalid"
             else:
                 self._outcome = "completed"
         self._close_stdin()

@@ -2164,8 +2164,8 @@ class FinalStore:
         with self._transaction():
             unit = self._unit_row(unit_id)
             existing = self._conn.execute(
-                "SELECT finding_id, content, severity, confidence, state, lens, path, line "
-                "FROM findings WHERE unit_id = ? AND finding_key = ?",
+                "SELECT finding_id, content, severity, confidence, state, lens, path, line, "
+                "evidence_json "                "FROM findings WHERE unit_id = ? AND finding_key = ?",
                 (unit_id, str(finding_key)),
             ).fetchone()
             if existing is not None:
@@ -2175,6 +2175,24 @@ class FinalStore:
                 ) == (
                     str(content), str(severity), str(confidence), str(state), lens, path, line,
                 ):
+                    stored = self._conn.execute(
+                        "SELECT anchor_type, anchor, evidence_fingerprint, details_json "
+                        "FROM finding_anchors WHERE finding_id = ?", (existing["finding_id"],)
+                    ).fetchall()
+                    existing_anchors = [{
+                        "anchor_type": row["anchor_type"], "anchor": row["anchor"],
+                        "evidence_fingerprint": row["evidence_fingerprint"],
+                        "details": _loads(row["details_json"]),
+                    } for row in stored]
+                    if sorted(existing_anchors, key=rg_final_memory._canonical) != sorted(
+                            stored_anchors, key=rg_final_memory._canonical):
+                        raise StoreError(
+                            f"duplicate finding_key {str(finding_key)!r} conflicts with different evidence"
+                        )
+                    if existing["evidence_json"] != _json(evidence):
+                        raise StoreError(
+                            f"duplicate finding_key {str(finding_key)!r} conflicts with different evidence"
+                        )
                     return existing["finding_id"]
                 raise StoreError(
                     f"duplicate finding_key {str(finding_key)!r} conflicts with different evidence"

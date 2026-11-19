@@ -950,9 +950,17 @@ def test_latest_parseable_worker_result_survives_later_assistant_text(
     executor.start(_task(tmp_path), completed)
     assert delivered.wait(5), "pre-chatter structured output was discarded"
     assert len(completions) == 1
+    if following_structured is not None:
+        assert completions[0].state == "failed"
+        assert completions[0].artifact is None
+        assert completions[0].error == "native RPC newest structured worker result is invalid"
+        assert completions[0].details["stdout_tail"] == json.dumps(following_structured)
+        assert completions[0].details["last_assistant_tail"] == json.dumps(
+            following_structured
+        )
+        return
     assert completions[0].state == "completed"
-    expected = payload if following_structured is None else following_structured
-    assert completions[0].artifact.payload == expected
+    assert completions[0].artifact.payload == payload
 
 
 @pytest.mark.parametrize("prior_valid_result", [False, True])

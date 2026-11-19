@@ -50,9 +50,11 @@ not an instruction to run nested agents. The production adapter launches
 strict JSONL. It waits for `agent_settled`; an accepted prompt response or
 `agent_end` does not prove completion. It retains the latest parseable
 worker-result object across assistant messages rather than discarding it when
-a later assistant message is only commentary. The latest assistant message is
-also retained separately for bounded diagnostics. Result selection adds no
-inference prompt and does not bypass supervisory result validation.
+a later assistant message is only commentary. A newer invalid structured
+candidate must not be hidden by an older valid result; it fails instead of
+becoming a settled artifact. The latest assistant message is also retained
+separately for bounded diagnostics. Result selection adds no inference prompt
+and does not bypass supervisory result validation.
 Cancellation sends a correlated `abort` before bounded process-group cleanup.
 Native session IDs contain the explicit run/task identity, not a bare PID.
 RPC review sessions also launch with `--plan`, the CLI's read-only mode.
@@ -325,9 +327,11 @@ a finding-verdict input.
 
 Native callbacks can arrive in any order. Accepted native artifacts feed the
 existing lens outcomes in required-lens order, and findings/warnings pass the
-existing falsification and memory pipeline. `ocr_verdict.compute_verdict` is
-still the only finding-verdict authority. There is **no DeepSeek stage, no
-model join, and no nested review session**.
+existing falsification and memory pipeline. Finding delivery is idempotent only
+when basic fields, normalized anchors, and evidence all match; an identity
+conflict is rejected without overwriting or merging distinct evidence.
+`ocr_verdict.compute_verdict` is still the only finding-verdict authority.
+There is **no DeepSeek stage, no model join, and no nested review session**.
 
 Final store schema v4 adds four tables: `native_tasks`,
 `native_task_events`, `native_artifacts`, and `native_artifact_messages`.
