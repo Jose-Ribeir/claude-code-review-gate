@@ -841,6 +841,52 @@ def test_continuity_requirement_degrades_fresh_store_but_not_same_store_restart(
         assert store.manifest(continued["run_id"])["trust"]["enforced"] is True
 
 
+def test_duplicate_finding_delivery_is_idempotent_but_conflicts_are_rejected(tmp_path):
+    store = opened(tmp_path)
+    identity = start(store)
+    unit_id = identity["unit_ids"]["individual:1"]
+    anchor = {
+        "anchor_type": "content", "anchor": "sha256:" + "0123456789abcdef" * 4,
+        "evidence_fingerprint": "e" * 64, "details": {"path": "app.py", "line": 7},
+    }
+    details = {
+        "content": "same documented defect", "severity": "medium",
+        "confidence": "0.85", "lens": "correctness", "path": "app.py", "line": 7,
+        "anchors": [anchor], "evidence": {"source": "fixture"},
+    }
+    with store:
+        first = store.record_finding(unit_id, "rs-1", **details)
+        duplicate = store.record_finding(unit_id, "rs-1", **details)
+        assert duplicate == first
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM findings WHERE unit_id = ?", (unit_id,)
+        ).fetchone()[0] == 1
+        with pytest.raises(StoreError, match="different evidence"):
+            store.record_finding(unit_id, "rs-1", **{
+                **details, "content": "different defect", "confidence": "0.1",
+            })
+        with pytest.raises(StoreError, match="different evidence"):
+            store.record_finding(unit_id, "rs-1", **{
+                **details,
+                    "anchors": [dict(anchor, details={"path": "other.py", "line": 7})],
+            })
+        with pytest.raises(StoreError, match="different evidence"):
+            store.record_finding(unit_id, "rs-1", **{
+                **details, "evidence": {"source": "different-fixture"},
+            })
+        original = store.connection.execute(
+            "SELECT content, confidence, evidence_json FROM findings WHERE finding_id = ?",
+            (first,),
+        ).fetchone()
+        assert original["content"] == details["content"]
+        assert original["confidence"] == details["confidence"]
+        assert json.loads(original["evidence_json"]) == details["evidence"]
+        original_anchor = store.connection.execute(
+            "SELECT details_json FROM finding_anchors WHERE finding_id = ?", (first,),
+        ).fetchone()
+        assert json.loads(original_anchor[0]) == anchor["details"]
+
+
 def test_close_is_idempotent_and_use_after_close_is_explicit(tmp_path):
     store = opened(tmp_path)
     identity = start(store)

@@ -19,6 +19,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+import rg_final_native  # noqa: E402
 import rg_final_review  # noqa: E402
 from rg_final_lenses import (  # noqa: E402
     CROSS_ITEM_CONTRACTS,
@@ -27,6 +28,47 @@ from rg_final_lenses import (  # noqa: E402
 )
 from rg_final_publish import STATUS_CONTEXT  # noqa: E402
 from rg_final_store import FinalStore  # noqa: E402
+from rg_native_executor import NativeHostCompletion  # noqa: E402
+from test_final_complete_standalone import stop_result, worker_result  # noqa: E402
+from test_final_native import GatedHost, ImmediateHost, _Session, native_options  # noqa: E402
+from test_native_executor import _DeadlineTimer  # noqa: E402
+
+
+def native_request(task):
+    request_path = task.prompt.split("Read the JSON request at ", 1)[1].split(
+        ". Its repository.path", 1)[0]
+    return json.loads(Path(request_path).read_text(encoding="utf-8"))
+
+
+class ReverseCompletionHost:
+    transport = "test-double/native-host-v1"
+
+    def __init__(self):
+        self.tasks = []
+        self.pending = {}
+        self.completion_order = []
+        self.condition = threading.Condition()
+
+    def launch(self, task, callback):
+        session = _Session(task, callback)
+        with self.condition:
+            self.tasks.append(task)
+            self.pending[task.task_id] = session
+            self.condition.notify_all()
+        return session
+
+    def finish_latest(self):
+        with self.condition:
+            while not self.pending:
+                assert self.condition.wait(5)
+            task_id, session = self.pending.popitem()
+            self.completion_order.append(task_id)
+        finished = time.time()
+        session.callback(NativeHostCompletion(
+            native_session_id=session.native_session_id, return_code=0,
+            stdout=json.dumps(worker_result()),
+            started_at_unix=finished - 0.01, finished_at_unix=finished,
+        ))
 
 
 def git(cwd, *args):
@@ -335,6 +377,269 @@ def test_three_item_stack_runs_complete_units_links_reports_and_publishes_each_i
                 for entry in report["units"][0]["coverage"]}["composition"] == "not_applicable"
         assert {entry["kind"]: entry["status"]
                 for entry in combined_coverage(report)}["composition"] == "complete"
+
+
+def test_direct_stack_rejects_unknown_transport_before_provider_reads():
+    class RejectingProvider:
+        def __init__(self):
+            self.reads = []
+
+        def read(self, reference, repo_root=None):
+            self.reads.append(reference)
+            raise AssertionError("invalid transport reached provider discovery")
+
+    provider = RejectingProvider()
+
+    with pytest.raises(ValueError, match="unsupported final-review transport"):
+        rg_final_review.run_final_stack(
+            ["!1"], provider=provider,
+            environ={"RG_FINAL_REVIEW_TRANSPORT": "nested"},
+        )
+
+    assert provider.reads == []
+
+
+def test_native_multi_reference_stack_uses_global_native_execution_without_fallback(
+        tmp_path, monkeypatch):
+    harness = Harness(tmp_path)
+    host = ImmediateHost()
+    monkeypatch.setattr(
+        rg_final_review,
+        "invoke_worker",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("native stack execution used the legacy worker")),
+    )
+
+    task_counts_at_required = []
+
+    def required(repository_path, commit_sha):
+        task_counts_at_required.append(len(host.tasks))
+        return harness.required(repository_path, commit_sha)
+
+    output = harness.run(
+        tmp_path / "native-stack.sqlite3",
+        environ=native_options(host),
+        native_host=host,
+        required_runner=required,
+    )
+
+    assert output["complete"] is True
+    assert output["state"] == "pass"
+    assert len(host.tasks) == 5 * len(REQUIRED_LENS_NAMES)
+    assert {task.unit_id for task in host.tasks} == {
+        unit["unit_id"] for unit in output["units"]
+    }
+    assert len(harness.required_calls) == len(harness.dynamic_calls) == 5
+    assert task_counts_at_required == [7, 14, 21, 28, 35]
+    requests = [native_request(task) for task in host.tasks]
+    for unit_key in ("combined", "prospective"):
+        composed = [request for request in requests if request["unit_key"] == unit_key]
+        assert len(composed) == len(REQUIRED_LENS_NAMES)
+        assert all(request["capabilities"] == [CROSS_ITEM_CONTRACTS, INTEGRATION_BEHAVIOR]
+                   for request in composed)
+        assert all("actual integration behavior" in request["review_duty"]
+                   for request in composed)
+    with FinalStore(output["store_path"]) as store:
+        report = store.machine_report(output["run_id"])
+        lens_tasks = [task for task in report["native_tasks"]
+                      if task["identity"]["stage"].startswith("lens:")]
+        execution_tasks = [task for task in report["native_tasks"]
+                           if task["identity"]["stage"].startswith("execution:")]
+        assert len(lens_tasks) == 35
+        assert all(len(task["artifacts"]) == 1 for task in lens_tasks)
+        assert len(execution_tasks) == 10
+        assert all(not task["artifacts"] for task in execution_tasks)
+        assert all(len(unit["lenses"]) == 7 for unit in report["units"])
+        assert all(unit["tests"] for unit in report["units"])
+
+
+def test_native_stack_results_are_independent_of_native_completion_order(
+        tmp_path, monkeypatch):
+    harness = Harness(tmp_path)
+    host = ReverseCompletionHost()
+    registered_units = set()
+    all_registered = threading.Event()
+    original_prepare = rg_final_native.NativeStandaloneExecution.prepare
+
+    def observed_prepare(execution, requests, **kwargs):
+        result = original_prepare(execution, requests, **kwargs)
+        registered_units.add(requests[0]["unit_key"])
+        if len(registered_units) == 5:
+            all_registered.set()
+        return result
+
+    monkeypatch.setattr(
+        rg_final_native.NativeStandaloneExecution, "prepare", observed_prepare)
+    outputs = []
+    errors = []
+
+    def run():
+        try:
+            outputs.append(harness.run(
+                tmp_path / "native-stack-order.sqlite3",
+                environ=native_options(host), native_host=host,
+            ))
+        except BaseException as exc:
+            errors.append(exc)
+
+    review = threading.Thread(target=run, daemon=True)
+    review.start()
+    assert all_registered.wait(5)
+    for _ in range(35):
+        host.finish_latest()
+    review.join(10)
+
+    assert not review.is_alive()
+    assert not errors
+    assert outputs[0]["complete"] is True
+    assert outputs[0]["state"] == "pass"
+    assert host.completion_order[0] == host.tasks[3].task_id
+    assert len(host.completion_order) == 35
+    assert all(len(unit["lenses"]) == 7 for unit in outputs[0]["units"])
+
+
+def test_native_stack_session_failure_is_terminal_without_widening_stop_scope(
+        tmp_path, monkeypatch):
+    harness = Harness(tmp_path)
+
+    class FailingHost(ImmediateHost):
+        def launch(self, task, callback):
+            self.tasks.append(task)
+            session = _Session(task, callback)
+            request = native_request(task)
+            failed = request["unit_key"] == "individual:2" and task.lens == "security"
+            finished = time.time()
+            callback(NativeHostCompletion(
+                native_session_id=session.native_session_id,
+                return_code=9 if failed else 0,
+                stdout="" if failed else json.dumps(worker_result()),
+                started_at_unix=finished - 0.01, finished_at_unix=finished,
+            ))
+            return session
+
+    monkeypatch.setattr(
+        rg_final_review,
+        "invoke_worker",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("native failure used the legacy worker")),
+    )
+    host = FailingHost()
+    output = harness.run(
+        tmp_path / "native-stack-failed.sqlite3",
+        environ=native_options(host), native_host=host,
+        publish=True, publication_runner=harness.writer,
+    )
+
+    assert output["state"] == "incomplete"
+    assert output["complete"] is False
+    assert output["stops"] == []
+    assert len(host.tasks) == 35
+    assert len(harness.required_calls) == len(harness.dynamic_calls) == 5
+    failed_unit = next(unit for unit in output["units"]
+                       if unit["unit_key"] == "individual:2")
+    lens_states = {lens["name"]: lens["state"] for lens in failed_unit["lenses"]}
+    assert lens_states["security"] == "incomplete"
+    assert not any(unit.get("inherited_stop") for unit in output["units"])
+    assert harness.writer.calls == []
+    with FinalStore(output["store_path"]) as store:
+        tasks = store.manifest(output["run_id"])["native_tasks"]
+        failed = [task for task in tasks
+                  if task["identity"]["unit_id"] == failed_unit["unit_id"]
+                  and task["identity"]["lens"] == "security"]
+        assert len(failed) == 1
+        assert failed[0]["artifacts"] == []
+        assert "failed" in {event["event_type"] for event in failed[0]["events"]}
+
+
+def test_native_stack_expiry_notifies_every_unit_without_running_tests(
+        tmp_path, monkeypatch, capsys):
+    timer = _DeadlineTimer()
+    real_deadline = rg_final_native.RunDeadline
+
+    def controlled_deadline(run_id, timeout_seconds, **kwargs):
+        return real_deadline(
+            run_id, timeout_seconds, timer_factory=timer, **kwargs)
+
+    monkeypatch.setattr(rg_final_native, "RunDeadline", controlled_deadline)
+    worker_started = threading.Event()
+    original_worker = rg_final_native.NativeStandaloneExecution.worker
+
+    def observed_worker(execution, request):
+        worker_started.set()
+        return original_worker(execution, request)
+
+    monkeypatch.setattr(
+        rg_final_native.NativeStandaloneExecution, "worker", observed_worker)
+    host = GatedHost(capacity=1)
+    harness = Harness(tmp_path)
+    outputs = []
+    errors = []
+
+    def run():
+        try:
+            outputs.append(harness.run(
+                tmp_path / "native-stack-expiry.sqlite3",
+                environ=native_options(host, RG_FINAL_LENS_WORKERS="1"),
+                native_host=host,
+            ))
+        except BaseException as exc:
+            errors.append(exc)
+
+    review = threading.Thread(target=run, daemon=True)
+    review.start()
+    assert worker_started.wait(5)
+    assert host.at_capacity.is_set()
+    timer.fire()
+    host.release.set()
+    review.join(5)
+
+    assert not review.is_alive(), "multi-reference waiters remained blocked after expiry"
+    assert not errors
+    assert outputs[0]["state"] == "incomplete"
+    assert outputs[0]["complete"] is False
+    assert len(host.tasks) == 1
+    assert harness.required_calls == harness.dynamic_calls == []
+    progress = capsys.readouterr().err.splitlines()
+    for unit in outputs[0]["units"]:
+        unit_progress = [line for line in progress
+                         if f": {unit['unit_id']}/" in line]
+        assert len(unit_progress) == len(REQUIRED_LENS_NAMES) + 2
+        assert all(line.endswith(" cancelled") for line in unit_progress)
+
+
+def test_native_stack_stop_skips_all_registered_descendants_without_waiting(
+        tmp_path, capsys):
+    harness = Harness(tmp_path)
+
+    def payload(task):
+        request_path = task.prompt.split("Read the JSON request at ", 1)[1].split(
+            ". Its repository.path", 1)[0]
+        request = json.loads(Path(request_path).read_text(encoding="utf-8"))
+        if request["unit_key"] == "individual:2" and task.lens == "correctness":
+            return stop_result()
+        return worker_result()
+
+    host = ImmediateHost(payload)
+    output = harness.run(
+        tmp_path / "native-stack-stop.sqlite3",
+        environ=native_options(host), native_host=host,
+        publish=True, publication_runner=harness.writer,
+    )
+
+    assert output["state"] == "incomplete"
+    assert output["complete"] is False
+    assert len(host.tasks) == 2 * len(REQUIRED_LENS_NAMES)
+    assert len(harness.required_calls) == len(harness.dynamic_calls) == 1
+    assert [unit.get("inherited_stop", False) for unit in output["units"]] == [
+        False, False, True, True, True,
+    ]
+    assert harness.writer.calls == []
+    progress = [line for line in capsys.readouterr().err.splitlines()
+                if line.startswith("review-gate final-review native:")]
+    for unit in output["units"][2:]:
+        unit_progress = [line for line in progress if f": {unit['unit_id']}/" in line]
+        assert len(unit_progress) == len(REQUIRED_LENS_NAMES) + 2
+        assert all(line.endswith(" skipped") for line in unit_progress)
 
 
 def test_complete_stack_uses_caller_lens_worker_environment_not_process_global(

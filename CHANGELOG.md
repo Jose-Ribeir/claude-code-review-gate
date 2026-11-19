@@ -7,6 +7,46 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Native execution contract hardening (SPEC-16).** Explicit final and deep reviews
+  can use correlated `prompt`/`abort` JSONL RPC workers with explicit run/task
+  identities, per-worker and whole-run deadlines, and bounded process cleanup.
+  Independent inference and repository execution slots schedule mandatory lenses
+  and tests without a unit barrier. Supervisors fence late results before durable
+  artifact publication, resume valid legacy deep journals, and accept unquoted
+  numeric CI matrix scalars. Deep native execution remains opt-in while #21
+  real-session acceptance is incomplete. Configuration and failure meanings are
+  documented in `docs/native-review-operations.md`.
+- **Native asynchronous review execution with guarded rollout (ADR 0009, SPEC-10).**
+  Add independently named inference task sessions with a global event-driven
+  scheduler and separate inference/test execution limits, durable task lifecycle
+  events, atomic review artifacts, and per-stage timing. Standalone and
+  multi-reference final review retain all seven required lenses and composed,
+  prospective, required/dynamic, freshness, and critical-stop evidence; trusted
+  `ocr_verdict.compute_verdict` remains the sole decision authority, with no
+  model aggregation or nested-agent fallback. A finite whole-run deadline and
+  native cancellation ownership support bounded process-tree cleanup and
+  retained incomplete evidence. Legacy deep review gains deterministic bounded
+  file/subsystem task manifests with complete coverage and global cross-file
+  duties. Required CI execution preserves nested heredoc indentation, expands
+  supported setup-python and literal matrix declarations, distinguishes missing
+  tool prerequisites from test failures, and uses bounded configurable timeouts.
+  `RG_FINAL_REVIEW_TRANSPORT` and `OCR_DEEP_TRANSPORT` default to legacy;
+  explicit `native` opt-in must never silently switch back before real-session
+  acceptance under #21. Migration and reporting preserve historical outcomes.
+- **Native result recovery and evidence integrity.** Native review defaults to
+  harness-selected `auto` models; explicit model overrides remain available.
+  Read-only `--plan` sessions and capability checks constrain inference without
+  bypassing owned verification workers. Provider retry/recovery remains bounded
+  by each worker's deadline, and a pending provider error clears only when a
+  valid replacement worker result arrives. The latest parseable structured
+  result is retained across assistant commentary without promoting newer
+  invalid/placeholder objects or hiding an unrecovered error. Require final
+  assistant-text worker results with evidence-backed finding fields and
+  confidence. Persist supplemental bounded, sanitized diagnostic warnings with
+  prefix+suffix context, leave terminal-event meanings unchanged, and make
+  identical finding delivery idempotent while rejecting conflicting evidence.
+  No new model aggregation, nested harness, global package installation, or
+  legacy fallback is added. Historical run and opt-in meanings do not change.
 - **Universal local-only push gate (ADR 0006).** `install-git-hook.sh`
   installs the global pre-push gate by default (pass `--no-git-hook` for the
   legacy opt-in), chaining any pre-existing global `core.hooksPath` through an

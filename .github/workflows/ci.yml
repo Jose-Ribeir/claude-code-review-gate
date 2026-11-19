@@ -52,7 +52,9 @@ jobs:
           PY
 
   test:
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: the latest image (Ubuntu 26.04) has no Python
+    # 3.9 build for setup-python, and 3.9 is the documented floor below.
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:

@@ -102,6 +102,7 @@ def make_standalone_fixture(tmp_path, monkeypatch, *, domain_contract=False, sta
     explicitly removes it and every other reviewer/selector override before it
     invokes the selected backend through the same public CLI.
     """
+    tmp_path = Path(tmp_path).resolve()
     repo, base, target, head = _repository(
         tmp_path, domain_contract=domain_contract, standards=standards,
     )
@@ -183,6 +184,16 @@ def make_standalone_fixture(tmp_path, monkeypatch, *, domain_contract=False, sta
 @pytest.fixture
 def standalone(tmp_path, monkeypatch):
     return make_standalone_fixture(tmp_path, monkeypatch)
+
+
+def test_relative_standalone_fixture_uses_absolute_provider_paths(tmp_path, monkeypatch):
+    fixture = make_standalone_fixture(
+        Path(os.path.relpath(tmp_path)), monkeypatch, standards=True,
+    )
+    provider_script = json.loads(fixture.script.read_text(encoding="utf-8"))
+    assert fixture.repo.is_absolute()
+    assert Path(provider_script["calls"]).is_absolute()
+    assert Path(provider_script["calls"]) == fixture.calls
 
 
 def _gate(*args, cwd=None):

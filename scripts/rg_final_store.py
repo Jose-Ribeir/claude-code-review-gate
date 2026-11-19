@@ -16,6 +16,7 @@ import math
 import os
 import re
 import sqlite3
+import tempfile
 import threading
 import time
 import uuid
@@ -39,7 +40,7 @@ NATIVE_TASK_SCHEMA = "native-review-task/v1"
 NATIVE_EVENT_SCHEMA = "native-review-event/v1"
 NATIVE_ARTIFACT_SCHEMA = "native-review-artifact/v1"
 NATIVE_EVENT_TYPES = frozenset((
-    "queued", "started", "completed", "warning", "timeout", "cancelled",
+    "queued", "started", "completed", "failed", "warning", "timeout", "cancelled",
     "cleanup", "finalization",
 ))
 _SHA = re.compile(r"^[0-9a-fA-F]{40}$")
@@ -91,6 +92,40 @@ def _json(value):
 
 def _loads(value):
     return json.loads(value) if value else {}
+
+
+def _atomic_artifact_write(path, artifact):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=path.name + ".", suffix=".tmp-", dir=str(path.parent),
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(artifact, stream, ensure_ascii=False, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+@contextmanager
+def _artifact_rollback(published):
+    try:
+        yield
+    except BaseException:
+        for path in published:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+        raise
 
 
 def _identifier():
@@ -168,19 +203,28 @@ def _native_artifact(value):
     if set(value) != fields:
         raise ValueError("native artifact has missing or unknown fields")
     payload = value.get("payload")
-    required_payload = {"schema", "status", "summary", "findings", "warnings", "unreviewed"}
-    if not isinstance(payload, dict) or not required_payload <= set(payload):
+    if not isinstance(payload, dict) or not {"schema", "status"} <= set(payload):
         raise ValueError("native artifact worker result is incomplete")
     if payload["schema"] != "final-review-worker-result/v1":
         raise ValueError("native artifact worker result has the wrong schema")
-    if payload["status"] not in ("success", "completed", "completed_with_warnings"):
-        raise ValueError("native artifact worker result is not a completed result")
-    if not isinstance(payload["summary"], str) or not payload["summary"].strip():
-        raise ValueError("native artifact worker result summary is incomplete")
-    if any(not isinstance(payload[key], list) for key in ("findings", "warnings", "unreviewed")):
-        raise ValueError("native artifact worker result collections must be arrays")
-    if any(not isinstance(finding, dict) for finding in payload["findings"]):
-        raise ValueError("native artifact worker result contains an invalid finding")
+    if str(payload["status"]).upper() == "STOP":
+        # STOP is terminal worker evidence, not a successful worker completion.
+        # Scheduler validation remains authoritative for its structured payload.
+        if "stop" in payload and not isinstance(payload["stop"], dict):
+            raise ValueError("native artifact STOP payload must be an object")
+    else:
+        required_payload = {"summary", "findings", "warnings", "unreviewed"}
+        if not required_payload <= set(payload):
+            raise ValueError("native artifact worker result is incomplete")
+        if payload["status"] not in ("success", "completed", "completed_with_warnings"):
+            raise ValueError("native artifact worker result is not a completed result")
+        if not isinstance(payload["summary"], str) or not payload["summary"].strip():
+            raise ValueError("native artifact worker result summary is incomplete")
+        if any(not isinstance(payload[key], list)
+               for key in ("findings", "warnings", "unreviewed")):
+            raise ValueError("native artifact worker result collections must be arrays")
+        if any(not isinstance(finding, dict) for finding in payload["findings"]):
+            raise ValueError("native artifact worker result contains an invalid finding")
     timing = value.get("timing")
     if not isinstance(timing, dict) or set(timing) != {
             "started_at_unix", "finished_at_unix", "duration_seconds"}:
@@ -586,7 +630,7 @@ _SCHEMA_V4 = (
         stage TEXT NOT NULL,
         lens TEXT NOT NULL,
         event_type TEXT NOT NULL CHECK(event_type IN (
-            'queued', 'started', 'completed', 'warning', 'timeout', 'cancelled',
+            'queued', 'started', 'completed', 'failed', 'warning', 'timeout', 'cancelled',
             'cleanup', 'finalization')),
         transport TEXT NOT NULL,
         native_session_id TEXT,
@@ -1737,8 +1781,9 @@ class FinalStore:
             row = self._insert_native_event(normalized)
             return self._native_event_public(row, identity)
 
-    def commit_native_artifact(self, identity, message_id, *, artifact, received_at_unix):
-        """Commit a validated result, event and receipt as one idempotent write."""
+    def commit_native_artifact(self, identity, message_id, *, artifact, received_at_unix,
+                               artifact_path=None):
+        """Commit a validated result, event, receipt and artifact file atomically."""
         identity = _native_identity(identity)
         message_id = _required_text({"message_id": message_id}, "message_id")
         artifact = _native_artifact(artifact)
@@ -1753,11 +1798,24 @@ class FinalStore:
             "message_id": message_id, "identity": identity, "artifact": artifact,
         }).encode("utf-8")).hexdigest()
         event_id = f"artifact-commit:{message_id}"
-        with self._transaction():
+        published = []
+        with _artifact_rollback(published), self._transaction():
             task = self._native_task_row(identity["run_id"], identity["task_id"])
             if _loads(task["identity_json"]) != identity or \
                     task["transport"] != artifact["transport"]:
                 raise StoreError("native artifact identity does not match its registered task")
+            run = self._run_row(identity["run_id"])
+            if run["superseded_by_run_id"] is not None:
+                raise StoreError("native artifact commit rejected: run is superseded")
+            fence = self._conn.execute(
+                "SELECT event_type FROM native_task_events WHERE run_id = ? "
+                "AND event_type IN ('cancelled', 'timeout', 'cleanup', 'finalization') LIMIT 1",
+                (identity["run_id"],),
+            ).fetchone()
+            if fence is not None:
+                raise StoreError(
+                    "native artifact commit rejected: run is fenced by " + fence["event_type"]
+                )
             receipt = self._conn.execute(
                 "SELECT * FROM native_artifact_messages WHERE run_id = ? AND message_id = ?",
                 (identity["run_id"], message_id),
@@ -1823,6 +1881,9 @@ class FinalStore:
                 "SELECT * FROM native_task_events WHERE run_id = ? AND event_id = ?",
                 (identity["run_id"], receipt["event_id"]),
             ).fetchone()
+            if artifact_path is not None:
+                _atomic_artifact_write(artifact_path, artifact)
+                published.append(Path(artifact_path))
             return {
                 "schema": "native-review-artifact-commit/v1",
                 "message_id": message_id,
@@ -2102,6 +2163,40 @@ class FinalStore:
         stored_anchors = normalized if anchors else ()
         with self._transaction():
             unit = self._unit_row(unit_id)
+            existing = self._conn.execute(
+                "SELECT finding_id, content, severity, confidence, state, lens, path, line, "
+                "evidence_json "                "FROM findings WHERE unit_id = ? AND finding_key = ?",
+                (unit_id, str(finding_key)),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["content"], existing["severity"], existing["confidence"],
+                    existing["state"], existing["lens"], existing["path"], existing["line"],
+                ) == (
+                    str(content), str(severity), str(confidence), str(state), lens, path, line,
+                ):
+                    stored = self._conn.execute(
+                        "SELECT anchor_type, anchor, evidence_fingerprint, details_json "
+                        "FROM finding_anchors WHERE finding_id = ?", (existing["finding_id"],)
+                    ).fetchall()
+                    existing_anchors = [{
+                        "anchor_type": row["anchor_type"], "anchor": row["anchor"],
+                        "evidence_fingerprint": row["evidence_fingerprint"],
+                        "details": _loads(row["details_json"]),
+                    } for row in stored]
+                    if sorted(existing_anchors, key=rg_final_memory._canonical) != sorted(
+                            stored_anchors, key=rg_final_memory._canonical):
+                        raise StoreError(
+                            f"duplicate finding_key {str(finding_key)!r} conflicts with different evidence"
+                        )
+                    if existing["evidence_json"] != _json(evidence):
+                        raise StoreError(
+                            f"duplicate finding_key {str(finding_key)!r} conflicts with different evidence"
+                        )
+                    return existing["finding_id"]
+                raise StoreError(
+                    f"duplicate finding_key {str(finding_key)!r} conflicts with different evidence"
+                )
             finding_id = self._insert_finding_row(
                 unit_id, finding_key, content, severity, confidence, state,
                 lens, path, line, stored_anchors, evidence,
@@ -3326,4 +3421,47 @@ class FinalStore:
             f"{item['error'] or 'no error'} {self._details(item['details'])}"
             for item in unassociated
         ) or lines.append("- none recorded")
+        if report["native_tasks"]:
+            lines.extend(("", "## Native task lifecycle", ""))
+            for task in report["native_tasks"]:
+                identity = task["identity"]
+                lines.extend((
+                    f"### {identity['task_id']}", "",
+                    f"Unit: {identity['unit_id']}; stage: {identity['stage']}; "
+                    f"lens: {identity['lens']}",
+                    f"Transport: {task['transport']}",
+                    f"Session: {identity['session_name']}",
+                    f"Backend/model: {identity['backend']}/{identity['model']}",
+                    f"Input SHA-256: {identity['input_sha256']}",
+                    f"Revision tuple: {self._details(identity['revision_tuple'])}",
+                    f"Worker deadline: {identity['deadline_at_unix']}",
+                    "Events:",
+                ))
+                for event in task["events"]:
+                    timing = event["timing"]
+                    duration = (
+                        ""
+                        if timing["duration_seconds"] is None
+                        else f"; duration={timing['duration_seconds']}s"
+                    )
+                    lines.append(
+                        f"- {event['event_type']} @ {timing['occurred_at_unix']}{duration}; "
+                        f"native_session={event['native_session_id'] or 'not assigned'}; "
+                        f"details={self._details(event['details'])}"
+                    )
+                lines.append("Artifact callbacks:")
+                lines.extend(
+                    f"- {message['message_id']}: accepted={str(message['accepted']).lower()}; "
+                    f"sha256={message['artifact_sha256'] or 'none'}; "
+                    f"reason={message['reason'] or 'none'}"
+                    for message in task["artifact_messages"]
+                ) or lines.append("- none recorded")
+                lines.append("Committed artifacts:")
+                lines.extend(
+                    f"- {artifact['message_id']}: sha256={artifact['artifact_sha256']}; "
+                    f"schema={artifact['artifact']['schema']}; "
+                    f"duration={artifact['artifact']['timing']['duration_seconds']}s"
+                    for artifact in task["artifacts"]
+                ) or lines.append("- none recorded")
+                lines.append("")
         return "\n".join(lines) + "\n"

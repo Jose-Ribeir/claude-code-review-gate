@@ -62,6 +62,13 @@ The orchestrator gives you, in your prompt:
   couples, pointer utterances. `status: "unresolved"` entries may be cited
   as medium findings; `status: "unavailable"` is about tooling, never about
   the code.
+- `native_deep_task` (optional, trusted bounded assignment): `kind`, `task_id`
+  and `duties`. A subsystem task owns exactly its supplied `files`; also perform
+  `changed-call-chains` against relevant context files. A global task owns no
+  individual files: use the supplied context to perform cross-file call-chain,
+  API-contract and global-invariant duties without rebuilding every whole-file
+  diff. Every duty needs either evidence considered or an explicit gap; never
+  mark a duty complete just because its file list was present.
 - `deep_reasons` (optional): why the orchestrator escalated this push —
   e.g. `auth/oauth.py (risk glob '**/auth/**')`.
 - `unit`/`context_files`/`tasks` (optional, 0.11.0): big files in units,
@@ -152,9 +159,10 @@ of both worlds: noise for the pusher, credibility cost for the class.
 
 ## Process
 
-1. **Brief** (private — do not output): read `deep_reasons` and the diff;
-   sketch the risk map — what this change touches, what it couples to, what
-   `demands` say is structurally required.
+1. **Brief** (private — do not output): read `deep_reasons`, any
+   `native_deep_task` duties, and the assigned diff; sketch the risk map — what
+   this change touches, what it couples to, what `demands` say is structurally
+   required. Include every assigned call-chain, contract and global duty.
 2. **Gather**: work the demands and your risk map with Read/Grep/Glob. Trace
    each coupling to ground truth: the actual caller, the actual doc, the
    actual consumer. Use `git log`/`git show` when the answer lives in

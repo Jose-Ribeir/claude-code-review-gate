@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import os
+import signal
 import sys
 
 import pytest
@@ -1672,7 +1673,9 @@ def test_a_timed_out_review_kills_the_child_and_fails_closed(monkeypatch, tmp_pa
         killed = False
 
         def __init__(self, cmd, **kw):
-            pass
+            type(self).killed = False
+            self.stdout = None
+            self.stderr = None
 
         def communicate(self, timeout=None):
             if not self.killed:
@@ -1682,6 +1685,10 @@ def test_a_timed_out_review_kills_the_child_and_fails_closed(monkeypatch, tmp_pa
         def kill(self):
             type(self).killed = True
 
+        def wait(self, timeout=None):
+            self.returncode = -9
+            return self.returncode
+
         def __enter__(self):
             return self
 
@@ -1690,12 +1697,20 @@ def test_a_timed_out_review_kills_the_child_and_fails_closed(monkeypatch, tmp_pa
 
     monkeypatch.setattr(review_gate.subprocess, "Popen", _StuckProc)
     monkeypatch.setattr(review_gate, "_find_kimi", lambda: "kimchi")
+
+    process_group_kills = []
+
+    def record_process_group_kill(pid, signum):
+        process_group_kills.append((pid, signum))
+
+    monkeypatch.setattr(review_gate.os, "killpg", record_process_group_kill)
     try:
         review_gate._run_review(str(tmp_path), "hook", str(tmp_path), "a" * 40)
         raise AssertionError("expected ReviewGateError")
     except review_gate.ReviewGateError as exc:
         assert "timed out" in str(exc)
-    assert _StuckProc.killed is True
+    # POSIX cleanup owns a process group rather than invoking proc.kill().
+    assert process_group_kills == [(4242, signal.SIGKILL)]
 
 
 # --- OCR_UNSET_ENV / the default session-bridge scrub --------------------------
@@ -2331,8 +2346,6 @@ def test_a_relative_hop_after_an_unresolvable_one_stays_ambiguous(tmp_path, monk
 # Claude pushes as `cd /j/codigo/repo && git push`. The hook runs under native
 # Python, where that path is `j/codigo/repo` off the root of the CURRENT drive: isabs()
 # is True, isdir() is False, and a real repository was denied as ambiguous.
-
-import pytest  # noqa: E402
 
 
 def test_an_msys_drive_path_is_translated_to_the_native_spelling(monkeypatch):

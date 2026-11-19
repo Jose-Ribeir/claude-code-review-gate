@@ -28,6 +28,8 @@ Invoked as `fake_backend.py <flavor> <cli argv...>`, flavor `claude` or
                   garbage  a well-formed stream whose text holds no verdict
                   crash    exit 3 with a stderr message and no stdout
                   rawtext  plain text with no JSON stream at all, exit 0
+                  native-timeout  stream credential-like tails, spawn a pipe-holding
+                                  child, and sleep until the native deadline
   FAKE_ENVELOPE   "json": claude flavor answers with the single
                   `--output-format json` result object instead of a stream.
 """
@@ -37,6 +39,7 @@ import re
 import stat
 import subprocess
 import sys
+import time
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _STUB = os.path.join(_HERE, "stub_reviewer.py")
@@ -124,7 +127,20 @@ def main(argv):
     if cli == ["--version"]:
         sys.stdout.write("2.1.0 (Claude Code)\n" if flavor == "claude" else "kimchi 1.34.3\n")
         return 0
-    prompt = cli[cli.index("-p") + 1] if "-p" in cli and cli.index("-p") + 1 < len(cli) else ""
+    if cli == ["--help"]:
+        sys.stdout.write(
+            "-p --mode rpc --no-session --no-approve --approve --no-auto-update "
+            "--model --mcp-config --allow-tool --deny-tool -e --plan\n"
+        )
+        return 0
+    rpc_id = None
+    rpc_mode = "--mode" in cli and cli[cli.index("--mode") + 1] == "rpc"
+    if rpc_mode:
+        command = json.loads(sys.stdin.buffer.readline())
+        rpc_id = command["id"]
+        prompt = command["message"]
+    else:
+        prompt = cli[cli.index("-p") + 1] if "-p" in cli and cli.index("-p") + 1 < len(cli) else ""
     trace = os.environ.get("FAKE_TRACE")
     if trace:
         with open(trace, "a", encoding="utf-8") as fh:
@@ -152,6 +168,43 @@ def main(argv):
     if scenario == "rawtext":
         sys.stdout.write("this is not a JSON stream\n")
         return 0
+    if scenario == "native-timeout":
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+        with open(os.environ["FAKE_TIMEOUT_CHILD"], "w", encoding="utf-8") as fh:
+            fh.write(str(child.pid))
+        if rpc_mode:
+            sys.stdout.write(json.dumps({
+                "id": rpc_id, "type": "response", "command": "prompt",
+                "success": True, "data": {"disposition": "started"},
+            }) + "\n" + json.dumps({
+                "type": "message_end", "message": {
+                    "role": "assistant", "stopReason": "stop",
+                    "content": [{"type": "text", "text": "api_key=stdout-secret"}],
+                },
+            }) + "\n")
+            sys.stdout.flush()
+            sys.stderr.write("model tool failed: bearer stderr-secret\n")
+            sys.stderr.flush()
+            while True:
+                line = sys.stdin.buffer.readline()
+                if not line:
+                    return 0
+                abort = json.loads(line)
+                if abort["type"] == "abort":
+                    sys.stdout.write(json.dumps({
+                        "id": abort["id"], "type": "response", "command": "abort",
+                        "success": True,
+                    }) + "\n" + json.dumps({"type": "agent_settled", "aborted": True}) + "\n")
+                    sys.stdout.flush()
+                    return 0
+        sys.stdout.write(json.dumps({
+            "type": "model_tool", "status": "api_key=stdout-secret",
+        }) + "\n")
+        sys.stdout.flush()
+        sys.stderr.write("model tool failed: bearer stderr-secret\n")
+        sys.stderr.flush()
+        time.sleep(120)
+        return 0
     proc = subprocess.run([sys.executable, _STUB] + _stub_argv(prompt),
                           capture_output=True, text=True, encoding="utf-8",
                           errors="replace", stdin=subprocess.DEVNULL)
@@ -159,7 +212,40 @@ def main(argv):
         sys.stdout.write(proc.stdout)
         sys.stderr.write(proc.stderr)
         return proc.returncode
-    sys.stdout.write(_wrap(flavor, proc.stdout))
+    output = proc.stdout
+    pf = re.search(r'--paths-file "([^"]+)"', prompt)
+    if pf:
+        with open(pf.group(1), encoding="utf-8") as fh:
+            manifest = json.load(fh)
+        task = manifest.get("native_deep_task")
+        if task:
+            payload = json.loads(output)
+            input_sha = re.search(r'"input_sha256": "([0-9a-f]{64})"', prompt)
+            payload["native_deep_evidence"] = {
+                "task_id": task["task_id"],
+                "input_sha256": input_sha.group(1),
+                "manifest_sha256": manifest["manifest_sha256"],
+                "reviewed_paths": manifest["paths"],
+                "completed_duties": task["duties"],
+            }
+            output = json.dumps(payload)
+    if rpc_mode:
+        sys.stdout.write(json.dumps({
+            "id": rpc_id, "type": "response", "command": "prompt",
+            "success": True, "data": {"disposition": "started"},
+        }) + "\n" + json.dumps({
+            "type": "message_end", "message": {
+                "role": "assistant", "stopReason": "stop",
+                "content": [{"type": "text", "text": output}],
+            },
+        }) + "\n" + json.dumps({
+            "type": "agent_end", "messages": [], "willRetry": False,
+        }) + "\n" + json.dumps({"type": "agent_settled", "aborted": False}) + "\n")
+        sys.stdout.flush()
+        while sys.stdin.buffer.readline():
+            pass
+    else:
+        sys.stdout.write(_wrap(flavor, output))
     return 0
 
 

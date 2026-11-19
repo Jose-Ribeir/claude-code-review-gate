@@ -29,6 +29,7 @@ _STUB = os.path.join(_HERE, "stub_reviewer.py")
 
 sys.path.insert(0, _SCRIPTS)
 from hook_output import parse_pretooluse  # noqa: E402
+import fake_backend  # noqa: E402
 _spec = importlib.util.spec_from_file_location("review_gate_t10", _GATE)
 review_gate = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(review_gate)
@@ -361,6 +362,140 @@ class TestDeepLaneE2E:
         st = _state(work, tip)
         assert st["state"] == "done" and st["tier"] == "deep"
         assert st.get("verdict") == "warn"
+
+    def test_kimchi_deep_uses_one_native_task_and_preserves_legacy_contract(self, tmp_path):
+        work = _repo(tmp_path, {"a.txt": "one\n"})
+        tip = _commit(work, {"auth/oauth.py": "x = 1\n"})
+        env = _env(tmp_path, STUB_VERDICT="block", STUB_TOUCH=tmp_path / "touched")
+        env.pop("OCR_REVIEWER_CMD")
+        env.update({
+            "OCR_BACKEND": "kimchi",
+            "KIMCHI_BIN": fake_backend.install(tmp_path / "bin", "kimchi"),
+            "OCR_SKIP_CANARY": "1",
+            "OCR_DEEP_TRANSPORT": "native",
+            "FAKE_TRACE": str(tmp_path / "fake.trace"),
+        })
+
+        decision, reason = _push(work, env)
+        assert decision == "deny" and "stub high finding" in reason
+        st = _state(work, tip)
+        assert st["state"] == "done" and st["tier"] == "deep"
+        assert (tmp_path / "touched").exists()
+
+        native_calls = [call for call in fake_backend.read_trace(tmp_path / "fake.trace")
+                        if call["argv"][:2] == ["--mode", "rpc"]]
+        assert len(native_calls) == 1
+        argv = native_calls[0]["argv"]
+        assert "-p" not in argv
+        assert "--no-session" in argv and "--no-approve" in argv
+        assert "--no-auto-update" in argv
+        assert argv[argv.index("-e") + 1] == review_gate._DENY_EXT
+        prompt = native_calls[0]["prompt"]
+        assert st["base"] + ".." + tip in prompt
+        assert "--paths-file" in prompt
+        manifest = _review_manifest(tmp_path)
+        assert manifest["deep_review"] is True
+        assert "auth/oauth.py" in manifest["paths"]
+
+        common = review_gate._git_common_dir(str(work))
+        artifact_path = review_gate._async_dir(common) / f"native-{st['run_id']}-deep.json"
+        artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+        assert artifact["schema"] == "native-review-artifact/v1"
+        assert artifact["transport"] == "native-top-level/kimchi-rpc-v1"
+        assert artifact["identity"]["lens"] == "deep"
+        assert artifact["payload"]["verdict"] == "block"
+        assert artifact["timing"]["duration_seconds"] >= 0
+
+        state_path = review_gate._state_path(common, tip)
+        log = Path(str(state_path)[:-5] + ".supervisor.log").read_text(encoding="utf-8")
+        assert "phase=deep-review" in log
+        assert "native-session-started" in log
+        assert "native-session-completed" in log
+        assert "stream-progress" in log
+        assert "stub high finding" not in log
+
+    @pytest.mark.parametrize("transport", [None, "legacy"])
+    def test_default_and_explicit_legacy_deep_transport_preserve_legacy_argv(
+            self, tmp_path, monkeypatch, transport):
+        monkeypatch.delenv("OCR_REVIEWER_CMD", raising=False)
+        monkeypatch.delenv("OCR_STUB_WORKER", raising=False)
+        monkeypatch.setenv("OCR_BACKEND", "kimchi")
+        monkeypatch.setenv(
+            "KIMCHI_BIN", fake_backend.install(tmp_path / "bin", "kimchi"),
+        )
+        monkeypatch.setenv("OCR_SKIP_CANARY", "1")
+        if transport is None:
+            monkeypatch.delenv("OCR_DEEP_TRANSPORT", raising=False)
+        else:
+            monkeypatch.setenv("OCR_DEEP_TRANSPORT", transport)
+        monkeypatch.setenv("FAKE_TRACE", str(tmp_path / "fake.trace"))
+
+        result, ran, _raw_name = review_gate._run_review(
+            str(tmp_path), "hook", str(tmp_path), "t" * 40, "a..b",
+            timeout=5, tier="deep", common_dir=str(tmp_path),
+            native=True, run_id=f"{transport or 'default'}-legacy",
+        )
+
+        assert ran and result["verdict"] == "pass"
+        calls = [call for call in fake_backend.read_trace(tmp_path / "fake.trace")
+                 if "-p" in call["argv"]]
+        assert len(calls) == 1
+        argv = calls[0]["argv"]
+        assert "--approve" in argv and "--no-approve" not in argv
+        assert "--no-session" in argv
+        artifact_dir = review_gate._async_dir(str(tmp_path))
+        run_id = f"{transport or 'default'}-legacy"
+        assert not (artifact_dir / f"native-{run_id}-deep.json").exists()
+
+    def test_native_deep_timeout_logs_sanitized_tails_after_bounded_cleanup(
+            self, tmp_path, monkeypatch):
+        from contextlib import redirect_stderr
+
+        monkeypatch.delenv("OCR_REVIEWER_CMD", raising=False)
+        monkeypatch.delenv("OCR_STUB_WORKER", raising=False)
+        monkeypatch.setenv("OCR_BACKEND", "kimchi")
+        monkeypatch.setenv(
+            "KIMCHI_BIN", fake_backend.install(tmp_path / "bin", "kimchi"),
+        )
+        monkeypatch.setenv("OCR_SKIP_CANARY", "1")
+        monkeypatch.setenv("OCR_DEEP_TRANSPORT", "native")
+        monkeypatch.setenv("FAKE_SCENARIO", "native-timeout")
+        monkeypatch.setenv("FAKE_TIMEOUT_CHILD", str(tmp_path / "descendant.pid"))
+        log_path = tmp_path / "timeout.supervisor.log"
+        started = time.monotonic()
+        with log_path.open("w", encoding="utf-8") as stream, redirect_stderr(stream):
+            with pytest.raises(review_gate.ReviewGateError) as captured:
+                review_gate._run_review(
+                    str(tmp_path), "hook", str(tmp_path), "t" * 40, "a..b",
+                    timeout=0.25, tier="deep", common_dir=str(tmp_path),
+                    native=True, run_id="timeout-native",
+                )
+
+        assert captured.value.is_timeout
+        assert time.monotonic() - started < 8
+        assert captured.value.cleanup["complete"] is True
+        artifact_dir = review_gate._async_dir(str(tmp_path))
+        assert not (artifact_dir / "native-timeout-native-deep.json").exists()
+        log = log_path.read_text(encoding="utf-8")
+        assert "phase=deep-review" in log
+        assert "deadline-exceeded" in log
+        assert "native-session-cancelled" in log
+        assert "native-diagnostic-tail" in log
+        assert "model_tool" in log
+        assert "stdout-secret" not in log and "stderr-secret" not in log
+        assert "[redacted]" in log
+        assert len(log) < 10000
+
+        descendant = int((tmp_path / "descendant.pid").read_text())
+        gone_by = time.monotonic() + 5
+        while time.monotonic() < gone_by:
+            try:
+                os.kill(descendant, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError("native deep timeout left a managed-pipe descendant alive")
 
     def test_a_surviving_high_low_confidence_deep_finding_blocks_under_d15(self, tmp_path):
         """Escalation swaps the reviewer, never the bar: the deep lane keeps

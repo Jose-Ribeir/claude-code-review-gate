@@ -97,7 +97,7 @@ def test_a_timeout_keeps_the_partial_stream_and_never_changes_the_error(monkeypa
         returncode = None
 
         def __init__(self, *a, **kw):
-            pass
+            self.expired = False
 
         def __enter__(self):
             return self
@@ -106,7 +106,8 @@ def test_a_timeout_keeps_the_partial_stream_and_never_changes_the_error(monkeypa
             return False
 
         def communicate(self, timeout=None):
-            if timeout is not None:
+            if timeout is not None and not self.expired:
+                self.expired = True
                 raise subprocess.TimeoutExpired("claude", timeout)
             return partial, ""
 

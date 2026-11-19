@@ -13,6 +13,9 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import rg_final_store as final_store  # noqa: E402
 from rg_final_store import FinalStore, StoreError  # noqa: E402
+from rg_native_executor import NativeExecutor, NativeTask  # noqa: E402
+from rg_run_lifecycle import RunDeadline  # noqa: E402
+from test_native_executor import _DeadlineTimer, _FakeHost  # noqa: E402
 
 
 def review_stack(source_sha="a" * 40, target_sha="b" * 40):
@@ -174,6 +177,19 @@ def test_registered_task_lifecycle_is_exactly_once_and_preserves_timing(tmp_path
 
         assert store.manifest(started["run_id"])["native_tasks"][0]["events"] == recorded
 
+        readable = store.human_report(started["run_id"])
+        for expected in (
+            "## Native task lifecycle",
+            "### task-correctness",
+            "Transport: test-double/native-host-v1",
+            "Session: review-task-correctness",
+            "- queued @ 10.0",
+            "- completed @ 13.25; duration=2.25s",
+            "Artifact callbacks:\n- none recorded",
+            "Committed artifacts:\n- none recorded",
+        ):
+            assert expected in readable
+
 
 def native_artifact(identity, payload=None):
     return {
@@ -303,3 +319,117 @@ def test_artifact_commit_rolls_back_partial_state_and_preserves_lens_evidence(tm
         assert task["artifacts"] == [committed["artifact"]]
         assert len(task["artifact_messages"]) == 1
         assert after["units"] == before["units"]
+
+
+def test_artifact_file_failure_rolls_back_the_entire_success_commit(tmp_path, monkeypatch):
+    with FinalStore(tmp_path / "artifact-io.sqlite3") as store:
+        started = store.start_run(review_stack())
+        identity = native_identity(started)
+        store.register_native_task(native_task(identity))
+        artifact_path = tmp_path / "rejected.json"
+
+        def fail_write(_path, _artifact):
+            raise OSError("injected artifact I/O failure")
+
+        monkeypatch.setattr(final_store, "_atomic_artifact_write", fail_write)
+        with pytest.raises(OSError, match="injected artifact I/O failure"):
+            store.commit_native_artifact(
+                identity, "message-correctness", artifact=native_artifact(identity),
+                received_at_unix=13.5, artifact_path=artifact_path,
+            )
+
+        recorded = store.manifest(started["run_id"])["native_tasks"][0]
+        assert recorded["artifacts"] == []
+        assert not any(event["event_type"] == "completed" for event in recorded["events"])
+        assert not artifact_path.exists()
+
+
+def test_database_commit_failure_removes_newly_published_artifact(tmp_path, monkeypatch):
+    with FinalStore(tmp_path / "artifact-db-commit.sqlite3") as store:
+        started = store.start_run(review_stack())
+        identity = native_identity(started)
+        store.register_native_task(native_task(identity))
+        artifact_path = tmp_path / "uncommitted.json"
+        class CommitFailure:
+            def __init__(self, connection):
+                self.connection = connection
+
+            def __getattr__(self, name):
+                return getattr(self.connection, name)
+
+            def commit(self):
+                raise sqlite3.OperationalError("injected database commit failure")
+
+        monkeypatch.setattr(store, "_conn", CommitFailure(store._conn))
+        with pytest.raises(sqlite3.DatabaseError, match="injected database commit failure"):
+            store.commit_native_artifact(
+                identity, "message-correctness", artifact=native_artifact(identity),
+                received_at_unix=13.5, artifact_path=artifact_path,
+            )
+
+        assert not artifact_path.exists()
+        recorded = store.manifest(started["run_id"])["native_tasks"][0]
+        assert recorded["artifacts"] == []
+        assert not any(event["event_type"] == "completed" for event in recorded["events"])
+
+
+def test_superseded_run_cannot_commit_late_artifact_even_without_scheduler(tmp_path):
+    with FinalStore(tmp_path / "artifact-superseded.sqlite3") as store:
+        first = store.start_run(review_stack())
+        store.start_run(review_stack(source_sha="c" * 40))
+        identity = native_identity(first)
+        store.register_native_task(native_task(identity))
+        artifact_path = tmp_path / "late.json"
+
+        with pytest.raises(StoreError, match="superseded"):
+            store.commit_native_artifact(
+                identity, "message-correctness", artifact=native_artifact(identity),
+                received_at_unix=13.5, artifact_path=artifact_path,
+            )
+
+        recorded = store.manifest(first["run_id"])["native_tasks"][0]
+        assert recorded["artifacts"] == []
+        assert not any(event["event_type"] == "completed" for event in recorded["events"])
+        assert not artifact_path.exists()
+
+
+def test_executor_records_expiry_cancellation_through_existing_native_store(tmp_path):
+    with FinalStore(tmp_path / "executor-events.sqlite3") as store:
+        started = store.start_run(review_stack())
+        run_id = started["run_id"]
+        task = NativeTask(
+            run_id=run_id,
+            task_id="task-correctness",
+            session_name="review-task-correctness",
+            unit_id=started["unit_ids"]["individual:1"],
+            stage="individual",
+            lens="correctness",
+            revision_tuple=("b" * 40, "a" * 40, "b" * 40),
+            input_sha256="a" * 64,
+            backend="kimchi",
+            model="kimi-k3.1-pro",
+            deadline_at_unix=200.0,
+            prompt="Return the contracted result.",
+            repo_root=tmp_path,
+            artifact_path=tmp_path / "result.json",
+        )
+        timer = _DeadlineTimer()
+        deadline = RunDeadline(run_id, 30, timer_factory=timer)
+        executor = NativeExecutor(_FakeHost(), deadline=deadline, store=store)
+        deadline.start()
+
+        executor.start(task, lambda _completion: None)
+        timer.fire()
+
+        events = store.manifest(run_id)["native_tasks"][0]["events"]
+        assert [event["event_type"] for event in events] == [
+            "queued", "started", "timeout",
+        ]
+        assert events[0]["details"]["run_timeout_seconds"] == 30.0
+        assert events[0]["details"]["watchdog"]["warnings"]
+        assert events[-1]["details"] == {
+            "reason": "run-deadline-exceeded",
+            "expiry_count": 1,
+            "cancellation_status": "native-handle-signalled",
+        }
+        assert not task.artifact_path.exists()

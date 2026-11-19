@@ -264,6 +264,15 @@ def test_default_final_worker_prompt_states_exact_success_status_contract(
     assert "success and completed both mean" in prompt
     assert "completed_with_warnings means" in prompt
     assert "only successful completion values" in prompt
+    assert "Complete tool calls before returning the structured result" in prompt
+    assert "The final assistant message must contain that object as text" in prompt
+    assert "claim it was returned earlier" in prompt
+    assert "Do not finish with a tool-call-only response" in prompt
+    assert "path (repository-relative)" in prompt
+    assert "start_line and end_line" in prompt
+    assert "confidence in [0,1]" in prompt
+    assert "justified by the inspected evidence" in prompt
+    assert "not chosen to force a gate result" in prompt
     assert '"summary":"..."' not in prompt
     assert "angle-bracket templates" in prompt
     assert "sources_read" in prompt
@@ -339,6 +348,22 @@ def test_final_worker_rejection_has_bounded_sanitized_structured_diagnostics(tmp
     assert "do-not-log" not in json.dumps(details)
     assert "known-model-secret" not in json.dumps(details)
     assert "x" * 700 not in details["stdout_tail"]
+
+
+def test_worker_diagnostic_preserves_prefix_and_suffix_within_limit():
+    text = (
+        "INITIAL_CAUSE: token=known-model-secret; "
+        + "unimportant-middle-" * 200
+        + "FINAL_STACK_LINE"
+    )
+    sanitized = final_review._sanitize_worker_diagnostic(
+        text, {"OPENAI_API_KEY": "known-model-secret"},
+    )
+    assert len(sanitized) <= 512
+    assert sanitized.startswith("INITIAL_CAUSE:")
+    assert sanitized.endswith("FINAL_STACK_LINE")
+    assert "...[truncated]..." in sanitized
+    assert "known-model-secret" not in sanitized
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group ownership")

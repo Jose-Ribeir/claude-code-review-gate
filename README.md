@@ -210,6 +210,12 @@ undetectable by design, stated here rather than faked as detection.
 - `OCR_STUB_WORKER=1` — run the stub reviewer instead of `kimchi` (tests)
 - `OCR_FAIL_OPEN=1` / `git push --no-verify` — the bypasses
 
+Native final/deep execution remains **opt-in and uncertified until #21
+acceptance**. `RG_FINAL_REVIEW_TRANSPORT` and `OCR_DEEP_TRANSPORT` default to
+legacy; explicit native selection has no silent fallback. See the
+[native review operations and rollback runbook](docs/native-review-operations.md)
+and [ADR 0009](docs/adr/0009-native-execution-opt-in-before-acceptance.md).
+
 ## Intent context: commit messages and linked tickets
 
 The reviewer no longer reads only the diff — it also reads *why* the change
