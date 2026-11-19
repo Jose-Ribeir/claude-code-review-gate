@@ -29,11 +29,11 @@ import ocr_docsquality as dq  # noqa: E402
 
 _GUIDE_MD = """# Guide
 
-See [the checklist](docs/missing.md#items) and `lib/dead.py` for details.
+See [the checklist](/docs/missing.md#items) and `lib/dead.py` for details.
 See also `lib/helper.py`.
 
 ```bash
-cat `docs/not-counted.md`
+cat `/docs/not-counted.md`
 ```
 """
 
@@ -221,7 +221,7 @@ class TestSteStats:
         ste = _evidence(scratch, "docs/ste.md")["evidence"]["docs/ste.md"]["ste"]
         assert ste["sentence_length"] == {
             "cap": 25,
-            "over_cap": [{"line": 4, "words": 26}],
+            "over_cap": [{"line": 2, "words": 26}],
         }
 
     def test_sentence_length_custom_cap(self, scratch):
@@ -232,8 +232,8 @@ class TestSteStats:
             "over_cap": [
                 {"line": 2, "words": 7},
                 {"line": 2, "words": 7},
-                {"line": 3, "words": 7},
-                {"line": 4, "words": 26},
+                {"line": 2, "words": 7},
+                {"line": 2, "words": 26},
             ],
         }
 
@@ -504,7 +504,7 @@ class TestCLI:
                          "docs/ste.md"])
         over = json.loads(proc.stdout)["evidence"]["docs/ste.md"]["ste"]
         assert over["sentence_length"]["cap"] == 5
-        assert over["sentence_length"]["over_cap"][-1] == {"line": 4, "words": 26}
+        assert over["sentence_length"]["over_cap"][-1] == {"line": 2, "words": 26}
 
     def test_validate_mode_round_trip(self):
         f = _finding(tells=[_tell(12), _tell(15), _tell(18)])

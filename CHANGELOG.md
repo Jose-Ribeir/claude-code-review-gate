@@ -47,6 +47,38 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   identical finding delivery idempotent while rejecting conflicting evidence.
   No new model aggregation, nested harness, global package installation, or
   legacy fallback is added. Historical run and opt-in meanings do not change.
+- **Universal local-only push gate (ADR 0006).** `install-git-hook.sh`
+  installs the global pre-push gate by default (pass `--no-git-hook` for the
+  legacy opt-in), chaining any pre-existing global `core.hooksPath` through an
+  installer-written wrapper whose exit code defers to the previous hook; a
+  repo with its own hooks dir gets the cure via `--chain-into <repo>`.
+- **User-level run config.** `~/.config/review-gate/config.json` (override
+  with `OCR_CONFIG_FILE`) exposes `review.depth` (`full` | `structural` |
+  `large-diff-scoped`), `review.timeoutSeconds` and `review.failOpen`, with
+  env > file > default precedence; a `timeoutSeconds` past the `hooks.json`
+  900s hook timeout warns loudly (a killed hook is a silent fail-open) instead
+  of clamping. See `docs/config-reference.md`.
+- **MR/PR context consult.** On a push to a branch with an open MR/PR (24h
+  cached, read-only `gh`/`glab` lookups, fail-open to "no context"), declared
+  scope, claimed counts and the recorded head are checked against the pushed
+  diff and block with `MR-CONSISTENCY:` findings; a recorded head that is an
+  ANCESTOR of the pushed tip (normal iteration) is a non-blocking advisory
+  instead — only rewritten history blocks. Above the large-diff threshold, a
+  fourth check flags path overlap with other open MRs. The review base
+  resolves against the MR's target branch before the legacy fallbacks.
+- **Tip-bound verdicts with wider carry-forward.** A recorded pass now also
+  carries forward when the pushed range's patch-ids equal the reviewed
+  range's — a rebase onto an advanced upstream — in addition to the
+  identical-tip-tree fast path; ref-deletion pushes invalidate that ref's
+  verdicts immediately, in both spellings of the ref.
+- **Ledger hygiene, wired in.** Verdict records expire after 90 days and the
+  lazy daily prune now actually runs on each gate invocation; reviewer
+  sandboxes expire after 7 days; corrupt entries are warned about and kept.
+- **Audited bypasses.** Every honored `OCR_FAIL_OPEN=1`/`review.failOpen`
+  bypass — including one overriding a BLOCKING verdict in git mode — lands in
+  `bypasses.jsonl` with mechanism, remote, ref, tip and reason, and is
+  announced loudly. `git push --no-verify` never invokes the hook, so it is
+  unrecordable by design (docs corrected to say so).
 - **Explicit final whole-stack review (ADR 0008, SPEC-16).**
   `review-gate.py final-review <ref>…` reviews provider-pinned, immutable
   complete trees rather than local working-tree content: every explicitly

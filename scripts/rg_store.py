@@ -25,6 +25,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 # The reviewer sandbox clones live under the store, never inside any repo.
@@ -32,6 +33,19 @@ _CLONES = "clones"
 # How many commits a verdict record may cover before the set is capped (the
 # store is a ledger, not a history dump; the subset check only needs identity).
 _MAX_COMMITS = 5000
+
+# Ledger hygiene (push-gate spec, "Ledger hygiene" decision): verdicts are
+# time-boxed to 90 days so a stale entry can never masquerade as coverage for
+# a push nobody reviewed; reviewer sandboxes rot out after a week; and both
+# are pruned lazily (at most once a day) so neither the store nor the run cost
+# grows with use. A ref-deletion push invalidates that ref's verdicts
+# immediately (invalidate_ref); every bypass is loud by construction (the
+# append-only bypasses.jsonl audit trail).
+VERDICT_TTL_SECONDS = 90 * 24 * 3600
+_CLONE_TTL_SECONDS = 7 * 24 * 3600
+_PRUNE_INTERVAL_SECONDS = 24 * 3600
+_PRUNE_MARKER = ".last-prune"
+_BYPASS_LOG = "bypasses.jsonl"
 
 
 def store_root():
@@ -123,6 +137,7 @@ def record_verdict(remote, tip, base, verdict, blocked, reasons, commits, note="
         "capped": len(commits) >= _MAX_COMMITS,
         "note": str(note or ""),
         "ts": _now(),
+        "recorded_at": _now(),
         "protocol_version": 1,
     }
     if content_keyed:
@@ -434,3 +449,221 @@ def record_commits(repo_root, base, tip):
     except Exception:
         pass
     return []
+
+
+# --- ledger hygiene: TTL, lazy prune, ref invalidation, bypass audit ---------
+
+def _warn(msg):
+    """Every hygiene failure degrades to a printed warning: the ledger is an
+    audit aid, and a store problem must never raise into the gate path (nor
+    be mistaken for a verdict)."""
+    try:
+        print(f"rg_store: warning: {msg}", file=sys.stderr)
+    except Exception:
+        pass
+
+
+def _rmtree_best_effort(path):
+    """Remove a sandbox tree, tolerating git's read-only object files (which
+    Windows refuses to unlink without an S_IWRITE chmod first). Never raises."""
+    import stat
+
+    def _fix(func, p, _exc):
+        try:
+            os.chmod(p, stat.S_IWRITE)
+        except OSError:
+            return
+        try:
+            func(p)
+        except OSError:
+            pass
+
+    try:
+        if sys.version_info >= (3, 12):
+            shutil.rmtree(str(path), onexc=_fix)
+        else:
+            shutil.rmtree(str(path), onerror=_fix)
+    except Exception:
+        pass
+
+
+def prune(state_dir=None):
+    """Enforce ledger hygiene; returns {"verdicts_removed", "clones_removed"}.
+
+    A verdict older than VERDICT_TTL_SECONDS is deleted: 90 days after a
+    review, keeping the entry would only masquerade as coverage for content
+    nobody has looked at in months (a re-push is cheap; a stale pass is not).
+    Age is `recorded_at`; a legacy entry without one is treated as freshly
+    important -- kept, and stamped on this write, so one prune sweeps the
+    whole ledger into the new shape without deleting real coverage.
+
+    Reviewer sandboxes under clones/ older than a week are removed (they are
+    scratch space: a clone is one command away from being rebuilt).
+
+    A corrupt or unreadable record is warned about and LEFT IN PLACE -- it
+    already authorizes nothing (the direct lookup DENIES on it) and deleting
+    anything the store could not parse would be laundering evidence. Every
+    failure is a warning, never an exception.
+    """
+    counts = {"verdicts_removed": 0, "clones_removed": 0}
+    try:
+        root = Path(state_dir) if state_dir else store_root()
+        now = _now()
+    except Exception as exc:
+        _warn(f"ledger prune skipped: store root unavailable ({exc})")
+        return counts
+    try:
+        paths = sorted((root / "verdicts").glob("*.json"))
+    except Exception as exc:
+        _warn(f"ledger prune could not list verdicts ({exc})")
+        paths = []
+    for path in paths:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            _warn(f"verdict record {path.name} unreadable ({exc}); left in place")
+            continue
+        if not isinstance(data, dict):
+            _warn(f"verdict record {path.name} is not a JSON object; left in place")
+            continue
+        try:
+            stamped = float(data.get("recorded_at"))
+        except (TypeError, ValueError):
+            stamped = None
+        if stamped is None:
+            data["recorded_at"] = now
+            try:
+                _write_json(path, data)
+            except Exception as exc:
+                _warn(f"could not stamp legacy verdict {path.name} ({exc})")
+            continue
+        if now - stamped > VERDICT_TTL_SECONDS:
+            try:
+                path.unlink()
+                counts["verdicts_removed"] += 1
+            except OSError as exc:
+                _warn(f"could not remove expired verdict {path.name} ({exc})")
+    try:
+        clones = [
+            p for p in (root / _CLONES).iterdir() if p.is_dir()
+        ] if (root / _CLONES).is_dir() else []
+    except OSError as exc:
+        _warn(f"ledger prune could not list sandboxes ({exc})")
+        clones = []
+    for d in clones:
+        try:
+            age = now - d.stat().st_mtime
+        except OSError as exc:
+            _warn(f"could not stat sandbox {d.name} ({exc})")
+            continue
+        if age > _CLONE_TTL_SECONDS:
+            _rmtree_best_effort(d)
+            if not d.exists():
+                counts["clones_removed"] += 1
+            else:
+                _warn(f"could not remove expired sandbox {d.name}")
+    return counts
+
+
+def maybe_prune(state_dir=None):
+    """Run prune at most once per day (lazily scheduled on gate invocations).
+
+    The marker file inside the store root holds the last run's timestamp; a
+    fresh marker short-circuits. Returns the prune counts dict when a prune
+    ran, None when it did not (marker fresh) or could not (warning emitted).
+    """
+    try:
+        root = Path(state_dir) if state_dir else store_root()
+        marker = root / _PRUNE_MARKER
+        now = _now()
+        last = None
+        try:
+            last = float(marker.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            try:
+                last = marker.stat().st_mtime
+            except OSError:
+                last = None
+        if last is not None and now - last < _PRUNE_INTERVAL_SECONDS:
+            return None
+        counts = prune(root)
+        try:
+            marker.write_text(str(now), encoding="utf-8")
+        except OSError as exc:
+            _warn(f"could not mark prune run ({exc}); next call will re-prune")
+        return counts
+    except Exception as exc:
+        _warn(f"lazy prune skipped ({exc})")
+        return None
+
+
+def invalidate_ref(remote, ref):
+    """Delete every verdict entry for (remote, `ref`); returns the count.
+
+    Used for `git push --delete`: a verdict blesses a tip on a ref, and once
+    the ref is gone the coverage it claimed belongs to history. Records are
+    matched on the `branch` field recorded at protocol_version 2; records
+    without it vouch for nothing by ref and are left alone. Corrupt records
+    are warnings, never exceptions, and are skipped (left in place DENYING).
+
+    The ref arrives in either spelling -- full (`refs/heads/x`, git mode) or
+    short (`x`, the hook parser) -- and both belong to the same ledger key
+    space, so the short/full juggling lives HERE: one call sweeps records
+    written under either spelling of the same branch."""
+    removed = 0
+    try:
+        ref = str(ref or "")
+        short = ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ref
+        forms = {ref, short, "refs/heads/" + short} if short else {ref}
+        prefix = _remote_key(remote) + "-"
+        paths = sorted((store_root() / "verdicts").glob(prefix + "*.json"))
+    except Exception as exc:
+        _warn(f"invalidate_ref could not scan the ledger ({exc})")
+        return 0
+    for path in paths:
+        try:
+            rec = _load_verdict_at(path)
+        except StoreError as exc:
+            _warn(f"verdict record {path.name} skipped during ref invalidation ({exc})")
+            continue
+        if rec is None or rec.get("branch") not in forms:
+            continue
+        try:
+            os.unlink(path)
+            removed += 1
+        except OSError as exc:
+            _warn(f"could not delete verdict {path.name} for {ref} ({exc})")
+    return removed
+
+
+def record_bypass(remote, ref, tip, mechanism, reason):
+    """Append one audited bypass record to bypasses.jsonl in the store root.
+
+    The escape hatches (mechanism is "OCR_FAIL_OPEN" or "review.failOpen")
+    are deliberate and loud by construction: this append-only log is the
+    audit trail that tells a bypass apart from an unnoticed hole. (`git push
+    --no-verify` never invokes the hook at all -- it leaves no record here,
+    by design; the forge's own audit log is the only evidence of that one.) A write failure
+    warns rather than raising -- it must never block the gate an env var
+    already told to open -- and then the bypass is NOT silent: the warning
+    itself names it.
+    """
+    entry = {
+        "remote": str(remote or ""),
+        "ref": str(ref or ""),
+        "tip": str(tip or ""),
+        "mechanism": str(mechanism or ""),
+        "reason": str(reason or ""),
+        "ts": _now(),
+    }
+    try:
+        path = store_root() / _BYPASS_LOG
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+    except Exception as exc:
+        _warn(f"could not record bypass ({mechanism}) for "
+              f"({remote}, {ref}, {tip}): {exc}")

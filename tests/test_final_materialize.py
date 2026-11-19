@@ -199,6 +199,8 @@ def test_materializes_target_from_a_separate_repository_and_cleans_failures(tmp_
     upstream, base, target, _head = _repository(tmp_path / "upstream")
     source = tmp_path / "fork"
     _git(tmp_path, "clone", "-q", str(upstream), str(source))
+    _git(source, "config", "user.name", "Fork Test")
+    _git(source, "config", "user.email", "fork@example.test")
     _git(source, "checkout", "-q", "-b", "fork-feature", base)
     (source / "fork.txt").write_text("fork change\n", encoding="utf-8")
     head = _commit(source, "fork change")
