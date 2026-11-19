@@ -17,11 +17,6 @@
 # the drift this release set out to remove.) Matches gate-hook.ps1.
 set -euo pipefail
 
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-# Read the payload once, up front.
-payload="$(cat)"
-
 # Pick a WORKING Python interpreter; skip Windows Store alias stubs. 3.7+ is
 # required: the detached supervisor relies on CPython >= 3.7 passing ONLY the
 # three redirected std handles to a child (see _spawn_supervisor).
@@ -37,16 +32,24 @@ _find_python() {
   return 1
 }
 
-# Inside the review session. review-gate.py runs the headless review with
-# --plugin-dir, so this plugin -- including this very hook -- is registered
-# there too. Until 0.6.0 this branch allowed everything, which let a
-# prompt-injected reviewer write files through `git ... --output=<path>` and
-# shell redirections (verified: the host's `Bash(git diff *)` rule admits
-# both). Only commands with a file-writing shape pay the Python spawn; the
-# rest pass through here, as before.
+# Inside the review session (a review worker is running): this must be the
+# FIRST thing the script does, before any subshell, `cat`, `dirname` or Python.
+# review-gate.py runs the headless review with --plugin-dir, so this plugin --
+# including this very hook -- is registered there too and would otherwise tax
+# every Bash call the reviewer makes. Only builtins run before the exit below:
+# `read -d ''` reads the payload without forking (`$(cat)` would fork a subshell
+# plus cat), and no interpreter is looked up for a command that cannot write.
+#
+# Until 0.6.0 this branch allowed everything, which let a prompt-injected
+# reviewer write files through `git ... --output=<path>` and shell redirections
+# (verified: the host's `Bash(git diff *)` rule admits both). So commands with a
+# file-writing shape still go to review-gate.py --mode guard (the one case that
+# pays a Python spawn); everything else passes through here silently.
 if [ "${OCR_IN_REVIEW:-}" = "1" ]; then
+  IFS= read -r -d '' payload || true
   case "$payload" in
     *--o*|*'>'*)
+      DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
       if PY="$(_find_python)" && [ -f "$DIR/review-gate.py" ]; then
         printf '%s' "$payload" | "$PY" "$DIR/review-gate.py" --mode guard
       else
@@ -57,6 +60,11 @@ if [ "${OCR_IN_REVIEW:-}" = "1" ]; then
   esac
   exit 0  # pass through: no decision, normal permission flow applies
 fi
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Read the payload once, up front.
+payload="$(cat)"
 
 # Short-circuit non-pushes before ever touching Python. hooks.json's
 # `if: "Bash(git *)"` is best-effort -- Claude Code's own docs say an

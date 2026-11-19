@@ -20,14 +20,16 @@
 # anything but a JSON object on a stdout that Claude Code parses.
 set -euo pipefail
 
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
 # Re-entry guard. review-gate.py runs the headless review with --plugin-dir, so
 # this plugin -- including this hook -- is registered inside the review session
-# too, where it would fire on every Bash call the reviewer makes.
+# too, where it would fire on every Bash call the reviewer makes. It must stay
+# the FIRST statement: nothing (no subshell, `dirname`, `cat` or Python) may run
+# before it, so a review worker pays no more than bash's own startup.
 if [ "${OCR_IN_REVIEW:-}" = "1" ]; then
   exit 0
 fi
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Read the payload once and short-circuit non-pushes before touching Python.
 # hooks.json deliberately carries no `if:` clause for this entry -- that

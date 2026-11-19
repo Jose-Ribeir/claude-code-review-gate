@@ -556,9 +556,14 @@ push_shape() {
 # ---------------------------------------------------------------------------
 # Python resolution (fail closed when absent).
 # ---------------------------------------------------------------------------
+# `py` is the Windows launcher: where python3/python resolve only to Store
+# alias stubs (a WindowsApps path, or a shim that exits nonzero / prints the
+# Store message), it is often the only way to reach a real interpreter. The
+# stub-skipping rules are the same as scripts/gate-hook.sh: skip a WindowsApps
+# path, then require the candidate to actually run and be 3.7+.
 _find_python() {
   local _c _p
-  for _c in python3 python; do
+  for _c in python3 python py; do
     _p="$(command -v "$_c" 2>/dev/null)" || continue
     case "$_p" in *[Ww]indows[Aa]pps*) continue ;; esac
     if "$_p" -c "import sys; sys.exit(0 if sys.version_info >= (3, 7) else 1)" >/dev/null 2>&1; then

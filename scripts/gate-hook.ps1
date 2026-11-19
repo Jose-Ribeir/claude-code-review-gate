@@ -48,17 +48,6 @@ $bytes = $stdinBytes.ToArray()
 # once it's running.
 $payloadText = [System.Text.Encoding]::UTF8.GetString($bytes)
 
-# The substring test runs on a DE-SPLICED copy of the payload: a real push
-# can hide its subcommand behind quote splicing -- `git pu""sh origin main`,
-# `git pu\sh origin main` -- so its JSON carries no literal `push` and the
-# raw `*git*push*` test under-matches it (the miss is documented as proven
-# live in hooks/sh/gate-hook.sh, and gate-hook.sh answers it the same way).
-# Stripping `"`, `'`, backticks and `\` from the test copy sees through the
-# splice while keeping the test's precision; it can only ever match MORE,
-# and over-match only costs a Python spawn (review-gate.py still gets the
-# raw payload below and re-parses strictly).
-$desplicedText = $payloadText -replace '[\\"`'']', ''
-
 # --- Inside the review session -------------------------------------------------
 # review-gate.py runs the headless review with --plugin-dir, so this plugin --
 # including this hook -- is registered there too. Since 0.6.0 a file-writing
@@ -71,6 +60,21 @@ if ($env:OCR_IN_REVIEW -eq '1') {
         exit 0  # pass through: no decision, normal permission flow applies
     }
 }
+# This block is deliberately ahead of the de-splice work below: a review worker
+# pays only for reading stdin, and no interpreter (Python) is ever looked up for
+# a command that cannot write.
+
+
+# The substring test runs on a DE-SPLICED copy of the payload: a real push
+# can hide its subcommand behind quote splicing -- `git pu""sh origin main`,
+# `git pu\sh origin main` -- so its JSON carries no literal `push` and the
+# raw `*git*push*` test under-matches it (the miss is documented as proven
+# live in hooks/sh/gate-hook.sh, and gate-hook.sh answers it the same way).
+# Stripping `"`, `'`, backticks and `\` from the test copy sees through the
+# splice while keeping the test's precision; it can only ever match MORE,
+# and over-match only costs a Python spawn (review-gate.py still gets the
+# raw payload below and re-parses strictly).
+$desplicedText = $payloadText -replace '[\\"`'']', ''
 
 # Loose on purpose: `git -C <dir> push` is a push too. review-gate.py applies
 # the strict command-position test once it is running.
