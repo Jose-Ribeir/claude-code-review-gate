@@ -33,6 +33,20 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `RG_FINAL_REVIEW_TRANSPORT` and `OCR_DEEP_TRANSPORT` default to legacy;
   explicit `native` opt-in must never silently switch back before real-session
   acceptance under #21. Migration and reporting preserve historical outcomes.
+- **Native result recovery and evidence integrity.** Native review defaults to
+  harness-selected `auto` models; explicit model overrides remain available.
+  Read-only `--plan` sessions and capability checks constrain inference without
+  bypassing owned verification workers. Provider retry/recovery remains bounded
+  by each worker's deadline, and a pending provider error clears only when a
+  valid replacement worker result arrives. The latest parseable structured
+  result is retained across assistant commentary without promoting newer
+  invalid/placeholder objects or hiding an unrecovered error. Require final
+  assistant-text worker results with evidence-backed finding fields and
+  confidence. Persist supplemental bounded, sanitized diagnostic warnings with
+  prefix+suffix context, leave terminal-event meanings unchanged, and make
+  identical finding delivery idempotent while rejecting conflicting evidence.
+  No new model aggregation, nested harness, global package installation, or
+  legacy fallback is added. Historical run and opt-in meanings do not change.
 - **Explicit final whole-stack review (ADR 0008, SPEC-16).**
   `review-gate.py final-review <ref>…` reviews provider-pinned, immutable
   complete trees rather than local working-tree content: every explicitly

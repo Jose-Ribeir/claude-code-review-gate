@@ -62,10 +62,14 @@ verification remains callable-backed execution work with its separate worker
 limit and deadline. The native capability probe requires support for this mode.
 Provider error messages are retained as pending diagnostics rather than
 immediately aborting native retry, overflow recovery, or compaction. A later
-successful assistant response clears the pending error. If it remains when
-`agent_settled` arrives, or the process exits without settlement, the task
-fails. Native recovery never bypasses the worker deadline and creates no
-orchestrator-driven retry, alternative backend, or unbounded wait.
+valid structured worker result—with an allowed completion status, usable
+summary, and the required arrays—clears the pending error. Commentary,
+tool-only payloads, or invalid/placeholder results never clear it. If an
+unrecovered error remains at `agent_settled` or process exit, the task fails;
+an older valid result cannot conceal that failure. Result candidates remain
+subject to supervisory validation. Native recovery never bypasses the worker
+deadline and creates no orchestrator-driven retry, alternative backend, or
+unbounded wait.
 
 ### No silent fallback
 
@@ -287,11 +291,25 @@ No declaration is recorded `absent` with a warning, never as a passing suite.
 | --- | --- | --- |
 | `RG_FINAL_REVIEW_TIMEOUT` | 1800 seconds; finite positive required | Native standalone/stack task-execution phase, after provider discovery and required tree/context preparation. Expiry stops queued work, cancels exact owned native handles, performs bounded cleanup, preserves accepted evidence, and yields controlled incomplete; it does not retroactively bound earlier provider discovery. |
 | `RG_FINAL_REVIEW_EXTERNAL_WATCHDOG_TIMEOUT` | Unset; finite positive when supplied | Declares a last-resort external kill. The implementation reserves a fixed 30-second cleanup margin and shortens the controlled deadline to `min(run timeout, external timeout - 30)`. Set the external watchdog later than the intended whole-run budget **plus at least 30 seconds**. Values <=30 leave no safe controlled window and fail before dispatch. |
-| `RG_FINAL_WORKER_TIMEOUT` | 900 seconds | Per-worker runtime deadline for native inference and required/dynamic execution. RPC workers receive `abort` before bounded cleanup; execution workers cancel their owned subprocess groups. Worker deadline events are `timeout`, not ordinary operator cancellation. |
+| `RG_FINAL_WORKER_TIMEOUT` | 900 seconds | Per-worker deadline starting when actual execution begins, not while queued. RPC workers receive `abort` before bounded cleanup; execution workers cancel their owned subprocess groups. Worker deadline events are `timeout`, not ordinary operator cancellation. Large immutable reviews may use an explicit measured finite override; the whole-run and external-watchdog budgets remain separate. |
 | `OCR_DEEP_TIMEOUT` | 600 seconds, minimum 60; invalid numeric falls back to 600 | Legacy or opted-in native deep-review whole deadline. Native decomposition applies this deadline across its task set, including cleanup coordination. |
 | `OCR_TIMEOUT` | 1800 seconds | Ordinary non-deep legacy reviewer wall clock. |
 | `OCR_CHUNK_TIMEOUT` | 1200 seconds, minimum 60 | Existing bounded legacy chunk lane, not a hidden retry budget. |
 | Required declaration `timeout` | 60 seconds; clamped to 1..3600 | Per required-suite attempt. A runner API may separately provide a default/override, which is recorded in `timeout_policy`; there is no global package provisioning or automatic timeout escalation. |
+
+Choose worker budgets from observed workload timings, not repeated automatic
+escalation. A longer worker budget is not evidence of completion and does not
+relax the overall run bound. For a native RPC worker, an unrecovered provider
+error still fails even if an earlier valid result exists; identical finding
+evidence is idempotent on delivery, while conflicting identity/content pairs
+are rejected without overwriting stored evidence.
+
+Keep harness workspaces and session paths reasonably short. Deeply nested
+materialization/artifact directories can exceed the provider's path limit
+(`ENAMETOOLONG`) while loading recent prompts. Treat that as an environment
+failure requiring shorter workspace paths, not a truncated review or a reason
+to infer a pass. Immutable revision and input-digest identity must be retained
+when relocating materialized checkouts or run artifacts.
 
 External watchdogs remain backstops. They should not be the normal way a native
 run ends. Native cancellation uses owned handles/process groups and bounded

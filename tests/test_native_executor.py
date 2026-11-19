@@ -953,3 +953,69 @@ def test_latest_parseable_worker_result_survives_later_assistant_text(
     assert completions[0].state == "completed"
     expected = payload if following_structured is None else following_structured
     assert completions[0].artifact.payload == expected
+
+
+@pytest.mark.parametrize("prior_valid_result", [False, True])
+@pytest.mark.parametrize("structured_replacement", [False, True])
+@pytest.mark.skipif(os.name != "posix", reason="POSIX native RPC lifecycle")
+def test_provider_error_requires_valid_replacement_before_settlement(
+        tmp_path, prior_valid_result, structured_replacement):
+    payload = {
+        "schema": "final-review-worker-result/v1", "status": "success",
+        "summary": "Inspected app.py and its callers.", "findings": [],
+        "warnings": [], "unreviewed": [],
+    }
+    replacement = (
+        {"schema": payload["schema"], "status": "success", "summary": "...",
+         "findings": [], "warnings": [], "unreviewed": []}
+        if structured_replacement else "No replacement structured result was provided."
+    )
+    expected_text = json.dumps(replacement) if structured_replacement else replacement
+    executable = tmp_path / "provider-error-non-result-double"
+    script = [
+        f"#!{sys.executable}\n",
+        "import json, sys\n",
+        "def emit(record):\n",
+        "    print(json.dumps(record), flush=True)\n",
+        "prompt = json.loads(sys.stdin.buffer.readline())\n",
+        "emit({'id': prompt['id'], 'type': 'response', 'command': 'prompt',"
+        "      'success': True, 'data': {'disposition': 'started'}})\n",
+    ]
+    if prior_valid_result:
+        script.append(
+            f"emit({{'type': 'message_end', 'message': {{'role': 'assistant',"
+            f"      'content': json.dumps({payload!r}), 'stopReason': 'stop'}}}})\n"
+        )
+    script.extend([
+        "emit({'type': 'message_end', 'message': {'role': 'assistant',"
+        "      'content': 'provider unavailable', 'stopReason': 'error',"
+        "      'errorMessage': 'provider unavailable'}})\n",
+        f"emit({{'type': 'message_end', 'message': {{'role': 'assistant',"
+        f"      'content': {expected_text!r}, 'stopReason': 'stop'}}}})\n",
+        "emit({'type': 'agent_end', 'messages': [], 'willRetry': False})\n",
+        "emit({'type': 'agent_settled', 'aborted': False})\n",
+        "while sys.stdin.buffer.readline():\n",
+        "    pass\n",
+    ])
+    executable.write_text("".join(script), encoding="utf-8")
+    executable.chmod(0o755)
+    completions = []
+    delivered = threading.Event()
+
+    def completed(completion):
+        completions.append(completion)
+        delivered.set()
+
+    executor = NativeExecutor(KimchiNativeHost(str(executable), environ={}))
+    executor.start(_task(tmp_path), completed)
+    assert delivered.wait(5), "non-recovery commentary incorrectly completed"
+    assert len(completions) == 1
+    assert completions[0].state == "failed"
+    assert completions[0].artifact is None
+    assert completions[0].error == "native RPC provider error: provider unavailable"
+    expected_stdout = (
+        json.dumps(payload)
+        if prior_valid_result and not structured_replacement else expected_text
+    )
+    assert completions[0].details["stdout_tail"] == expected_stdout
+    assert completions[0].details["last_assistant_tail"] == expected_text

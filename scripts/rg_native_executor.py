@@ -17,6 +17,7 @@ import time
 from typing import Callable, Dict, Optional, Protocol, Tuple
 
 from rg_final_env import scrub_environment
+from rg_final_lenses import worker_summary_rejection
 from rg_final_review import (
     _PIPE_CLOSE_TIMEOUT,
     _REAP_TIMEOUT,
@@ -24,6 +25,7 @@ from rg_final_review import (
     _kill_owned_process,
     _object_from_text,
     _sanitize_worker_diagnostic,
+    WORKER_COMPLETION_STATUSES,
 )
 
 
@@ -609,11 +611,14 @@ class _RpcSession:
             with self._state:
                 self._stdout = text
                 cancelling = self._cancel_reason is not None
-                if reason not in ("error", "aborted"):
-                    self._provider_error = None
-            if reason not in ("error", "aborted") and _object_from_text(text) is not None:
+            candidate = None
+            if reason not in ("error", "aborted"):
+                candidate = _object_from_text(text)
+            if candidate is not None:
                 with self._state:
                     self._latest_result_text = text
+                    if self._valid_worker_result(candidate):
+                        self._provider_error = None
             if reason in ("error", "aborted") and not cancelling:
                 detail = message.get("errorMessage") or "provider supplied no error detail"
                 self._record_provider_error(reason, detail)
@@ -624,6 +629,18 @@ class _RpcSession:
                 self._record_provider_error("error", detail)
         elif record_type == "agent_settled":
             self._settle(bool(record.get("aborted", False)))
+
+    @staticmethod
+    def _valid_worker_result(result):
+        return isinstance(result, dict) and (
+            result.get("status") in WORKER_COMPLETION_STATUSES
+            and worker_summary_rejection(result) in ("", None)
+            and all(
+                isinstance(result.get(key), list)
+                for key in ("findings", "warnings")
+            )
+            and isinstance(result.get("unreviewed", []), list)
+        )
 
     def _record_provider_error(self, reason, detail):
         with self._state:

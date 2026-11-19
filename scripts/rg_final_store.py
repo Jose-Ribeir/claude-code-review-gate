@@ -2163,6 +2163,22 @@ class FinalStore:
         stored_anchors = normalized if anchors else ()
         with self._transaction():
             unit = self._unit_row(unit_id)
+            existing = self._conn.execute(
+                "SELECT finding_id, content, severity, confidence, state, lens, path, line "
+                "FROM findings WHERE unit_id = ? AND finding_key = ?",
+                (unit_id, str(finding_key)),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["content"], existing["severity"], existing["confidence"],
+                    existing["state"], existing["lens"], existing["path"], existing["line"],
+                ) == (
+                    str(content), str(severity), str(confidence), str(state), lens, path, line,
+                ):
+                    return existing["finding_id"]
+                raise StoreError(
+                    f"duplicate finding_key {str(finding_key)!r} conflicts with different evidence"
+                )
             finding_id = self._insert_finding_row(
                 unit_id, finding_key, content, severity, confidence, state,
                 lens, path, line, stored_anchors, evidence,
