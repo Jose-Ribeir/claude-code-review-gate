@@ -7,6 +7,23 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Native asynchronous review execution with guarded rollout (ADR 0009, SPEC-10).**
+  Add independently named inference task sessions with a global event-driven
+  scheduler and separate inference/test execution limits, durable task lifecycle
+  events, atomic review artifacts, and per-stage timing. Standalone and
+  multi-reference final review retain all seven required lenses and composed,
+  prospective, required/dynamic, freshness, and critical-stop evidence; trusted
+  `ocr_verdict.compute_verdict` remains the sole decision authority, with no
+  model aggregation or nested-agent fallback. A finite whole-run deadline and
+  native cancellation ownership support bounded process-tree cleanup and
+  retained incomplete evidence. Legacy deep review gains deterministic bounded
+  file/subsystem task manifests with complete coverage and global cross-file
+  duties. Required CI execution preserves nested heredoc indentation, expands
+  supported setup-python and literal matrix declarations, distinguishes missing
+  tool prerequisites from test failures, and uses bounded configurable timeouts.
+  `RG_FINAL_REVIEW_TRANSPORT` and `OCR_DEEP_TRANSPORT` default to legacy;
+  explicit `native` opt-in must never silently switch back before real-session
+  acceptance under #21. Migration and reporting preserve historical outcomes.
 - **Explicit final whole-stack review (ADR 0008, SPEC-16).**
   `review-gate.py final-review <ref>…` reviews provider-pinned, immutable
   complete trees rather than local working-tree content: every explicitly
