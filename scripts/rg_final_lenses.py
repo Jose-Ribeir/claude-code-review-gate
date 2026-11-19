@@ -21,6 +21,7 @@ import threading
 import time
 
 import ocr_verdict
+from rg_run_lifecycle import RunDeadlineExpired
 
 
 WORKER_RESULT_SCHEMA = "final-review-worker-result/v1"
@@ -729,6 +730,10 @@ def _run_bounded_lenses(base_request, worker, specs, *, normalize_result,
                 index, spec = futures.pop(future)
                 try:
                     outcome = normalize_result(future.result(), spec)
+                except RunDeadlineExpired:
+                    # Whole-run cancellation is supervisor control flow, not
+                    # lens evidence; do not turn it into rationale for tests.
+                    raise
                 except Exception as exc:
                     outcome = failed_result(spec, exc)
                 outcomes[index] = outcome

@@ -1,7 +1,6 @@
 """Global event-driven scheduling for native review tasks."""
 from __future__ import annotations
 
-from copy import deepcopy
 from dataclasses import dataclass, replace
 import threading
 import time
@@ -34,24 +33,29 @@ class ScheduledResult:
     artifact: Optional[NativeArtifact]
     eligible: bool
     error: Optional[str] = None
+    source_artifact: Optional[NativeArtifact] = None
 
 
 @dataclass
 class _Entry:
     definition: SchedulerTask
     on_finalize: Optional[Callable[[ScheduledResult], None]]
+    on_complete: Optional[Callable[[ScheduledResult], None]]
     state: str = "queued"
     handle: object = None
     artifact: Optional[NativeArtifact] = None
+    source_artifact: Optional[NativeArtifact] = None
     error: Optional[str] = None
     eligible: bool = True
     callback_received: bool = False
+    completion_notified: bool = False
     finalized: bool = False
 
     def result(self):
         return ScheduledResult(
             task=self.definition, state=self.state, artifact=self.artifact,
             eligible=self.eligible, error=self.error,
+            source_artifact=self.source_artifact,
         )
 
 
@@ -79,11 +83,12 @@ class NativeScheduler:
         self._runs = {}
         self._lock = threading.RLock()
 
-    def submit(self, definition: SchedulerTask, *, on_finalize=None):
+    def submit(self, definition: SchedulerTask, *, on_finalize=None, on_complete=None):
         task = definition.task
         with self._lock:
             run = self._runs.setdefault(task.run_id, {
                 "closed": False, "finalized": False, "cancelled": None, "cleaning": False,
+                "stopped": set(),
             })
             if run["closed"] or run["cancelled"] is not None:
                 raise RuntimeError(f"run {task.run_id} is closed or cancelled")
@@ -98,13 +103,20 @@ class NativeScheduler:
             if any(self._entries[task_id].definition.task.run_id != task.run_id
                    for task_id in definition.dependencies):
                 raise ValueError("native task dependencies must belong to the same run")
-            entry = _Entry(definition, on_finalize)
+            entry = _Entry(definition, on_finalize, on_complete)
             entry.eligible = all(
-                self._entries[task_id].eligible for task_id in definition.dependencies
+                self._entries[task_id].eligible and task_id not in run["stopped"]
+                for task_id in definition.dependencies
             )
             self._entries[task.task_id] = entry
-            self._pending.append(entry)
-        self._drain()
+            if entry.eligible:
+                self._pending.append(entry)
+            else:
+                entry.state = "skipped"
+        if entry.eligible:
+            self._drain()
+        else:
+            self._notify_complete(entry)
         self._maybe_finalize(task.run_id)
         return definition
 
@@ -147,6 +159,29 @@ class NativeScheduler:
                     self._pending.append(entry)
                 self.expire_run(entry.definition.task.run_id)
                 return
+            except Exception as exc:
+                with self._lock:
+                    self._active[entry.definition.resource] -= 1
+                    entry.state = "failed"
+                    entry.error = f"native launch failed: {exc}"
+                if self._store is not None:
+                    task = entry.definition.task
+                    self._store.record_native_event({
+                        "schema": "native-review-event/v1",
+                        "event_id": "scheduler:launch-failed:" + task.task_id,
+                        "event_type": "failed",
+                        "identity": task.identity(),
+                        "transport": self._executor.transport,
+                        "native_session_id": None,
+                        "timing": {
+                            "occurred_at_unix": self._clock(),
+                            "started_at_unix": None, "finished_at_unix": None,
+                            "duration_seconds": None,
+                        },
+                        "details": {"error": entry.error},
+                    })
+                self._notify_complete(entry)
+                continue
             entry.handle = handle
             if self._on_start is not None:
                 self._on_start(handle)
@@ -162,24 +197,16 @@ class NativeScheduler:
         except StopRequestError as exc:
             payload = _rejected_result(artifact.payload, exc)
             return replace(artifact, payload=payload), None
-        if stop is None:
-            return artifact, None
-        payload = deepcopy(artifact.payload)
-        payload["status"] = "completed_with_warnings"
-        payload["findings"] = list(payload.get("findings") or []) + [stop["finding"]]
-        payload["warnings"] = list(payload.get("warnings") or []) + [{
-            "code": "structured-stop",
-            "message": stop["reason"],
-            "scope": "execution",
-            "details": deepcopy(stop),
-        }]
-        return replace(artifact, payload=payload), stop
+        # Preserve a valid STOP envelope for execute_unit's deterministic,
+        # lens-order-aware handling. Rejected STOPs are downgraded above.
+        return artifact, stop
 
     def _apply_stop(self, source, stop):
         del stop  # Scheduler eligibility uses only trusted graph ancestry, never worker scope.
         with self._lock:
             source_id = source.definition.task.task_id
             run_id = source.definition.task.run_id
+            self._runs[run_id]["stopped"].add(source_id)
             affected = set()
             changed = True
             while changed:
@@ -191,6 +218,7 @@ class NativeScheduler:
                            for parent in entry.definition.dependencies):
                         affected.add(task_id)
                         changed = True
+            skipped = []
             for task_id in affected:
                 entry = self._entries[task_id]
                 entry.eligible = False
@@ -198,6 +226,18 @@ class NativeScheduler:
                     entry.state = "skipped"
                     if entry in self._pending:
                         self._pending.remove(entry)
+                    skipped.append(entry)
+        for entry in skipped:
+            self._notify_complete(entry)
+
+    def _notify_complete(self, entry):
+        with self._lock:
+            if entry.completion_notified:
+                return
+            entry.completion_notified = True
+            callback = entry.on_complete
+        if callback is not None:
+            callback(entry.result())
 
     def _completed(self, entry, completion):
         with self._lock:
@@ -205,6 +245,7 @@ class NativeScheduler:
                 return
             entry.callback_received = True
         artifact = completion.artifact
+        source_artifact = artifact
         stop = None
         error = completion.error
         state = completion.state
@@ -227,6 +268,7 @@ class NativeScheduler:
         with self._lock:
             entry.state = state
             entry.artifact = artifact
+            entry.source_artifact = source_artifact
             entry.error = error
             self._active[entry.definition.resource] -= 1
         if state == "cancelled":
@@ -239,6 +281,7 @@ class NativeScheduler:
         if self._on_completion is not None:
             self._on_completion(completion)
         self._drain()
+        self._notify_complete(entry)
         self._maybe_finalize(entry.definition.task.run_id)
 
     def _maybe_finalize(self, run_id):
@@ -319,6 +362,9 @@ class NativeScheduler:
         for entry in entries:
             if entry.state not in ("completed", "failed", "skipped"):
                 self._record_cleanup(entry, reason)
+        for entry in entries:
+            if entry.state in _TERMINAL_STATES:
+                self._notify_complete(entry)
         with self._lock:
             run["cleaning"] = False
         self._maybe_finalize(run_id)

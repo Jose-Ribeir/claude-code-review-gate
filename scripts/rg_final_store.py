@@ -168,19 +168,28 @@ def _native_artifact(value):
     if set(value) != fields:
         raise ValueError("native artifact has missing or unknown fields")
     payload = value.get("payload")
-    required_payload = {"schema", "status", "summary", "findings", "warnings", "unreviewed"}
-    if not isinstance(payload, dict) or not required_payload <= set(payload):
+    if not isinstance(payload, dict) or not {"schema", "status"} <= set(payload):
         raise ValueError("native artifact worker result is incomplete")
     if payload["schema"] != "final-review-worker-result/v1":
         raise ValueError("native artifact worker result has the wrong schema")
-    if payload["status"] not in ("success", "completed", "completed_with_warnings"):
-        raise ValueError("native artifact worker result is not a completed result")
-    if not isinstance(payload["summary"], str) or not payload["summary"].strip():
-        raise ValueError("native artifact worker result summary is incomplete")
-    if any(not isinstance(payload[key], list) for key in ("findings", "warnings", "unreviewed")):
-        raise ValueError("native artifact worker result collections must be arrays")
-    if any(not isinstance(finding, dict) for finding in payload["findings"]):
-        raise ValueError("native artifact worker result contains an invalid finding")
+    if str(payload["status"]).upper() == "STOP":
+        # STOP is terminal worker evidence, not a successful worker completion.
+        # Scheduler validation remains authoritative for its structured payload.
+        if "stop" in payload and not isinstance(payload["stop"], dict):
+            raise ValueError("native artifact STOP payload must be an object")
+    else:
+        required_payload = {"summary", "findings", "warnings", "unreviewed"}
+        if not required_payload <= set(payload):
+            raise ValueError("native artifact worker result is incomplete")
+        if payload["status"] not in ("success", "completed", "completed_with_warnings"):
+            raise ValueError("native artifact worker result is not a completed result")
+        if not isinstance(payload["summary"], str) or not payload["summary"].strip():
+            raise ValueError("native artifact worker result summary is incomplete")
+        if any(not isinstance(payload[key], list)
+               for key in ("findings", "warnings", "unreviewed")):
+            raise ValueError("native artifact worker result collections must be arrays")
+        if any(not isinstance(finding, dict) for finding in payload["findings"]):
+            raise ValueError("native artifact worker result contains an invalid finding")
     timing = value.get("timing")
     if not isinstance(timing, dict) or set(timing) != {
             "started_at_unix", "finished_at_unix", "duration_seconds"}:
