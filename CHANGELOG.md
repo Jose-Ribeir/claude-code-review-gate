@@ -7,6 +7,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Native execution contract hardening (SPEC-16).** Explicit final and deep reviews
+  can use correlated `prompt`/`abort` JSONL RPC workers with explicit run/task
+  identities, per-worker and whole-run deadlines, and bounded process cleanup.
+  Independent inference and repository execution slots schedule mandatory lenses
+  and tests without a unit barrier. Supervisors fence late results before durable
+  artifact publication, resume valid legacy deep journals, and accept unquoted
+  numeric CI matrix scalars. Deep native execution remains opt-in while #21
+  real-session acceptance is incomplete. Configuration and failure meanings are
+  documented in `docs/native-review-operations.md`.
 - **Native asynchronous review execution with guarded rollout (ADR 0009, SPEC-10).**
   Add independently named inference task sessions with a global event-driven
   scheduler and separate inference/test execution limits, durable task lifecycle

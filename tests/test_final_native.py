@@ -140,8 +140,17 @@ def test_native_standalone_persists_both_units_through_existing_execution(standa
     assert standalone.stages == ["required", "dynamic", "required", "dynamic"]
     with FinalStore(store_path) as store:
         manifest = store.manifest(output["run_id"])
-        assert len(manifest["native_tasks"]) == 14
-        assert all(len(task["artifacts"]) == 1 for task in manifest["native_tasks"])
+        assert len(manifest["native_tasks"]) == 18
+        inference_tasks = [task for task in manifest["native_tasks"]
+                           if task["identity"]["stage"].startswith("lens:")]
+        execution_tasks = [task for task in manifest["native_tasks"]
+                           if task["identity"]["stage"].startswith("execution:")]
+        assert len(inference_tasks) == 14
+        assert all(len(task["artifacts"]) == 1 for task in inference_tasks)
+        assert len(execution_tasks) == 4
+        assert all(not task["artifacts"] for task in execution_tasks)
+        assert all(any(event["event_type"] == "finalization"
+                       for event in task["events"]) for task in execution_tasks)
         for unit in manifest["units"]:
             assert len(unit["lenses"]) == 7
             assert all(lens["state"] == "completed" for lens in unit["lenses"])
@@ -199,7 +208,7 @@ def test_native_global_cap_and_progress_are_bounded(standalone, capsys):  # noqa
     assert captured.out == ""
     progress = [line for line in captured.err.splitlines()
                 if line.startswith("review-gate final-review native:")]
-    assert len(progress) == 14
+    assert len(progress) == 18
 
 
 def test_native_stop_is_durable_and_all_mandatory_stages_are_explicit(standalone):  # noqa: F811

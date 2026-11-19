@@ -6,15 +6,17 @@ run-scoped durable bookkeeping, and deterministic evidence validation.
 """
 from __future__ import annotations
 
+from copy import deepcopy
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import threading
 import time
 
-from rg_native_executor import KimchiNativeHost, NativeExecutor, NativeTask
-from rg_native_scheduler import NativeScheduler, SchedulerTask
+from rg_native_executor import KimchiNativeHost, NativeArtifact, NativeExecutor, NativeTask
+from rg_native_scheduler import NativeScheduler, ScheduledResult, SchedulerTask
 from rg_run_lifecycle import RunDeadline
 
 
@@ -131,7 +133,8 @@ class LegacyDeepStore:
             self._write()
             return event
 
-    def commit_native_artifact(self, identity, message_id, *, artifact, received_at_unix):
+    def commit_native_artifact(self, identity, message_id, *, artifact, received_at_unix,
+                               artifact_path=None):
         with self._lock:
             task = self._find(identity)
             if task is None or task["identity"] != identity \
@@ -147,6 +150,19 @@ class LegacyDeepStore:
                 return existing
             if task["artifacts"]:
                 raise DeepExecutionError("legacy deep task already has an accepted artifact")
+            latest_started = max((
+                index for index, item in enumerate(task["events"])
+                if item["event_type"] == "started"
+            ), default=-1)
+            fence = next((
+                item["event_type"] for item in task["events"][latest_started + 1:]
+                if item["event_type"] in ("cancelled", "timeout", "cleanup", "finalization")
+            ), None)
+            if fence is not None:
+                raise DeepExecutionError(
+                    f"legacy deep artifact commit is fenced by {fence}"
+                )
+            previous = deepcopy(self._state)
             committed = {
                 "message_id": message_id,
                 "artifact_sha256": artifact_sha256,
@@ -175,7 +191,14 @@ class LegacyDeepStore:
             task["artifacts"].append(committed)
             task["artifact_messages"].append(receipt)
             task["events"].append(event)
-            self._write()
+            try:
+                self._write()
+                if artifact_path is not None:
+                    _atomic_json(artifact_path, artifact)
+            except BaseException:
+                self._state = previous
+                self._write()
+                raise
             return receipt
 
 
@@ -282,6 +305,43 @@ def _validate_completion(definition, result, manifest):
         )
 
 
+def _reused_result(definition, manifest, recorded):
+    task = definition.task
+    if not recorded["artifacts"]:
+        if task.artifact_path.exists():
+            raise DeepExecutionError(
+                f"legacy deep task {task.task_id} has an uncommitted artifact; "
+                "refusing stale or malformed coverage"
+            )
+        return None
+    try:
+        if len(recorded["artifacts"]) != 1 or len(recorded["artifact_messages"]) != 1 \
+                or recorded["artifact_messages"][0].get("accepted") is not True:
+            raise ValueError("invalid artifact receipt")
+        document = recorded["artifacts"][0]["artifact"]
+        if json.loads(task.artifact_path.read_text(encoding="utf-8")) != document:
+            raise ValueError("journal and artifact file differ")
+        artifact = NativeArtifact(
+            task=task,
+            transport=recorded["transport"],
+            native_session_id=document["native_session_id"],
+            payload=document["payload"],
+            started_at_unix=document["timing"]["started_at_unix"],
+            finished_at_unix=document["timing"]["finished_at_unix"],
+        )
+        if artifact.as_dict() != document:
+            raise ValueError("artifact identity or timing differs")
+    except (KeyError, IndexError, TypeError, ValueError, OSError, json.JSONDecodeError) as exc:
+        raise DeepExecutionError(
+            f"legacy deep task {task.task_id} has stale or malformed journaled coverage: {exc}"
+        ) from exc
+    result = ScheduledResult(
+        task=definition, state="completed", artifact=artifact, eligible=True,
+    )
+    _validate_completion(definition, result, manifest)
+    return result
+
+
 def execute_deep_review(base_prompt, parent_manifest, parent_manifest_path, *, kimi,
                         repo_root, run_id, async_dir, head_sha, push_range, timeout,
                         model, child_env, started_at, result_parser, merge_results,
@@ -314,13 +374,47 @@ def execute_deep_review(base_prompt, parent_manifest, parent_manifest_path, *, k
         ),
     )
     owner["scheduler"] = scheduler
+    attempts = [1] + [
+        int(match.group(1))
+        for recorded in store._state["native_tasks"]
+        for event in recorded["events"]
+        for match in [re.match(r"executor:attempt-(\d+):", event["event_id"])]
+        if match is not None
+    ]
+    attempt = max(attempts) + (1 if store._state["native_tasks"] else 0)
     definitions = []
+    reused = {}
     for manifest, manifest_path in manifests:
             kind = manifest["native_deep_task"]["kind"]
             task_id = manifest["native_deep_task"]["task_id"]
             prompt, input_sha256 = _task_prompt(
                 base_prompt, parent_path, manifest, manifest_path,
             )
+            recorded = next((
+                item for item in store._state["native_tasks"]
+                if item["identity"]["run_id"] == run_id
+                and item["identity"]["task_id"] == task_id
+            ), None)
+            current_deadline = started_at + timeout
+            if recorded is not None:
+                expected_identity = {
+                    "run_id": run_id,
+                    "task_id": task_id,
+                    "session_name": "legacy-" + task_id,
+                    "unit_id": "legacy-deep:" + task_id,
+                    "stage": "legacy-deep",
+                    "lens": "deep-global" if kind == "global" else "deep-files",
+                    "revision_tuple": [head_sha, push_range],
+                    "input_sha256": input_sha256,
+                    "backend": "kimchi",
+                    "model": model,
+                }
+                if any(recorded["identity"].get(key) != value
+                       for key, value in expected_identity.items()):
+                    raise DeepExecutionError(
+                        f"legacy deep task {task_id} has stale journaled identity"
+                    )
+                current_deadline = recorded["identity"]["deadline_at_unix"]
             task = NativeTask(
                 run_id=run_id,
                 task_id=task_id,
@@ -332,23 +426,30 @@ def execute_deep_review(base_prompt, parent_manifest, parent_manifest_path, *, k
                 input_sha256=input_sha256,
                 backend="kimchi",
                 model=model,
-                deadline_at_unix=started_at + timeout,
+                deadline_at_unix=current_deadline,
                 prompt=prompt,
                 repo_root=Path(repo_root),
                 artifact_path=async_dir / f"native-{task_id}.json",
                 extensions=extensions,
+                runtime_deadline_at_unix=started_at + timeout,
+                attempt=attempt,
             )
-            if task.artifact_path.exists():
-                raise DeepExecutionError(
-                    f"legacy deep task {task_id} has an already committed artifact; "
-                    "refusing to rewrite immutable evidence"
-                )
             definition = SchedulerTask(task)
             definitions.append((definition, manifest))
+            if recorded is not None:
+                result = _reused_result(definition, manifest, recorded)
+                if result is not None:
+                    reused[task_id] = result
+            elif task.artifact_path.exists():
+                raise DeepExecutionError(
+                    f"legacy deep task {task_id} has an unjournaled artifact; "
+                    "refusing stale or malformed coverage"
+                )
     deadline.start()
     try:
         for definition, _manifest in definitions:
-            scheduler.submit(definition)
+            if definition.task.task_id not in reused:
+                scheduler.submit(definition)
         wait_deadline = time.monotonic() + timeout + 20
         while not scheduler.close_run(run_id):
             finalized_event.clear()
@@ -363,6 +464,8 @@ def execute_deep_review(base_prompt, parent_manifest, parent_manifest_path, *, k
                 )
             finalized_event.wait(remaining)
         snapshot = scheduler.snapshot(run_id)
+        results = dict(reused)
+        results.update(snapshot["tasks"])
         if snapshot["cancelled"] is not None:
             raise DeepExecutionError(
                 "legacy deep native run was cancelled: " + snapshot["cancelled"],
@@ -370,7 +473,7 @@ def execute_deep_review(base_prompt, parent_manifest, parent_manifest_path, *, k
             )
         validated = []
         for definition, manifest in definitions:
-            result = snapshot["tasks"][definition.task.task_id]
+            result = results[definition.task.task_id]
             _validate_completion(definition, result, manifest)
             validated.append(result.artifact.payload)
         file_results = [
@@ -388,7 +491,7 @@ def execute_deep_review(base_prompt, parent_manifest, parent_manifest_path, *, k
         raw = _canonical([
             {
                 "task_id": definition.task.task_id,
-                "artifact": snapshot["tasks"][definition.task.task_id].artifact.as_dict(),
+                "artifact": results[definition.task.task_id].artifact.as_dict(),
             }
             for definition, _manifest in definitions
         ])

@@ -19,6 +19,7 @@ def test_large_kimchi_deep_review_uses_bounded_direct_native_tasks(tmp_path):
         "OCR_BACKEND": "kimchi",
         "KIMCHI_BIN": fake_backend.install(tmp_path / "bin", "kimchi"),
         "OCR_SKIP_CANARY": "1",
+        "OCR_DEEP_TRANSPORT": "native",
         "FAKE_TRACE": str(tmp_path / "fake.trace"),
     })
 
@@ -28,7 +29,7 @@ def test_large_kimchi_deep_review_uses_bounded_direct_native_tasks(tmp_path):
     assert state["state"] == "done"
 
     calls = fake_backend.read_trace(tmp_path / "fake.trace")
-    native_calls = [call for call in calls if "-p" in call["argv"]]
+    native_calls = [call for call in calls if call["argv"][:2] == ["--mode", "rpc"]]
     assert len(native_calls) == 4
     task_manifests = [call["manifest"] for call in _review_calls(tmp_path)]
     file_manifests = [manifest for manifest in task_manifests if manifest["paths"]]

@@ -4,6 +4,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 _HERE = Path(__file__).resolve().parent
 _SCRIPTS = _HERE.parent / "scripts"
 sys.path.insert(0, str(_SCRIPTS))
@@ -490,9 +492,11 @@ def test_setup_python_uses_an_installed_versioned_interpreter_without_python_on_
                for suite in result["suites"])
 
 
+@pytest.mark.parametrize("quoted", [False, True])
 def test_github_literal_matrix_expands_and_substitutes_only_declared_values(
-        monkeypatch, tmp_path):
+        monkeypatch, tmp_path, quoted):
     version = f"{sys.version_info.major}.{sys.version_info.minor}"
+    version_declaration = f'"{version}"' if quoted else version
     tools = tmp_path / "matrix-tools"
     tools.mkdir()
     (tools / f"python{version}").symlink_to(sys.executable)
@@ -503,7 +507,7 @@ def test_github_literal_matrix_expands_and_substitutes_only_declared_values(
     strategy:
       fail-fast: false
       matrix:
-        python-version: [\"{version}\"]
+        python-version: [{version_declaration}]
         suite: [unit, integration]
     steps:
       - uses: actions/checkout@v4

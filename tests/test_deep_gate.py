@@ -383,13 +383,14 @@ class TestDeepLaneE2E:
         assert (tmp_path / "touched").exists()
 
         native_calls = [call for call in fake_backend.read_trace(tmp_path / "fake.trace")
-                        if "-p" in call["argv"]]
+                        if call["argv"][:2] == ["--mode", "rpc"]]
         assert len(native_calls) == 1
         argv = native_calls[0]["argv"]
+        assert "-p" not in argv
         assert "--no-session" in argv and "--no-approve" in argv
         assert "--no-auto-update" in argv
         assert argv[argv.index("-e") + 1] == review_gate._DENY_EXT
-        prompt = argv[argv.index("-p") + 1]
+        prompt = native_calls[0]["prompt"]
         assert st["base"] + ".." + tip in prompt
         assert "--paths-file" in prompt
         manifest = _review_manifest(tmp_path)
@@ -400,7 +401,7 @@ class TestDeepLaneE2E:
         artifact_path = review_gate._async_dir(common) / f"native-{st['run_id']}-deep.json"
         artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
         assert artifact["schema"] == "native-review-artifact/v1"
-        assert artifact["transport"] == "native-top-level/kimchi-cli-no-session-v1"
+        assert artifact["transport"] == "native-top-level/kimchi-rpc-v1"
         assert artifact["identity"]["lens"] == "deep"
         assert artifact["payload"]["verdict"] == "block"
         assert artifact["timing"]["duration_seconds"] >= 0
@@ -432,7 +433,7 @@ class TestDeepLaneE2E:
         result, ran, _raw_name = review_gate._run_review(
             str(tmp_path), "hook", str(tmp_path), "t" * 40, "a..b",
             timeout=5, tier="deep", common_dir=str(tmp_path),
-            native=True, run_id="explicit-legacy",
+            native=True, run_id=f"{transport or 'default'}-legacy",
         )
 
         assert ran and result["verdict"] == "pass"
@@ -443,7 +444,8 @@ class TestDeepLaneE2E:
         assert "--approve" in argv and "--no-approve" not in argv
         assert "--no-session" in argv
         artifact_dir = review_gate._async_dir(str(tmp_path))
-        assert not (artifact_dir / "native-explicit-legacy-deep.json").exists()
+        run_id = f"{transport or 'default'}-legacy"
+        assert not (artifact_dir / f"native-{run_id}-deep.json").exists()
 
     def test_native_deep_timeout_logs_sanitized_tails_after_bounded_cleanup(
             self, tmp_path, monkeypatch):

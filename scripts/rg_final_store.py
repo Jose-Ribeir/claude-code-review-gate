@@ -16,6 +16,7 @@ import math
 import os
 import re
 import sqlite3
+import tempfile
 import threading
 import time
 import uuid
@@ -91,6 +92,40 @@ def _json(value):
 
 def _loads(value):
     return json.loads(value) if value else {}
+
+
+def _atomic_artifact_write(path, artifact):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=path.name + ".", suffix=".tmp-", dir=str(path.parent),
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(artifact, stream, ensure_ascii=False, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+@contextmanager
+def _artifact_rollback(published):
+    try:
+        yield
+    except BaseException:
+        for path in published:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+        raise
 
 
 def _identifier():
@@ -1746,8 +1781,9 @@ class FinalStore:
             row = self._insert_native_event(normalized)
             return self._native_event_public(row, identity)
 
-    def commit_native_artifact(self, identity, message_id, *, artifact, received_at_unix):
-        """Commit a validated result, event and receipt as one idempotent write."""
+    def commit_native_artifact(self, identity, message_id, *, artifact, received_at_unix,
+                               artifact_path=None):
+        """Commit a validated result, event, receipt and artifact file atomically."""
         identity = _native_identity(identity)
         message_id = _required_text({"message_id": message_id}, "message_id")
         artifact = _native_artifact(artifact)
@@ -1762,11 +1798,24 @@ class FinalStore:
             "message_id": message_id, "identity": identity, "artifact": artifact,
         }).encode("utf-8")).hexdigest()
         event_id = f"artifact-commit:{message_id}"
-        with self._transaction():
+        published = []
+        with _artifact_rollback(published), self._transaction():
             task = self._native_task_row(identity["run_id"], identity["task_id"])
             if _loads(task["identity_json"]) != identity or \
                     task["transport"] != artifact["transport"]:
                 raise StoreError("native artifact identity does not match its registered task")
+            run = self._run_row(identity["run_id"])
+            if run["superseded_by_run_id"] is not None:
+                raise StoreError("native artifact commit rejected: run is superseded")
+            fence = self._conn.execute(
+                "SELECT event_type FROM native_task_events WHERE run_id = ? "
+                "AND event_type IN ('cancelled', 'timeout', 'cleanup', 'finalization') LIMIT 1",
+                (identity["run_id"],),
+            ).fetchone()
+            if fence is not None:
+                raise StoreError(
+                    "native artifact commit rejected: run is fenced by " + fence["event_type"]
+                )
             receipt = self._conn.execute(
                 "SELECT * FROM native_artifact_messages WHERE run_id = ? AND message_id = ?",
                 (identity["run_id"], message_id),
@@ -1832,6 +1881,9 @@ class FinalStore:
                 "SELECT * FROM native_task_events WHERE run_id = ? AND event_id = ?",
                 (identity["run_id"], receipt["event_id"]),
             ).fetchone()
+            if artifact_path is not None:
+                _atomic_artifact_write(artifact_path, artifact)
+                published.append(Path(artifact_path))
             return {
                 "schema": "native-review-artifact-commit/v1",
                 "message_id": message_id,

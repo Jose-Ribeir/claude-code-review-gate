@@ -1378,6 +1378,9 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
                     native_execution = NativeStandaloneExecution(
                         store, host, environ=environ, run_id=run_id,
                         prompt_factory=_worker_prompt,
+                        required_runner=required_runner or run_required_verification,
+                        dynamic_runner=dynamic_runner or run_dynamic_checks,
+                        dynamic_kwargs=standalone_dynamic_kwargs,
                     )
                     native_execution.prepare([
                         enrich_request(build_lens_request(requests[current_id], spec), unit_key)
@@ -1430,8 +1433,16 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
 
                     executions[current_id] = execute_unit(
                         request, isolated_worker, unit_id=current_id,
-                        required_runner=required_runner or run_required_verification,
-                        dynamic_runner=dynamic_runner or run_dynamic_checks,
+                        required_runner=(
+                            native_execution.required_runner(request)
+                            if native_execution is not None
+                            else required_runner or run_required_verification
+                        ),
+                        dynamic_runner=(
+                            native_execution.dynamic_runner(request)
+                            if native_execution is not None
+                            else dynamic_runner or run_dynamic_checks
+                        ),
                         dynamic_kwargs=standalone_dynamic_kwargs, environ=environ,
                     )
                     aggregations[current_id] = executions[current_id].aggregation

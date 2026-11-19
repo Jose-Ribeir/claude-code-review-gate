@@ -12,7 +12,6 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
-import tempfile
 import threading
 import time
 from typing import Callable, Dict, Optional, Protocol, Tuple
@@ -29,7 +28,7 @@ from rg_final_review import (
 
 
 NATIVE_ARTIFACT_SCHEMA = "native-review-artifact/v1"
-KIMCHI_NATIVE_TRANSPORT = "native-top-level/kimchi-cli-no-session-v1"
+KIMCHI_NATIVE_TRANSPORT = "native-top-level/kimchi-rpc-v1"
 _SESSION_BRIDGE_ENV = frozenset((
     "KIMCHI_PARENT_SESSION_ID", "KIMCHI_SESSION_ID", "KIMCHI_CHILD_SESSION",
     "KIMCHI_MESSAGING_SOCKET", "KIMCHI_MESSAGING_TOKEN", "PI_PACKAGE_DIR",
@@ -58,6 +57,9 @@ class NativeTask:
     allow_tools: Tuple[str, ...] = ()
     deny_tools: Tuple[str, ...] = ()
     extensions: Tuple[str, ...] = ()
+    runtime_deadline_at_unix: Optional[float] = None
+    attempt: int = 1
+    execute: Optional[Callable[[], Dict[str, object]]] = None
 
     def identity(self) -> Dict[str, object]:
         return {
@@ -86,6 +88,8 @@ class NativeHostCompletion:
     finished_at_unix: float
     stderr: str = ""
     cleanup: Optional[Dict[str, object]] = None
+    error: Optional[str] = None
+    cancellation_reason: Optional[str] = None
 
 
 class NativeHostSession(Protocol):
@@ -161,28 +165,8 @@ class NativeCompletion:
     details: Dict[str, object] = field(default_factory=dict)
 
 
-def _atomic_write(path: Path, value: Dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary = tempfile.mkstemp(
-        prefix=path.name + ".", suffix=".tmp-", dir=str(path.parent),
-    )
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            json.dump(value, stream, ensure_ascii=False, sort_keys=True)
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    except BaseException:
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
-        raise
-
-
 class NativeExecutor:
-    """Own native session callbacks, result envelopes, and atomic artifacts."""
+    """Own native session callbacks and uncommitted result envelopes."""
 
     def __init__(self, host: NativeHost, *, deadline=None, store=None,
                  result_parser=None, diagnostic_environ=None):
@@ -218,7 +202,10 @@ class NativeExecutor:
             return
         self._store.record_native_event({
             "schema": "native-review-event/v1",
-            "event_id": f"executor:{task.task_id}:{event_type}",
+            "event_id": (
+                f"executor:{task.task_id}:{event_type}" if task.attempt == 1 else
+                f"executor:attempt-{task.attempt}:{task.task_id}:{event_type}"
+            ),
             "event_type": event_type,
             "identity": task.identity(),
             "transport": self._host.transport,
@@ -236,11 +223,27 @@ class NativeExecutor:
 
     def _notify(self, completion, on_completion, *, started, finished, details=None):
         handle = completion.handle
-        self._record(
-            handle.task, completion.state, finished,
-            native_session_id=handle.native_session_id,
-            started=started, finished=finished, details=details,
+        if completion.state == "completed":
+            on_completion(completion)
+            return
+        reason = completion.details.get("reason", "")
+        event_type = (
+            "timeout" if completion.state == "cancelled" and "deadline" in str(reason)
+            else completion.state
         )
+        try:
+            self._record(
+                handle.task, event_type, finished,
+                native_session_id=handle.native_session_id,
+                started=started, finished=finished, details=details,
+            )
+        except Exception as exc:
+            error = f"native completion event failed: {exc}"
+            completion = NativeCompletion(
+                handle=handle, state="failed", artifact=None, error=error,
+                stdout=completion.stdout, stderr=completion.stderr,
+                details={**completion.details, "event_error": error},
+            )
         on_completion(completion)
 
     def start(self, task: NativeTask,
@@ -269,7 +272,9 @@ class NativeExecutor:
             expired = self._deadline is not None and self._deadline.expired
             details = self._diagnostics(host_completion)
             details.update({
-                "reason": "run-deadline-exceeded" if expired else "operator-cancelled",
+                "reason": host_completion.cancellation_reason or (
+                    "run-deadline-exceeded" if expired else "operator-cancelled"
+                ),
                 "expiry_count": (
                     self._deadline.diagnostics()["expiry_count"]
                     if self._deadline is not None else 0
@@ -287,7 +292,9 @@ class NativeExecutor:
                 if state["terminal"]:
                     return
                 state["terminal"] = True
-                cancelling = state["cancelling"]
+                cancelling = (
+                    state["cancelling"] or host_completion.cancellation_reason is not None
+                )
             if self._deadline is not None:
                 self._deadline.release(handle)
             if cancelling:
@@ -318,7 +325,25 @@ class NativeExecutor:
             # owned process and managed pipes have finished bounded cleanup.
             session.cancel()
 
-        session = self._host.launch(task, host_completed)
+        try:
+            session = self._host.launch(task, host_completed)
+        except Exception as exc:
+            started_at = time.time()
+            session_id = f"unlaunched:{task.run_id}:{task.task_id}"
+            handle = NativeSessionHandle(
+                task=task, session_name=task.session_name, native_session_id=session_id,
+                transport=self._host.transport, _cancel=lambda: None,
+            )
+            with lock:
+                state["handle"] = handle
+            if self._deadline is not None:
+                self._deadline.own(task.run_id, handle)
+            host_completed(NativeHostCompletion(
+                native_session_id=session_id, return_code=1, stdout="",
+                started_at_unix=started_at, finished_at_unix=time.time(),
+                error=f"native session launch failed: {exc}",
+            ))
+            return handle
         started_at = time.time()
         self._record(
             task, "started", started_at, native_session_id=session.native_session_id,
@@ -335,22 +360,16 @@ class NativeExecutor:
             state["handle"] = handle
             pending = list(early)
             early.clear()
-            if state["terminal"]:
-                pending.clear()
-            elif pending:
-                state["terminal"] = True
         if self._deadline is not None:
             self._deadline.own(task.run_id, handle)
         for host_completion in pending:
-            if self._deadline is not None:
-                self._deadline.release(handle)
-            self._complete(handle, host_completion, on_completion)
+            host_completed(host_completion)
         return handle
 
     def _complete(self, handle: NativeSessionHandle, host: NativeHostCompletion,
                   on_completion: Callable[[NativeCompletion], None]) -> None:
-        if host.return_code:
-            error = f"native session exited {host.return_code}"
+        if host.error or host.return_code:
+            error = host.error or f"native session exited {host.return_code}"
             self._notify(
                 NativeCompletion(
                     handle=handle, state="failed", artifact=None, error=error,
@@ -361,7 +380,21 @@ class NativeExecutor:
                 finished=host.finished_at_unix, details={"error": error},
             )
             return
-        payload = self._result_parser(host.stdout)
+        try:
+            payload = self._result_parser(host.stdout)
+        except Exception as exc:
+            payload = None
+            error = f"native result parsing failed: {exc}"
+            self._notify(
+                NativeCompletion(
+                    handle=handle, state="failed", artifact=None, error=error,
+                    stdout=host.stdout, stderr=host.stderr,
+                    details=self._diagnostics(host),
+                ),
+                on_completion, started=host.started_at_unix,
+                finished=host.finished_at_unix, details={"error": error},
+            )
+            return
         if payload is None:
             error = "native session returned no valid final-review worker result"
             self._notify(
@@ -382,7 +415,6 @@ class NativeExecutor:
             started_at_unix=host.started_at_unix,
             finished_at_unix=host.finished_at_unix,
         )
-        _atomic_write(handle.task.artifact_path, artifact.as_dict())
         self._notify(
             NativeCompletion(
                 handle=handle, state="completed", artifact=artifact,
@@ -406,100 +438,323 @@ def _top_level_environment(environ) -> Dict[str, str]:
     return child
 
 
-class _ProcessSession:
-    """A direct OS process used as the CLI's native cancellation handle."""
+class _RpcSession:
+    """One explicit task identity backed by the documented JSONL RPC protocol."""
 
-    def __init__(self, process: subprocess.Popen, started_at_unix: float, progress=None):
+    def __init__(self, task, process: subprocess.Popen, started_at_unix: float,
+                 callback: Callable[[NativeHostCompletion], None], *, progress=None):
+        self.task = task
         self.process = process
         self.started_at_unix = started_at_unix
-        self.native_session_id = "pid:" + str(process.pid)
+        self.native_session_id = f"rpc:{task.run_id}:{task.task_id}"
+        self._prompt_id = f"{task.run_id}:{task.task_id}:prompt"
+        self._abort_id = f"{task.run_id}:{task.task_id}:abort"
+        self._commands = {self._prompt_id: "prompt", self._abort_id: "abort"}
+        self._responses = set()
         self._progress = progress
-        self._cleanup = None
+        self._callback = callback
+        self._state = threading.RLock()
+        self._write_lock = threading.Lock()
         self._cleanup_lock = threading.Lock()
+        self._outcome = None
+        self._error = None
+        self._cancel_reason = None
+        self._stdout = ""
+        self._stderr = []
+        self._cleanup = None
+        self._kill_timer = None
+        self._worker_timer = None
+        self._readers = []
 
-    def cancel(self) -> None:
-        # A direct parent may already be reaped while its descendants still own
-        # the managed pipes; group cleanup is still required in that state.
-        with self._cleanup_lock:
-            if self._cleanup is not None:
-                return
-            self._cleanup = _kill_owned_process(self.process)
+    def start(self):
+        self._readers = [
+            threading.Thread(
+                target=self._read_stdout, name=self.native_session_id + "-stdout", daemon=True,
+            ),
+            threading.Thread(
+                target=self._read_stderr, name=self.native_session_id + "-stderr", daemon=True,
+            ),
+        ]
+        for reader in self._readers:
+            reader.start()
+        watcher = threading.Thread(
+            target=self._wait, name="native-rpc-" + self.task.task_id, daemon=True,
+        )
+        watcher.start()
+        self._send(self._prompt_id, "prompt", {"message": self.task.prompt})
+        runtime_deadline = (
+            self.task.runtime_deadline_at_unix
+            if self.task.runtime_deadline_at_unix is not None
+            else self.task.deadline_at_unix
+        )
+        remaining = runtime_deadline - time.time()
+        if remaining <= 0:
+            self._cancel("worker-deadline-exceeded")
+        else:
+            self._worker_timer = threading.Timer(
+                remaining, self._cancel, args=("worker-deadline-exceeded",),
+            )
+            self._worker_timer.daemon = True
+            self._worker_timer.start()
 
-    def _drain(self, name, stream, parts):
+    def _stream_progress(self, stream, chunks, byte_count):
+        if self._progress is None:
+            return
+        try:
+            self._progress({
+                "event": "stream-progress",
+                "native_session_id": self.native_session_id,
+                "stream": stream,
+                "chunks": chunks,
+                "bytes": byte_count,
+            })
+        except Exception:
+            pass
+
+    def _read_stdout(self):
+        buffer = b""
         chunks = 0
         byte_count = 0
         try:
             while True:
-                chunk = stream.readline()
+                chunk = os.read(self.process.stdout.fileno(), 8192)
                 if not chunk:
                     break
-                parts.append(chunk)
                 chunks += 1
-                byte_count += len(chunk.encode("utf-8", "replace"))
-                if self._progress is not None:
+                byte_count += len(chunk)
+                self._stream_progress("stdout", chunks, byte_count)
+                buffer += chunk
+                while b"\n" in buffer:
+                    line, buffer = buffer.split(b"\n", 1)
+                    if line.endswith(b"\r"):
+                        line = line[:-1]
                     try:
-                        self._progress({
-                            "event": "stream-progress",
-                            "native_session_id": self.native_session_id,
-                            "stream": name,
-                            "chunks": chunks,
-                            "bytes": byte_count,
-                        })
-                    except Exception:
-                        pass
+                        record = json.loads(line.decode("utf-8"))
+                    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                        self._fail(f"native RPC malformed JSON: {exc}")
+                        continue
+                    self._handle_record(record)
+            if buffer:
+                self._fail("native RPC protocol error: unterminated JSONL record")
+        except (OSError, ValueError) as exc:
+            with self._state:
+                active = self.process.poll() is None and self._outcome is None
+            if active:
+                self._fail(f"native RPC stdout failed: {type(exc).__name__}: {exc}")
+
+    def _read_stderr(self):
+        chunks = 0
+        byte_count = 0
+        try:
+            while True:
+                chunk = os.read(self.process.stderr.fileno(), 8192)
+                if not chunk:
+                    break
+                chunks += 1
+                byte_count += len(chunk)
+                self._stderr.append(chunk.decode("utf-8", "replace"))
+                self._stream_progress("stderr", chunks, byte_count)
         except (OSError, ValueError):
-            # A bounded timeout may close an inherited pipe that a surviving
-            # descendant kept open. The captured prefix remains diagnostic data.
             pass
 
-    def wait(self, callback: Callable[[NativeHostCompletion], None]) -> None:
-        output = {"stdout": [], "stderr": []}
-        readers = [
-            threading.Thread(
-                target=self._drain, args=(name, stream, output[name]),
-                name=f"{self.native_session_id}-{name}", daemon=True,
+    def _handle_record(self, record):
+        if not isinstance(record, dict) or not isinstance(record.get("type"), str):
+            self._fail("native RPC protocol error: record must be an object with a type")
+            return
+        record_type = record["type"]
+        if record_type == "response":
+            self._handle_response(record)
+        elif record_type == "message_end":
+            message = record.get("message")
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                return
+            content = message.get("content", "")
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                text = "".join(
+                    str(block.get("text", "")) for block in content
+                    if isinstance(block, dict) and block.get("type") == "text"
+                )
+            else:
+                self._fail("native RPC protocol error: assistant content must be text or blocks")
+                return
+            with self._state:
+                self._stdout = text
+                cancelling = self._cancel_reason is not None
+            reason = message.get("stopReason")
+            if reason in ("error", "aborted") and not cancelling:
+                detail = message.get("errorMessage") or "provider supplied no error detail"
+                self._fail(f"native RPC provider {reason}: {detail}")
+        elif record_type == "message_update":
+            update = record.get("assistantMessageEvent")
+            if isinstance(update, dict) and update.get("type") == "error":
+                with self._state:
+                    cancelling = self._cancel_reason is not None
+                if not cancelling:
+                    detail = update.get("error") or update.get("reason") or "provider failure"
+                    self._fail(f"native RPC provider error: {detail}")
+        elif record_type == "agent_settled":
+            self._settle(bool(record.get("aborted", False)))
+
+    def _handle_response(self, record):
+        request_id = record.get("id")
+        command = record.get("command")
+        expected = self._commands.get(request_id)
+        if expected is None or command != expected or request_id in self._responses:
+            self._fail(
+                "native RPC protocol error: uncorrelated response "
+                f"id={request_id!r} command={command!r}"
             )
-            for name, stream in (("stdout", self.process.stdout),
-                                 ("stderr", self.process.stderr))
-        ]
-        for reader in readers:
-            reader.start()
-        self.process.wait()
-        drain_deadline = time.monotonic() + _REAP_TIMEOUT
-        for reader in readers:
-            reader.join(max(0.0, drain_deadline - time.monotonic()))
-        abandoned = [reader for reader in readers if reader.is_alive()]
+            return
+        self._responses.add(request_id)
+        if not record.get("success"):
+            detail = record.get("error") or "command supplied no error detail"
+            if command == "abort":
+                self._force_cleanup()
+            else:
+                self._fail(f"native RPC prompt failed: {detail}")
+            return
+        if command == "prompt":
+            data = record.get("data")
+            disposition = data.get("disposition") if isinstance(data, dict) else None
+            if disposition == "handled":
+                self._fail("native RPC prompt was handled without starting agent work")
+            elif disposition not in ("started", "queued"):
+                self._fail(f"native RPC protocol error: invalid prompt disposition {disposition!r}")
+
+    def _send(self, request_id, command, values=None):
+        record = {"id": request_id, "type": command}
+        record.update(values or {})
+        try:
+            encoded = json.dumps(record, ensure_ascii=False).encode("utf-8") + b"\n"
+            with self._write_lock:
+                self.process.stdin.write(encoded)
+                self.process.stdin.flush()
+        except (OSError, ValueError) as exc:
+            self._fail(f"native RPC stdin write failed: {type(exc).__name__}: {exc}")
+
+    def _close_stdin(self):
+        try:
+            self.process.stdin.close()
+        except (OSError, ValueError):
+            pass
+
+    def _settle(self, aborted):
+        with self._state:
+            if self._outcome is not None:
+                return
+            if self._cancel_reason is not None:
+                self._outcome = "cancelled"
+            elif aborted:
+                self._outcome = "failed"
+                self._error = "native RPC agent aborted before a successful settlement"
+            else:
+                self._outcome = "completed"
+        self._close_stdin()
+        self._schedule_cleanup()
+
+    def _fail(self, error):
+        with self._state:
+            if self._outcome is not None:
+                return
+            self._outcome = "cancelled" if self._cancel_reason is not None else "failed"
+            self._error = error
+        self._close_stdin()
+        self._force_cleanup()
+
+    def _schedule_cleanup(self):
         with self._cleanup_lock:
-            cleanup = self._cleanup
-            if abandoned and cleanup is not None:
-                # An escaped descendant can retain a duplicated pipe after the
-                # model's process group dies. Close only our managed endpoints,
-                # then give the readers one final bounded opportunity to exit.
-                cleanup["errors"].append("pipe-drain-timeout")
-                _close_owned_pipes(self.process)
-                close_deadline = time.monotonic() + _PIPE_CLOSE_TIMEOUT
-                for reader in abandoned:
-                    reader.join(max(0.0, close_deadline - time.monotonic()))
-            if cleanup is not None:
-                cleanup["direct_child_reaped"] = self.process.returncode is not None
-                cleanup["pipe_drain_completed"] = (
-                    not abandoned and not any(reader.is_alive() for reader in readers)
+            if self._kill_timer is not None:
+                return
+            self._kill_timer = threading.Timer(_REAP_TIMEOUT, self._force_cleanup)
+            self._kill_timer.daemon = True
+            self._kill_timer.start()
+
+    def _force_cleanup(self):
+        self._close_stdin()
+        with self._cleanup_lock:
+            if self._cleanup is None:
+                self._cleanup = _kill_owned_process(self.process)
+
+    def cancel(self) -> None:
+        self._cancel("operator-cancelled")
+
+    def _cancel(self, reason):
+        with self._state:
+            if self._outcome is not None or self._cancel_reason is not None:
+                return
+            self._cancel_reason = reason
+        self._send(self._abort_id, "abort")
+        self._schedule_cleanup()
+
+    def _wait(self):
+        self.process.wait()
+        # Reaping the RPC parent is not enough: tool descendants may retain both
+        # process-group membership and the managed pipes after the parent exits.
+        self._force_cleanup()
+        drain_deadline = time.monotonic() + _REAP_TIMEOUT
+        for reader in self._readers:
+            reader.join(max(0.0, drain_deadline - time.monotonic()))
+        if any(reader.is_alive() for reader in self._readers):
+            _close_owned_pipes(self.process)
+            close_deadline = time.monotonic() + _PIPE_CLOSE_TIMEOUT
+            for reader in self._readers:
+                reader.join(max(0.0, close_deadline - time.monotonic()))
+        with self._state:
+            outcome = self._outcome
+            if outcome is None:
+                outcome = "cancelled" if self._cancel_reason is not None else "failed"
+                self._error = (
+                    f"native RPC process exited {self.process.returncode} before agent_settled"
                 )
-                if not cleanup["direct_child_reaped"] or not cleanup["pipe_drain_completed"]:
-                    cleanup["tree_termination_verified"] = False
-                cleanup["complete"] = bool(
-                    cleanup["direct_child_reaped"] and cleanup["tree_termination_verified"]
-                    and cleanup["pipe_drain_completed"]
-                )
-                cleanup["status"] = "complete" if cleanup["complete"] else "incomplete"
-        callback(NativeHostCompletion(
+            if outcome == "completed" and self.process.returncode:
+                outcome = "failed"
+                self._error = f"native RPC process exited {self.process.returncode} after agent_settled"
+            if outcome == "completed" and not self._stdout.strip():
+                outcome = "failed"
+                self._error = "native RPC agent_settled without a final assistant message"
+            error = self._error
+            reason = self._cancel_reason
+            stdout = self._stdout
+        for timer in (self._worker_timer, self._kill_timer):
+            if timer is not None:
+                timer.cancel()
+        pipes_done = all(not reader.is_alive() for reader in self._readers)
+        cleanup = self._cleanup or {
+            "status": "complete",
+            "termination_method": "stdin-eof",
+            "direct_child_reaped": True,
+            "tree_termination_verified": True,
+            "pipe_drain_completed": pipes_done,
+            "errors": [],
+        }
+        cleanup.update({
+            "process_pid": self.process.pid,
+            "direct_child_reaped": self.process.returncode is not None,
+            "pipe_drain_completed": pipes_done,
+        })
+        cleanup["complete"] = bool(
+            cleanup["direct_child_reaped"] and cleanup.get("tree_termination_verified")
+            and pipes_done
+        )
+        cleanup["status"] = "complete" if cleanup["complete"] else "incomplete"
+        if outcome == "failed":
+            return_code = self.process.returncode
+            if not return_code:
+                return_code = 1
+        else:
+            return_code = self.process.returncode
+        self._callback(NativeHostCompletion(
             native_session_id=self.native_session_id,
-            return_code=self.process.returncode,
-            stdout="".join(output["stdout"]),
-            stderr="".join(output["stderr"]),
+            return_code=return_code,
+            stdout=stdout,
+            stderr="".join(self._stderr),
             started_at_unix=self.started_at_unix,
             finished_at_unix=time.time(),
             cleanup=cleanup,
+            error=error,
+            cancellation_reason=reason if outcome == "cancelled" else None,
         ))
 
 
@@ -557,7 +812,7 @@ def probe_kimchi_native_capability(executable=None, *, environ=None,
         )
     help_text = completed.stdout + "\n" + completed.stderr
     required = (
-        "-p", "--mode", "--no-session", "--no-approve", "--no-auto-update",
+        "--mode", "rpc", "--no-session", "--no-approve", "--no-auto-update",
         "--model", "--mcp-config", "--allow-tool", "--deny-tool",
     )
     missing = [flag for flag in required if flag not in help_text]
@@ -568,16 +823,12 @@ def probe_kimchi_native_capability(executable=None, *, environ=None,
         )
     return NativeCapability(
         True, KIMCHI_NATIVE_TRANSPORT, str(selected),
-        "required direct CLI flags present; help-only check, inference not exercised",
+        "required RPC CLI flags present; help-only check, inference not exercised",
     )
 
 
 class KimchiNativeHost:
-    """Launch direct ``kimchi -p --no-session`` top-level native sessions.
-
-    No Agent tool or nested harness session is involved. Required repository and
-    test executables remain ordinary descendants of the direct session process.
-    """
+    """Launch top-level ``kimchi --mode rpc --no-session`` task sessions."""
 
     transport = KIMCHI_NATIVE_TRANSPORT
 
@@ -601,11 +852,11 @@ class KimchiNativeHost:
         )
 
     def launch(self, task: NativeTask,
-               callback: Callable[[NativeHostCompletion], None]) -> _ProcessSession:
+               callback: Callable[[NativeHostCompletion], None]) -> _RpcSession:
         command = [
-            self._executable, "-p", task.prompt,
-            "--mode", "json", "--no-session", "--no-approve", "--no-auto-update",
-            "--model", task.model, "--mcp-config", '{"mcpServers":{}}',
+            self._executable, "--mode", "rpc", "--no-session", "--no-approve",
+            "--no-auto-update", "--model", task.model,
+            "--mcp-config", '{"mcpServers":{}}',
         ]
         for rule in task.allow_tools:
             command.extend(("--allow-tool", rule))
@@ -623,14 +874,11 @@ class KimchiNativeHost:
             options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
         started = time.time()
         process = subprocess.Popen(
-            command, cwd=str(task.repo_root), env=environ, stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            encoding="utf-8", errors="replace", **options,
+            command, cwd=str(task.repo_root), env=environ, stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, **options,
         )
-        session = _ProcessSession(process, started, progress=self._progress)
-        watcher = threading.Thread(
-            target=session.wait, args=(callback,),
-            name="native-session-" + task.task_id, daemon=True,
+        session = _RpcSession(
+            task, process, started, callback, progress=self._progress,
         )
-        watcher.start()
+        session.start()
         return session

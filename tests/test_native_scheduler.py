@@ -77,12 +77,71 @@ def test_native_completion_commits_artifact_and_defers_finalization_until_close(
     assert len(view["artifacts"]) == 1
     assert view["artifacts"][0]["message_id"] == "native-completion:task-a"
     assert view["artifact_messages"][0]["accepted"] is True
+    assert json.loads(task.artifact_path.read_text(encoding="utf-8")) == (
+        view["artifacts"][0]["artifact"]
+    )
     assert finalized == []
 
     scheduler.close_run(run_id)
 
     assert [item.task.task.task_id for item in finalized] == ["task-a"]
     assert scheduler.snapshot(run_id)["finalized"] is True
+    store.close()
+
+
+def test_supervisor_commit_failure_has_failed_evidence_and_no_success_file(
+        tmp_path, monkeypatch):
+    store, run_id, unit_id, host, scheduler = _scheduler(tmp_path)
+    task = _task(tmp_path, unit_id, "task-a", run_id=run_id)
+    completions = []
+    scheduler.submit(SchedulerTask(task), on_complete=completions.append)
+
+    def reject(*_args, **_kwargs):
+        raise RuntimeError("injected commit failure")
+
+    monkeypatch.setattr(store, "commit_native_artifact", reject)
+    host.sessions["task-a"].finish(_result("untrusted"))
+
+    result = scheduler.snapshot(run_id)["tasks"]["task-a"]
+    assert result.state == "failed"
+    assert result.artifact is None
+    assert result.source_artifact is not None
+    assert result.error == "native supervisor rejected completion: injected commit failure"
+    assert not task.artifact_path.exists()
+    events = store.manifest(run_id)["native_tasks"][0]["events"]
+    assert not any(event["event_type"] == "completed" for event in events)
+    assert [event["event_type"] for event in events].count("failed") == 1
+    assert events[-1]["details"]["error"] == result.error
+    assert len(completions) == 1
+    store.close()
+
+
+def test_parser_exception_is_one_failed_scheduler_completion(tmp_path):
+    store = FinalStore(tmp_path / "parser.sqlite3")
+    started = store.start_run(review_stack())
+    run_id = started["run_id"]
+    host = _FakeHost()
+
+    def malformed(_stdout):
+        raise ValueError("injected parser failure")
+
+    scheduler = NativeScheduler(NativeExecutor(
+        host, store=store, result_parser=malformed,
+    ))
+    task = _task(tmp_path, started["unit_ids"]["individual:1"], "task-a", run_id=run_id)
+    completions = []
+    scheduler.submit(SchedulerTask(task), on_complete=completions.append)
+
+    host.sessions["task-a"].finish(_result("unparsed"))
+
+    assert len(completions) == 1
+    assert completions[0].state == "failed"
+    assert completions[0].error == "native result parsing failed: injected parser failure"
+    assert completions[0].artifact is None
+    assert not task.artifact_path.exists()
+    events = store.manifest(run_id)["native_tasks"][0]["events"]
+    assert [event["event_type"] for event in events].count("failed") == 1
+    assert not any(event["event_type"] == "completed" for event in events)
     store.close()
 
 
@@ -253,10 +312,10 @@ def test_duplicate_and_late_completion_cannot_rewrite_artifact_or_repeat_finaliz
     session = host.sessions["task-a"]
 
     session.finish(_result("accepted"))
+    assert scheduler.close_run(run_id) is True
     before = store.manifest(run_id)
     session.finish(_result("duplicate"))
     session.emit(json.dumps(_result("late")), 0)
-    assert scheduler.close_run(run_id) is True
     assert scheduler.close_run(run_id) is True
 
     assert store.manifest(run_id) == before
@@ -347,6 +406,41 @@ def test_cancelling_one_run_does_not_cancel_another_runs_children(tmp_path):
     store.close()
 
 
+def test_cancelled_run_waits_for_owned_worker_before_cleanup_and_finalization(tmp_path):
+    finalized = []
+    store, run_id, unit_id, host, scheduler = _scheduler(
+        tmp_path, on_finalized=finalized.append,
+    )
+    task = _task(tmp_path, unit_id, "task-a", run_id=run_id)
+    scheduler.submit(SchedulerTask(task))
+    session = host.sessions["task-a"]
+
+    def deferred_cancel():
+        session.cancel_calls += 1
+
+    session.cancel = deferred_cancel
+    scheduler.close_run(run_id)
+    scheduler.cancel_run(run_id)
+
+    snapshot = scheduler.snapshot(run_id)
+    assert snapshot["cancelled"] == "operator-cancelled"
+    assert snapshot["finalized"] is False
+    assert snapshot["tasks"]["task-a"].state == "running"
+    assert finalized == []
+
+    session.emit("", -9)
+
+    assert scheduler.snapshot(run_id)["finalized"] is True
+    assert scheduler.snapshot(run_id)["tasks"]["task-a"].state == "cancelled"
+    assert finalized == [run_id]
+    events = store.manifest(run_id)["native_tasks"][0]["events"]
+    event_types = [event["event_type"] for event in events]
+    assert event_types.count("finalization") == 1
+    assert event_types[-1] == "finalization"
+    assert event_types.index("cleanup") > event_types.index("cancelled")
+    store.close()
+
+
 def test_cancellation_during_validation_owns_finalization_order(tmp_path):
     from rg_final_execution import validate_stop
 
@@ -386,6 +480,11 @@ def test_cancellation_during_validation_owns_finalization_order(tmp_path):
     assert finalized == []
     result = scheduler.snapshot(run_id)["tasks"]["task-a"]
     assert result.eligible is False
-    assert result.artifact is not None
-    assert len(store.manifest(run_id)["native_tasks"][0]["artifacts"]) == 1
+    assert result.artifact is None
+    assert result.source_artifact is not None
+    assert not task.artifact_path.exists()
+    recorded = store.manifest(run_id)["native_tasks"][0]
+    assert recorded["artifacts"] == []
+    assert not any(event["event_type"] == "completed" for event in recorded["events"])
+    assert scheduler.snapshot(run_id)["finalized"] is True
     store.close()

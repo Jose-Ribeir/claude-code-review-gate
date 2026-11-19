@@ -74,6 +74,7 @@ class _ManualHost(_CoverageHost):
 
 def _run_deep(tmp_path, monkeypatch, host, paths, *, timeout=5):
     monkeypatch.setenv("OCR_BACKEND", "kimchi")
+    monkeypatch.setenv("OCR_DEEP_TRANSPORT", "native")
     monkeypatch.setenv(
         "KIMCHI_BIN", fake_backend.install(tmp_path / "bin", "kimchi"),
     )
@@ -152,17 +153,40 @@ def test_large_native_deep_review_covers_every_file_once_with_global_duties(
     assert "global-invariants" in duties
 
 
-def test_repeated_attempt_cannot_rewrite_a_committed_artifact(tmp_path, monkeypatch):
-    host = _CoverageHost()
+def test_repeated_attempt_reuses_valid_journaled_artifacts_without_reexecution(
+        tmp_path, monkeypatch):
     paths = [f"pkg/file-{index}.py" for index in range(5)]
-    _run_deep(tmp_path, monkeypatch, host, paths)
+    first = _run_deep(tmp_path, monkeypatch, _CoverageHost(), paths)
     async_dir = review_gate._async_dir(str(tmp_path))
     artifact_paths = sorted(async_dir.glob("native-deep-partitioned-deep-*.json"))
     artifact_paths = [path for path in artifact_paths if "tasks" not in path.name]
     before = {path: path.read_bytes() for path in artifact_paths}
     assert before
 
-    with pytest.raises(review_gate.ReviewGateError, match="already committed"):
-        _run_deep(tmp_path, monkeypatch, host, paths)
+    resumed_host = _CoverageHost()
+    resumed = _run_deep(tmp_path, monkeypatch, resumed_host, paths)
 
+    assert resumed["verdict"] == first["verdict"]
+    assert resumed_host.sessions == {}
     assert {path: path.read_bytes() for path in artifact_paths} == before
+
+
+def test_malformed_journaled_coverage_is_rejected_without_reexecution(tmp_path, monkeypatch):
+    host = _CoverageHost()
+    paths = [f"pkg/file-{index}.py" for index in range(5)]
+    _run_deep(tmp_path, monkeypatch, host, paths)
+    async_dir = review_gate._async_dir(str(tmp_path))
+    journal_path = async_dir / "native-deep-partitioned-deep-tasks.json"
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    recorded = journal["native_tasks"][0]
+    artifact = recorded["artifacts"][0]["artifact"]
+    artifact["payload"]["native_deep_evidence"]["completed_duties"] = []
+    artifact_path = async_dir / f"native-{recorded['identity']['task_id']}.json"
+    artifact_path.write_text(json.dumps(artifact) + "\n", encoding="utf-8")
+    journal_path.write_text(json.dumps(journal) + "\n", encoding="utf-8")
+    resumed_host = _CoverageHost()
+
+    with pytest.raises(review_gate.ReviewGateError, match="misidentified evidence"):
+        _run_deep(tmp_path, monkeypatch, resumed_host, paths)
+
+    assert resumed_host.sessions == {}

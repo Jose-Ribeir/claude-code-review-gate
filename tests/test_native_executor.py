@@ -95,14 +95,14 @@ def _task(tmp_path, task_id="task-a"):
         input_sha256="a" * 64,
         backend="kimchi",
         model="kimi-k3.1-pro",
-        deadline_at_unix=200.0,
+        deadline_at_unix=time.time() + 200.0,
         prompt="Return the contracted result.",
         repo_root=tmp_path,
         artifact_path=tmp_path / (task_id + ".json"),
     )
 
 
-def test_completion_handle_and_atomic_artifact_preserve_native_identity(tmp_path):
+def test_completion_handle_preserves_native_identity_without_worker_publication(tmp_path):
     host = _FakeHost()
     executor = NativeExecutor(host)
     task = _task(tmp_path)
@@ -131,8 +131,8 @@ def test_completion_handle_and_atomic_artifact_preserve_native_identity(tmp_path
     assert completion.artifact.task == task
     assert completion.artifact.native_session_id == handle.native_session_id
     assert completion.artifact.duration_seconds == pytest.approx(0.25)
-    serialized = json.loads(task.artifact_path.read_text(encoding="utf-8"))
-    assert serialized == completion.artifact.as_dict()
+    serialized = completion.artifact.as_dict()
+    assert not task.artifact_path.exists()
     assert serialized["schema"] == "native-review-artifact/v1"
     assert serialized["transport"] == "test-double/native-host-v1"
     assert serialized["identity"] == {
@@ -146,7 +146,7 @@ def test_completion_handle_and_atomic_artifact_preserve_native_identity(tmp_path
         "input_sha256": "a" * 64,
         "backend": "kimchi",
         "model": "kimi-k3.1-pro",
-        "deadline_at_unix": 200.0,
+        "deadline_at_unix": task.deadline_at_unix,
     }
     assert serialized["payload"] == payload
     assert serialized["timing"] == {
@@ -169,7 +169,7 @@ def test_json_result_envelope_preserves_the_contracted_worker_payload(tmp_path):
 
     assert completions[0].state == "completed"
     assert completions[0].artifact.payload == payload
-    assert json.loads(task.artifact_path.read_text())["payload"] == payload
+    assert not task.artifact_path.exists()
 
 
 def test_two_task_spike_cancels_only_one_and_fences_late_output(tmp_path):
@@ -207,23 +207,44 @@ def test_two_task_spike_cancels_only_one_and_fences_late_output(tmp_path):
     assert len(completions) == 2
     assert completions[-1].handle == first_handle
     assert completions[-1].state == "completed"
-    assert json.loads(first_task.artifact_path.read_text())["payload"] == {
+    assert completions[-1].artifact.payload == {
         "schema": "final-review-worker-result/v1", "status": "success", "task": "task-a",
     }
+    assert not first_task.artifact_path.exists()
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX direct-process identity")
-def test_direct_kimchi_adapter_is_top_level_and_restricts_supplied_environment(tmp_path):
+@pytest.mark.skipif(os.name != "posix", reason="POSIX RPC process identity")
+def test_kimchi_rpc_host_correlates_prompt_and_settles_with_explicit_identity(tmp_path):
     capture = tmp_path / "launch.json"
-    executable = tmp_path / "direct-kimchi-double"
+    commands = tmp_path / "commands.json"
+    executable = tmp_path / "rpc-kimchi-double"
+    payload = {
+        "schema": "final-review-worker-result/v1",
+        "status": "success",
+        "summary": "RPC double with Unicode separators \u2028 and \u2029",
+        "findings": [],
+        "warnings": [],
+    }
     executable.write_text(
         f"#!{sys.executable}\n"
         "import json, os, pathlib, sys\n"
         f"pathlib.Path({str(capture)!r}).write_text(json.dumps({{"
         "'argv': sys.argv[1:], 'env': dict(os.environ), 'pid': os.getpid(),"
         " 'parent_pid': os.getppid(), 'process_group': os.getsid(0)}))\n"
-        "print(json.dumps({'schema': 'final-review-worker-result/v1',"
-        " 'status': 'success', 'summary': 'direct double', 'findings': [], 'warnings': []}))\n",
+        "command = json.loads(sys.stdin.buffer.readline())\n"
+        f"pathlib.Path({str(commands)!r}).write_text(json.dumps(command))\n"
+        "def emit(record):\n"
+        "    sys.stdout.buffer.write(json.dumps(record).encode('utf-8') + b'\\n')\n"
+        "    sys.stdout.buffer.flush()\n"
+        "emit({'id': command['id'], 'type': 'response', 'command': 'prompt',"
+        "      'success': True, 'data': {'disposition': 'started'}})\n"
+        f"emit({{'type': 'message_end', 'message': {{'role': 'assistant',"
+        f"      'content': [{{'type': 'text', 'text': json.dumps({payload!r})}}],"
+        "      'stopReason': 'stop'}})\n"
+        "emit({'type': 'agent_end', 'messages': [], 'willRetry': False})\n"
+        "emit({'type': 'agent_settled', 'aborted': False})\n"
+        "while sys.stdin.buffer.readline():\n"
+        "    pass\n",
         encoding="utf-8",
     )
     executable.chmod(0o755)
@@ -254,26 +275,21 @@ def test_direct_kimchi_adapter_is_top_level_and_restricts_supplied_environment(t
         delivered.set()
 
     handle = executor.start(task, completed)
-    assert delivered.wait(5), "direct host did not deliver its completion callback"
+    assert delivered.wait(5), "RPC host did not deliver its completion callback"
 
     launched = json.loads(capture.read_text(encoding="utf-8"))
+    command = json.loads(commands.read_text(encoding="utf-8"))
     assert launched["parent_pid"] == os.getpid()
     assert launched["process_group"] == launched["pid"]
-    assert handle.native_session_id == "pid:" + str(launched["pid"])
-    assert handle.transport == "native-top-level/kimchi-cli-no-session-v1"
+    assert handle.native_session_id == "rpc:run-1:task-a"
+    assert handle.transport == "native-top-level/kimchi-rpc-v1"
     assert launched["argv"] == [
-        "-p", task.prompt,
-        "--mode", "json",
-        "--no-session",
-        "--no-approve",
-        "--no-auto-update",
-        "--model", task.model,
-        "--mcp-config", '{"mcpServers":{}}',
-        "--allow-tool", "Read",
-        "--allow-tool", "Bash(git diff *)",
-        "--deny-tool", "Write",
-        "--deny-tool", "Bash(gh *)",
+        "--mode", "rpc", "--no-session", "--no-approve", "--no-auto-update",
+        "--model", task.model, "--mcp-config", '{"mcpServers":{}}',
+        "--allow-tool", "Read", "--allow-tool", "Bash(git diff *)",
+        "--deny-tool", "Write", "--deny-tool", "Bash(gh *)",
     ]
+    assert command == {"id": "run-1:task-a:prompt", "type": "prompt", "message": task.prompt}
     environment = launched["env"]
     assert environment["OPENAI_API_KEY"] == "model-auth-only"
     assert environment["ALLOWED_CONTEXT"] == "preserved"
@@ -288,13 +304,135 @@ def test_direct_kimchi_adapter_is_top_level_and_restricts_supplied_environment(t
         "KIMCHI_PERMISSIONS_MODE",
     ):
         assert name not in environment
-    assert len(completions) == 1 and completions[0].state == "completed"
+    assert len(completions) == 1
+    assert completions[0].error is None, completions[0].error
+    assert completions[0].state == "completed"
+    assert completions[0].artifact.payload == payload
+
+
+@pytest.mark.parametrize("scenario,expected_error", [
+    ("prompt-error", "native RPC prompt failed: Model not found: invalid/model"),
+    (
+        "wrong-response-id",
+        "native RPC protocol error: uncorrelated response id='wrong' command='prompt'",
+    ),
+    (
+        "malformed-json",
+        "native RPC malformed JSON: Expecting property name enclosed in double quotes: "
+        "line 1 column 2 (char 1)",
+    ),
+    ("process-exit", "native RPC process exited 7 before agent_settled"),
+    ("empty-settlement", "native RPC agent_settled without a final assistant message"),
+])
+def test_rpc_failures_deliver_exactly_one_specific_terminal_callback(
+        tmp_path, scenario, expected_error):
+    executable = tmp_path / (scenario + "-rpc-double")
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import json, sys\n"
+        f"scenario = {scenario!r}\n"
+        "command = json.loads(sys.stdin.buffer.readline())\n"
+        "def emit(record):\n"
+        "    sys.stdout.buffer.write(json.dumps(record).encode() + b'\\n')\n"
+        "    sys.stdout.buffer.flush()\n"
+        "if scenario == 'malformed-json':\n"
+        "    sys.stdout.buffer.write(b'{bad}\\n'); sys.stdout.buffer.flush()\n"
+        "elif scenario == 'wrong-response-id':\n"
+        "    emit({'id': 'wrong', 'type': 'response', 'command': 'prompt', 'success': True})\n"
+        "elif scenario == 'process-exit':\n"
+        "    sys.exit(7)\n"
+        "else:\n"
+        "    emit({'id': command['id'], 'type': 'response', 'command': 'prompt',\n"
+        "          'success': scenario != 'prompt-error',\n"
+        "          'error': 'Model not found: invalid/model',\n"
+        "          'data': {'disposition': 'started'}})\n"
+        "    if scenario == 'empty-settlement':\n"
+        "        emit({'type': 'agent_settled', 'aborted': False})\n"
+        "while sys.stdin.buffer.readline():\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+    executor = NativeExecutor(KimchiNativeHost(str(executable), environ={}))
+    completions = []
+    delivered = threading.Event()
+
+    def completed(completion):
+        completions.append(completion)
+        delivered.set()
+
+    executor.start(_task(tmp_path), completed)
+    assert delivered.wait(5), "RPC failure did not reach its terminal callback"
+
+    assert len(completions) == 1
+    assert completions[0].state == "failed"
+    assert completions[0].artifact is None
+    assert completions[0].error == expected_error
+    assert completions[0].details["cleanup"]["direct_child_reaped"] is True
+    assert not (tmp_path / "task-a.json").exists()
+
+
+@pytest.mark.parametrize("cancellation", ["operator", "worker-deadline"])
+def test_rpc_abort_is_correlated_reaped_and_truthful_about_cancellation(
+        tmp_path, cancellation):
+    commands_path = tmp_path / "rpc-commands.jsonl"
+    executable = tmp_path / "abort-rpc-double"
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import json, pathlib, sys\n"
+        "def emit(record):\n"
+        "    sys.stdout.buffer.write(json.dumps(record).encode() + b'\\n')\n"
+        "    sys.stdout.buffer.flush()\n"
+        "while True:\n"
+        "    line = sys.stdin.buffer.readline()\n"
+        "    if not line:\n"
+        "        break\n"
+        "    command = json.loads(line)\n"
+        f"    with pathlib.Path({str(commands_path)!r}).open('ab') as stream:\n"
+        "        stream.write(json.dumps(command).encode() + b'\\n')\n"
+        "    emit({'id': command['id'], 'type': 'response',\n"
+        "          'command': command['type'], 'success': True,\n"
+        "          'data': {'disposition': 'started'} if command['type'] == 'prompt' else {}})\n"
+        "    if command['type'] == 'abort':\n"
+        "        emit({'type': 'agent_settled', 'aborted': True})\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+    task = replace(
+        _task(tmp_path),
+        deadline_at_unix=time.time() + (0.2 if cancellation == "worker-deadline" else 30),
+    )
+    executor = NativeExecutor(KimchiNativeHost(str(executable), environ={}))
+    completions = []
+    delivered = threading.Event()
+
+    def completed(completion):
+        completions.append(completion)
+        delivered.set()
+
+    handle = executor.start(task, completed)
+    if cancellation == "operator":
+        handle.cancel()
+    assert delivered.wait(5), "RPC abort did not complete bounded cleanup"
+
+    expected_reason = (
+        "worker-deadline-exceeded" if cancellation == "worker-deadline"
+        else "operator-cancelled"
+    )
+    assert len(completions) == 1
+    assert completions[0].state == "cancelled"
+    assert completions[0].details["reason"] == expected_reason
+    assert completions[0].details["cleanup"]["complete"] is True
+    records = [json.loads(line) for line in commands_path.read_text().splitlines()]
+    assert [record["type"] for record in records] == ["prompt", "abort"]
+    assert records[1]["id"] == "run-1:task-a:abort"
+    assert not task.artifact_path.exists()
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX executable double")
 def test_kimchi_capability_probe_is_bounded_and_never_falls_back(tmp_path):
     required_help = (
-        "-p --mode --no-session --no-approve --no-auto-update --model "
+        "--mode rpc --no-session --no-approve --no-auto-update --model "
         "--mcp-config --allow-tool --deny-tool"
     )
     supported = tmp_path / "supported-kimchi"
@@ -308,7 +446,7 @@ def test_kimchi_capability_probe_is_bounded_and_never_falls_back(tmp_path):
 
     capability = probe_kimchi_native_capability(str(supported), environ={}, timeout=2.0)
     assert capability.supported
-    assert capability.transport == "native-top-level/kimchi-cli-no-session-v1"
+    assert capability.transport == "native-top-level/kimchi-rpc-v1"
     assert capability.inference_tested is False
     assert isinstance(KimchiNativeHost.checked(
         str(supported), environ={}, timeout=2.0,
@@ -359,6 +497,25 @@ def test_failed_or_malformed_native_session_never_publishes_an_artifact(
     assert not task.artifact_path.exists()
 
 
+def test_process_launch_failure_gets_one_failed_callback_with_task_identity(tmp_path):
+    class BrokenHost(_FakeHost):
+        def launch(self, task, callback):
+            raise OSError("injected spawn failure")
+
+    executor = NativeExecutor(BrokenHost())
+    completions = []
+
+    handle = executor.start(_task(tmp_path), completions.append)
+
+    assert handle.native_session_id == "unlaunched:run-1:task-a"
+    assert len(completions) == 1
+    assert completions[0].handle == handle
+    assert completions[0].state == "failed"
+    assert completions[0].artifact is None
+    assert completions[0].error == "native session launch failed: injected spawn failure"
+    assert not (tmp_path / "task-a.json").exists()
+
+
 def test_run_expiry_fences_dispatch_and_cancels_only_owned_native_handles(tmp_path):
     timer = _DeadlineTimer()
     deadline = RunDeadline("run-1", 30, timer_factory=timer)
@@ -400,12 +557,28 @@ def test_native_deadline_streams_progress_reaps_pipes_and_sanitizes_tails(tmp_pa
     executable = tmp_path / "timeout-kimchi-double"
     executable.write_text(
         f"#!{sys.executable}\n"
-        "import json, os, pathlib, subprocess, sys, time\n"
+        "import json, os, pathlib, subprocess, sys\n"
         "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
         f"pathlib.Path({str(descendant_path)!r}).write_text(str(child.pid))\n"
-        "print(json.dumps({'type': 'progress', 'detail': 'token=stdout-secret'}), flush=True)\n"
-        "print('tool failed: bearer stderr-secret', file=sys.stderr, flush=True)\n"
-        "os._exit(0)\n",
+        "def emit(record):\n"
+        "    sys.stdout.buffer.write(json.dumps(record).encode() + b'\\n')\n"
+        "    sys.stdout.buffer.flush()\n"
+        "while True:\n"
+        "    line = sys.stdin.buffer.readline()\n"
+        "    if not line:\n"
+        "        break\n"
+        "    command = json.loads(line)\n"
+        "    emit({'id': command['id'], 'type': 'response',\n"
+        "          'command': command['type'], 'success': True,\n"
+        "          'data': {'disposition': 'started'} if command['type'] == 'prompt' else {}})\n"
+        "    if command['type'] == 'prompt':\n"
+        "        emit({'type': 'message_end', 'message': {'role': 'assistant',\n"
+        "              'content': [{'type': 'text', 'text': 'progress token=stdout-secret'}],\n"
+        "              'stopReason': 'stop'}})\n"
+        "        print('tool failed: bearer stderr-secret', file=sys.stderr, flush=True)\n"
+        "    if command['type'] == 'abort':\n"
+        "        emit({'type': 'agent_settled', 'aborted': True})\n"
+        "        os._exit(0)\n",
         encoding="utf-8",
     )
     executable.chmod(0o755)
@@ -441,8 +614,8 @@ def test_native_deadline_streams_progress_reaps_pipes_and_sanitizes_tails(tmp_pa
     handle = executor.start(_task(tmp_path), completed)
     try:
         assert emitted.wait(5), "native test double did not stream its initial progress"
-        host.session.process.wait(timeout=5)
         timer.fire()
+        host.session.process.wait(timeout=5)
         assert delivered.wait(10), "native cancellation did not finish bounded pipe cleanup"
         assert time.monotonic() - started < 8
         completion = completions[0]

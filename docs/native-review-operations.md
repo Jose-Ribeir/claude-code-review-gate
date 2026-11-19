@@ -45,9 +45,12 @@ git push origin HEAD:main
 ```
 
 Normal deny-first-push/retry-join behavior still applies. A native opt-in is
-not an instruction to run nested agents. The implemented production adapter
-launches direct `kimchi -p --no-session` processes; required repository and
-test programs are ordinary child processes of those direct sessions.
+not an instruction to run nested agents. The production adapter launches
+`kimchi --mode rpc --no-session` and sends a correlated `prompt` command over
+strict JSONL. It waits for the final assistant message and `agent_settled`;
+an accepted prompt response or `agent_end` does not prove completion.
+Cancellation sends a correlated `abort` before bounded process-group cleanup.
+Native session IDs contain the explicit run/task identity, not a bare PID.
 
 ### No silent fallback
 
@@ -85,13 +88,15 @@ values to 1..4. `RG_FINAL_NATIVE_MODEL` defaults to `kimi-k3.1-pro` and is
 recorded in every task identity.
 
 The scheduler has separate resource classes with starting limits of **4
-inference** and **2 execution** tasks. The execution-class constructor default
-is 2; there is currently no separate operator environment variable for it.
-These are initial safeguards, not benchmark-derived optima. They bound one
-native run's scheduler; they are not advertised as a process-wide quota across
-independent review runs. Trusted final-review required-test execution retains
-its existing sequencing and evidence duties rather than becoming an
-unbounded model-worker class.
+inference** and **2 execution** tasks. `RG_FINAL_EXECUTION_WORKERS` sets the
+execution limit. These are initial safeguards, not benchmark-derived optima.
+They bound one native run's scheduler, not independent review runs.
+Required/dynamic execution starts after its unit's mandatory lenses reach
+terminal outcomes. Ordinary lens failures preserve independent test evidence;
+trusted STOP dependencies mark affected execution ineligible. Individual
+execution does not wait for combined evaluation, and execution subprocesses
+belong to the same run resource owner as inference workers. Execution results
+persist when their task callbacks complete, without becoming model artifacts.
 
 ### Legacy deep review
 
@@ -138,16 +143,20 @@ original task ID.
 ### Completion and commit
 
 The host delivers one terminal callback containing the exact native session
-ID, return code, captured stdout/stderr, and start/finish timestamps. The
-executor accepts a `final-review-worker-result/v1` JSON payload (including the
-CLI JSON result envelope), then atomically writes a
-`native-review-artifact/v1` envelope containing task identity, transport,
-native session ID, worker payload, and timing.
+ID, return code, captured stdout/stderr, and start/finish timestamps. Protocol,
+provider, process, and launch failures use the same once-only callback path.
+The executor accepts a `final-review-worker-result/v1` JSON payload but does
+not publish it. The supervisor validates the payload and STOP request, then
+atomically writes a `native-review-artifact/v1` envelope with task identity,
+transport, native session ID, worker payload, and timing.
 
-An output file alone is not accepted evidence. The scheduler validates any
-STOP request and calls `commit_native_artifact`; the supervisor atomically
-commits the artifact, an idempotent callback/message receipt, and the
-completion event as `native-review-artifact-commit/v1`. Lens aggregation only
+An output file alone is not accepted evidence. The scheduler calls
+`commit_native_artifact`; the supervisor atomically commits the artifact file,
+an idempotent callback/message receipt, and the completion event as
+`native-review-artifact-commit/v1`. File or database failure leaves no success
+file or committed success event, and failed publication produces structured
+unsuccessful evidence. Run cancellation, finalization, and same-store
+supersession fence late commits; their output remains diagnostic only. Lens aggregation only
 consumes this validated path. Duplicate delivery has no second state effect;
 conflicting reuse of an event/message identity is an error. Cancellation fences
 the exact run/session handle so late output cannot replace active evidence.
@@ -178,8 +187,16 @@ Legacy deep decomposition writes beside that run's asynchronous state:
 ```
 
 The journal deliberately does not invent final-review run/unit rows. Direct
-single-task deep review uses `<async-dir>/native-<run-id>-deep.json` and the
-existing supervisor log/result state.
+single-task deep review uses `<async-dir>/native-<run-id>-deep.json`, a
+journal-backed supervisor commit, and the existing supervisor log/result
+state.
+
+After interruption, a later partitioned attempt validates each accepted
+journal entry against its artifact file, immutable identity, and coverage
+before reusing it. It executes only unfinished tasks with a fresh runtime
+deadline and attempt-scoped event identities. Conflicting files, uncommitted
+artifacts, stale identities, and omitted or repeated coverage fail closed;
+they never authorize replacement inference or rewrite accepted evidence.
 
 ### Lifecycle and views
 
@@ -216,7 +233,7 @@ Install prerequisites before review. The engine does not implicitly install
 global packages, select a package manager, or provision a toolchain.
 
 - **Supervisor:** Python 3 and Git on `PATH`.
-- **Native inference:** a `kimchi` executable with `-p`, `--mode`,
+- **Native inference:** a `kimchi` executable with `--mode rpc`,
   `--no-session`, `--no-approve`, `--no-auto-update`, `--model`,
   `--mcp-config`, `--allow-tool`, and `--deny-tool` support, plus the operator's
   model authentication.
@@ -254,7 +271,7 @@ No declaration is recorded `absent` with a warning, never as a passing suite.
 | --- | --- | --- |
 | `RG_FINAL_REVIEW_TIMEOUT` | 1800 seconds; finite positive required | Native standalone/stack task-execution phase, after provider discovery and required tree/context preparation. Expiry stops queued work, cancels exact owned native handles, performs bounded cleanup, preserves accepted evidence, and yields controlled incomplete; it does not retroactively bound earlier provider discovery. |
 | `RG_FINAL_REVIEW_EXTERNAL_WATCHDOG_TIMEOUT` | Unset; finite positive when supplied | Declares a last-resort external kill. The implementation reserves a fixed 30-second cleanup margin and shortens the controlled deadline to `min(run timeout, external timeout - 30)`. Set the external watchdog later than the intended whole-run budget **plus at least 30 seconds**. Values <=30 leave no safe controlled window and fail before dispatch. |
-| `RG_FINAL_WORKER_TIMEOUT` | 900 seconds | Legacy final-review worker process timeout. Native task construction also records the resulting `deadline_at_unix`; direct native processes are actively bounded by the whole-run deadline, not by a separate per-worker watchdog. Do not mistake the metadata for an additional enforced native budget. |
+| `RG_FINAL_WORKER_TIMEOUT` | 900 seconds | Per-worker runtime deadline for native inference and required/dynamic execution. RPC workers receive `abort` before bounded cleanup; execution workers cancel their owned subprocess groups. Worker deadline events are `timeout`, not ordinary operator cancellation. |
 | `OCR_DEEP_TIMEOUT` | 600 seconds, minimum 60; invalid numeric falls back to 600 | Legacy or opted-in native deep-review whole deadline. Native decomposition applies this deadline across its task set, including cleanup coordination. |
 | `OCR_TIMEOUT` | 1800 seconds | Ordinary non-deep legacy reviewer wall clock. |
 | `OCR_CHUNK_TIMEOUT` | 1200 seconds, minimum 60 | Existing bounded legacy chunk lane, not a hidden retry budget. |

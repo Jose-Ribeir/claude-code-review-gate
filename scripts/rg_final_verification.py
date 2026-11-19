@@ -18,6 +18,8 @@ import subprocess
 from pathlib import Path
 import tempfile
 
+from rg_execution_ownership import run_owned_process
+
 _ABSENT_WARNING = "no required verification suite is declared by repository checks or CI"
 _FULL_SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 
@@ -32,7 +34,7 @@ def _git(repository: Path, *args: str, env=None) -> str:
         # Git config; suite execution supplies its own temporary HOME below.
         env = _safe_environment(Path(tempfile.gettempdir()))
     try:
-        proc = subprocess.run(
+        proc = run_owned_process(
             ["git", *args], cwd=str(repository), capture_output=True,
             text=True, check=False, timeout=30, env=env,
         )
@@ -135,12 +137,17 @@ def _github_matrix_values(raw: str) -> list[str]:
     value = raw.strip()
     if not (value.startswith("[") and value.endswith("]")):
         raise ValueError("matrix values must be finite inline or block sequences")
+    parsed = None
     try:
-        parsed = ast.literal_eval(value)
+        candidate = ast.literal_eval(value)
+        if isinstance(candidate, list) and all(isinstance(item, str) for item in candidate):
+            parsed = candidate
     except (SyntaxError, ValueError):
+        pass
+    if parsed is None:
+        # Numeric YAML scalars such as 3.10 must not round-trip through a
+        # Python float (which would silently turn the version into "3.1").
         parsed = [part.strip() for part in value[1:-1].split(",")]
-    if not isinstance(parsed, list) or any(not isinstance(item, str) for item in parsed):
-        raise ValueError("matrix sequences must contain only literal scalar values")
     values = [_yaml_scalar(item) for item in parsed]
     if any(not item or "${{" in item for item in values):
         raise ValueError("matrix values must be nonempty literal scalars, not expressions")
@@ -730,7 +737,7 @@ def _missing_command_tool(command: str, checkout: Path, env: dict) -> list[dict]
                 "raise SystemExit(importlib.util.find_spec(sys.argv[1]) is None)"
             )
             try:
-                available_module = subprocess.run(
+                available_module = run_owned_process(
                     [str(executable), "-c", probe, module], cwd=checkout, env=env,
                     capture_output=True, text=True, check=False, timeout=5,
                 )
@@ -777,7 +784,7 @@ def _run_suite(repository: Path, commit: str, declaration: dict) -> dict:
             }])
         version_probe = "import sys; print('.'.join(map(str, sys.version_info[:2])))"
         try:
-            inspected = subprocess.run(
+            inspected = run_owned_process(
                 [executable, "-c", version_probe], cwd=tempfile.gettempdir(),
                 env=lookup_env, capture_output=True, text=True, check=False, timeout=5,
             )
@@ -825,7 +832,7 @@ def _run_suite(repository: Path, commit: str, declaration: dict) -> dict:
                     _git(clone, "reset", "--hard", "--quiet", commit, env=env)
                     _git(clone, "clean", "-ffdx", "--quiet", env=env)
                 try:
-                    proc = subprocess.run(
+                    proc = run_owned_process(
                         declaration["command"], cwd=clone, env=env, shell=True,
                         capture_output=True, text=True, check=False,
                         timeout=declaration["timeout"],

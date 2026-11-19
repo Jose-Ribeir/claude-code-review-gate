@@ -21,6 +21,7 @@ import os
 from pathlib import Path, PurePosixPath
 import subprocess
 
+from rg_execution_ownership import run_owned_process
 from rg_final_env import scrub_environment
 from rg_final_materialize import materialize_review
 
@@ -80,7 +81,7 @@ def _executor_environment(environ):
 
 
 def _changed_paths(repository, merge_base, head_sha):
-    process = subprocess.run(
+    process = run_owned_process(
         ["git", "diff", "--name-only", "--no-ext-diff", "--no-textconv",
          "-z", merge_base, head_sha],
         cwd=str(repository), capture_output=True, timeout=30, check=False,
@@ -277,7 +278,7 @@ def _invoke_executor(executor, paths, cwd, environ, timeout, result):
     environment["OCR_CHECK_TIMEOUT_S"] = str(timeout)
     result["telemetry"]["executor_attempts"] += 1
     try:
-        process = subprocess.run(
+        process = run_owned_process(
             command, cwd=str(cwd), input=json.dumps(paths), env=environment,
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=timeout, check=False,
