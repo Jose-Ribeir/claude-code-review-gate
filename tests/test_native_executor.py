@@ -21,6 +21,7 @@ from rg_native_executor import (  # noqa: E402
 )
 from rg_run_lifecycle import RunDeadline, RunDeadlineExpired  # noqa: E402
 from rg_final_store import FinalStore  # noqa: E402
+from rg_final_review import _PIPE_CLOSE_TIMEOUT, _REAP_TIMEOUT  # noqa: E402
 
 
 class _DeadlineTimer:
@@ -735,7 +736,13 @@ def test_cancel_wakes_pipe_watcher_when_descendant_escapes_group(tmp_path):
     assert deadline.is_set(), "native child did not expose its detached descendant"
     try:
         handle.cancel()
-        assert completed.wait(5), "descendant-held stdout kept cancellation waiting"
+        # A worker that ignores abort is force-killed after _REAP_TIMEOUT, then the
+        # pipe watcher joins its readers for _REAP_TIMEOUT and closes the pipes for
+        # _PIPE_CLOSE_TIMEOUT. That bounded cleanup alone is 5s, so a flat 5s wait
+        # has no margin on a slow runner. Derive the bound from the executor's own
+        # constants plus slack; it must stay far below the descendant's 60s sleep.
+        cancel_bound = 2 * _REAP_TIMEOUT + _PIPE_CLOSE_TIMEOUT + 5
+        assert completed.wait(cancel_bound), "descendant-held stdout kept cancellation waiting"
     finally:
         if capture.exists():
             try:
