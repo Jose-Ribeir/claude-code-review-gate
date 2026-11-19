@@ -1225,6 +1225,8 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
     provider = _selected_provider(reference, provider, repo_root)
     environ = os.environ if environ is None else environ
     transport = str(environ.get("RG_FINAL_REVIEW_TRANSPORT", "")).strip().lower()
+    if transport not in ("", "legacy", "native"):
+        raise ValueError(f"unsupported final-review transport {transport!r}")
     if isinstance(reference, (list, tuple)) and len(reference) == 1:
         reference = reference[0]
     if isinstance(reference, (list, tuple)):
@@ -2010,6 +2012,9 @@ def run_final_stack(references, *, repo_root=None, provider=None, store_path=Non
             report_url=report_url, local_waivers=local_waivers, native_host=native_host,
         )
     environ = os.environ if environ is None else environ
+    transport = str(environ.get("RG_FINAL_REVIEW_TRANSPORT", "")).strip().lower()
+    if transport not in ("", "legacy", "native"):
+        raise ValueError(f"unsupported final-review transport {transport!r}")
     repo_root = str(repo_root or os.getcwd())
     provider = _selected_provider(references, provider, repo_root)
     stage = EXECUTION_STAGE if execute_checks else STACK_STAGE

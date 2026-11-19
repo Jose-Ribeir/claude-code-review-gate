@@ -379,6 +379,26 @@ def test_three_item_stack_runs_complete_units_links_reports_and_publishes_each_i
                 for entry in combined_coverage(report)}["composition"] == "complete"
 
 
+def test_direct_stack_rejects_unknown_transport_before_provider_reads():
+    class RejectingProvider:
+        def __init__(self):
+            self.reads = []
+
+        def read(self, reference, repo_root=None):
+            self.reads.append(reference)
+            raise AssertionError("invalid transport reached provider discovery")
+
+    provider = RejectingProvider()
+
+    with pytest.raises(ValueError, match="unsupported final-review transport"):
+        rg_final_review.run_final_stack(
+            ["!1"], provider=provider,
+            environ={"RG_FINAL_REVIEW_TRANSPORT": "nested"},
+        )
+
+    assert provider.reads == []
+
+
 def test_native_multi_reference_stack_uses_global_native_execution_without_fallback(
         tmp_path, monkeypatch):
     harness = Harness(tmp_path)

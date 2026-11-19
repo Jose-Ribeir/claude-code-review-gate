@@ -177,6 +177,19 @@ def test_registered_task_lifecycle_is_exactly_once_and_preserves_timing(tmp_path
 
         assert store.manifest(started["run_id"])["native_tasks"][0]["events"] == recorded
 
+        readable = store.human_report(started["run_id"])
+        for expected in (
+            "## Native task lifecycle",
+            "### task-correctness",
+            "Transport: test-double/native-host-v1",
+            "Session: review-task-correctness",
+            "- queued @ 10.0",
+            "- completed @ 13.25; duration=2.25s",
+            "Artifact callbacks:\n- none recorded",
+            "Committed artifacts:\n- none recorded",
+        ):
+            assert expected in readable
+
 
 def native_artifact(identity, payload=None):
     return {

@@ -7,6 +7,8 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -421,3 +423,20 @@ def test_explicit_native_multi_reference_uses_complete_native_stack(standalone):
     assert args[0] == ["!17", "!18"]
     assert kwargs["complete"] is True
     assert kwargs["environ"]["RG_FINAL_REVIEW_TRANSPORT"] == "native"
+
+
+def test_multi_reference_rejects_unknown_transport_before_stack_dispatch(
+        standalone):  # noqa: F811
+    stack_calls = []
+    standalone.monkeypatch.setattr(
+        rg_final_review, "run_final_stack",
+        lambda *args, **kwargs: stack_calls.append((args, kwargs)),
+    )
+
+    with pytest.raises(ValueError, match="unsupported final-review transport"):
+        rg_final_review.run_final_review(
+            ["!17", "!18"], provider=Provider(),
+            environ={"RG_FINAL_REVIEW_TRANSPORT": "nested"},
+        )
+
+    assert stack_calls == []

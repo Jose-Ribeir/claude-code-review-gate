@@ -3387,4 +3387,47 @@ class FinalStore:
             f"{item['error'] or 'no error'} {self._details(item['details'])}"
             for item in unassociated
         ) or lines.append("- none recorded")
+        if report["native_tasks"]:
+            lines.extend(("", "## Native task lifecycle", ""))
+            for task in report["native_tasks"]:
+                identity = task["identity"]
+                lines.extend((
+                    f"### {identity['task_id']}", "",
+                    f"Unit: {identity['unit_id']}; stage: {identity['stage']}; "
+                    f"lens: {identity['lens']}",
+                    f"Transport: {task['transport']}",
+                    f"Session: {identity['session_name']}",
+                    f"Backend/model: {identity['backend']}/{identity['model']}",
+                    f"Input SHA-256: {identity['input_sha256']}",
+                    f"Revision tuple: {self._details(identity['revision_tuple'])}",
+                    f"Worker deadline: {identity['deadline_at_unix']}",
+                    "Events:",
+                ))
+                for event in task["events"]:
+                    timing = event["timing"]
+                    duration = (
+                        ""
+                        if timing["duration_seconds"] is None
+                        else f"; duration={timing['duration_seconds']}s"
+                    )
+                    lines.append(
+                        f"- {event['event_type']} @ {timing['occurred_at_unix']}{duration}; "
+                        f"native_session={event['native_session_id'] or 'not assigned'}; "
+                        f"details={self._details(event['details'])}"
+                    )
+                lines.append("Artifact callbacks:")
+                lines.extend(
+                    f"- {message['message_id']}: accepted={str(message['accepted']).lower()}; "
+                    f"sha256={message['artifact_sha256'] or 'none'}; "
+                    f"reason={message['reason'] or 'none'}"
+                    for message in task["artifact_messages"]
+                ) or lines.append("- none recorded")
+                lines.append("Committed artifacts:")
+                lines.extend(
+                    f"- {artifact['message_id']}: sha256={artifact['artifact_sha256']}; "
+                    f"schema={artifact['artifact']['schema']}; "
+                    f"duration={artifact['artifact']['timing']['duration_seconds']}s"
+                    for artifact in task["artifacts"]
+                ) or lines.append("- none recorded")
+                lines.append("")
         return "\n".join(lines) + "\n"
