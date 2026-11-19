@@ -281,6 +281,7 @@ def _run_unit(store, identity, graph, unit_key, unit_id, *, item=None, composed=
 
             if native_execution is not None and not plan["native_prepared"]:
                 _prepare_native_unit(native_execution, request, capabilities)
+                plan["native_prepared"] = True
 
             def isolated_worker(lens_request):
                 lens_request = _enrich_unit_lens(lens_request, capabilities)
