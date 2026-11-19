@@ -289,6 +289,7 @@ def test_kimchi_rpc_host_correlates_prompt_and_settles_with_explicit_identity(tm
     assert "--model" in launched["argv"]
     assert launched["argv"][launched["argv"].index("--model") + 1] == "other-provider-model"
     assert "--mcp-config" in launched["argv"]
+    assert "--plan" in launched["argv"]
     assert "Bash(git diff *)" in launched["argv"]
     assert "--deny-tool" in launched["argv"]
     assert "Write" in launched["argv"]
@@ -437,7 +438,7 @@ def test_rpc_abort_is_correlated_reaped_and_truthful_about_cancellation(
 def test_kimchi_capability_probe_is_bounded_and_never_falls_back(tmp_path):
     required_help = (
         "--mode rpc --no-session --no-approve --no-auto-update --model "
-        "--mcp-config --allow-tool --deny-tool"
+        "--mcp-config --allow-tool --deny-tool --plan"
     )
     supported = tmp_path / "supported-kimchi"
     supported.write_text(

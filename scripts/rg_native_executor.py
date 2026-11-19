@@ -818,7 +818,7 @@ def probe_kimchi_native_capability(executable=None, *, environ=None,
     help_text = completed.stdout + "\n" + completed.stderr
     required = (
         "--mode", "rpc", "--no-session", "--no-approve", "--no-auto-update",
-        "--model", "--mcp-config", "--allow-tool", "--deny-tool",
+        "--model", "--mcp-config", "--allow-tool", "--deny-tool", "--plan",
     )
     missing = [flag for flag in required if flag not in help_text]
     if missing:
@@ -860,7 +860,7 @@ class KimchiNativeHost:
                callback: Callable[[NativeHostCompletion], None]) -> _RpcSession:
         command = [
             self._executable, "--mode", "rpc", "--no-session", "--no-approve",
-            "--no-auto-update", "--mcp-config", '{"mcpServers":{}}',
+            "--no-auto-update", "--mcp-config", '{"mcpServers":{}}', "--plan",
         ]
         if task.model and task.model != "auto":
             command.extend(("--model", task.model))

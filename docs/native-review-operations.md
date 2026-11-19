@@ -51,6 +51,11 @@ strict JSONL. It waits for the final assistant message and `agent_settled`;
 an accepted prompt response or `agent_end` does not prove completion.
 Cancellation sends a correlated `abort` before bounded process-group cleanup.
 Native session IDs contain the explicit run/task identity, not a bare PID.
+RPC review sessions also launch with `--plan`, the CLI's read-only mode.
+Static lens workers inspect the immutable checkout but must not perform test
+execution independently of the owned execution scheduler. Required and dynamic
+verification remains callable-backed execution work with its separate worker
+limit and deadline. The native capability probe requires support for this mode.
 
 ### No silent fallback
 
