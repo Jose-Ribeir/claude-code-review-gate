@@ -268,6 +268,11 @@ def test_default_final_worker_prompt_states_exact_success_status_contract(
     assert "The final assistant message must contain that object as text" in prompt
     assert "claim it was returned earlier" in prompt
     assert "Do not finish with a tool-call-only response" in prompt
+    assert "path (repository-relative)" in prompt
+    assert "start_line and end_line" in prompt
+    assert "confidence in [0,1]" in prompt
+    assert "justified by the inspected evidence" in prompt
+    assert "not chosen to force a gate result" in prompt
     assert '"summary":"..."' not in prompt
     assert "angle-bracket templates" in prompt
     assert "sources_read" in prompt
