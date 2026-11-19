@@ -56,6 +56,12 @@ Static lens workers inspect the immutable checkout but must not perform test
 execution independently of the owned execution scheduler. Required and dynamic
 verification remains callable-backed execution work with its separate worker
 limit and deadline. The native capability probe requires support for this mode.
+Provider error messages are retained as pending diagnostics rather than
+immediately aborting native retry, overflow recovery, or compaction. A later
+successful assistant response clears the pending error. If it remains when
+`agent_settled` arrives, or the process exits without settlement, the task
+fails. Native recovery never bypasses the worker deadline and creates no
+orchestrator-driven retry, alternative backend, or unbounded wait.
 
 ### No silent fallback
 

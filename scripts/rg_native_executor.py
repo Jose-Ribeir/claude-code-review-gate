@@ -459,6 +459,7 @@ class _RpcSession:
         self._cleanup_lock = threading.Lock()
         self._outcome = None
         self._error = None
+        self._provider_error = None
         self._cancel_reason = None
         self._stdout = ""
         self._stderr = []
@@ -584,23 +585,29 @@ class _RpcSession:
             else:
                 self._fail("native RPC protocol error: assistant content must be text or blocks")
                 return
+            reason = message.get("stopReason")
             with self._state:
                 self._stdout = text
                 cancelling = self._cancel_reason is not None
-            reason = message.get("stopReason")
+                if reason not in ("error", "aborted"):
+                    self._provider_error = None
             if reason in ("error", "aborted") and not cancelling:
                 detail = message.get("errorMessage") or "provider supplied no error detail"
-                self._fail(f"native RPC provider {reason}: {detail}")
+                self._record_provider_error(reason, detail)
         elif record_type == "message_update":
             update = record.get("assistantMessageEvent")
             if isinstance(update, dict) and update.get("type") == "error":
-                with self._state:
-                    cancelling = self._cancel_reason is not None
-                if not cancelling:
-                    detail = update.get("error") or update.get("reason") or "provider failure"
-                    self._fail(f"native RPC provider error: {detail}")
+                detail = update.get("error") or update.get("reason") or "provider failure"
+                self._record_provider_error("error", detail)
         elif record_type == "agent_settled":
             self._settle(bool(record.get("aborted", False)))
+
+    def _record_provider_error(self, reason, detail):
+        with self._state:
+            if self._cancel_reason is None:
+                self._provider_error = (
+                    f"native RPC provider {reason}: {str(detail)[:8192]}"
+                )
 
     def _handle_response(self, record):
         request_id = record.get("id")
@@ -651,9 +658,11 @@ class _RpcSession:
                 return
             if self._cancel_reason is not None:
                 self._outcome = "cancelled"
-            elif aborted:
+            elif aborted or self._provider_error:
                 self._outcome = "failed"
-                self._error = "native RPC agent aborted before a successful settlement"
+                self._error = self._provider_error or (
+                    "native RPC agent aborted before a successful settlement"
+                )
             else:
                 self._outcome = "completed"
         self._close_stdin()
@@ -710,7 +719,7 @@ class _RpcSession:
             outcome = self._outcome
             if outcome is None:
                 outcome = "cancelled" if self._cancel_reason is not None else "failed"
-                self._error = (
+                self._error = self._provider_error or (
                     f"native RPC process exited {self.process.returncode} before agent_settled"
                 )
             if outcome == "completed" and self.process.returncode:

@@ -803,3 +803,87 @@ def test_auto_model_does_not_override_harness_model_selection(tmp_path):
     assert delivered.wait(5)
     launched = json.loads(capture.read_text())
     assert "--model" not in launched
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX native RPC lifecycle")
+def test_provider_retry_status_allows_native_recovery_and_uses_final_message(tmp_path):
+    executable = tmp_path / "retrying-native-double"
+    payload = {
+        "schema": "final-review-worker-result/v1", "status": "success",
+        "summary": "completed after native transient retry", "findings": [],
+        "warnings": [], "unreviewed": [],
+    }
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import json, sys\n"
+        "def emit(record):\n"
+        "    print(json.dumps(record), flush=True)\n"
+        "prompt = json.loads(sys.stdin.buffer.readline())\n"
+        "emit({'id': prompt['id'], 'type': 'response', 'command': 'prompt',"
+        "      'success': True, 'data': {'disposition': 'started'}})\n"
+        "emit({'type': 'message_update', 'assistantMessageEvent':"
+        "      {'type': 'error', 'error': 'Retrying…'}})\n"
+        "emit({'type': 'message_end', 'message': {'role': 'assistant',"
+        "      'content': 'Retrying…', 'stopReason': 'error',"
+        "      'errorMessage': 'Retrying…'}})\n"
+        "emit({'type': 'agent_end', 'messages': [], 'willRetry': True})\n"
+        "emit({'type': 'agent_start'})\n"
+        f"emit({{'type': 'message_end', 'message': {{'role': 'assistant',"
+        f"      'content': json.dumps({payload!r}), 'stopReason': 'stop'}}}})\n"
+        "emit({'type': 'agent_end', 'messages': [], 'willRetry': False})\n"
+        "emit({'type': 'agent_settled', 'aborted': False})\n"
+        "while sys.stdin.buffer.readline():\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+    completions = []
+    delivered = threading.Event()
+
+    def completed(completion):
+        completions.append(completion)
+        delivered.set()
+
+    executor = NativeExecutor(KimchiNativeHost(str(executable), environ={}))
+    executor.start(_task(tmp_path), completed)
+    assert delivered.wait(5), "transient retry status aborted native recovery"
+    assert len(completions) == 1
+    assert completions[0].state == "completed"
+    assert completions[0].artifact.payload["summary"] == "completed after native transient retry"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX native RPC lifecycle")
+def test_unrecovered_provider_error_fails_at_final_settlement(tmp_path):
+    executable = tmp_path / "terminal-provider-error-double"
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import json, sys\n"
+        "def emit(record):\n"
+        "    print(json.dumps(record), flush=True)\n"
+        "prompt = json.loads(sys.stdin.buffer.readline())\n"
+        "emit({'id': prompt['id'], 'type': 'response', 'command': 'prompt',"
+        "      'success': True, 'data': {'disposition': 'started'}})\n"
+        "emit({'type': 'message_end', 'message': {'role': 'assistant',"
+        "      'content': 'provider unavailable', 'stopReason': 'error',"
+        "      'errorMessage': 'provider unavailable'}})\n"
+        "emit({'type': 'agent_end', 'messages': [], 'willRetry': False})\n"
+        "emit({'type': 'agent_settled', 'aborted': True})\n"
+        "while sys.stdin.buffer.readline():\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+    completions = []
+    delivered = threading.Event()
+
+    def completed(completion):
+        completions.append(completion)
+        delivered.set()
+
+    executor = NativeExecutor(KimchiNativeHost(str(executable), environ={}))
+    executor.start(_task(tmp_path), completed)
+    assert delivered.wait(5)
+    assert len(completions) == 1
+    assert completions[0].state == "failed"
+    assert completions[0].artifact is None
+    assert completions[0].error == "native RPC provider error: provider unavailable"
