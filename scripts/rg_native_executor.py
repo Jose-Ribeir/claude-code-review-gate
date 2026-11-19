@@ -860,9 +860,10 @@ class KimchiNativeHost:
                callback: Callable[[NativeHostCompletion], None]) -> _RpcSession:
         command = [
             self._executable, "--mode", "rpc", "--no-session", "--no-approve",
-            "--no-auto-update", "--model", task.model,
-            "--mcp-config", '{"mcpServers":{}}',
+            "--no-auto-update", "--mcp-config", '{"mcpServers":{}}',
         ]
+        if task.model and task.model != "auto":
+            command.extend(("--model", task.model))
         for rule in task.allow_tools:
             command.extend(("--allow-tool", rule))
         for rule in task.deny_tools:

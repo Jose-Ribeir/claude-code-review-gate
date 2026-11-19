@@ -84,8 +84,9 @@ callback order.
 
 `RG_FINAL_LENS_WORKERS` selects the inference cap for standalone/stack lens
 work. It defaults to 4, treats blank/non-numeric values as 4, and clamps other
-values to 1..4. `RG_FINAL_NATIVE_MODEL` defaults to `kimi-k3.1-pro` and is
-recorded in every task identity.
+values to 1..4. Model selection defaults to `auto`, which leaves the model choice to the
+harness rather than imposing a different reviewer model; task records make this selection explicit.
+Set `RG_FINAL_NATIVE_MODEL` only for an intentional explicit model override, recorded in the task identity.
 
 The scheduler has separate resource classes with starting limits of **4
 inference** and **2 execution** tasks. `RG_FINAL_EXECUTION_WORKERS` sets the

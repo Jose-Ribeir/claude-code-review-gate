@@ -188,7 +188,7 @@ class NativeStandaloneExecution:
             revision_tuple=tuple(str(value) for value in request["revision_tuple"]),
             input_sha256=hashlib.sha256(serialized.encode("utf-8")).hexdigest(),
             backend="kimchi",
-            model=self._environ.get("RG_FINAL_NATIVE_MODEL", "kimi-k3.1-pro"),
+            model=self._environ.get("RG_FINAL_NATIVE_MODEL", "auto"),
             deadline_at_unix=time.time() + float(
                 self._environ.get("RG_FINAL_WORKER_TIMEOUT", "900")
             ),

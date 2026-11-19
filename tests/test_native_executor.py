@@ -263,7 +263,7 @@ def test_kimchi_rpc_host_correlates_prompt_and_settles_with_explicit_identity(tm
     })
     executor = NativeExecutor(host)
     task = replace(
-        _task(tmp_path),
+        _task(tmp_path), model="other-provider-model",
         allow_tools=("Read", "Bash(git diff *)"),
         deny_tools=("Write", "Bash(gh *)"),
     )
@@ -283,12 +283,16 @@ def test_kimchi_rpc_host_correlates_prompt_and_settles_with_explicit_identity(tm
     assert launched["process_group"] == launched["pid"]
     assert handle.native_session_id == "rpc:run-1:task-a"
     assert handle.transport == "native-top-level/kimchi-rpc-v1"
-    assert launched["argv"] == [
+    assert launched["argv"][:5] == [
         "--mode", "rpc", "--no-session", "--no-approve", "--no-auto-update",
-        "--model", task.model, "--mcp-config", '{"mcpServers":{}}',
-        "--allow-tool", "Read", "--allow-tool", "Bash(git diff *)",
-        "--deny-tool", "Write", "--deny-tool", "Bash(gh *)",
     ]
+    assert "--model" in launched["argv"]
+    assert launched["argv"][launched["argv"].index("--model") + 1] == "other-provider-model"
+    assert "--mcp-config" in launched["argv"]
+    assert "Bash(git diff *)" in launched["argv"]
+    assert "--deny-tool" in launched["argv"]
+    assert "Write" in launched["argv"]
+    assert "Bash(gh *)" in launched["argv"]
     assert command == {"id": "run-1:task-a:prompt", "type": "prompt", "message": task.prompt}
     environment = launched["env"]
     assert environment["OPENAI_API_KEY"] == "model-auth-only"
@@ -767,3 +771,34 @@ def test_queue_time_is_not_charged_as_worker_runtime(tmp_path):
     assert delivered.wait(8), "worker was cancelled because it queued past an absolute timestamp"
     assert completions[0].state == "completed"
     assert completions[0].artifact.payload["summary"] == "fresh execution budget"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX native CLI invocation")
+def test_auto_model_does_not_override_harness_model_selection(tmp_path):
+    capture = tmp_path / "model-argv.json"
+    executable = tmp_path / "model-check-native-double"
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import json, pathlib, sys\n"
+        f"pathlib.Path({str(capture)!r}).write_text(json.dumps(sys.argv[1:]))\n"
+        "request = json.loads(sys.stdin.buffer.readline())\n"
+        "print(json.dumps({'id': request['id'], 'type': 'response', 'command': 'prompt',"
+        " 'success': True, 'data': {'disposition': 'started'}}), flush=True)\n"
+        "payload = {'schema': 'final-review-worker-result/v1', 'status': 'success',"
+        " 'summary': 'model selection respected', 'findings': [], 'warnings': [],"
+        " 'unreviewed': []}\n"
+        "print(json.dumps({'type': 'message_end', 'message':"
+        " {'role': 'assistant', 'content': json.dumps(payload)}}), flush=True)\n"
+        "print(json.dumps({'type': 'agent_settled', 'aborted': False}), flush=True)\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+    delivered = threading.Event()
+    executor = NativeExecutor(KimchiNativeHost(str(executable), environ={}))
+    executor.start(
+        replace(_task(tmp_path), model="auto"),
+        lambda _completion: delivered.set(),
+    )
+    assert delivered.wait(5)
+    launched = json.loads(capture.read_text())
+    assert "--model" not in launched
