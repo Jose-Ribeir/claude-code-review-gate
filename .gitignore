@@ -4,3 +4,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .ocr/docs-summary.md
+
+# local agent/ticket working dirs
+.delegate-kit/
+.scratch/
