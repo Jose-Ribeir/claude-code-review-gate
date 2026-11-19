@@ -511,7 +511,12 @@ def _sanitize_worker_diagnostic(value, environ):
     text = "".join(
         char if char.isprintable() or char in "\n\t" else " " for char in text
     )
-    return text[-_STDOUT_DIAGNOSTIC_LIMIT:]
+    if len(text) <= _STDOUT_DIAGNOSTIC_LIMIT:
+        return text
+    marker = "\n...[truncated]...\n"
+    head_length = (_STDOUT_DIAGNOSTIC_LIMIT - len(marker)) // 2
+    tail_length = _STDOUT_DIAGNOSTIC_LIMIT - len(marker) - head_length
+    return text[:head_length] + marker + text[-tail_length:]
 
 
 def _worker_diagnostics(source, *, reason, status=None, return_code=None, stdout=None,

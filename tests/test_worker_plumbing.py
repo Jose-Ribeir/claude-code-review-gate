@@ -341,6 +341,22 @@ def test_final_worker_rejection_has_bounded_sanitized_structured_diagnostics(tmp
     assert "x" * 700 not in details["stdout_tail"]
 
 
+def test_worker_diagnostic_preserves_prefix_and_suffix_within_limit():
+    text = (
+        "INITIAL_CAUSE: token=known-model-secret; "
+        + "unimportant-middle-" * 200
+        + "FINAL_STACK_LINE"
+    )
+    sanitized = final_review._sanitize_worker_diagnostic(
+        text, {"OPENAI_API_KEY": "known-model-secret"},
+    )
+    assert len(sanitized) <= 512
+    assert sanitized.startswith("INITIAL_CAUSE:")
+    assert sanitized.endswith("FINAL_STACK_LINE")
+    assert "...[truncated]..." in sanitized
+    assert "known-model-secret" not in sanitized
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group ownership")
 def test_process_group_guard_never_targets_the_callers_group(monkeypatch):
     process = SimpleNamespace(pid=os.getpgrp(), killed=False)
