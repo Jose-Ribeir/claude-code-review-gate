@@ -1,0 +1,148 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/Jose-Ribeir/claude-code-review-gate/schemas/settings.schema.json",
+  "title": "review-gate settings",
+  "description": "Per-agent model and thinking level for each backend, plus behavior knobs. Validated strictly by scripts/rg_settings.py (the single source; this schema is generated from it). Precedence: OCR_* env > <repo>/.ocr/settings.json > ~/.config/review-gate/settings.json > built-in defaults.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "agents": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "spotter": {
+          "$ref": "#/definitions/backends"
+        },
+        "code-reviewer": {
+          "$ref": "#/definitions/backends"
+        },
+        "deep-reviewer": {
+          "$ref": "#/definitions/backends"
+        },
+        "docs-checker": {
+          "$ref": "#/definitions/backends"
+        },
+        "code-filter": {
+          "$ref": "#/definitions/backends"
+        },
+        "code-resolver": {
+          "$ref": "#/definitions/backends"
+        },
+        "docs-summary": {
+          "$ref": "#/definitions/backends"
+        },
+        "orchestrator": {
+          "$ref": "#/definitions/backends"
+        },
+        "canary": {
+          "$ref": "#/definitions/backends"
+        }
+      }
+    },
+    "behavior": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "inline_wait_seconds": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "hook": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 600
+            },
+            "git": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 300
+            }
+          }
+        },
+        "spotter_skip": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true
+            },
+            "max_files": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 3
+            },
+            "max_changed_lines": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 60
+            }
+          }
+        },
+        "canary_cache": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true
+            },
+            "ttl_days": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 7
+            }
+          }
+        },
+        "docs_checker_parallel": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true
+            }
+          }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "agentEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "model": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@+\\[\\]\\-]*$",
+          "description": "Model id the agent runs with under this backend."
+        },
+        "thinking": {
+          "enum": [
+            "off",
+            "low",
+            "medium",
+            "high",
+            "max"
+          ],
+          "description": "Thinking level; omit to use the default."
+        }
+      }
+    },
+    "backends": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "claude": {
+          "$ref": "#/definitions/agentEntry"
+        },
+        "kimchi": {
+          "$ref": "#/definitions/agentEntry"
+        }
+      }
+    }
+  }
+}
