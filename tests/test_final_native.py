@@ -394,20 +394,21 @@ def test_native_model_verdict_cannot_override_compute_verdict(standalone):  # no
     assert output["exit_code"] == 1
 
 
-def test_explicit_native_multi_reference_does_not_enter_legacy_stack(standalone):  # noqa: F811
+def test_explicit_native_multi_reference_uses_complete_native_stack(standalone):  # noqa: F811
     stack_calls = []
-    standalone.monkeypatch.setattr(
-        rg_final_review, "run_final_stack",
-        lambda *args, **kwargs: stack_calls.append((args, kwargs)),
-    )
+    result = object()
 
-    try:
-        rg_final_review.run_final_review(
-            ["!17", "!18"], provider=Provider(), environ=native_options(None),
-        )
-    except ValueError as exc:
-        assert "standalone" in str(exc)
-    else:
-        raise AssertionError("explicit native multi-ref request must not fall back")
+    def dispatch(*args, **kwargs):
+        stack_calls.append((args, kwargs))
+        return result
 
-    assert stack_calls == []
+    standalone.monkeypatch.setattr(rg_final_review, "run_final_stack", dispatch)
+
+    assert rg_final_review.run_final_review(
+        ["!17", "!18"], provider=Provider(), environ=native_options(None),
+    ) is result
+
+    args, kwargs = stack_calls[0]
+    assert args[0] == ["!17", "!18"]
+    assert kwargs["complete"] is True
+    assert kwargs["environ"]["RG_FINAL_REVIEW_TRANSPORT"] == "native"
