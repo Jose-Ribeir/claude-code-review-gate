@@ -372,6 +372,7 @@ class TestDeepLaneE2E:
             "OCR_BACKEND": "kimchi",
             "KIMCHI_BIN": fake_backend.install(tmp_path / "bin", "kimchi"),
             "OCR_SKIP_CANARY": "1",
+            "OCR_DEEP_TRANSPORT": "native",
             "FAKE_TRACE": str(tmp_path / "fake.trace"),
         })
 
@@ -412,7 +413,9 @@ class TestDeepLaneE2E:
         assert "stream-progress" in log
         assert "stub high finding" not in log
 
-    def test_explicit_legacy_deep_transport_preserves_legacy_argv(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("transport", [None, "legacy"])
+    def test_default_and_explicit_legacy_deep_transport_preserve_legacy_argv(
+            self, tmp_path, monkeypatch, transport):
         monkeypatch.delenv("OCR_REVIEWER_CMD", raising=False)
         monkeypatch.delenv("OCR_STUB_WORKER", raising=False)
         monkeypatch.setenv("OCR_BACKEND", "kimchi")
@@ -420,7 +423,10 @@ class TestDeepLaneE2E:
             "KIMCHI_BIN", fake_backend.install(tmp_path / "bin", "kimchi"),
         )
         monkeypatch.setenv("OCR_SKIP_CANARY", "1")
-        monkeypatch.setenv("OCR_DEEP_TRANSPORT", "legacy")
+        if transport is None:
+            monkeypatch.delenv("OCR_DEEP_TRANSPORT", raising=False)
+        else:
+            monkeypatch.setenv("OCR_DEEP_TRANSPORT", transport)
         monkeypatch.setenv("FAKE_TRACE", str(tmp_path / "fake.trace"))
 
         result, ran, _raw_name = review_gate._run_review(
@@ -450,6 +456,7 @@ class TestDeepLaneE2E:
             "KIMCHI_BIN", fake_backend.install(tmp_path / "bin", "kimchi"),
         )
         monkeypatch.setenv("OCR_SKIP_CANARY", "1")
+        monkeypatch.setenv("OCR_DEEP_TRANSPORT", "native")
         monkeypatch.setenv("FAKE_SCENARIO", "native-timeout")
         monkeypatch.setenv("FAKE_TIMEOUT_CHILD", str(tmp_path / "descendant.pid"))
         log_path = tmp_path / "timeout.supervisor.log"

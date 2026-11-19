@@ -3868,7 +3868,7 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
     # skew.
     started_at = time.time()
     started_mono = time.monotonic()
-    deep_transport = os.environ.get("OCR_DEEP_TRANSPORT", "native").strip().lower()
+    deep_transport = os.environ.get("OCR_DEEP_TRANSPORT", "legacy").strip().lower()
     if native and deep_transport not in ("native", "legacy"):
         raise ReviewGateError("OCR_DEEP_TRANSPORT must be 'native' or 'legacy'")
     if native and deep_transport == "native" and not stub and launch.name == "kimchi":

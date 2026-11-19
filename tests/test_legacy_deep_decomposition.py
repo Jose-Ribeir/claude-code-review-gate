@@ -78,6 +78,7 @@ def _run_deep(tmp_path, monkeypatch, host, paths, *, timeout=5):
         "KIMCHI_BIN", fake_backend.install(tmp_path / "bin", "kimchi"),
     )
     monkeypatch.setenv("OCR_SKIP_CANARY", "1")
+    monkeypatch.setenv("OCR_DEEP_TRANSPORT", "native")
     manifest = review_gate._build_deep_manifest(paths, ["risky"], 7)
     manifest_path = tmp_path / "deep.json"
     review_gate._write_manifest_file(str(manifest_path), manifest, "test deep manifest")
