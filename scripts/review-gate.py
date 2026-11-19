@@ -3519,7 +3519,7 @@ def _timeout_knob(override, used):
 
 def _run_review(repo_root, mode, git_dir=None, head_sha="", push_range="",
                 paths_file=None, timeout=None, raw_tag="", resolve_file=None,
-                tier="", common_dir=None, partial=False):
+                tier="", common_dir=None, partial=False, native=False, run_id=""):
     """_run_review_once, timed into the run log.
 
     tier is one of ocr_telemetry's v2 tier names when this call IS that
@@ -3536,7 +3536,8 @@ def _run_review(repo_root, mode, git_dir=None, head_sha="", push_range="",
         out = _run_review_once(repo_root, mode, git_dir, head_sha, push_range,
                                paths_file=paths_file, timeout=timeout,
                                raw_tag=raw_tag, resolve_file=resolve_file,
-                               partial=partial)
+                               partial=partial, native=native, run_id=run_id,
+                               common_dir=common_dir)
         outcome = "ok" if out[1] else "skipped"
         return out
     except ReviewLimitError:
@@ -3797,7 +3798,7 @@ def _missing_review_message(bypass):
 
 def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
                      paths_file=None, timeout=None, raw_tag="", resolve_file=None,
-                     partial=False):
+                     partial=False, native=False, run_id="", common_dir=None):
     """Return (result_dict, True, raw_archive_name) on success.
 
     paths_file: path to a chunk manifest JSON; if given, --paths-file is added
@@ -3867,6 +3868,17 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
     # skew.
     started_at = time.time()
     started_mono = time.monotonic()
+    deep_transport = os.environ.get("OCR_DEEP_TRANSPORT", "native").strip().lower()
+    if native and deep_transport not in ("native", "legacy"):
+        raise ReviewGateError("OCR_DEEP_TRANSPORT must be 'native' or 'legacy'")
+    if native and deep_transport == "native" and not stub and launch.name == "kimchi":
+        return _run_native_review_once(
+            kimi, prompt, repo_root, mode, git_dir, head_sha, push_range,
+            raw_tag=raw_tag, resolve_file=resolve_file, timeout=_run_timeout,
+            run_id=run_id, common_dir=common_dir, child_env=child_env,
+            launch=launch, bypass=bypass, started_at=started_at,
+            paths_file=paths_file,
+        )
     try:
         with subprocess.Popen(
             cmd,
@@ -3994,48 +4006,91 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
             f"review process error ({exc}) - blocking commit to preserve gate integrity.\n"
             f"{bypass}"
         )
+    return _review_outcome(
+        proc.returncode, out_text, err_text, kimi, git_dir, head_sha, raw_tag,
+        launch, bypass, resolve_file,
+    )
+
+
+_SUPERVISOR_LOG_LOCK = threading.Lock()
+
+
+def _supervisor_event(run_id, event, **fields):
+    """Write one bounded progress event to this supervisor's redirected log.
+
+    This stream is deliberately separate from worker stdout, which remains the
+    sole engine-result transport. Callers pass counts, identities, timings, and
+    already-sanitized tails only; raw model events are never duplicated here.
+    """
+    values = {"ts": round(time.time(), 3), "run": run_id, "event": event, **fields}
+    parts = []
+    for key, value in values.items():
+        if isinstance(value, bool):
+            rendered = "1" if value else "0"
+        elif isinstance(value, (int, float)):
+            rendered = str(value)
+        else:
+            rendered = _sanitize(str(value), 512).replace(" ", "_") or "?"
+        parts.append(f"{key}={rendered}")
+    line = "[review-gate] " + " ".join(parts)
+    try:
+        with _SUPERVISOR_LOG_LOCK:
+            sys.stderr.write(line[:4096] + "\n")
+            sys.stderr.flush()
+    except Exception:
+        pass
+
+
+def _review_timeout_error(mode, launch, bypass, timeout, run_timeout, source):
+    knob = _timeout_knob(timeout, run_timeout)
+    if mode == "hook":
+        escalation = (
+            f"  Give Claude more time : export {knob}={run_timeout * 2} in the environment\n"
+            f"    {launch.host} itself is launched from (a shell prefix on `git push` will\n"
+            "    NOT work in hook mode). Leave hooks/hooks.json's PreToolUse timeout\n"
+            "    alone: the review runs detached from the hook, and that timeout must\n"
+            "    stay below the host's session watchdog."
+        )
+    else:
+        escalation = f"  Give Claude more time : {knob}={run_timeout * 2} git push ..."
+    error = ReviewGateError(
+        f"review timed out after {run_timeout}s - blocking commit to preserve gate integrity.\n"
+        f"{escalation}\n{bypass}",
+        is_timeout=True,
+    )
+    error.cleanup = getattr(source, "cleanup", None)
+    return error
+
+
+def _review_outcome(return_code, out_text, err_text, kimi, git_dir, head_sha,
+                    raw_tag, launch, bypass, resolve_file):
     raw_name = _save_raw_output(git_dir, out_text, head_sha, raw_tag)
-    # A non-zero exit means claude never got as far as producing a review, so the
-    # output is an error string, not malformed JSON. Diagnose that separately:
-    # reporting "could not parse review output" for a login failure sends people
-    # looking at the review skill when the real fault is the CLI's credentials.
-    # Note claude writes these errors to STDOUT, so stderr is often empty.
-    if proc.returncode != 0:
-        # Check for usage/session limit before treating as a generic error.
+    # Keep this established legacy result path identical across transports.
+    if return_code != 0:
         is_limit, resets_at = _check_limit(out_text, err_text)
         if is_limit:
             raise ReviewLimitError(
-                f"usage limit (exit {proc.returncode}): the reviewer could not run.\n{bypass}",
+                f"usage limit (exit {return_code}): the reviewer could not run.\n{bypass}",
                 resets_at=resets_at,
             )
-        # Strip BEFORE falling through: a whitespace-only stdout is truthy, so
-        # `stdout or stderr` would select it and discard a real stderr message,
-        # leaving detail empty and hiding why the review failed.
         detail = (out_text or "").strip() or (err_text or "").strip()
         raise ReviewGateError(
-            f"`{launch.label}` exited {proc.returncode} without running the review -- blocking commit "
+            f"`{launch.label}` exited {return_code} without running the review -- blocking commit "
             "to preserve gate integrity.\n"
             f"  {kimi}\n"
             f"  Output (first 400 chars): {detail[:400]!r}\n"
             f"{_auth_hint(detail, launch)}"
             f"{bypass}"
         )
-    # A resolver call's contract IS `{"resolutions": ...}`; a review call's
-    # is the verdict shape -- refusing the resolver shape here keeps an echoed
-    # skill example from standing in for a verdict (fail-open, see
-    # _is_valid_verdict).
     result = (_extract_from_stream_json(out_text, resolver=bool(resolve_file))
               or _extract_json(out_text, resolver=bool(resolve_file)))
     if result is None:
-        # Exit 0 but no JSON. Check for limit before auth hint.
         is_limit, resets_at = _check_limit(out_text)
         if is_limit:
             raise ReviewLimitError(
                 f"usage limit (exit 0): the reviewer could not run.\n{bypass}",
                 resets_at=resets_at,
             )
-        # Auth failures have been seen to exit 0 too
-        # (the Desktop-bundled claude.exe does exactly this), so still check.
         _num_turns = _num_turns_from_stream_json(out_text)
         _turns_note = f" ({_num_turns} turn(s) captured)" if _num_turns is not None else ""
         _raw_note = f"  Raw output saved: {raw_name!r}\n" if raw_name else ""
@@ -4050,11 +4105,294 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
     return result, True, raw_name
 
 
+def _run_native_process(kimi, prompt, repo_root, head_sha, push_range, timeout,
+                        run_id, common_dir, child_env, started_at, git_dir,
+                        resolve_file):
+    """Run the one monolithic legacy deep task through the shared native host."""
+    from rg_final_review import _PIPE_CLOSE_TIMEOUT, _REAP_TIMEOUT
+    from rg_native_executor import KimchiNativeHost, NativeExecutor, NativeTask
+    from rg_run_lifecycle import RunDeadline
+
+    native_run_id = run_id or f"deep-{os.getpid()}-{int(started_at * 1000)}"
+    stream_counts = {}
+    stream_lock = threading.Lock()
+
+    def progress(event):
+        stream = event.get("stream") or "?"
+        with stream_lock:
+            key = (stream, event.get("native_session_id"))
+            stream_counts[key] = stream_counts.get(key, 0) + 1
+            count = stream_counts[key]
+        if count <= 4 or count % 64 == 0:
+            _supervisor_event(
+                native_run_id, "stream-progress", stream=stream, chunks=count,
+                bytes=event.get("bytes") or 0,
+                native_session_id=event.get("native_session_id") or "?",
+            )
+
+    host = KimchiNativeHost.checked(
+        kimi, environ=child_env, progress=progress,
+    )
+    completions = []
+    delivered = threading.Event()
+
+    def completed(completion):
+        completions.append(completion)
+        duration = (
+            completion.artifact.duration_seconds if completion.artifact is not None
+            else time.time() - started_at
+        )
+        details = completion.details
+        _supervisor_event(
+            native_run_id, "native-session-" + completion.state,
+            native_session_id=completion.handle.native_session_id,
+            transport=completion.handle.transport,
+            duration_s=round(duration, 3),
+            cleanup_status=(details.get("cleanup") or {}).get("status") or "",
+        )
+        if completion.state != "completed":
+            _supervisor_event(
+                native_run_id, "native-diagnostic-tail",
+                native_session_id=completion.handle.native_session_id,
+                stdout_tail=details.get("stdout_tail") or "",
+                stderr_tail=details.get("stderr_tail") or "",
+            )
+        delivered.set()
+
+    def expired(details):
+        _supervisor_event(
+            native_run_id, "deadline-exceeded",
+            expiry_count=details.get("expiry_count") or 0,
+            owned_cancellation_count=details.get("owned_cancellation_count") or 0,
+        )
+
+    deadline = RunDeadline(native_run_id, timeout, on_expire=expired)
+    executor = NativeExecutor(
+        host, deadline=deadline,
+        result_parser=lambda text: (
+            _extract_from_stream_json(text, resolver=bool(resolve_file))
+            or _extract_json(text, resolver=bool(resolve_file))
+        ),
+        diagnostic_environ=child_env,
+    )
+    task_id = native_run_id + "-deep"
+    artifact_path = _async_dir(common_dir or git_dir or repo_root) / f"native-{task_id}.json"
+    task = NativeTask(
+        run_id=native_run_id,
+        task_id=task_id,
+        session_name="legacy-" + task_id,
+        unit_id="legacy-deep",
+        stage="legacy-deep",
+        lens="deep",
+        revision_tuple=(head_sha, push_range),
+        input_sha256=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+        backend="kimchi",
+        model=_read_tier2_model(),
+        deadline_at_unix=started_at + timeout,
+        prompt=prompt,
+        repo_root=Path(repo_root),
+        artifact_path=artifact_path,
+        extensions=(_DENY_EXT,),
+    )
+    handle = None
+    deadline.start()
+    try:
+        handle = executor.start(task, completed)
+        _register_native_handle(handle)
+        reviewer_pid = (
+            int(handle.native_session_id.split(":", 1)[1])
+            if handle.native_session_id.startswith("pid:") else 0
+        )
+        _supervisor_event(
+            native_run_id, "native-session-started",
+            native_session_id=handle.native_session_id,
+            reviewer_pid=reviewer_pid,
+            supervisor_pid=os.getpid(), transport=handle.transport,
+            timeout_s=timeout,
+        )
+        cleanup_bound = _REAP_TIMEOUT + _PIPE_CLOSE_TIMEOUT + 5
+        if not delivered.wait(timeout + cleanup_bound):
+            handle.cancel()
+            _supervisor_event(native_run_id, "native-cleanup-timeout", timeout_s=timeout)
+            error = subprocess.TimeoutExpired([kimi, "-p"], timeout)
+            error.cleanup = None
+            raise error
+    finally:
+        if handle is not None:
+            _unregister_native_handle(handle)
+        deadline.close()
+
+    completion = completions[0]
+    if completion.state == "cancelled":
+        if not deadline.expired:
+            raise _Fenced()
+        _note_call_stats(completion.stdout, started_at)
+        error = subprocess.TimeoutExpired(
+            [kimi, "-p"], timeout, output=completion.stdout, stderr=completion.stderr,
+        )
+        error.returncode = completion.details.get("return_code")
+        error.cleanup = completion.details.get("cleanup")
+        raise error
+    _note_call_stats(completion.stdout, started_at)
+    return (
+        completion.details.get("return_code") or 0,
+        completion.stdout,
+        completion.stderr,
+    )
+
+
+def _run_native_decomposed_review(kimi, prompt, manifest, paths_file, repo_root,
+                                  mode, git_dir, head_sha, push_range, raw_tag,
+                                  timeout, run_id, common_dir, child_env, launch,
+                                  bypass, started_at):
+    from rg_legacy_deep import DeepExecutionError, execute_deep_review
+
+    native_run_id = run_id or f"deep-{os.getpid()}-{int(started_at * 1000)}"
+    async_dir = _async_dir(common_dir or git_dir or repo_root)
+    stream_counts = {}
+    session_states = {}
+    session_lock = threading.Lock()
+
+    def progress(event):
+        stream = event.get("stream") or "?"
+        with session_lock:
+            key = (stream, event.get("native_session_id"))
+            stream_counts[key] = stream_counts.get(key, 0) + 1
+            count = stream_counts[key]
+        if count <= 4 or count % 64 == 0:
+            _supervisor_event(
+                native_run_id, "stream-progress", stream=stream, chunks=count,
+                bytes=event.get("bytes") or 0,
+                native_session_id=event.get("native_session_id") or "?",
+            )
+
+    def log_completion(completion):
+        details = completion.details
+        duration = (
+            completion.artifact.duration_seconds if completion.artifact is not None
+            else time.time() - started_at
+        )
+        _supervisor_event(
+            native_run_id, "native-session-" + completion.state,
+            task_id=completion.handle.task.task_id,
+            native_session_id=completion.handle.native_session_id,
+            transport=completion.handle.transport,
+            duration_s=round(duration, 3),
+            cleanup_status=(details.get("cleanup") or {}).get("status") or "",
+        )
+        if completion.state != "completed":
+            _supervisor_event(
+                native_run_id, "native-diagnostic-tail",
+                task_id=completion.handle.task.task_id,
+                stdout_tail=details.get("stdout_tail") or "",
+                stderr_tail=details.get("stderr_tail") or "",
+            )
+
+    def session_started(handle):
+        with session_lock:
+            state = session_states.setdefault(handle.task.task_id, {"terminal": None})
+            state["started"] = True
+            _supervisor_event(
+                native_run_id, "native-session-started",
+                task_id=handle.task.task_id,
+                native_session_id=handle.native_session_id,
+                transport=handle.transport, timeout_s=timeout,
+            )
+            if state["terminal"] is None:
+                _register_native_handle(handle)
+            else:
+                log_completion(state["terminal"])
+
+    def session_completed(completion):
+        task_id = completion.handle.task.task_id
+        with session_lock:
+            state = session_states.setdefault(task_id, {"started": False})
+            state["terminal"] = completion
+            if state["started"]:
+                _unregister_native_handle(completion.handle)
+                log_completion(completion)
+
+    def expired(details):
+        _supervisor_event(
+            native_run_id, "deadline-exceeded",
+            expiry_count=details.get("expiry_count") or 0,
+            owned_cancellation_count=details.get("owned_cancellation_count") or 0,
+        )
+
+    try:
+        result, raw = execute_deep_review(
+            prompt, manifest, paths_file, kimi=kimi, repo_root=repo_root,
+            run_id=native_run_id, async_dir=async_dir, head_sha=head_sha,
+            push_range=push_range, timeout=timeout, model=_read_tier2_model(),
+            child_env=child_env, started_at=started_at,
+            result_parser=lambda text: (
+                _extract_from_stream_json(text) or _extract_json(text)
+            ),
+            merge_results=_merge_chunk_results, verdict=compute_verdict,
+            extensions=(_DENY_EXT,), progress=progress,
+            on_start=session_started, on_completion=session_completed,
+            on_expire=expired,
+        )
+    except DeepExecutionError as exc:
+        if exc.is_timeout:
+            raise _review_timeout_error(
+                mode, launch, bypass, timeout, timeout, exc,
+            ) from exc
+        raise ReviewGateError(
+            f"legacy deep native review incomplete: {exc}\n{bypass}"
+        ) from exc
+    raw_name = _save_raw_output(git_dir, raw, head_sha, raw_tag)
+    return result, True, raw_name
+
+
+def _run_native_review_once(kimi, prompt, repo_root, mode, git_dir, head_sha,
+                            push_range, *, raw_tag, resolve_file, timeout, run_id,
+                            common_dir, child_env, launch, bypass, started_at,
+                            paths_file=None):
+    _supervisor_event(run_id or "deep", "phase", phase="deep-review")
+    if paths_file and not resolve_file:
+        try:
+            manifest = json.loads(Path(paths_file).read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise ReviewGateError(f"could not read deep-review manifest: {exc}") from exc
+        from rg_legacy_deep import DEEP_FILE_TASK_LIMIT
+        if manifest.get("deep_review") is True \
+                and len(manifest.get("paths") or []) > DEEP_FILE_TASK_LIMIT:
+            return _run_native_decomposed_review(
+                kimi, prompt, manifest, paths_file, repo_root, mode, git_dir,
+                head_sha, push_range, raw_tag, timeout, run_id, common_dir,
+                child_env, launch, bypass, started_at,
+            )
+    try:
+        return_code, out_text, err_text = _run_native_process(
+            kimi, prompt, repo_root, head_sha, push_range, timeout, run_id,
+            common_dir, child_env, started_at, git_dir, resolve_file,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise _review_timeout_error(
+            mode, launch, bypass, timeout, timeout, exc,
+        ) from exc
+    except _Fenced:
+        raise
+    except ReviewGateError:
+        raise
+    except Exception as exc:
+        raise ReviewGateError(
+            f"review process error ({exc}) - blocking commit to preserve gate integrity.\n"
+            f"{bypass}"
+        ) from exc
+    return _review_outcome(
+        return_code, out_text, err_text, kimi, git_dir, head_sha, raw_tag,
+        launch, bypass, resolve_file,
+    )
+
+
 # --- the review runs elsewhere: state file, supervisor, inline join ----------
 # The reviewer children currently being waited on by _run_review (one per
 # chunk in flight since 0.12.0), so the supervisor's heartbeat thread can kill
 # them all on a fence break, and a failing chunk can stop its siblings.
 _ACTIVE_CHILDREN = set()
+_ACTIVE_NATIVE_HANDLES = set()
 _ACTIVE_CHILDREN_LOCK = threading.Lock()
 
 
@@ -4074,9 +4412,35 @@ def _active_children():
         return sorted(_ACTIVE_CHILDREN, key=lambda c: getattr(c, "pid", 0) or 0)
 
 
+def _register_native_handle(handle):
+    with _ACTIVE_CHILDREN_LOCK:
+        _ACTIVE_NATIVE_HANDLES.add(handle)
+
+
+def _unregister_native_handle(handle):
+    with _ACTIVE_CHILDREN_LOCK:
+        _ACTIVE_NATIVE_HANDLES.discard(handle)
+
+
+def _active_native_handles():
+    with _ACTIVE_CHILDREN_LOCK:
+        return sorted(_ACTIVE_NATIVE_HANDLES, key=lambda h: h.native_session_id)
+
+
+def _active_native_pids():
+    return sorted(
+        int(handle.native_session_id.split(":", 1)[1])
+        for handle in _active_native_handles()
+        if handle.native_session_id.startswith("pid:")
+        and handle.native_session_id.split(":", 1)[1].isdigit()
+    )
+
+
 def _kill_active_children():
     for child in _active_children():
         _kill_child(child)
+    for handle in _active_native_handles():
+        handle.cancel()
 # The genuine class, captured at import: tests substitute subprocess.Popen
 # with stand-ins carrying made-up pids, and those must never reach taskkill.
 _REAL_POPEN = subprocess.Popen
@@ -4747,7 +5111,8 @@ def _supervise_run(state_path, run_id):
     run_id -- and this process, seeing a run_id that is no longer its own,
     kills its reviewer and leaves (fencing). Ends by writing `done` (with the
     verdict and the sanitised findings text a retry replays) or `failed`
-    (with why). Never touches inherited stdio; never raises out.
+    (with why). Emits only bounded progress to its own redirected log stream;
+    never duplicates worker stdout/stderr or raises out.
     """
     import threading
 
@@ -4787,6 +5152,10 @@ def _supervise_run(state_path, run_id):
         _write_state(state_path, st)
     except Exception:
         return 1
+    _supervisor_event(
+        run_id, "phase", phase="supervisor-started", tier=tier,
+        supervisor_pid=os.getpid(), timeout_s=run_timeout,
+    )
 
     stop = threading.Event()
     fenced = {"hit": False}
@@ -4795,9 +5164,10 @@ def _supervise_run(state_path, run_id):
         while not stop.wait(HEARTBEAT_S):
             fields = {"heartbeat_ts": time.time()}
             children = _active_children()
-            if children:
-                fields["reviewer_pid"] = children[0].pid     # pre-0.12.0 readers
-                fields["reviewer_pids"] = [c.pid for c in children]
+            reviewer_pids = [c.pid for c in children] + _active_native_pids()
+            if reviewer_pids:
+                fields["reviewer_pid"] = reviewer_pids[0]  # pre-0.12.0 readers
+                fields["reviewer_pids"] = reviewer_pids
             try:
                 _update_state_owned(state_path, run_id, **fields)
             except _Fenced:
@@ -4959,7 +5329,8 @@ def _supervise_run(state_path, run_id):
                         lambda: _run_review(review_root, mode, git_dir, tip, review_range,
                                             paths_file=manifest_path, timeout=_DEEP_TIMEOUT,
                                             tier=ocr_telemetry.TIER_DEEP,
-                                            common_dir=common_dir, partial=partial)
+                                            common_dir=common_dir, partial=partial,
+                                            native=True, run_id=run_id)
                     )
                 finally:
                     try:

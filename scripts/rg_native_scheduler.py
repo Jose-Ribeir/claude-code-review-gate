@@ -63,7 +63,8 @@ class NativeScheduler:
     """Dispatch native work only from submissions and terminal events."""
 
     def __init__(self, executor: NativeExecutor, *, store=None, clock=time.time,
-                 inference_limit=4, execution_limit=2, stop_validator=validate_stop):
+                 inference_limit=4, execution_limit=2, stop_validator=validate_stop,
+                 on_start=None, on_completion=None, on_finalized=None):
         for name, value in (("inference_limit", inference_limit),
                             ("execution_limit", execution_limit)):
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
@@ -72,6 +73,9 @@ class NativeScheduler:
         self._store = executor.store if store is None else store
         self._clock = clock
         self._stop_validator = stop_validator
+        self._on_start = on_start
+        self._on_completion = on_completion
+        self._on_finalized = on_finalized
         self._limits = {"inference": inference_limit, "execution": execution_limit}
         self._active = {"inference": 0, "execution": 0}
         self._pending = []
@@ -179,6 +183,12 @@ class NativeScheduler:
                 self._notify_complete(entry)
                 continue
             entry.handle = handle
+            if self._on_start is not None:
+                self._on_start(handle)
+            with self._lock:
+                cancelled = self._runs[entry.definition.task.run_id]["cancelled"] is not None
+            if cancelled:
+                handle.cancel()
 
     def _validated_artifact(self, entry, artifact):
         task = entry.definition.task
@@ -261,33 +271,47 @@ class NativeScheduler:
             entry.source_artifact = source_artifact
             entry.error = error
             self._active[entry.definition.resource] -= 1
+        if state == "cancelled":
+            self.cancel_run(
+                entry.definition.task.run_id,
+                completion.details.get("reason") or "operator-cancelled",
+            )
         if stop is not None and entry.eligible:
             self._apply_stop(entry, stop)
+        if self._on_completion is not None:
+            self._on_completion(completion)
         self._drain()
         self._notify_complete(entry)
         self._maybe_finalize(entry.definition.task.run_id)
 
     def _maybe_finalize(self, run_id):
         callbacks = []
+        newly_finalized = False
         with self._lock:
             run = self._runs[run_id]
             if run["cancelled"] is not None:
+                if run["cleaning"]:
+                    return False
+                newly_finalized = not run["finalized"]
                 run["finalized"] = True
-                return True
-            if not run["closed"] or run["finalized"] or run["cleaning"]:
-                return run["finalized"]
-            entries = [entry for entry in self._entries.values()
-                       if entry.definition.task.run_id == run_id]
-            if any(entry.state not in _TERMINAL_STATES for entry in entries):
-                return False
-            run["finalized"] = True
-            for entry in entries:
-                entry.finalized = True
-                if entry.eligible and entry.state == "completed" and \
-                        entry.on_finalize is not None:
-                    callbacks.append((entry.on_finalize, entry.result()))
+            else:
+                if not run["closed"] or run["finalized"] or run["cleaning"]:
+                    return run["finalized"]
+                entries = [entry for entry in self._entries.values()
+                           if entry.definition.task.run_id == run_id]
+                if any(entry.state not in _TERMINAL_STATES for entry in entries):
+                    return False
+                newly_finalized = True
+                run["finalized"] = True
+                for entry in entries:
+                    entry.finalized = True
+                    if entry.eligible and entry.state == "completed" and \
+                            entry.on_finalize is not None:
+                        callbacks.append((entry.on_finalize, entry.result()))
         for callback, result in callbacks:
             callback(result)
+        if newly_finalized and self._on_finalized is not None:
+            self._on_finalized(run_id)
         return True
 
     def _record_cleanup(self, entry, reason):

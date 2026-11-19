@@ -5,6 +5,7 @@ import os
 import signal
 import sys
 import threading
+import time
 
 import pytest
 
@@ -391,6 +392,96 @@ def test_run_expiry_fences_dispatch_and_cancels_only_owned_native_handles(tmp_pa
     host.sessions["owned"].finish({"status": "success", "late": True})
     assert len(completions) == 1
     assert not task.artifact_path.exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descendant and pipe ownership")
+def test_native_deadline_streams_progress_reaps_pipes_and_sanitizes_tails(tmp_path):
+    descendant_path = tmp_path / "descendant.pid"
+    executable = tmp_path / "timeout-kimchi-double"
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, pathlib, subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+        f"pathlib.Path({str(descendant_path)!r}).write_text(str(child.pid))\n"
+        "print(json.dumps({'type': 'progress', 'detail': 'token=stdout-secret'}), flush=True)\n"
+        "print('tool failed: bearer stderr-secret', file=sys.stderr, flush=True)\n"
+        "os._exit(0)\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+    progress = []
+    emitted = threading.Event()
+
+    def on_progress(event):
+        progress.append(event)
+        emitted.set()
+
+    class CapturingHost(KimchiNativeHost):
+        def launch(self, task, callback):
+            self.session = super().launch(task, callback)
+            return self.session
+
+    host = CapturingHost(
+        str(executable),
+        environ={"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path)},
+        progress=on_progress,
+    )
+    timer = _DeadlineTimer()
+    deadline = RunDeadline("run-1", 30, timer_factory=timer)
+    executor = NativeExecutor(host, deadline=deadline)
+    completions = []
+    delivered = threading.Event()
+
+    def completed(completion):
+        completions.append(completion)
+        delivered.set()
+
+    started = time.monotonic()
+    deadline.start()
+    handle = executor.start(_task(tmp_path), completed)
+    try:
+        assert emitted.wait(5), "native test double did not stream its initial progress"
+        host.session.process.wait(timeout=5)
+        timer.fire()
+        assert delivered.wait(10), "native cancellation did not finish bounded pipe cleanup"
+        assert time.monotonic() - started < 8
+        completion = completions[0]
+        assert completion.handle == handle
+        assert completion.state == "cancelled"
+        assert "progress" in completion.stdout
+        assert "tool failed" in completion.stderr
+        assert "stdout-secret" not in completion.details["stdout_tail"]
+        assert "stderr-secret" not in completion.details["stderr_tail"]
+        assert len(completion.details["stdout_tail"]) <= 512
+        assert len(completion.details["stderr_tail"]) <= 512
+        assert completion.details["cleanup"]["complete"] is True
+        assert completion.details["cleanup"]["pipe_drain_completed"] is True
+        assert not task_artifact_exists(tmp_path)
+        assert progress and all(event["event"] == "stream-progress" for event in progress)
+        assert all("token" not in str(event) for event in progress)
+
+        descendant = int(descendant_path.read_text())
+        gone_by = time.monotonic() + 5
+        while time.monotonic() < gone_by:
+            try:
+                os.kill(descendant, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError("pipe-holding descendant outlived native cleanup")
+    finally:
+        deadline.close()
+        handle.cancel()
+        if descendant_path.exists():
+            try:
+                os.kill(int(descendant_path.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def task_artifact_exists(tmp_path):
+    return (tmp_path / "task-a.json").exists()
 
 
 def test_malformed_native_result_is_a_durable_failed_event(tmp_path):
