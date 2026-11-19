@@ -897,3 +897,59 @@ def test_unrecovered_provider_error_fails_at_final_settlement(tmp_path):
     assert completions[0].state == "failed"
     assert completions[0].artifact is None
     assert completions[0].error == "native RPC provider error: provider unavailable"
+
+
+@pytest.mark.parametrize(
+    "following_structured", [None, {
+        "schema": "final-review-worker-result/v1", "status": "finished",
+        "summary": "newer structured report", "findings": [], "warnings": [],
+    }],
+    ids=["trailing-commentary", "newer-structured-object"],
+)
+@pytest.mark.skipif(os.name != "posix", reason="POSIX native RPC lifecycle")
+def test_latest_parseable_worker_result_survives_later_assistant_text(
+        tmp_path, following_structured):
+    executable = tmp_path / "multi-message-native-double"
+    payload = {
+        "schema": "final-review-worker-result/v1", "status": "success",
+        "summary": "structured result before commentary", "findings": [],
+        "warnings": [], "unreviewed": [],
+    }
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import json, sys\n"
+        "def emit(record):\n"
+        "    print(json.dumps(record), flush=True)\n"
+        "prompt = json.loads(sys.stdin.buffer.readline())\n"
+        "emit({'id': prompt['id'], 'type': 'response', 'command': 'prompt',"
+        "      'success': True, 'data': {'disposition': 'started'}})\n"
+        f"emit({{'type': 'message_end', 'message': {{'role': 'assistant',"
+        f"      'content': json.dumps({payload!r}), 'stopReason': 'toolCalls'}}}})\n"
+        + (
+            "emit({'type': 'message_end', 'message': {'role': 'assistant',"
+            "      'content': 'The prior turn contained the completed JSON result.'}})\n"
+            if following_structured is None else
+            f"emit({{'type': 'message_end', 'message': {{'role': 'assistant',"
+            f"      'content': json.dumps({following_structured!r})}}}})\n"
+        )
+        + "emit({'type': 'agent_end', 'messages': [], 'willRetry': False})\n"
+          "emit({'type': 'agent_settled', 'aborted': False})\n"
+          "while sys.stdin.buffer.readline():\n"
+          "    pass\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+    completions = []
+    delivered = threading.Event()
+
+    def completed(completion):
+        completions.append(completion)
+        delivered.set()
+
+    executor = NativeExecutor(KimchiNativeHost(str(executable), environ={}))
+    executor.start(_task(tmp_path), completed)
+    assert delivered.wait(5), "pre-chatter structured output was discarded"
+    assert len(completions) == 1
+    assert completions[0].state == "completed"
+    expected = payload if following_structured is None else following_structured
+    assert completions[0].artifact.payload == expected

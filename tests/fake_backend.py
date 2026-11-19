@@ -130,7 +130,7 @@ def main(argv):
     if cli == ["--help"]:
         sys.stdout.write(
             "-p --mode rpc --no-session --no-approve --approve --no-auto-update "
-            "--model --mcp-config --allow-tool --deny-tool -e\n"
+            "--model --mcp-config --allow-tool --deny-tool -e --plan\n"
         )
         return 0
     rpc_id = None

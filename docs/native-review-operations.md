@@ -47,8 +47,12 @@ git push origin HEAD:main
 Normal deny-first-push/retry-join behavior still applies. A native opt-in is
 not an instruction to run nested agents. The production adapter launches
 `kimchi --mode rpc --no-session` and sends a correlated `prompt` command over
-strict JSONL. It waits for the final assistant message and `agent_settled`;
-an accepted prompt response or `agent_end` does not prove completion.
+strict JSONL. It waits for `agent_settled`; an accepted prompt response or
+`agent_end` does not prove completion. It retains the latest parseable
+worker-result object across assistant messages rather than discarding it when
+a later assistant message is only commentary. The latest assistant message is
+also retained separately for bounded diagnostics. Result selection adds no
+inference prompt and does not bypass supervisory result validation.
 Cancellation sends a correlated `abort` before bounded process-group cleanup.
 Native session IDs contain the explicit run/task identity, not a bare PID.
 RPC review sessions also launch with `--plan`, the CLI's read-only mode.

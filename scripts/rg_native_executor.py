@@ -91,6 +91,7 @@ class NativeHostCompletion:
     cleanup: Optional[Dict[str, object]] = None
     error: Optional[str] = None
     cancellation_reason: Optional[str] = None
+    last_assistant_text: str = ""
 
 
 class NativeHostSession(Protocol):
@@ -187,6 +188,9 @@ class NativeExecutor:
                 host.stderr, self._diagnostic_environ,
             ),
             "cleanup": host.cleanup,
+            "last_assistant_tail": _sanitize_worker_diagnostic(
+                host.last_assistant_text or host.stdout, self._diagnostic_environ,
+            ),
         }
 
     @property
@@ -240,7 +244,10 @@ class NativeExecutor:
             )
             diagnostic = {
                 key: completion.details[key]
-                for key in ("return_code", "stdout_tail", "stderr_tail", "cleanup")
+                for key in (
+                    "return_code", "stdout_tail", "stderr_tail", "cleanup",
+                    "last_assistant_tail",
+                )
                 if key in completion.details
             }
             if any(diagnostic.get(key) for key in ("stdout_tail", "stderr_tail", "cleanup")):
@@ -473,6 +480,7 @@ class _RpcSession:
         self._error = None
         self._provider_error = None
         self._cancel_reason = None
+        self._latest_result_text = None
         self._stdout = ""
         self._stderr = []
         self._cleanup = None
@@ -603,6 +611,9 @@ class _RpcSession:
                 cancelling = self._cancel_reason is not None
                 if reason not in ("error", "aborted"):
                     self._provider_error = None
+            if reason not in ("error", "aborted") and _object_from_text(text) is not None:
+                with self._state:
+                    self._latest_result_text = text
             if reason in ("error", "aborted") and not cancelling:
                 detail = message.get("errorMessage") or "provider supplied no error detail"
                 self._record_provider_error(reason, detail)
@@ -737,12 +748,14 @@ class _RpcSession:
             if outcome == "completed" and self.process.returncode:
                 outcome = "failed"
                 self._error = f"native RPC process exited {self.process.returncode} after agent_settled"
-            if outcome == "completed" and not self._stdout.strip():
+            result_text = self._latest_result_text or self._stdout
+            if outcome == "completed" and not result_text.strip():
                 outcome = "failed"
                 self._error = "native RPC agent_settled without a final assistant message"
             error = self._error
             reason = self._cancel_reason
-            stdout = self._stdout
+            stdout = result_text
+            last_assistant_text = self._stdout
         for timer in (self._worker_timer, self._kill_timer):
             if timer is not None:
                 timer.cancel()
@@ -781,6 +794,7 @@ class _RpcSession:
             cleanup=cleanup,
             error=error,
             cancellation_reason=reason if outcome == "cancelled" else None,
+            last_assistant_text=last_assistant_text,
         ))
 
 
