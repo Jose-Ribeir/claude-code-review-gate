@@ -488,3 +488,16 @@ def test_cancellation_during_validation_owns_finalization_order(tmp_path):
     assert not any(event["event_type"] == "completed" for event in recorded["events"])
     assert scheduler.snapshot(run_id)["finalized"] is True
     store.close()
+
+
+def test_successful_task_keeps_completed_finish_reason_when_run_cancelled(tmp_path):
+    store, run_id, unit_id, host, scheduler = _scheduler(tmp_path)
+    scheduler.submit(SchedulerTask(_task(tmp_path, unit_id, "task-a", run_id=run_id)))
+    host.sessions["task-a"].finish(_result("accepted before cancellation"))
+
+    scheduler.cancel_run(run_id, "worker-deadline-exceeded")
+
+    events = store.manifest(run_id)["native_tasks"][0]["events"]
+    finalization = next(event for event in events if event["event_type"] == "finalization")
+    assert finalization["details"]["reason"] == "run-closed"
+    store.close()

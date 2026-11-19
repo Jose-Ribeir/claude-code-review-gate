@@ -352,7 +352,10 @@ class NativeScheduler:
             if any(entry.state not in _TERMINAL_STATES for entry in entries):
                 return False
             for entry in entries:
-                self._record_finalization(entry, run["cancelled"])
+                self._record_finalization(
+                    entry,
+                    run["cancelled"] if entry.state != "completed" else "run-closed",
+                )
             run["finalized"] = True
             for entry in entries:
                 entry.finalized = True

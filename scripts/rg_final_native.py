@@ -148,6 +148,7 @@ class NativeStandaloneExecution:
             deadline_at_unix=time.time() + float(
                 self._environ.get("RG_FINAL_WORKER_TIMEOUT", "900")
             ),
+            timeout_seconds=float(self._environ.get("RG_FINAL_WORKER_TIMEOUT", "900")),
             prompt="",
             repo_root=Path(request["repository"]["path"]),
             artifact_path=self._root / "artifacts" / (safe_id + ".json"),
@@ -191,6 +192,7 @@ class NativeStandaloneExecution:
             deadline_at_unix=time.time() + float(
                 self._environ.get("RG_FINAL_WORKER_TIMEOUT", "900")
             ),
+            timeout_seconds=float(self._environ.get("RG_FINAL_WORKER_TIMEOUT", "900")),
             prompt=self._prompt_factory(request, request_path),
             repo_root=repository_path,
             artifact_path=self._root / "artifacts" / (safe_id + ".json"),

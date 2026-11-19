@@ -58,6 +58,7 @@ class NativeTask:
     deny_tools: Tuple[str, ...] = ()
     extensions: Tuple[str, ...] = ()
     runtime_deadline_at_unix: Optional[float] = None
+    timeout_seconds: Optional[float] = None
     attempt: int = 1
     execute: Optional[Callable[[], Dict[str, object]]] = None
 
@@ -485,7 +486,11 @@ class _RpcSession:
         runtime_deadline = (
             self.task.runtime_deadline_at_unix
             if self.task.runtime_deadline_at_unix is not None
-            else self.task.deadline_at_unix
+            else (
+                time.time() + self.task.timeout_seconds
+                if self.task.timeout_seconds is not None
+                else self.task.deadline_at_unix
+            )
         )
         remaining = runtime_deadline - time.time()
         if remaining <= 0:

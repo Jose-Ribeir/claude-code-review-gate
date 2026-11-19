@@ -728,3 +728,42 @@ def test_cancel_wakes_pipe_watcher_when_descendant_escapes_group(tmp_path):
             except ProcessLookupError:
                 pass
         handle.cancel()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX worker deadline behavior")
+def test_queue_time_is_not_charged_as_worker_runtime(tmp_path):
+    executable = tmp_path / "eventual-native-double"
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys, time\n"
+        "request = json.loads(sys.stdin.buffer.readline())\n"
+        "print(json.dumps({'id': request['id'], 'type': 'response', 'command': 'prompt',"
+        " 'success': True, 'data': {'disposition': 'started'}}), flush=True)\n"
+        "time.sleep(0.2)\n"
+        "payload = {'schema': 'final-review-worker-result/v1', 'status': 'success',"
+        " 'summary': 'fresh execution budget', 'findings': [], 'warnings': [],"
+        " 'unreviewed': []}\n"
+        "print(json.dumps({'type': 'message_end', 'message':"
+        " {'role': 'assistant', 'content': json.dumps(payload)}}), flush=True)\n"
+        "print(json.dumps({'type': 'agent_settled', 'aborted': False}), flush=True)\n"
+        "os._exit(0)\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+    completions = []
+    delivered = threading.Event()
+    executor = NativeExecutor(KimchiNativeHost(str(executable), environ={}))
+    task = replace(
+        _task(tmp_path),
+        deadline_at_unix=1.0,
+        timeout_seconds=1.0,
+    )
+
+    def complete(completion):
+        completions.append(completion)
+        delivered.set()
+
+    executor.start(task, complete)
+    assert delivered.wait(8), "worker was cancelled because it queued past an absolute timestamp"
+    assert completions[0].state == "completed"
+    assert completions[0].artifact.payload["summary"] == "fresh execution budget"

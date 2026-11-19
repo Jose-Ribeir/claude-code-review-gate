@@ -27,7 +27,11 @@ class _ExecutionSession:
             target=self._run, name="native-execution-" + self.task.task_id, daemon=True,
         )
         worker.start()
-        deadline = self.task.runtime_deadline_at_unix or self.task.deadline_at_unix
+        deadline = self.task.runtime_deadline_at_unix or (
+            time.time() + self.task.timeout_seconds
+            if self.task.timeout_seconds is not None
+            else self.task.deadline_at_unix
+        )
         remaining = max(0.0, deadline - time.time())
         self._timer = threading.Timer(
             remaining, self._cancel, args=("worker-deadline-exceeded",),
