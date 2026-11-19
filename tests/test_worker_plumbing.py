@@ -264,6 +264,10 @@ def test_default_final_worker_prompt_states_exact_success_status_contract(
     assert "success and completed both mean" in prompt
     assert "completed_with_warnings means" in prompt
     assert "only successful completion values" in prompt
+    assert "Complete tool calls before returning the structured result" in prompt
+    assert "The final assistant message must contain that object as text" in prompt
+    assert "claim it was returned earlier" in prompt
+    assert "Do not finish with a tool-call-only response" in prompt
     assert '"summary":"..."' not in prompt
     assert "angle-bracket templates" in prompt
     assert "sources_read" in prompt
