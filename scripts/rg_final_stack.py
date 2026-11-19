@@ -591,6 +591,9 @@ def run_final_stack(references, *, repo_root=None, provider=None, store_path=Non
     whole-stack pass. The publisher only renders that decision and transports it.
     """
     environ = os.environ if environ is None else environ
+    transport = str(environ.get("RG_FINAL_REVIEW_TRANSPORT", "")).strip().lower()
+    if transport not in ("", "legacy", "native"):
+        raise ValueError(f"unsupported final-review transport {transport!r}")
     repo_root = str(repo_root or os.getcwd())
     provider = provider or GitLabProvider()
     options = dict(dynamic_kwargs or {})
