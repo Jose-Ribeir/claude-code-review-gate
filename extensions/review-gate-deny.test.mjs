@@ -9,6 +9,7 @@
 // parsing, fail-closed ambiguity, and the inertness guarantee (OCR_IN_REVIEW
 // unset => nothing is ever blocked).
 
+import { fileURLToPath } from "node:url"
 import ext from "./review-gate-deny.ts"
 
 let failures = 0
@@ -272,6 +273,57 @@ for (const [cmd] of EXPLICIT_DENY) {
 }
 
 process.env.OCR_IN_REVIEW = "1"
+
+// --- review-gate helper scripts: exact whole-command allowlist ------------------
+//
+// The review session may run the gate's own conventions / demands / collector
+// scripts by exact path and fixed argument grammar; every other python stays
+// denied. No prefix or glob matching.
+
+{
+  const root = fileURLToPath(new URL("..", import.meta.url)).replaceAll("\\", "/").replace(/\/+$/, "")
+  const conv = "python3 " + root + "/scripts/ocr_conventions.py"
+  const dem = "python3 " + root + "/scripts/ocr_demands.py"
+  const col = "python3 " + root + "/scripts/ocr_collectors.py"
+  const body = '{"demands": {}}'
+  const helperAllowed = [
+    conv + " --repo-root . src/a.py src/b.py",
+    conv + " --repo-root . --max-doc-lines 50 --max-total-lines 200 a.py",
+    col + " --repo-root . --changed-file a.py --changed-file b.py",
+    col + " --validate-bundle",
+    dem,
+    dem + " <<'EOF'\n" + body + "\nEOF",
+  ]
+  for (const cmd of helperAllowed) {
+    const r = call("bash", { command: cmd })
+    check("HELPER ALLOW " + JSON.stringify(cmd) + " -> " + JSON.stringify(r && r.reason), r === undefined)
+  }
+  const helperDenied = [
+    "python -c 'print(1)'",
+    "python3 -I -c 'print(1)'",
+    "python3 /tmp/evil.py",
+    "python3 " + root + "/scripts/review-gate.py --print-range",
+    conv + ".bak --repo-root .",                              // prefix of an allowed path
+    conv + "/../ocr_conventions.py --repo-root .",            // `..` trick
+    "python3 " + root + "/scripts/../scripts/ocr_conventions.py --repo-root .",
+    dem + " --dump-schema /tmp/out.json",                      // extra args on a no-arg helper
+    dem + " extra",
+    conv + " --repo-root=. a.py",                              // =-form / unknown flag
+    conv + " --repo-root . -c 'x'",
+    col + " --dump-schema /tmp/out.json",
+    conv + " --repo-root . ; python3 -c 'x'",                  // chaining
+    conv + " --repo-root . && rm -rf /",
+    conv + " --repo-root . | tee out.txt",
+    conv + " --repo-root $(id)",
+    dem + " <<EOF\nx\nEOF",                                    // unquoted heredoc
+    dem + " <<'EOF'\nx\nEOF\nrm -rf /",                       // trailing command after heredoc
+    "python3 -c 'import os' <<'EOF'\nx\nEOF",                 // heredoc on a non-helper
+  ]
+  for (const cmd of helperDenied) {
+    const r = call("bash", { command: cmd })
+    check("HELPER DENY " + JSON.stringify(cmd), r !== undefined && r.block === true)
+  }
+}
 
 // --- summary ---------------------------------------------------------------------
 

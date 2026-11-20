@@ -1,9 +1,10 @@
 """Kimchi helper allowlist: the review session may run the review-gate's own
 conventions / demands / collector scripts and nothing else in python.
 
-Seam: a real push through the gate behind the fake `kimchi` (tests/fake_backend.py)
-yields the manifest the review skill reads; the exact helper commands it
-publishes (`manifest.helper_cmds`) are then put through the REAL deny extension
+Seam: the gate's own `_helper_cmds_field()` under OCR_BACKEND=kimchi (the field
+the review manifest carries, read in-process: the golden single-context push
+writes no manifest file); the exact helper commands it publishes
+(`manifest.helper_cmds`) are then put through the REAL deny extension
 (extensions/review-gate-deny.ts, loaded by tests/kimchi_deny_driver.mjs the way
 `kimchi -e` loads it) alongside the commands that must stay denied. Assertions
 are the extension's allow/deny decisions only. Needs node >= 24 (skipped when
@@ -19,7 +20,7 @@ import pytest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
-from test_claude_profile import _backend_env, _commit, _push, repo  # noqa: E402,F401
+from test_claude_profile import clean, rg, tiers  # noqa: E402,F401
 
 _DRIVER = os.path.join(_HERE, "kimchi_deny_driver.mjs")
 _NODE = shutil.which("node")
@@ -36,14 +37,10 @@ def _decisions(commands):
 
 
 @pytest.fixture
-def helper_cmds(repo, tmp_path):
-    """manifest.helper_cmds of a real kimchi review of a real push."""
-    _commit(repo)
-    copy = tmp_path / "manifest.copy.json"
-    env = _backend_env(tmp_path, OCR_BACKEND="kimchi", FAKE_MANIFEST_COPY=copy)
-    decision, reason = _push(repo, env)
-    assert decision == "pass", reason
-    return json.loads(copy.read_text(encoding="utf-8"))["helper_cmds"]
+def helper_cmds(tiers):
+    """manifest.helper_cmds the gate publishes for a kimchi review."""
+    tiers.setenv("OCR_BACKEND", "kimchi")
+    return rg._helper_cmds_field()["helper_cmds"]
 
 
 def test_the_manifest_publishes_the_three_exact_helper_commands(helper_cmds):
