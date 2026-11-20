@@ -83,6 +83,7 @@ def _env(tmp_path, **kw):
                 "OCR_REVIEWER_CMD": f'"{sys.executable}" "{_STUB}"',
                 "STUB_TRACE": str(tmp_path / "stub.trace"),
                 "OCR_INLINE_BUDGET": "30",
+                "OCR_HARNESS": "claude",  # unset harness = kimchi = 4 s inline cap
                 "STUB_FINDINGS_FOR": json.dumps(FINDINGS_FOR)})
     env.update({k: str(v) for k, v in kw.items()})
     return env

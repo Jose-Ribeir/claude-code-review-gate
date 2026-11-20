@@ -75,7 +75,8 @@ def _env(tmp_path, trace, **kw):
                 # deadline. Keep the conftest's private store on both sides.
                 "OCR_STATE_DIR": os.environ["OCR_STATE_DIR"],
                 "OCR_REVIEWER_CMD": f'"{sys.executable}" "{_STUB}"',
-                "STUB_TRACE": str(tmp_path / trace), "OCR_INLINE_BUDGET": "30"})
+                "STUB_TRACE": str(tmp_path / trace), "OCR_INLINE_BUDGET": "30",
+                "OCR_HARNESS": "claude"})  # unset harness = kimchi = 4 s inline cap
     env.update({k: str(v) for k, v in kw.items()})
     return env
 

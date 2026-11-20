@@ -80,6 +80,7 @@ def _env(tmp_path, trace="stub.trace", **kw):
     env["OCR_REVIEWER_CMD"] = f'"{sys.executable}" "{_STUB}"'
     env["STUB_TRACE"] = str(tmp_path / trace)
     env["OCR_INLINE_BUDGET"] = "30"
+    env["OCR_HARNESS"] = "claude"  # unset harness = kimchi = 4 s inline cap
     for k, v in kw.items():
         env[k] = str(v)
     return env
