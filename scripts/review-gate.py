@@ -76,6 +76,7 @@ import ocr_docsquality  # noqa: E402  # SPEC-14: docs-quality evidence + demotio
 import ocr_impact  # noqa: E402
 import ocr_index  # noqa: E402
 import ocr_memory  # noqa: E402
+import ocr_render  # noqa: E402  # verdict render + 3a quote check (formerly LLM turns)
 import ocr_segment  # noqa: E402
 import ocr_telemetry  # noqa: E402
 import ocr_profile  # noqa: E402  # backend (claude / kimchi) selection
@@ -3291,13 +3292,18 @@ def _normalize_verdict(obj):
         findings.append(g)
     shaped = dict(obj)
     shaped["findings"] = findings
+    shaped["_gate_rendered"] = True
     if dropped:
         shaped["dropped_unparseable_findings"] = dropped
         if not findings:
             # Every entry was unparseable: no support for pass, warn or
             # block -- the signal is unknowable, so fail closed.
             shaped["verdict"] = "block"
-    shaped.setdefault("status", "success")
+    if "status" not in shaped:
+        # A raw worker object (the formatter session is gone): the gate
+        # derives the contract status from the reported inputs.
+        shaped["status"] = ocr_render.derive_status(shaped)
+    shaped.pop("status_inputs", None)
     # The model's `verdict` key is advisory only (docstring above): recompute
     # unconditionally, like _rescue_verdict, never `setdefault` it through.
     # Sole exception, just decided above: every findings entry was
@@ -3470,6 +3476,7 @@ def _rescue_verdict(obj):
     shaped = dict(obj)
     shaped["findings"] = findings
     shaped["rescued"] = kind
+    shaped["_gate_rendered"] = True
     shaped.setdefault("status", "success")
     shaped["verdict"] = compute_verdict(shaped)
     if kind == "warn_fallback" and shaped["verdict"] == "pass":
@@ -3494,6 +3501,13 @@ def _verdict_candidate(obj, resolver=True):
     norm = _normalize_verdict(obj)
     if norm is not None:
         return norm
+    # A bare array of located findings, or one wrapper key around the object:
+    # shapes the formatter session used to absorb, now rendered here.
+    inner = ocr_render.unwrap_findings_object(obj, _rescue_located)
+    if inner is not None:
+        norm = _normalize_verdict(inner)
+        if norm is not None:
+            return norm
     return _rescue_verdict(obj)
 
 
@@ -3505,7 +3519,7 @@ def _extract_json(text, resolver=True):
     text = text.strip()
     # 1) whole thing
     try:
-        obj = json.loads(text)
+        obj = ocr_render.loads_lenient(text)
         candidate = _verdict_candidate(obj, resolver=resolver)
         if candidate is not None:
             return candidate
@@ -3516,7 +3530,7 @@ def _extract_json(text, resolver=True):
     blocks = re.findall(r"```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```", text, re.DOTALL)
     for b in reversed(blocks):
         try:
-            candidate = _verdict_candidate(json.loads(b), resolver=resolver)
+            candidate = _verdict_candidate(ocr_render.loads_lenient(b), resolver=resolver)
             if candidate is not None:
                 return candidate
         except Exception:
@@ -4123,6 +4137,14 @@ def _run_review(repo_root, mode, git_dir=None, head_sha="", push_range="",
                                partial=partial, native=native, run_id=run_id,
                                common_dir=common_dir)
         outcome = "ok" if out[1] else "skipped"
+        if isinstance(out, tuple) and out and isinstance(out[0], dict):
+            res = out[0]
+            if res.pop("_gate_rendered", None) and not resolve_file:
+                # Raw worker results the gate rendered itself: the skill's
+                # step 3a (quote check) is the gate's job now, run per session
+                # (a chunk's own range), before anything merges chunks.
+                res = _apply_quote_check(repo_root, head_sha, push_range, res)
+            out = (res,) + tuple(out[1:])
         return out
     except ReviewLimitError:
         outcome = "limit"
@@ -7274,6 +7296,44 @@ def _finding_id(f):
         f.get("content") or "",
     ))
     return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()
+
+
+def _apply_quote_check(repo_root, tip, push_range, result):
+    """Skill step 3a, in Python (it used to cost a model turn): a finding whose
+    `existing_code` appears neither in the cited file's diff over the pushed
+    range nor in the file's content at the reviewed tip is downgraded -- its
+    confidence drops by 0.3 and a warning is recorded -- so a medium finding
+    that only ever blocked on a hallucinated anchor stops blocking. Never
+    raises and never touches a verdict: compute_verdict still decides, from
+    the findings this hands back. A file the gate cannot read is never held
+    against a finding."""
+    findings = (result or {}).get("findings")
+    if not isinstance(findings, list) or not any(
+            isinstance(f, dict) and f.get("existing_code") and f.get("path")
+            for f in findings):
+        return result
+    try:
+        def texts_for(path):
+            texts = []
+            blob = _blob_oids_at(repo_root, tip, [path]).get(path, "")
+            if blob:
+                content = _cat_blob_texts(repo_root, [blob]).get(blob)
+                if content:
+                    texts.append(content)
+            if push_range:
+                diff, rc = _git(["diff", "-M", "--no-color", push_range, "--", path],
+                                cwd=repo_root)
+                if rc == 0 and diff:
+                    texts.append(diff)
+            return texts
+        checked, warnings = ocr_render.quote_check(findings, texts_for)
+    except Exception:  # noqa: BLE001 -- a check that cannot run changes nothing
+        return result
+    if not warnings:
+        return result
+    out = dict(result, findings=checked)
+    out["warnings"] = list(result.get("warnings") or []) + warnings
+    return out
 
 
 def _apply_memory_demotion(repo_root, result):

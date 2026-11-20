@@ -1338,21 +1338,20 @@ def test_the_skill_has_the_resolve_mode_the_gate_calls():
     assert "code-resolver" in skill and '{"resolutions"' in skill
 
 
-def test_the_skill_mandates_the_formatter_for_chunk_sessions():
-    # SPEC-05: a chunk reviewer session (--paths-file) running with --json is
-    # required to spawn the formatter subagent and relay its output verbatim as
-    # its final message — the chunked path must not read as exempt from the §6
-    # verdict contract, or a long chunk session may compose its own object and
-    # drift off the verdict schema.
+def test_the_skill_has_no_formatter_and_chunk_sessions_print_raw_results():
+    # W9 (fewer LLM turns): the formatter subagent is gone; the gate renders the
+    # verdict object. A chunk reviewer session (--paths-file) running with --json
+    # still must not compose a verdict of its own: it prints the one fenced raw
+    # results block of §6, and the §1 --paths-file fast path points at that rule
+    # so the chunked path cannot read as exempt from the output contract.
     skill = (Path(_GATE).parent.parent / "skills" / "review" / "SKILL.md").read_text(encoding="utf-8")
-    # §6 names chunk sessions explicitly and forbids self-composing the verdict.
+    assert "formatter subagent" not in skill
+    assert "no formatter step" in skill
     assert "--json`" in skill and "chunk session" in skill
-    assert "formatter subagent" in skill and "never compose" in skill.lower()
-    # The §1 --paths-file fast path points the chunked session at that same
-    # formatter rule, so it cannot be read as a §6-free path.
+    assert "status_inputs" in skill and "do **not** compute or print `verdict`" in skill
     fast_path = skill[skill.index("**`--paths-file` fast path:**"):
                      skill.index("**Determine the revision range**")]
-    assert "formatter subagent" in fast_path and "verbatim" in fast_path
+    assert "raw-results block" in fast_path and "the gate renders" in fast_path
 
 
 def test_resolver_manifest_carries_per_file_diff_specs(monkeypatch, tmp_path):

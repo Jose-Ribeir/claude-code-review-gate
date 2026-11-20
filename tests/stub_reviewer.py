@@ -786,4 +786,24 @@ if filter_drop:
         if trace:
             with open(trace, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps({"filter": out["filter"]}) + "\n")
+# STUB_RAW (W9 fewer LLM turns): answer the way the skill's section 6 now has the
+# session answer -- raw results, no status/verdict/summary (the gate renders the
+# contract object). Modes: `1` the raw object; `array` a bare findings array;
+# `wrapped` the raw object under a `result` key; `commas` the raw object with
+# trailing commas (a parse class the formatter session used to absorb).
+raw_mode = os.environ.get("STUB_RAW", "").strip().lower()
+if raw_mode:
+    raw = {k: v for k, v in out.items() if k not in ("status", "verdict", "summary")}
+    raw["status_inputs"] = {"subagent_errored": False,
+                            "files_reviewable": len((manifest or {}).get("paths") or [1])}
+    if raw_mode == "array":
+        emit(json.dumps(raw["findings"]))
+    elif raw_mode == "wrapped":
+        emit(json.dumps({"result": raw}))
+    elif raw_mode == "commas":
+        text = json.dumps(raw).replace("}]", "},]")
+        emit(text[:-1] + ",}")
+    else:
+        emit(json.dumps(raw))
+    sys.exit(0)
 emit(json.dumps(out))
