@@ -159,6 +159,7 @@ def quote_check(findings, texts_for):
         code = _first_line(f.get("existing_code"))
         path = str(f.get("path") or "")
         if (not code or not path or f.get("type") == "intent_gap"
+                or f.get("category") == "documentation"
                 or any(f.get(k) for k in _ANCHORED_KEYS)
                 or (f.get("provenance") not in (None, "", "new"))):
             out.append(f)
