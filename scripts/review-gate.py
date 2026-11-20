@@ -13861,7 +13861,17 @@ def _run_chunked(state_path, run_id, common_dir, review_root, mode, git_dir,
                         continue
                 break
 
-            done, _ = _futures.wait(list(inflight), return_when=_futures.FIRST_COMPLETED)
+            while True:
+                done, _ = _futures.wait(
+                    list(inflight), timeout=1.0 if stop_evt.is_set() else None,
+                    return_when=_futures.FIRST_COMPLETED)
+                if done:
+                    break
+                # Stopping, and a sibling is still going: one that passed its
+                # stop check before the flag was set can launch its reviewer
+                # after the first kill sweep and would otherwise run to its
+                # own timeout. Sweep again until it is gone.
+                _kill_active_children()
             for fut in sorted(done, key=lambda f: inflight[f][0]):
                 k, chunk_items, manifest, slot = inflight.pop(fut)
                 free_slots.append(slot)
