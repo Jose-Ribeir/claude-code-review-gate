@@ -59,10 +59,14 @@ def _model_arg(launch):
 
 def test_default_models_are_todays_pins():
     d = rg_settings.default_model
-    assert d("orchestrator", "kimchi") == "kimchi-dev/kimi-k3"
-    assert d("spotter", "kimchi") == "deepseek-v4-flash"
-    assert d("code-reviewer", "kimchi") == "kimi-k3"
-    assert d("deep-reviewer", "kimchi") == "kimi-k3"
+    assert d("orchestrator", "kimchi") == "kimchi-dev/kimi-k3.1-pro"
+    assert d("canary", "kimchi") == "kimchi-dev/kimi-k3.1-pro"
+    assert d("spotter", "kimchi") == "deepseek-v4.1-flash-1017"
+    assert d("code-reviewer", "kimchi") == "kimchi-dev/kimi-k3.1-pro"
+    assert d("deep-reviewer", "kimchi") == "kimchi-dev/kimi-k3.1-pro"
+    assert d("docs-checker", "kimchi") == "kimchi-dev/glm-5.3"
+    assert d("code-filter", "kimchi") == "kimchi-dev/deepseek-v4.1-flash-1017"
+    assert d("code-resolver", "kimchi") == "kimchi-dev/glm-5.3"
     assert d("docs-summary", "kimchi") == "kimchi-dev/glm-5.3"
     assert d("spotter", "claude") == "haiku"
     assert d("code-reviewer", "claude") == "sonnet"
@@ -73,7 +77,7 @@ def test_default_models_are_todays_pins():
 
 def test_no_file_resolves_to_the_default_with_default_source(tmp_path):
     got = rg_settings.load(tmp_path, NO_ENV).model("code-reviewer", "kimchi")
-    assert (got.value, got.source) == ("kimi-k3", "default")
+    assert (got.value, got.source) == ("kimchi-dev/kimi-k3.1-pro", "default")
 
 
 def test_user_file_beats_the_default(tmp_path, user_file):
@@ -96,7 +100,7 @@ def test_a_pin_in_one_backend_section_does_not_touch_the_other(tmp_path, user_fi
     _write(user_file, _agent("code-reviewer", "claude", "opus"))
     s = rg_settings.load(tmp_path, NO_ENV)
     assert s.model("code-reviewer", "claude").value == "opus"
-    assert s.model("code-reviewer", "kimchi").value == "kimi-k3"
+    assert s.model("code-reviewer", "kimchi").value == "kimchi-dev/kimi-k3.1-pro"
 
 
 @pytest.mark.parametrize("env,expected", [
@@ -204,7 +208,8 @@ def test_no_settings_file_launches_todays_models(repo, tmp_path):
 def test_no_settings_file_launches_todays_kimchi_model(repo, tmp_path):
     _commit(repo)
     assert _push(repo, _backend_env(tmp_path, OCR_BACKEND="kimchi"))[0] == "pass"
-    assert _model_arg(_launches(tmp_path)[0]) == "kimchi-dev/kimi-k3"
+    # the fast lane's session runs at its default thinking level, as a suffix
+    assert _model_arg(_launches(tmp_path)[0]) == "kimchi-dev/kimi-k3.1-pro:high"
 
 
 def test_user_file_model_changes_the_launched_claude_model(repo, tmp_path, user_file):
@@ -218,7 +223,7 @@ def test_user_file_model_changes_the_launched_kimchi_model(repo, tmp_path, user_
     _write(user_file, _agent("orchestrator", "kimchi", "kimchi-dev/glm-5.3"))
     _commit(repo)
     assert _push(repo, _backend_env(tmp_path, OCR_BACKEND="kimchi"))[0] == "pass"
-    assert _model_arg(_launches(tmp_path)[0]) == "kimchi-dev/glm-5.3"
+    assert _model_arg(_launches(tmp_path)[0]) == "kimchi-dev/glm-5.3:high"
 
 
 def test_project_file_beats_user_file_in_a_real_launch(repo, tmp_path, user_file):
@@ -267,7 +272,7 @@ def test_tier_model_reads_through_the_settings_files(repo, monkeypatch, user_fil
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("OCR_BACKEND", "kimchi")
     rg._settings_root_cache.clear()
-    assert rg._tier_model("tier1") == "kimi-k3"
+    assert rg._tier_model("tier1") == "kimchi-dev/kimi-k3.1-pro"
     _write(user_file, _agent("code-reviewer", "kimchi", "glm-5.3"))
     assert rg._tier_model("tier1") == "glm-5.3"
     monkeypatch.setenv("OCR_TIER1_MODEL", "deepseek-v4-flash")

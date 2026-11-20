@@ -35,6 +35,7 @@ import os
 import sys
 
 import ocr_telemetry
+import rg_settings
 
 # The demand-list keys, in contract order. schemas/demands.schema.json is
 # GENERATED from this module (DEMANDS_SCHEMA below); do not edit it by hand.
@@ -247,8 +248,8 @@ def _record_spotter_telemetry(text):
         common = ocr_telemetry.repo_common_dir(os.getcwd())
         if not common:
             return
-        model = (os.environ.get("OCR_SPOTTER_MODEL", "deepseek-v4-flash").strip()
-                 or "deepseek-v4-flash")
+        model = (os.environ.get("OCR_SPOTTER_MODEL", "").strip()
+                 or rg_settings.default_model("spotter", "kimchi"))
         ocr_telemetry.record_tier_call(
             common, ocr_telemetry.TIER_SPOTTER, model=model,
             token_estimate=ocr_telemetry.estimate_tokens(len(text or "")))

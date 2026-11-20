@@ -9,7 +9,7 @@
     "--no-session",
     "--approve",
     "--model",
-    "kimchi-dev/kimi-k3",
+    "kimchi-dev/kimi-k3.1-pro",
     "-e",
     "<deny-ext>",
     "--mcp-config",

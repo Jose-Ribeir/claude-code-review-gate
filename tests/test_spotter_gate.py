@@ -1,7 +1,7 @@
 """Gate plumbing for the context spotter (review-gate v2, t04).
 
 The spotter's model is configurable with OCR_SPOTTER_MODEL
-(default deepseek-v4-flash). The gate carries the configured value into every
+(default deepseek-v4.1-flash-1017). The gate carries the configured value into every
 review manifest (the headless review session's allowlist has no env-reading
 Bash, so the manifest is how the skill learns which model to spawn the spotter
 subagent with), and, because the model changes the review criteria, puts the
@@ -107,7 +107,7 @@ def _review_manifest(tmp_path):
 class TestModelPlumbing:
     def test_spotter_model_defaults_to_fast_open_model(self, monkeypatch):
         monkeypatch.delenv("OCR_SPOTTER_MODEL", raising=False)
-        assert review_gate._read_spotter_model() == "deepseek-v4-flash"
+        assert review_gate._read_spotter_model() == "deepseek-v4.1-flash-1017"
 
     def test_spotter_model_from_env(self, monkeypatch):
         monkeypatch.setenv("OCR_SPOTTER_MODEL", "some-fast-model")
@@ -115,7 +115,7 @@ class TestModelPlumbing:
 
     def test_spotter_model_blank_env_falls_back(self, monkeypatch):
         monkeypatch.setenv("OCR_SPOTTER_MODEL", "  ")
-        assert review_gate._read_spotter_model() == "deepseek-v4-flash"
+        assert review_gate._read_spotter_model() == "deepseek-v4.1-flash-1017"
 
     def test_fingerprint_env_vars_include_spotter_model(self):
         assert "OCR_SPOTTER_MODEL" in review_gate._FINGERPRINT_ENV_VARS
@@ -148,7 +148,7 @@ class TestManifestPlumbing:
         assert decision == "pass", reason
         assert _state(work, tip).get("state") == "done"
         manifest = _review_manifest(tmp_path)
-        assert manifest["spotter_model"] == "deepseek-v4-flash"
+        assert manifest["spotter_model"] == "deepseek-v4.1-flash-1017"
 
     def test_manifest_carries_configured_spotter_model(self, tmp_path):
         work = _repo(tmp_path, {"lib.py": "def f():\n    return 1\n"})

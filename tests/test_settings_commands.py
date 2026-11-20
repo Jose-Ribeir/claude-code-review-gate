@@ -82,9 +82,9 @@ def test_show_lists_every_agent_backend_and_behavior_knob_with_defaults(project,
         for backend in ("claude", "kimchi"):
             assert "agents.%s.%s.model" % (agent, backend) in rows
             assert "agents.%s.%s.thinking" % (agent, backend) in rows
-    assert rows["agents.spotter.kimchi.model"] == ("deepseek-v4-flash", "default")
+    assert rows["agents.spotter.kimchi.model"] == ("deepseek-v4.1-flash-1017", "default")
     assert rows["agents.code-reviewer.claude.model"] == ("sonnet", "default")
-    assert rows["agents.code-reviewer.kimchi.thinking"] == ("max", "default")
+    assert rows["agents.code-reviewer.kimchi.thinking"] == ("high", "default")
     assert rows["agents.canary.claude.thinking"][0] == "(not passed)"
     assert rows["behavior.spotter_skip.max_files"] == ("3", "default")
     assert rows["behavior.canary_cache.enabled"] == ("true", "default")

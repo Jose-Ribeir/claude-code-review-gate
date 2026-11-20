@@ -136,7 +136,7 @@ def _meta(tmp_path, files):
 class TestTier2ModelPlumbing:
     def test_tier2_model_defaults_to_flagship_open_model(self, monkeypatch):
         monkeypatch.delenv("OCR_TIER2_MODEL", raising=False)
-        assert review_gate._read_tier2_model() == "kimi-k3"
+        assert review_gate._read_tier2_model() == "kimchi-dev/kimi-k3.1-pro"
 
     def test_tier2_model_from_env(self, monkeypatch):
         monkeypatch.setenv("OCR_TIER2_MODEL", "some-stronger-model")
@@ -144,7 +144,7 @@ class TestTier2ModelPlumbing:
 
     def test_tier2_model_blank_env_falls_back(self, monkeypatch):
         monkeypatch.setenv("OCR_TIER2_MODEL", "  ")
-        assert review_gate._read_tier2_model() == "kimi-k3"
+        assert review_gate._read_tier2_model() == "kimchi-dev/kimi-k3.1-pro"
 
     def test_tier2_model_whitespace_trimmed(self, monkeypatch):
         monkeypatch.setenv("OCR_TIER2_MODEL", " some-stronger-model\n")
@@ -311,7 +311,7 @@ class TestDeepLaneE2E:
         assert len(calls) == 1  # one deep pass; no fast pass plus a deep pass
         manifest = _review_manifest(tmp_path)
         assert manifest["deep_review"] is True
-        assert manifest["tier2_model"] == "kimi-k3"
+        assert manifest["tier2_model"] == "kimchi-dev/kimi-k3.1-pro"
         assert manifest["spotter_model"]  # the deep pass still runs the spotter for demands
         assert "db/migrations/001_users.py" in manifest["paths"]
         assert manifest.get("risk_threshold") == 7
@@ -327,7 +327,7 @@ class TestDeepLaneE2E:
         assert st["state"] == "done" and st.get("tier") == "fast"
         manifest = _review_manifest(tmp_path)
         assert manifest.get("deep_review") is not True
-        assert manifest.get("tier1_model") == "kimi-k3"
+        assert manifest.get("tier1_model") == "kimchi-dev/kimi-k3.1-pro"
 
     def test_rule_json_escalation_and_threshold_reach_the_manifest(self, tmp_path):
         work = _repo(tmp_path, {"a.txt": "one\n"})

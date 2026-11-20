@@ -1,7 +1,7 @@
 """Tier-1 reviewer wiring and the provider guard (review-gate v2, t07).
 
 The tier-1 (fast-lane) reviewer's model is configurable with OCR_TIER1_MODEL
-(default kimi-k3). The gate carries the configured value into every review
+(default kimchi-dev/kimi-k3.1-pro). The gate carries the configured value into every review
 manifest (`tier1_model`) the same way it carries the spotter model -- the
 headless review session's allowlist cannot read the env var -- and, because
 the model changes the review criteria, puts the env var into the review
@@ -122,7 +122,7 @@ def _review_calls(tmp_path):
 class TestTier1ModelPlumbing:
     def test_tier1_model_defaults_to_flagship_open_model(self, monkeypatch):
         monkeypatch.delenv("OCR_TIER1_MODEL", raising=False)
-        assert review_gate._read_tier1_model() == "kimi-k3"
+        assert review_gate._read_tier1_model() == "kimchi-dev/kimi-k3.1-pro"
 
     def test_tier1_model_from_env(self, monkeypatch):
         monkeypatch.setenv("OCR_TIER1_MODEL", "some-strong-model")
@@ -130,7 +130,7 @@ class TestTier1ModelPlumbing:
 
     def test_tier1_model_blank_env_falls_back(self, monkeypatch):
         monkeypatch.setenv("OCR_TIER1_MODEL", "  ")
-        assert review_gate._read_tier1_model() == "kimi-k3"
+        assert review_gate._read_tier1_model() == "kimchi-dev/kimi-k3.1-pro"
 
     def test_tier1_model_whitespace_trimmed(self, monkeypatch):
         monkeypatch.setenv("OCR_TIER1_MODEL", "  some-strong-model \n")
@@ -290,7 +290,7 @@ class TestManifestPlumbing:
         assert decision == "pass", reason
         assert _state(work, tip).get("state") == "done"
         manifest = _review_manifest(tmp_path)
-        assert manifest["tier1_model"] == "kimi-k3"
+        assert manifest["tier1_model"] == "kimchi-dev/kimi-k3.1-pro"
 
     def test_manifest_carries_configured_tier1_model(self, tmp_path):
         work = _repo(tmp_path, {"lib.py": "def f():\n    return 1\n"})

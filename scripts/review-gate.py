@@ -128,8 +128,8 @@ _DOCTOR_CMD = "python3 " + os.path.join(
 # session (glm-5.3-flash) broke the skill flow — every FN review ran 9-12
 # turns, surfaced findings, then died unparseable ("could not parse review
 # output"), with 3-6x wall time from error+retry churn. The default stays
-# the reviewer pin; the REVIEWER PERSONA carries kimi-k3 @ max thinking (D16
-# in skills/review/SKILL.md) via its Agent spawn regardless. OCR_MODEL
+# the reviewer pin; the REVIEWER PERSONA carries its own pin and thinking level
+# (the manifest's tier1_*/tier2_* fields) via its Agent spawn regardless. OCR_MODEL
 # overrides this session pin for experimentation.
 _MODEL = (os.environ.get("OCR_MODEL", rg_settings.default_model("orchestrator", "kimchi")).strip()
           or rg_settings.default_model("orchestrator", "kimchi"))
@@ -263,7 +263,7 @@ def _check_provider_guard():
         " terms (providers " + ", ".join(_BLOCKED_PROVIDERS) + " are blocked):\n"
         + detail +
         "\nSet the variable or settings value to an allowed open model (e.g."
-        " kimi-k3, glm-5.3, deepseek-v4-flash) or unset it to use the default.")
+        " kimi-k3.1-pro, glm-5.3, deepseek-v4.1-flash-1017) or unset it to use the default.")
 
 DEFAULT_KIMI_ARGS = [
     # Kimchi headless worker argv (port spec section 4). The read-only sandbox
@@ -302,7 +302,7 @@ def _read_claude_model(*role_vars):
     --model the spawned session inherits the PARENT Claude Code session's
     model, so a user on Opus would pay Opus rates for every gate run.
 
-    A vendor-prefixed id (`kimchi-dev/kimi-k3`, the kimchi convention that
+    A vendor-prefixed id (`kimchi-dev/kimi-k3.1-pro`, the kimchi convention that
     OCR_MODEL / OCR_DOCS_SUMMARY_MODEL carry on that profile) is not a claude
     model and is skipped, so one environment can serve both profiles."""
     for var in tuple(role_vars) + ("OCR_CLAUDE_MODEL", "OCR_MODEL"):
@@ -411,6 +411,33 @@ def _helper_cmds_field():
     return {"helper_cmds": cmds} if cmds else {}
 
 
+# manifest field prefix -> the settings agent whose pin it carries.
+_PERSONA_PIN_AGENTS = (
+    ("spotter", "spotter"), ("tier1", "code-reviewer"),
+    ("tier2", "deep-reviewer"), ("docs_checker", "docs-checker"),
+    ("filter", "code-filter"), ("resolver", "code-resolver"))
+
+
+def _persona_pins_field():
+    """Every kimchi persona pin the review skill spawns with, from the settings
+    layer, as manifest fields: `<prefix>_model` and `<prefix>_thinking` for the
+    spotter, tier-1 and tier-2 reviewers, docs-checker, filter and resolver
+    (a level of None is left out). The skill carries no model ids of its own;
+    this is its one source. {} under the claude backend, whose persona models
+    are the tier aliases the callers already put in the manifest and whose Task
+    tool takes no thinking level."""
+    if _current_launch().name != "kimchi":
+        return {}
+    settings = _settings()
+    out = {}
+    for prefix, agent in _PERSONA_PIN_AGENTS:
+        out[prefix + "_model"] = settings.model(agent, "kimchi").value
+        level = settings.thinking(agent, "kimchi").value
+        if level:
+            out[prefix + "_thinking"] = level
+    return out
+
+
 def _claude_review_args(helpers=True):
     """The claude review worker's default argv with the caller's extras
     appended; only consulted without an OCR_CLAUDE_ARGS override (see
@@ -432,6 +459,21 @@ def _pin_model_arg(args, agent, backend):
     settings file and no env override this is the value the argv already had."""
     if "--model" in args and args.index("--model") + 1 < len(args):
         args[args.index("--model") + 1] = _agent_model(agent, backend)
+    return args
+
+
+def _pin_thinking_arg(args, agent, backend):
+    """Append the settings-resolved thinking level of `agent` to the `--model`
+    value in `args` (in place) as kimchi's `<model>:<level>` suffix, e.g.
+    `kimchi-dev/kimi-k3.1-pro:high`. Nothing is added when the agent has no
+    level, there is no `--model`, or the model id already carries a suffix."""
+    level = _settings().thinking(agent, backend).value
+    if not level or "--model" not in args:
+        return args
+    at = args.index("--model") + 1
+    if at >= len(args) or ":" in args[at].rsplit("/", 1)[-1]:
+        return args
+    args[at] = "%s:%s" % (args[at], level)
     return args
 
 
@@ -4179,7 +4221,10 @@ def _worker_invocation(default_args, missing_message, repo_root=None):
     if (not stub and launch.canary and not override and not _canary_state["probed"]
             and not os.environ.get("OCR_SKIP_CANARY", "").strip()):
         _canary_state["probed"] = True
-        _canary_probe(kimi, args, child_env)
+        # The canary's model is its own settings agent (default: the session
+        # model), not whichever caller got here first.
+        _canary_probe(kimi, _pin_model_arg(list(args), "canary", launch.name),
+                      child_env)
     inv = _Invocation((kimi, stub, args, child_env, scrubbed))
     inv.launch = launch
     return inv
@@ -4217,6 +4262,15 @@ def _run_review_once(repo_root, mode, git_dir=None, head_sha="", push_range="",
                              repo_root=repo_root)
     kimi, stub, args, child_env, scrubbed = inv
     launch = inv.launch
+    if launch.name == "kimchi" and not stub and not os.environ.get(launch.args_env):
+        # The session runs at its lane's thinking level: the deep lane (the
+        # only caller passing native=True) at the deep reviewer's, a resolve
+        # run at the resolver's, every other review at the fast lane's. An
+        # OCR_KIMI_ARGS override replaces the argv wholesale and is left alone.
+        args = _pin_thinking_arg(
+            list(args),
+            "deep-reviewer" if native else "code-resolver" if resolve_file
+            else "code-reviewer", "kimchi")
     debug = _debug_enabled()
     creationflags = _WIN_FLAGS if sys.platform == "win32" else 0
     _SUFFIX = " --json"
@@ -9687,6 +9741,7 @@ def _build_deep_manifest(paths, reasons, threshold, renames=None):
         "risk_threshold": threshold,
         "spotter_model": _tier_model("spotter"),
         "tier2_model": _tier_model("tier2"),
+        **_persona_pins_field(),
         **_helper_cmds_field(),
     }
 _DOCS_SUMMARY_PATH = ".ocr/docs-summary.md"
@@ -11289,6 +11344,7 @@ def _build_review_manifest(scope, chunk_items, other_changed, carry_paths,
     # Same channel for the tier-1 reviewer model (skills/review/SKILL.md step
     # 3 reads it to spawn the code-reviewer subagent).
     manifest["tier1_model"] = _tier_model("tier1")
+    manifest.update(_persona_pins_field())
     manifest.update(_helper_cmds_field())
     if docs_context:
         manifest["docs_context"] = docs_context

@@ -81,13 +81,13 @@ def test_golden_has_no_paths_file():
 
 
 def test_golden_has_correct_model():
-    """The golden argv uses the reviewer pin (kimchi-dev/kimi-k3, D16). A flash
+    """The golden argv uses the reviewer pin (kimchi-dev/kimi-k3.1-pro, D16). A flash
     orchestration default was tried and reverted (2026-11-09): it broke the
     skill flow (verdict extraction failed on every review) and tripled wall
     time — see docs/review-latency-analysis.md."""
     fixture = _load_fixture()
     idx = fixture.index("--model")
-    assert fixture[idx + 1] == "kimchi-dev/kimi-k3"
+    assert fixture[idx + 1] == "kimchi-dev/kimi-k3.1-pro"
 
 
 def test_golden_loads_the_deny_extension():

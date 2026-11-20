@@ -29,7 +29,7 @@ settings_schema(); a test keeps the two in step):
     {
       "agents": {
         "spotter": {
-          "kimchi": {"model": "deepseek-v4-flash", "thinking": "high"},
+          "kimchi": {"model": "deepseek-v4.1-flash-1017", "thinking": "high"},
           "claude": {"model": "haiku"}
         }
       },
@@ -78,15 +78,15 @@ TIER_AGENTS = {"spotter": "spotter", "tier1": "code-reviewer",
 # code-filter, code-resolver, canary) are resolved here so every consumer reads
 # one table; they only take effect where a consumer reads them.
 DEFAULT_MODELS = {
-    ("spotter", "kimchi"): "deepseek-v4-flash",
-    ("code-reviewer", "kimchi"): "kimi-k3",
-    ("deep-reviewer", "kimchi"): "kimi-k3",
+    ("spotter", "kimchi"): "deepseek-v4.1-flash-1017",
+    ("code-reviewer", "kimchi"): "kimchi-dev/kimi-k3.1-pro",
+    ("deep-reviewer", "kimchi"): "kimchi-dev/kimi-k3.1-pro",
     ("docs-checker", "kimchi"): "kimchi-dev/glm-5.3",
     ("code-filter", "kimchi"): "kimchi-dev/deepseek-v4.1-flash-1017",
     ("code-resolver", "kimchi"): "kimchi-dev/glm-5.3",
     ("docs-summary", "kimchi"): "kimchi-dev/glm-5.3",
-    ("orchestrator", "kimchi"): "kimchi-dev/kimi-k3",
-    ("canary", "kimchi"): "kimchi-dev/kimi-k3",
+    ("orchestrator", "kimchi"): "kimchi-dev/kimi-k3.1-pro",
+    ("canary", "kimchi"): "kimchi-dev/kimi-k3.1-pro",
     # claude: aliases, not dated ids, so the pin tracks the model family.
     ("spotter", "claude"): "haiku",
     ("code-reviewer", "claude"): "sonnet",
@@ -100,9 +100,10 @@ DEFAULT_MODELS = {
 }
 
 # None = the thinking level is not passed (the backend/persona default). The
-# reviewers are the highest-stakes calls (kimi-k3 collapses below max).
+# fast lane (tier-1 reviewer) runs at `high`; the deep lane (tier-2 reviewer),
+# the highest-stakes call, at `max`.
 DEFAULT_THINKING = {
-    "spotter": "high", "code-reviewer": "max", "deep-reviewer": "max",
+    "spotter": "high", "code-reviewer": "high", "deep-reviewer": "max",
     "docs-checker": "high", "code-filter": "high", "code-resolver": "high",
     "docs-summary": None, "orchestrator": None, "canary": None,
 }

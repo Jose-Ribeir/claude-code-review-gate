@@ -582,7 +582,7 @@ def test_helper_cmds_are_given_to_the_session_only_under_claude(tiers):
 def test_tier_models_are_per_profile(tiers):
     tiers.setenv("OCR_BACKEND", "kimchi")
     assert [rg._tier_model(r) for r in ("spotter", "tier1", "tier2")] == [
-        "deepseek-v4-flash", "kimi-k3", "kimi-k3"]
+        "deepseek-v4.1-flash-1017", "kimchi-dev/kimi-k3.1-pro", "kimchi-dev/kimi-k3.1-pro"]
     tiers.setenv("OCR_BACKEND", "claude")
     assert [rg._tier_model(r) for r in ("spotter", "tier1", "tier2")] == ["haiku", "sonnet", "opus"]
 
