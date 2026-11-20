@@ -77,7 +77,8 @@ unit_diff is `unit:<path>:<unit>:<part>` and a context item `context:<role>:<pat
                      the substrings are dropped, code and doc findings alike.
 docs-gate 05 knobs (generation mode, `--docs-summary` in argv):
   STUB_DOCS_SUMMARY         the summary markdown the generation call returns
-  STUB_DOCS_SUMMARY_VERDICT "fail" -- exit 1, exercising the gate's fail-closed path
+  STUB_DOCS_SUMMARY_VERDICT "fail" -- exit 1 (the gate warns and uses the diff-based context)
+  STUB_DOCS_SUMMARY_SLEEP   extra seconds only the generation call sleeps
   STUB_UNIT_FINDINGS  JSON {unit qualname: {severity, content, offset}} -- a finding anchored
                       `offset` lines into every unit_diff item of that unit (first part only),
                       at the unit's tip line numbers, with `existing_code` read from the tree.
@@ -475,10 +476,12 @@ if resolve_file is not None:
 # headless worker call with `--docs-summary` in argv. Behaviour knobs:
 #   STUB_DOCS_SUMMARY         the summary markdown the generation writes
 #                             (default: a canned stub summary)
-#   STUB_DOCS_SUMMARY_VERDICT "fail" -- exit 1 with no usable output, so the
-#                             gate's fail-closed path can be exercised
+#   STUB_DOCS_SUMMARY_VERDICT "fail" -- exit 1 with no usable output (the gate
+#                             degrades to the diff-based context + a warning)
+#   STUB_DOCS_SUMMARY_SLEEP   extra seconds this generation call alone waits
 if docs_summary:
     time.sleep(float(os.environ.get("STUB_SLEEP", "0") or 0))
+    time.sleep(float(os.environ.get("STUB_DOCS_SUMMARY_SLEEP", "0") or 0))
     if os.environ.get("STUB_DOCS_SUMMARY_VERDICT", "").strip().lower() == "fail":
         sys.stdout.write("stub: docs summary generation failed\n")
         sys.exit(1)

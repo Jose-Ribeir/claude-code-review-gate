@@ -989,9 +989,8 @@ person reading the verdict, and `compute_verdict` will refuse to let an
 incomplete finding block a push on its own — so a dropped field doesn't just
 degrade the report, it silently weakens the gate.
 
-**Documentation check (only when the manifest has `docs_context` or `docs_quality`).** After the
-reviewer's findings are parsed and before §3a, spawn **one**
-documentation-checker subagent via the Agent tool — `subagent_type:
+**Documentation check (only when the manifest has `docs_context` or `docs_quality`).** Spawn
+**one** documentation-checker subagent via the Agent tool — `subagent_type:
 "General-Purpose"`, `model: manifest.docs_checker_model`,
 `thinking: manifest.docs_checker_thinking`,
 `isolated: true`, `run_in_background: false` (see the note above §3) — whose
@@ -1025,6 +1024,22 @@ findings array the same way: §3a/§3b/§4 unchanged.
 When the manifest has neither `docs_context` nor `docs_quality`, skip this
 step entirely: no spawn, no cost, behavior identical to a review without the
 artifact.
+
+**When it runs (`manifest.docs_checker_parallel`).** The checker's payload
+depends on nothing the reviewer produces, so by default (`docs_checker_parallel`
+true, or absent from the manifest) spawn it **in the same message as the
+reviewer** — the reviewer Agent call(s) and the documentation-checker Agent call
+as parallel tool-use blocks of one message, every one with `run_in_background:
+false` — and parse both results before §3a, merging the checker's findings into
+the reviewer's array exactly as described above (same blocking power, same
+merge). One failing or non-JSON result records its warning and never stops the
+other. Only when `docs_checker_parallel` is `false` do the old order: spawn the
+checker after the reviewer's findings are parsed and before §3a.
+When `docs_context.summary_unavailable` is true the generated summary is
+stale, missing, or still regenerating: `content` is empty and the checker works
+from the diffs and the `corpus` pointers. That never changes the step: spawn it
+as usual and do not add a finding or a warning of your own — the gate already
+attaches the "docs summary unavailable" warning to the verdict.
 
 ## 3a. Hallucination check
 

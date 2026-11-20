@@ -242,18 +242,17 @@ def test_docs_only_push_records_staleness_without_regenerating(tmp_path):
     assert len(_gen_calls(tmp_path, "t2.trace")) == 1
 
 
-def test_generation_failure_fails_closed_with_a_documented_message(tmp_path):
-    """The summary is needed and cannot be produced: the push is denied
-    (never silently unchecked), and the denial itself documents the chosen
-    fail-closed behavior and the recorded escape hatch."""
+def test_generation_failure_no_longer_blocks_and_warns(tmp_path):
+    """Intentional change (review-speed 10, ADR 0010): the summary cannot be
+    produced, and that alone never blocks the push. The documentation check
+    runs on the diff-based context and the verdict carries a visible
+    "docs summary unavailable" warning; nothing half-written is left."""
     work = _repo(tmp_path, {"app.py": _APP_V1, "README.md": "# project\n"})
-    _commit(work, {"app.py": _APP_V2})
+    tip = _commit(work, {"app.py": _APP_V2})
     env = _env(tmp_path, "t.trace", STUB_DOCS_SUMMARY_VERDICT="fail")
     decision, reason = _push(work, env)
-    assert decision == "deny", reason
-    assert "documentation summary" in reason
-    assert "fail-closed" in reason
-    assert "--no-verify" in reason
+    assert decision == "pass", reason
+    assert "docs summary unavailable" in _state(work, tip).get("reasons", "")
     assert not (work / _DOCS_REL).exists(), \
         "a failed generation must leave no half-written artifact"
 
