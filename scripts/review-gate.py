@@ -8659,6 +8659,7 @@ def _resolver_attempt(repo_root, mode, git_dir, tip, push_range, to_resolve,
             ],
             "prior_files": prior_specs,
             "recheck": bool(recheck),
+            **_persona_pins_field(),
         }
         if diffs is not None:
             manifest["items"] = _resolver_diff_items(

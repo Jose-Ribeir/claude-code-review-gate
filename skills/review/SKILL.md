@@ -43,7 +43,7 @@ Decide which host you are on from your own tool list, then apply the matching ru
     of the payload, exactly as the Kimchi path does.
   - Ignore `thinking:`, `isolated:`, `run_in_background:` and the
     `subagent_type: "Reviewer"` / `"General-Purpose"` names, and every
-    `kimchi-dev/...` or `kimi-k3` pin: they do not exist on this host.
+    model pin that names a Kimchi model: they do not exist on this host.
   - Models: the manifest already holds this host's model for each tier
     (`manifest.spotter_model`, `manifest.tier1_model`, `manifest.tier2_model`
     -- aliases such as `haiku` / `sonnet` / `opus`). Pass that value as the
@@ -93,17 +93,22 @@ persona's pin explicitly:
 
 | Persona | Agent spawn | model | thinking |
 |---|---|---|---|
-| code-reviewer — reviewer (§3) | `subagent_type: "Reviewer"` | `manifest.tier1_model` / `OCR_TIER1_MODEL` (default `kimi-k3`; v2) | `max` |
-| deep-reviewer — tier-2 reviewer (§3 deep lane) | `subagent_type: "Reviewer"` | `manifest.tier2_model` / `OCR_TIER2_MODEL` (default `kimi-k3`; v2) | `max` |
-| context-spotter — context demands (§2c) | `subagent_type: "General-Purpose"` | `manifest.spotter_model` / `OCR_SPOTTER_MODEL` (default `deepseek-v4-flash`; v2) | `high` |
-| code-filter — falsify pass (§3b) | `subagent_type: "General-Purpose"`, `isolated: true` | `kimchi-dev/deepseek-v4.1-flash-1017` | `high` |
-| docs-checker — documentation check (§3, docs step) | `subagent_type: "General-Purpose"`, `isolated: true` | `kimchi-dev/glm-5.3` | `high` |
-| code-resolver — resolve mode (§R) | `subagent_type: "General-Purpose"` | `kimchi-dev/glm-5.3` | `high` |
-| any file-filtering persona (ad-hoc mechanical file narrowing) | `subagent_type: "General-Purpose"` | `kimchi-dev/deepseek-v4-flash-0731` | `off` |
+| code-reviewer — reviewer (§3) | `subagent_type: "Reviewer"` | `manifest.tier1_model` | `manifest.tier1_thinking` |
+| deep-reviewer — tier-2 reviewer (§3 deep lane) | `subagent_type: "Reviewer"` | `manifest.tier2_model` | `manifest.tier2_thinking` |
+| context-spotter — context demands (§2c) | `subagent_type: "General-Purpose"` | `manifest.spotter_model` | `manifest.spotter_thinking` |
+| code-filter — falsify pass (§3b) | `subagent_type: "General-Purpose"`, `isolated: true` | `manifest.filter_model` | `manifest.filter_thinking` |
+| docs-checker — documentation check (§3, docs step) | `subagent_type: "General-Purpose"`, `isolated: true` | `manifest.docs_checker_model` | `manifest.docs_checker_thinking` |
+| code-resolver — resolve mode (§R) | `subagent_type: "General-Purpose"` | `manifest.resolver_model` (the resolve manifest) | `manifest.resolver_thinking` |
+| any file-filtering persona (ad-hoc mechanical file narrowing) | `subagent_type: "General-Purpose"` | `manifest.filter_model` | `off` |
 
-The reviewer is the hardest, highest-stakes call (kimi-k3 collapses below max
-thinking). The environment variable `OCR_MODEL`, when set by the gate, overrides
-the reviewer's model pin.
+**This skill carries no model id and no thinking level of its own.** The gate
+resolves every pin (environment override, project and user settings files,
+built-in default) and writes it into the manifest; the table names the field to
+read. Pass that value as the spawn's `model` and, when the `*_thinking` field is
+present, as its `thinking` (a missing field means the thinking level is not
+set: omit it). If a `*_model` field is missing too, omit `model` and let the
+spawn inherit the session's. The reviewer is the hardest, highest-stakes call,
+which is why the gate gives it the highest level.
 
 Every Agent spawn in this skill uses `run_in_background: false` (see the note
 above §3).
@@ -175,7 +180,8 @@ present after the author's fix commits. Do not review the code for new issues.
    (`role`, `path`, `old_path`, `file`) in place of that diff's text. Collect
    yourself only the entries whose item has an empty `file` (or is missing).
 3. Spawn **one** resolver subagent via the Agent tool — `subagent_type:
-   "General-Purpose"`, `model: "kimchi-dev/glm-5.3"`, `thinking: "high"`,
+   "General-Purpose"`, `model: manifest.resolver_model`,
+   `thinking: manifest.resolver_thinking`,
    `run_in_background: false` (see the note above §3) — whose `prompt` is the
    resolver persona body (Appendix P.3) followed by the payload. Pass it the
    prior findings inside a fenced block labelled
@@ -290,6 +296,11 @@ manifest JSON. The manifest fields are:
 - `tier1_model` — (v2, review manifests only) the model to spawn the §3
   code-reviewer subagent(s) with, pinned for the same reason: the allowlist
   cannot read `OCR_TIER1_MODEL`.
+- `spotter_thinking`, `tier1_thinking`, `tier2_thinking`, `docs_checker_model`,
+  `docs_checker_thinking`, `filter_model`, `filter_thinking` — (kimchi review
+  manifests) the remaining persona pins from the persona-pin table in the
+  header; `resolver_model` / `resolver_thinking` ride the resolve manifest (§R).
+  The gate resolves them from the settings layer; this skill holds no model id.
 - `deep_review` — (v2 t10, review manifests only) present and `true` when
   the gate's risk gate escalated this push to the tier-2 slow lane: meet §3's
   escalation rule with it. `deep_reasons` (list of strings, one per matched
@@ -718,9 +729,8 @@ its own risk read) — **never findings**. The reviewer receives the demands in
 Skip this entire step in `--scan` mode (there is no diff). Proceed to §3 with
 `demands` absent.
 
-**Step 1 — Model:** `manifest.spotter_model` when a manifest was given;
-otherwise the environment variable `OCR_SPOTTER_MODEL`, defaulting to
-`deepseek-v4-flash`.
+**Step 1 — Model:** `manifest.spotter_model` (and `manifest.spotter_thinking`) when a manifest was given;
+otherwise the spawn inherits the session's model.
 
 **Step 2 — Spawn:** spawn **one** `context-spotter` subagent via the Agent
 tool with that model and `run_in_background: false` — parsing and validating
@@ -837,8 +847,8 @@ when pinned there, otherwise `risk_threshold` in the project
 `.ocr/rule.json`, default **7**). Escalation only ever **raises** the tier —
 a low spotter score NEVER downgrades a `deep_review: true` manifest back to
 the fast lane. In the deep lane, spawn **one `deep-reviewer` subagent
-INSTEAD of the `code-reviewer`** below (model `manifest.tier2_model`,
-otherwise `OCR_TIER2_MODEL`, default `kimi-k3`), with the same prompt
+INSTEAD of the `code-reviewer`** below (model `manifest.tier2_model`, thinking
+`manifest.tier2_thinking`), with the same prompt
 fields as below plus the manifest's `deep_reasons` and, when present, its
 `native_deep_task` assignment — *instead-of* because
 the deep-reviewer is a strict superset of the tier-1 reviewer (same inputs,
@@ -851,8 +861,7 @@ lane swaps the reviewer, never the verdict authority (ADR 0001: no new
 verdict authority).
 
 **Model (v2) — tier-1 reviewer:** spawn the reviewer with
-`manifest.tier1_model` when a manifest was given; otherwise the environment
-variable `OCR_TIER1_MODEL`, defaulting to `kimi-k3`. The same model applies
+`manifest.tier1_model` (thinking `manifest.tier1_thinking`). The same model applies
 to every group subagent in the escalation path below. Under the **kimchi**
 backend the gate validates the review-model variables at startup (provider
 guard, Python-side): a push configured with an anthropic/openai model is
@@ -864,9 +873,9 @@ Anthropic models by design; see ADR 0005).
 **Default path (≤ 15 files):** spawn **one** reviewer subagent via the Agent
 tool, with:
 - `subagent_type: "Reviewer"`
-- `model: "kimchi-dev/kimi-k3"` — the D16 reviewer pin; if the environment
-  variable `OCR_MODEL` is set, use its value as the model pin instead
-- `thinking: "max"`
+- `model: manifest.tier1_model` — the D16 reviewer pin (the deep lane uses
+  `manifest.tier2_model`)
+- `thinking: manifest.tier1_thinking` (`manifest.tier2_thinking` in the deep lane)
 - `run_in_background: false`
 
 Its `prompt` is the reviewer persona body (Appendix P.1) followed by a payload
@@ -951,8 +960,8 @@ directory (first path segment). Spawn one reviewer subagent per group,
 running at most **4 groups in parallel** — issue all of them as parallel
 Agent tool-use blocks within a single message (per the "run agents in
 parallel" pattern), each with the same persona pin as the default path
-(`subagent_type: "Reviewer"`, `model: "kimchi-dev/kimi-k3"` / `OCR_MODEL`
-override, `thinking: "max"`) and with `run_in_background: false`. Do not let any
+(`subagent_type: "Reviewer"`, `model: manifest.tier1_model`,
+`thinking: manifest.tier1_thinking`) and with `run_in_background: false`. Do not let any
 group run in the background: per the note above §3, a single backgrounded
 group is enough to trigger the race, and with up to 4 groups in flight the
 odds of a stray/duplicate notification only go up. Pass each group subagent
@@ -983,7 +992,8 @@ degrade the report, it silently weakens the gate.
 **Documentation check (only when the manifest has `docs_context` or `docs_quality`).** After the
 reviewer's findings are parsed and before §3a, spawn **one**
 documentation-checker subagent via the Agent tool — `subagent_type:
-"General-Purpose"`, `model: "kimchi-dev/glm-5.3"`, `thinking: "high"`,
+"General-Purpose"`, `model: manifest.docs_checker_model`,
+`thinking: manifest.docs_checker_thinking`,
 `isolated: true`, `run_in_background: false` (see the note above §3) — whose
 `prompt` is the checker persona body (Appendix P.4) followed by a payload
 containing:
@@ -1058,8 +1068,8 @@ Assign each surviving finding a temporary id (`"f-0"`, `"f-1"`, …).
 
 Spawn the falsify subagent via the Agent tool, with:
 - `subagent_type: "General-Purpose"`
-- `model: "kimchi-dev/deepseek-v4.1-flash-1017"` (the D16 falsify pin)
-- `thinking: "high"`
+- `model: manifest.filter_model` (the D16 falsify pin)
+- `thinking: manifest.filter_thinking`
 - `isolated: true` (decision D3: a fresh context, so the falsify pass is
   genuinely independent of this orchestrator's reasoning)
 - `run_in_background: false` (see the note above §3 — step 4/6 depend on its
@@ -1138,7 +1148,7 @@ subagent** — it has a SMALL context and exactly one job — and relay its outp
 verbatim as your final message:
 
 - `subagent_type`: `"General-Purpose"`
-- `model`: `"kimchi-dev/deepseek-v4.1-flash-1017"`, `thinking`: `"high"`
+- `model`: `manifest.filter_model`, `thinking`: `manifest.filter_thinking`
 - `prompt` (fill the bracketed inputs from YOUR state; emit the findings
   array exactly as §3a/§3b/§4 left it):
 
@@ -1216,8 +1226,8 @@ not be softened.
 
 ### P.1 Reviewer persona (from `agents/code-reviewer.md`)
 
-Spawn per §3: `subagent_type: "Reviewer"`, `model: "kimchi-dev/kimi-k3"`
-(or `OCR_MODEL` when set), `thinking: "max"`, `run_in_background: false`.
+Spawn per §3: `subagent_type: "Reviewer"`, `model: manifest.tier1_model`,
+`thinking: manifest.tier1_thinking`, `run_in_background: false`.
 
 <!--
   The review role, scope discipline, and the "falsify, don't verify" filter in
@@ -1503,7 +1513,7 @@ is an object even when there are no `impact_sites`). Each finding:
 ### P.2 Filter persona (from `agents/code-filter.md`)
 
 Spawn per §3b: `subagent_type: "General-Purpose"`,
-`model: "kimchi-dev/deepseek-v4.1-flash-1017"`, `thinking: "high"`,
+`model: manifest.filter_model`, `thinking: manifest.filter_thinking`,
 `isolated: true`, `run_in_background: false`.
 
 # Code filter — independent falsify pass
@@ -1576,7 +1586,7 @@ contradicted by the diff. If you are not certain, do not include the id.
 ### P.3 Resolver persona (from `agents/code-resolver.md`)
 
 Spawn per §R step 3: `subagent_type: "General-Purpose"`,
-`model: "kimchi-dev/glm-5.3"`, `thinking: "high"`,
+`model: manifest.resolver_model`, `thinking: manifest.resolver_thinking`,
 `run_in_background: false`.
 
 # Code resolver — prior-finding re-check
@@ -1700,8 +1710,8 @@ Every id from the input must appear exactly once in `resolutions`.
 ### P.4 Documentation-checker persona (from `agents/docs-checker.md`)
 
 Spawn per §3 ("Documentation check"): `subagent_type: "General-Purpose"`,
-`model: "kimchi-dev/glm-5.3"`, `thinking: "high"`, `isolated: true`,
-`run_in_background: false`. Paste the body of `agents/docs-checker.md`
+`model: manifest.docs_checker_model`, `thinking: manifest.docs_checker_thinking`,
+`isolated: true`, `run_in_background: false`. Paste the body of `agents/docs-checker.md`
 (frontmatter dropped, tool names per §T) verbatim, followed by the §3 payload:
 `docs_context` fenced as untrusted, the per-file diffs, `repo_root`, and,
 when present, `arch_flags` and `docs_quality`, both verbatim.
