@@ -592,7 +592,7 @@ ATTEMPT_CAP = 3       # failed attempts before the exhausted state (port plan C1
 # error (review), a usage limit, an unreviewable range -- keeps the fail-closed
 # posture of ADR 0002: sticky for the TTL at the cap.
 _RETRIABLE_FAILURE_REASONS = frozenset(
-    {"budget", "timeout", "crash", "unparseable-output", "spawn"})
+    {"budget", "timeout", "review-timeout", "crash", "unparseable-output", "spawn"})
 
 # --- chunking / checkpoint (0.7.0) -------------------------------------------
 _CHUNK_THRESHOLD = _env_int("OCR_CHUNK_THRESHOLD", 15, floor=1)
@@ -3423,9 +3423,19 @@ _AUTH_MARKERS = (
 _LIMIT_PATTERNS = [
     re.compile(r"hit your (?:\w+ )?limit", re.IGNORECASE),
     re.compile(r"usage limit reached", re.IGNORECASE),
-    re.compile(r"\brate limit\b", re.IGNORECASE),
+    # A real rate-limit notice, not the phrase in passing: a diff, a tool
+    # result or the model's own prose can say "rate limit" (this very gate
+    # has a rate-limit helper) without the backend having refused the call.
+    re.compile(r"\brate[ _-]limit(?:ed|_error|\s+(?:exceeded|reached|error|hit))\b"
+               r"|\b(?:hit|exceeded|reached)\s+(?:the |your |a )?rate limit\b",
+               re.IGNORECASE),
     re.compile(r"session limit", re.IGNORECASE),
 ]
+# Where a limit notice can be: stderr, a short stdout, or the LAST line of a
+# long stdout (the stream-json `result` event). The body of a long transcript
+# is the model's reading of the diff, not the backend talking.
+_LIMIT_SHORT_STDOUT = 1500
+_LIMIT_TAIL_CHARS = 600
 _RESETS_AT_RE = re.compile(
     r"resets\s+(\d{1,2}(?::\d{2})?(?:\s*[aApP][mM])?)\s*\(([^)]+)\)",
     re.IGNORECASE,
@@ -3469,7 +3479,11 @@ def _parse_resets_at(text):
 
 def _check_limit(out_text, err_text=""):
     """Check if output signals a usage limit. Returns (bool, resets_at_or_None)."""
-    combined = (out_text or "") + " " + (err_text or "")
+    out = out_text or ""
+    if len(out) > _LIMIT_SHORT_STDOUT:
+        last = next((ln for ln in reversed(out.splitlines()) if ln.strip()), "")
+        out = last[-_LIMIT_TAIL_CHARS:]
+    combined = out + " " + (err_text or "")[-4000:]
     for pat in _LIMIT_PATTERNS:
         if pat.search(combined):
             return True, _parse_resets_at(combined)
@@ -5421,10 +5435,37 @@ def _drive_review(common_dir, repo_root, meta, mode, budget):
                     + [st2.get("reviewer_pid"), st2.get("supervisor_pid")]))
             attempts = int(st2.get("attempts") or 0) \
                 if st2.get("state") in ("failed", "exhausted") else 0
+            died = (st2.get("state") in ("running", "claimed")
+                    and int(st2.get("protocol_version") or 0) >= PROTOCOL_VERSION)
+            if died:
+                # A supervisor that went silent (died, or never got as far as
+                # its first heartbeat) is a failed attempt, not a fresh start:
+                # without this a supervisor that cannot start respawned with
+                # attempts=0 forever and the pusher only ever saw "still
+                # running". Retriable class (crash), so the cap walls the tip.
+                attempts = int(st2.get("attempts") or 0) + 1
             if force:
                 attempts = 0
+            if died and not force and attempts >= ATTEMPT_CAP:
+                beat = float(st2.get("heartbeat_ts") or st2.get("claimed_ts") or 0)
+                silent = max(0, int(time.time() - beat)) if beat else 0
+                st2.update({
+                    "state": "exhausted", "failed_ts": time.time(),
+                    "attempts": attempts, "reason": "crash",
+                    "detail": ("the review supervisor died or never started "
+                               f"(no heartbeat for {silent}s; failed {attempts} "
+                               "times) - see the supervisor log below"),
+                })
+                _write_state(state_path, st2)
+                for pid in stale_pids:
+                    _tree_kill(pid)
+                return st2
             run_id = _new_run_id()
             new = dict(meta)
+            if not force:
+                for key in ("timeout_retries",):
+                    if key in st2:
+                        new[key] = st2[key]   # counters that outlive one supervisor
             new.update({
                 "state": "claimed", "run_id": run_id, "claimed_ts": time.time(),
                 "mode": mode, "attempts": attempts,
@@ -6294,9 +6335,17 @@ def _supervise_run(state_path, run_id):
         # PR4: an unparseable reviewer answer is its own retriable class --
         # distinct from a machinery error ("review") -- so the next push
         # retries it inside ATTEMPT_CAP.
-        failure = ("unparseable-output"
-                   if (exc.is_parse_failure and not exc.is_timeout) else "review",
-                   str(exc))
+        if (exc.is_timeout and tier == "deep"
+                and int((_read_state(state_path) or st).get("timeout_retries") or 0) < 1):
+            # A deep-lane timeout is retried ONCE (the next push starts a
+            # fresh attempt); a second one fails with its real reason.
+            failure = ("review-timeout", str(exc))
+        elif exc.is_timeout and tier == "deep":
+            failure = ("deep-timeout-final", str(exc))
+        else:
+            failure = ("unparseable-output"
+                       if (exc.is_parse_failure and not exc.is_timeout) else "review",
+                       str(exc))
         result, ran, raw_name, chunks_new = None, False, "", progress["new"]
     except BaseException as exc:  # noqa: BLE001 -- the file must always say why
         failure = ("crash", f"{type(exc).__name__}: {exc}")
@@ -6346,6 +6395,24 @@ def _supervise_run(state_path, run_id):
                 "state": "failed", "failed_ts": time.time(),
                 "attempts": int(st.get("attempts") or 0) + 1,
                 "reason": "timeout", "detail": _sanitize(failure[1], 1500),
+            })
+        elif failure[0] == "review-timeout":
+            # The first deep-lane timeout: one attempt burned, one retry
+            # allowed (the counter rides the restart in _drive_review).
+            st.update({
+                "state": "failed", "failed_ts": time.time(),
+                "attempts": int(st.get("attempts") or 0) + 1,
+                "timeout_retries": int(st.get("timeout_retries") or 0) + 1,
+                "reason": "review-timeout",
+                "detail": _sanitize(failure[1], 1500),
+            })
+        elif failure[0] == "deep-timeout-final":
+            # The retry timed out too: fail with the real reason, at the cap
+            # (sticky for MARKER_TTL like any non-retriable failure).
+            st.update({
+                "state": "failed", "failed_ts": time.time(),
+                "attempts": ATTEMPT_CAP, "reason": "review",
+                "detail": _sanitize(failure[1], 1500),
             })
         elif failure[0] == "unreviewable":
             # Terminal for this tip: re-running the same call is the loop this
@@ -14266,7 +14333,54 @@ def _still_running_reason(st, budget, mode):
     )
 
 
-def _failed_reason(st, mode):
+_SUP_LOG_LINES = 6
+_SUP_LOG_LINE_CHARS = 220
+_SUP_LOG_TOTAL_CHARS = 900
+
+
+def _supervisor_log_head(state_path):
+    """The first lines of this tip's supervisor log, sanitized and bounded.
+
+    The supervisor's stdout/stderr are redirected to `<state>.supervisor.log`
+    (see _spawn_supervisor); a supervisor that died before it could record a
+    reason leaves its traceback there and nowhere else. Every line is
+    _sanitize'd like the other worker tails: the text can echo model output.
+    Returns "" when there is no log or nothing readable in it."""
+    if not state_path:
+        return ""
+    try:
+        log = Path(str(state_path)[:-5] + ".supervisor.log")
+        with log.open("rb") as fh:
+            raw = fh.read(8192)
+    except OSError:
+        return ""
+    lines, total = [], 0
+    for line in raw.decode("utf-8", "replace").splitlines():
+        line = _sanitize(line, _SUP_LOG_LINE_CHARS)
+        if not line:
+            continue
+        total += len(line)
+        if len(lines) >= _SUP_LOG_LINES or total > _SUP_LOG_TOTAL_CHARS:
+            break
+        lines.append(line)
+    if not lines:
+        return ""
+    return ("  Supervisor log (first lines):\n"
+            + "\n".join("    " + line for line in lines) + "\n")
+
+
+def _failed_reason(st, mode, state_path=None):
+    """The deny text for a failed/exhausted review: the reason and the worker's
+    real error (state `detail`), plus the first lines of the supervisor log
+    when `state_path` is given."""
+    base = _failed_reason_core(st, mode)
+    log_head = _supervisor_log_head(state_path)
+    if not log_head:
+        return base
+    return base.rstrip("\n") + "\n" + log_head.rstrip("\n")
+
+
+def _failed_reason_core(st, mode):
     why = _sanitize(str(st.get("reason") or "error"), 40)
     detail = str(st.get("detail") or "")
     attempts = int(st.get("attempts") or 0)
@@ -15911,7 +16025,7 @@ def _main_inner(argv, mode):
                 "[!] This bypass should be used sparingly and intentionally."
             )
             allow()
-        _fail_closed(mode, _failed_reason(st, mode))
+        _fail_closed(mode, _failed_reason(st, mode, _state_path(common_dir, tip, base)))
         return  # unreachable
 
     # done
