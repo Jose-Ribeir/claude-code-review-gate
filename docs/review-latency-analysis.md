@@ -1,6 +1,11 @@
 # Review latency analysis — why a review takes 30 s or 20 minutes, and how to cut it
 
 **Date:** 2026-11-09 · **Scope:** `kimchi-review-gate` real-model reviews (calibration corpus)
+
+**Note (2026-11-20):** the model ids below are the pins of the measurement date. The
+current kimchi defaults are `kimchi-dev/kimi-k3.1-pro` (fast lane `:high`, deep lane
+`:max`) and `deepseek-v4.1-flash-1017` for the spotter; see `docs/config-reference.md`.
+
 **Data source:** supervisor telemetry (`review-gate-debug.log` phase/call events, state files) from 15+ real reviews on fixture repos (8–13-line diffs) and the upstream repo (330–501-line diffs).
 
 ## TL;DR

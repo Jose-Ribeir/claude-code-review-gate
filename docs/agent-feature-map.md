@@ -9,15 +9,17 @@
 
 | Agent | File | Tools | Model tier (claude profile / kimchi profile) | Runs when | Returns |
 |---|---|---|---|---|---|
-| **context-spotter** | `agents/context-spotter.md` | none | `haiku` / `deepseek-v4-flash` (`OCR_SPOTTER_MODEL`) | every push with a diff (not `--scan`) | *demands* (callers, docs, event couples, references) + `risk.score`; never findings |
-| **code-reviewer** (tier 1) | `agents/code-reviewer.md` | Read, Grep (≤3 Reads/file, ≤5 Grep per review) | `sonnet` / `kimi-k3 @ max` (`OCR_TIER1_MODEL`) | every push on the fast lane | findings JSON |
-| **deep-reviewer** (tier 2) | `agents/deep-reviewer.md` | Read, Grep, Glob, Bash (read-only git) | `opus` / `kimi-k3 @ max` (`OCR_TIER2_MODEL`) | **instead of** code-reviewer when risk-escalated | findings JSON (same contract) |
-| **docs-checker** | `agents/docs-checker.md` | none declared in frontmatter (reads docs itself per its prompt) | `kimchi-dev/glm-5.3 @ high` (pinned in SKILL.md; no claude tier) | only if the manifest carries `docs_context` or `docs_quality` | findings JSON incl. stale-doc, missing-ADR, prose-quality |
-| **code-filter** | `agents/code-filter.md` | none | `deepseek-v4.1-flash-1017 @ high` (pinned) | only if the verdict would otherwise be `block` | `{drop_ids}` — drop-only falsify |
-| **code-resolver** | `agents/code-resolver.md` | Read, Grep | `glm-5.3 @ high` (pinned) | `--resolve` mode only (re-check prior findings after a fix) | per-finding `resolved` / `still_present` + quote |
+| **context-spotter** | `agents/context-spotter.md` | none | `haiku` / `deepseek-v4.1-flash-1017 @ high` (`OCR_SPOTTER_MODEL`) | every push with a diff (not `--scan`) | *demands* (callers, docs, event couples, references) + `risk.score`; never findings |
+| **code-reviewer** (tier 1) | `agents/code-reviewer.md` | Read, Grep (≤3 Reads/file, ≤5 Grep per review) | `sonnet` / `kimi-k3.1-pro @ high` (`OCR_TIER1_MODEL`) | every push on the fast lane | findings JSON |
+| **deep-reviewer** (tier 2) | `agents/deep-reviewer.md` | Read, Grep, Glob, Bash (read-only git) | `opus` / `kimi-k3.1-pro @ max` (`OCR_TIER2_MODEL`) | **instead of** code-reviewer when risk-escalated | findings JSON (same contract) |
+| **docs-checker** | `agents/docs-checker.md` | none declared in frontmatter (reads docs itself per its prompt) | `kimchi-dev/glm-5.3 @ high` (pinned via the manifest; no claude tier) | only if the manifest carries `docs_context` or `docs_quality` | findings JSON incl. stale-doc, missing-ADR, prose-quality |
+| **code-filter** | `agents/code-filter.md` | none | `deepseek-v4.1-flash-1017 @ high` (pinned via the manifest) | only if the verdict would otherwise be `block` | `{drop_ids}` — drop-only falsify |
+| **code-resolver** | `agents/code-resolver.md` | Read, Grep | `glm-5.3 @ high` (pinned via the manifest) | `--resolve` mode only (re-check prior findings after a fix) | per-finding `resolved` / `still_present` + quote |
 
 The orchestrating session itself is also a model call: the `/review-gate:review` skill is an LLM
-following `SKILL.md`, and it is pinned to the reviewer-tier model (`OCR_MODEL`).
+following `SKILL.md`, and it is pinned to the orchestrator model (`OCR_MODEL`; default `kimchi-dev/kimi-k3.1-pro`).
+Every model and thinking level is resolved through the settings layer; see
+`docs/config-reference.md` for the effective table and precedence.
 
 Backend tiers are chosen in `scripts/review-gate.py:183-213` (`_tier_model`); the claude defaults are
 `spotter=haiku, tier1=sonnet, tier2=opus`. The kimchi side is guarded against anthropic/openai

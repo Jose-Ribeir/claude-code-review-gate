@@ -71,7 +71,9 @@ Re-running the 6 FN reviews with the worker session on `kimchi-dev/glm-5.3-flash
 the findings, then died unparseable (`could not parse review output`, verdict None
 on all 6 rows; wall 191-279 s vs the 30-41 s baseline, from error+retry churn).
 Pushes still denied (fail-closed held), but no verdicts were produced. The
-session model default was reverted to `kimchi-dev/kimi-k3`; `OCR_MODEL` remains
+session model default was reverted to `kimchi-dev/kimi-k3` (the pin as of
+2026-11-09; the current default is `kimchi-dev/kimi-k3.1-pro`, see
+`docs/config-reference.md`); `OCR_MODEL` remains
 the escape hatch. Rec #1 is invalidated by measurement — see
 docs/review-latency-analysis.md.
 | upstream-0356c55-fbc880c | upstream | 0356c55..fbc880c | pass | pass | no | pass | (none) | 0 | upstream: [W4] orphans to their own record, siblings after the resolver, dedup fixes [recorded from store after harness wedge] |

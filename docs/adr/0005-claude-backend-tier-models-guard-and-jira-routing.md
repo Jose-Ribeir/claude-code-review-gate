@@ -17,7 +17,9 @@ operator-visible behaviour carry decisions.
 ## Context and decisions
 
 ### a) Per-profile tier models
-The tier models were kimchi ids (kimi-k3, deepseek-v4-flash). Under `claude`
+The tier models were kimchi ids (at the time kimi-k3 and deepseek-v4-flash;
+the kimchi defaults are now kimi-k3.1-pro and deepseek-v4.1-flash-1017, see
+`docs/config-reference.md`). Under `claude`
 they are meaningless. Each profile now resolves its own tier models: kimchi
 keeps the existing defaults and `OCR_*_MODEL` switches; claude defaults to the
 `haiku` / `sonnet` / `opus` aliases for spotter / tier1 / tier2 and honours
@@ -39,6 +41,12 @@ to the review worker's allowlist (never to the docs-summary worker) and the
 command is published as `manifest.helper_cmds` so the skill uses it verbatim.
 The demands validator needs JSON on stdin, which the Bash tool's safety filter
 refuses, so it stays unavailable under claude and degrades with a warning.
+
+Kimchi note (ADR 0010): the kimchi profile also publishes `manifest.helper_cmds`,
+for exactly three scripts (conventions, demands, collectors) admitted by the
+deny extension by exact path and fixed argument grammar; the demands validator's
+heredoc stdin is accepted only for those commands. The kimchi sandbox is
+otherwise unchanged (`python -c` and every other script stay denied).
 
 ### d) Jira routing
 The side-fetch follows the selected backend: claude runs

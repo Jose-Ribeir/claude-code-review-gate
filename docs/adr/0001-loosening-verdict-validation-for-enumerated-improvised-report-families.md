@@ -60,11 +60,13 @@ families** observed in the incident:
    findings list; the model's `verdict` key is never trusted.
 5. **Anything else stays a parse failure** and keeps failing closed, exactly as
    before.
-6. **Prompt-side counterpart:** chunk reviewer sessions are required to spawn
-   the formatter subagent and relay its output verbatim as the final message
-   (same rule as the final verdict), so the improvised families should stop
-   being produced at the source. The gate-side rescue is a safety net for the
-   ones that still slip through.
+6. **Prompt-side counterpart (superseded by ADR 0010):** chunk reviewer
+   sessions were required to spawn the formatter subagent and relay its output
+   verbatim as the final message, so the improvised families would stop being
+   produced at the source. ADR 0010 removes the formatter session: the gate
+   renders status, summary and verdict in Python from the raw results, and
+   `compute_verdict` remains the sole verdict authority. The gate-side rescue
+   is the primary handler for the enumerated families, not just a safety net.
 
 The rescue is also **telemetry-instrumented**: parse failures, rescues, and
 warn-fallbacks each emit distinct telemetry records, so any drift — the
@@ -78,7 +80,7 @@ path — is measurable rather than invisible.
   loosening: new improvised shapes are *not* auto-accepted; they still fail
   closed, and extending the set is an explicit decision (a new ADR), not a
   code change.
-- **Drift is measurable.** If the prompt-side formatter mandate erodes and
+- **Drift is measurable.** If the contract the reviewer is told to follow erodes and
   improvised reports rise again, the telemetry shows it, and the cost shows up
   as rescued/warn-fallback records rather than as silently lost reviews.
 - **The invariant "never silently pass" is preserved.** Reconstructed findings

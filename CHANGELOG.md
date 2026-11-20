@@ -6,6 +6,107 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Review speed and reliability (fix/review-speed)
+
+#### Changed
+- **Kimchi model pins repinned (`kimchi-dev/kimi-k3.1-pro`).** Every kimchi
+  default that was `kimi-k3` is now `kimchi-dev/kimi-k3.1-pro`; the spotter
+  runs `deepseek-v4.1-flash-1017` (the code-filter likewise). The fast lane
+  runs the reviewer at thinking `high` and the deep lane at `max`, passed as a
+  `:high` / `:max` suffix on `--model` (the native deep session gets the suffix
+  too). The skill and the agents carry no model-id literals: every persona pin
+  and thinking level comes from the manifest, and a test scans the sources for
+  stray ids. The canary uses the pinned canary model with no suffix. The old
+  `kimi-k3` and bare `deepseek-v4.1-flash` ids are in a deprecation table
+  (retiring 2026-12-17 and 2026-12-02); the doctor warns when one is pinned.
+- **Normal pushes use the fast lane.** `.ocr/rule.json` `risk_globs` is `[]`
+  instead of `["**"]`: the loader appends to the built-in risk globs, so
+  migrations, auth, payments, concurrency and similar paths still escalate to
+  the deep lane, but ordinary changes no longer all take the deep lane.
+- **Longer inline wait on the claude and git paths (ADR 0010).** The claude
+  hook waits up to `behavior.inline_wait_seconds.hook` (default 300 s, cap 840;
+  `OCR_INLINE_BUDGET` wins) and a pre-push run inside an agent's Bash tool up to
+  `behavior.inline_wait_seconds.git` (default 300 s; `OCR_INLINE_BUDGET_GIT`
+  wins; a human terminal waits the full review). The kimchi hook keeps its short
+  3 s wait (never above 4 s). A timeout still denies the push; a re-push joins
+  the running review.
+- **Docs summary never blocks a push alone (ADR 0010).** A stale or missing
+  `.ocr/docs-summary.md` is regenerated in the background; the review waits at
+  most `OCR_DOCS_SUMMARY_WAIT` seconds (default 5), then uses a diff-based docs
+  context and shows a visible `docs summary unavailable` warning. A late summary
+  still lands for the next push. The docs-checker still runs and its findings
+  still block.
+- **Docs-checker runs beside the reviewer.** The skill spawns the docs-checker
+  in parallel with the reviewer (manifest field `docs_checker_parallel`;
+  `behavior.docs_checker_parallel.enabled`, default on).
+- **Formatter session removed (ADR 0010, amends ADR 0001 item 6).** The gate
+  renders status, summary and verdict from the raw reviewer results; bare
+  arrays, wrapper keys and trailing commas are handled in Python and anything
+  else still fails closed after the retry. `compute_verdict` stays the sole
+  verdict authority. The skill's §3a quote check moved to Python: a finding whose
+  quoted evidence is not in the cited file is downgraded by 0.3 confidence with
+  a warning (not dropped); documentation findings are exempt. The reviewer
+  persona in the skill appendix is kept in sync with `agents/code-reviewer.md`
+  by a test.
+- **Deep-lane timeout is retried once (ADR 0010).** The first deep timeout is
+  the retriable reason `review-timeout`; a second fails with the real
+  `review timed out after Ns` detail. Fast-lane timeouts are unchanged.
+
+#### Added
+- **Settings layer and `/review-gate:settings` command.** A schema-validated
+  `settings.json` sets the model and thinking level of every review agent
+  (spotter, code-reviewer, deep-reviewer, docs-checker, code-filter,
+  code-resolver, docs-summary, orchestrator, canary) per backend, plus a
+  `behavior` section. Precedence: `OCR_*` environment, then the project file
+  `.ocr/settings.json`, then the user file `~/.config/review-gate/settings.json`
+  (`OCR_SETTINGS_FILE` relocates it), then the defaults. An invalid file denies
+  with a message naming the problems instead of falling back. Commands:
+  `py scripts/rg_settings_cli.py show|set|validate` and `/review-gate:settings`
+  (`commands/settings.md`); the ADR 0005 provider guard also covers pins from
+  files. The doctor validates the files, the guard, deprecated ids and, when
+  kimchi is installed, every pin against `kimchi --list-models`. The schema is
+  `schemas/settings.schema.json`; see `docs/config-reference.md`.
+- **Canary cache.** A passed kimchi deny-extension canary is remembered for
+  `behavior.canary_cache.ttl_days` (default 7), keyed on the kimchi version, the
+  deny-extension hash and the canary model, so most pushes skip the extra
+  headless session. A failed, corrupt or expired entry is a miss; disable with
+  `behavior.canary_cache.enabled` or `OCR_CANARY_CACHE=0`.
+- **Spotter skip (off by default).** `behavior.spotter_skip` (`OCR_SPOTTER_SKIP`)
+  skips the spotter for docs-only pushes and tiny changes (at most 3 files and
+  60 changed lines by default). Shipped disabled until the cross-file recall
+  scenarios are run on a real kimchi; the review fingerprint does not include
+  the skip state (known limitation, ADR 0010).
+- **Kimchi helper allowlist.** The deny extension admits exactly the
+  conventions, demands and collectors scripts by exact plugin path and fixed
+  argument grammar (a quoted heredoc only as stdin of those); `python -c` and
+  every other script stay denied. The commands are published as
+  `manifest.helper_cmds` and the skill uses them, so the demands and evidence
+  steps no longer fail under kimchi. The sandbox is otherwise unchanged
+  (ADR 0005 note, ADR 0010).
+- **`scripts/kimchi-verify.sh` (and `.ps1`).** One command for a real-kimchi
+  check: version, model list, doctor, every pinned model against the list, the
+  `:high` / `:max` suffix probe and a timed sample review through a real push;
+  writes `kimchi-verify-report.txt` and exits non-zero on any failure.
+- **Claude CLI finder and login message.** The claude backend finds the desktop
+  app's per-version install (`Claude-Data/claude_*/claude-code/<ver>/<hash>/`),
+  and a worker that reports it is not logged in is denied with an explicit
+  "child not logged in" message and the fix instead of a generic failure.
+- **ADR 0010** records the fail-closed relaxations, the formatter removal and
+  the kimchi helper allowlist.
+
+#### Fixed
+- **Hooks exit early inside review workers.** When `OCR_IN_REVIEW=1` is set the
+  hook scripts exit as their first statement, before any interpreter or fork, so
+  a worker's Bash calls no longer pay a hook round trip each. File-writing
+  shaped commands still go through the guard. The kimchi hook also finds `py`
+  when `python3` and `python` are missing or Windows Store stubs.
+- **Honest failure messages.** The deny shows the worker's real error and the
+  first lines of the supervisor log. A dead supervisor counts as an attempt
+  (it used to respawn with the counter reset, so three pushes exhausted a tip
+  without a reason); at the cap the state is `exhausted` with reason `crash`.
+  The usage-limit classifier needs a real rate-limit error shape and no longer
+  trips on the words "rate limit" in a long transcript.
+
 ### Added
 - **Native execution contract hardening (SPEC-16).** Explicit final and deep reviews
   can use correlated `prompt`/`abort` JSONL RPC workers with explicit run/task
