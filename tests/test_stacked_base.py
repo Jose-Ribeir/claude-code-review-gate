@@ -348,6 +348,7 @@ def test_git_mode_names_the_pushed_branch_not_the_checkout(repo, tmp_path):
     _git(["switch", "-q", "main"], cwd=repo)   # the checkout is main; the push sends feat
     env = _env(tmp_path)
     env["STUB_SLEEP"] = "5"   # outrun the 3 s inline budget: a still-running deny
+    env["OCR_INLINE_BUDGET_GIT"] = "3"   # git mode waits 300 s by default (W4)
     proc = _git_mode(repo, [f"refs/heads/feat {tip} refs/heads/feat {ZERO}"], env)
     out = proc.stdout + proc.stderr
     assert proc.returncode != 0, out
