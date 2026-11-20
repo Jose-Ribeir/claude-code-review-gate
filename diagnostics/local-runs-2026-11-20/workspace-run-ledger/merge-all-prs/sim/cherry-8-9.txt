@@ -1,0 +1,40 @@
++ b80a82386ec19a354fdd036686d9caae4d4ad82f [W1] spec-15: checks config keys parallel + timeout
++ de2a99d6c51f6a724e1d357d4701c96aefced01b [W2] spec-15: granular finding waivers
++ f99eccab2e8875a6000b4b3c02e92a7ffa0c1926 [W3] spec-15: executor contract warnings + evidence_source
++ 52a31b3ea62592d0b06155898595dca8c920bd8a [W4] spec-15: review fixes — waiver anchor windows, wiring, warning channels
++ 00bcf0bdf4fb1a159fc34030c6f9952f10d75799 [W5] spec-15: parallel command-check scheduling with isolated tip clone
++ 480c511e4c7196609c354ce2ea42b4c9fd67e927 [W6] spec-15: reference test-check executor (selector + probes)
++ 41ce469c28e9d3eadd8c489fd5787444cdec0e40 [W8] spec-15: anchor fallback for command checks + harness foundations
++ 261de0faedaad38b2ef71230d205ea7642ca566b [W7] spec-15: acceptance scenarios, ADR 0007, docs
++ 641bef2771ba4e4ddf1aca68e9e3cf128fd4ecd5 [W9] spec-15: scheduler cleanup, evidence anchors, budgets + telemetry
++ 05f1381ce8f03e90ac80fb35b4e18c765c26f8c2 [W10] spec-15: acceptance harness finding ids + lapse fixture
++ 29ccf5f1e3cafc91f60cea5ba7ef35f55a5b6a63 [W11] spec-15: stable test selection + waiver scenario coverage
++ 673b61d161442b1e8a74525d10093e9fec136782 spec-15: isolate lapse acceptance from prior waivers
++ ea98ce2d731376bfbdece095646b7ece8bbab222 spec-15: satisfy lint in the evidence fingerprint
++ e2725667957b1651e6e666f52e69890b72c95490 tests: repair cmdshim and cleanup compatibility across platforms
++ b5c3d94647b20e288404b79cdd0a3589ad77bd61 [S16-01B] Materialize immutable final-review repositories
++ c0657b5205deb43b1eabc32277d3859fb1beb40a [S16-01C] Add versioned final-review SQLite store
++ 33a21a4d6352197d478d85a7597ed04ca87e1c3b [S16-01A] add GitLab final-review provider metadata
++ f1de92911698779588ab0f7447ef335a2c7ea3b8 [S16-01D] Add standalone final-review correctness stage
++ f593b31daa7f3d1dd5a040fded669ea1e0763c77 [S16-06A] Add validated GitLab final-review graphs
++ c579f3f3f21218824670476ef29d3ae805e4c0d4 [S16-02B] Add complete final-review repository context
++ dc8d286981eb7f203cdc98138cbc026e9ee170e0 [S16-02A] Add independent final-review static lenses
++ f255226147063af6094376386552da109c9d37a3 [S16-02A] Repair independent-lens CLI regressions
++ b9990021048fa341e046b7fa78dc83a8a100aead [S16-03B] Add isolated final-review dynamic checks
++ 889273e6bca561925889c3649b7300e93ac46618 [S16-06B] Add ordered final stack composition
++ 467a1e13918ad44494064f1c4c00b8cdba295b89 [S16-03A] Add isolated required final verification
++ db9591b46f7388581511b274aa7b419fbf7d804d [S16-04A] Add durable final finding memory
++ 74c073e84b3fc8d2be0639d054850daadf024cb1 [S16-04B] Complete scoped final execution stops
++ 36171478403d73f2ed12eb893ddff7d97e6dd283 [S16-05] Add guarded GitLab final publication
++ c09201d72035426f7981ec516909804d3bf1826f [S16-07] Complete standalone final review
++ 35ca2f42454fd0199c9329480df978f90ad86787 [S16-07] Repair standalone orchestration regressions
++ 4da0c45c11d6dea38e57850b9bd5dcfbf1a51702 [S16-07] Finish final stack regression coverage
++ bd60e5f3db98777a11e612d0a992fbeaf2dcc057 [S16-08] Add GitHub final review parity
++ be13df8ca95abab267df1bf486772cd0165364cd [S16-09A] Add versioned final acceptance registry
++ 62eb6db26982e19e968f392e8987ef0ec8d2ab47 [S16-09B] Add database-backed final review views
++ 44f6544e1608ca37bc67b260004309578d48e4f4 [S16-10B1] Record final architecture and observability
++ 04f6484669a4e2c77a034a241091a24a0aaf1987 [S16-10A] Implement executable SPEC-16 acceptance scenarios
++ c4bdab9e115e1312e1a3abf915b098474bef6a5f [S16-10B1] Wire final review observability into runtime
++ 09ebf9779948f591b496223d3bb05fb2f795a5b5 [W3] Default installed acceptance identity in store
++ c68cc892c162d69fafbe8375fbce540d90e63acd [W4] Record SPEC-16 configuration and operator decisions
++ 5f2e99b3ca04cd2c268d34a5dc6fd5ab4f1a5c90 [W2] Make unsupported required CI visibly unassessable

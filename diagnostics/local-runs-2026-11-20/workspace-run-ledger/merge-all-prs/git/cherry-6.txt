@@ -1,0 +1,14 @@
++ d990cb4a88ff9e023418e93ec9a8054ae7a81299 test(pg1): failing tests for the user-level gate config surface
++ c2960d4c1c056dfaaec381d75d64f450db79eca0 feat(rg_store): ledger hygiene — verdict TTL with lazy prune, delete-ref invalidation, audited bypasses
++ b97e28fabcaa3d9a93cbf1bcf1b85acff834fd8d feat(pg1): user-level run-config surface with load_config()
++ f0c8c57eb507d548447604f4cb0e568075a2edb6 feat(pg6): default-on universal gate install with global-hooks chaining
++ e53d0b0ca666d60e3e1760f34b8890374fcf4df1 feat: add read-only MR/PR context consult with consistency findings (pg2)
++ 68f2b893b662eb43ac962f7d61ad3168b4458a9e feat(pg4): tip-bound verdicts with tree-diff carry-forward, delete invalidation, audited git-mode bypass
++ a530e68e720a6afc23afa7c5c17d8c8e1e418103 docs(adr): record the universal local-only push-gate decisions and config surface
++ 7074706b94175e14f181f7222aa1d01b33b86459 feat(pg5): orchestrator wiring — run-config consumption, MR-context consult, MR-target base resolution
++ eaea518338f5c6fd731677a7524cefa6e53e84f5 fix(pg8): apply push-gate review findings — ancestor head check, patch-id carry-forward, prune wiring, timeout warn, docs, cleanups
++ 9df1ca62f5be4d7c92105b74dbd36d0b22dd9adb fix(pg8): apply the gate's own self-review findings
++ e119bc0b6f162a92be269508a1a27deff6607961 fix(pg8): separator-anchored brace rename parsing
++ e0e6d1a6b8522ab1568dca2d9721a9ca9c23ac2a fix(pg8): parse numstat renames via -z instead of brace rewriting
++ 8a793acabdb5bdff26a6a8ca9e3394309d68dd9d fix(pg8): split numstat records on the first two tabs only
++ 895abdb489eb3ecf1aca10aac7a91c6421da1d72 test(pg8): create the fixture dir before git init in the tab-path test

@@ -1,0 +1,18 @@
+[sim] target: /Users/jose_ribeir/work/code-review/claude-code-review-gate
+[sim] scratch: /Users/jose_ribeir/work/code-review/sim-scratch-spec15-final
+[sim] seeded into the scratch baseline: .ocr/config.json, go.mod, scripts/test_check, simconst/limits.py, simgo/racy.go, simlib/feature.py, tests/test_feature.py
+[sim] gate hook installed via the repo installer: /Users/jose_ribeir/work/code-review/sim-scratch-spec15-final/hooks/pre-push
+[sim] --- A-race-probe-blocks: a fabricated data race in changed Go code is caught by an ephemeral probe run under go test -race and blocks
+[sim]     expect: block
+[sim]     [OK  ] outcome=block pushes=13 elapsed=172.0s
+[sim] --- B-regression-blocks: a fabricated behavioral regression in a long-standing feature blocks via the selected existing test
+[sim]     expect: block
+[sim]     [OK  ] outcome=block pushes=13 elapsed=171.9s
+[sim] --- C-waived-repush-passes: the same blocking push, re-pushed after its finding is waived, passes with the waiver loudly listed
+[sim]     expect: pass
+[sim]     [FAIL] outcome=error pushes=0 elapsed=0s
+[sim]     failure: no recorded finding on 'tests/test_feature.py' in the findings log
+[sim] docs summary cache regenerated inline: False (0 bytes)
+[sim] original repository untouched: True
+[sim] report written to /Users/jose_ribeir/work/code-review/sim-scratch-spec15-final/results.json
+[sim] ==== FAILURES RECORDED (490s total) ====

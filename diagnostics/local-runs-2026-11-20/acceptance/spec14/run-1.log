@@ -1,0 +1,29 @@
+[sim] target: /Users/jose_ribeir/work/kimchi-studio
+[sim] scratch: /Users/jose_ribeir/work/code-review/sim-scratch-spec14
+[sim] seeded into the scratch baseline: .gitignore, .ocr/config.json, docs/adr/0001-electron-vite-build-tooling.md
+[sim] gate hook installed via the repo installer: /Users/jose_ribeir/work/code-review/sim-scratch-spec14/hooks/pre-push
+[sim] --- A-deslopped-docs-block: new onboarding doc packed with catalog-tell slop (docs-deslop duty)
+[sim]     expect: block
+[sim]     [OK  ] outcome=block pushes=10 elapsed=132.9s
+[sim] --- B-clean-rewrite-passes: the onboarding doc rewritten plain -- the deslop finding no longer holds
+[sim]     expect: pass
+[sim]     [OK  ] outcome=pass pushes=7 elapsed=86.2s
+[sim] --- C-adr-decision-before-context-blocks: ADR-0102 states its Decision before its Context (adr-wait-what duty, unconditional rule)
+[sim]     expect: block
+[sim]     [OK  ] outcome=block pushes=19 elapsed=259.2s
+[sim] --- D-adr-phantom-function-blocks: ADR-0103 cites a stagedPaths helper that does not exist in the named file (adr-integrity duty)
+[sim]     expect: block
+[sim]     [OK  ] outcome=block pushes=16 elapsed=216.3s
+[sim] --- E-adr-misquote-blocks: ADR-0104 claims seeded ADR-0001 says transcripts are rewritten in place; 0001 says the opposite (adr-integrity duty)
+[sim]     expect: block
+[sim]     [OK  ] outcome=block pushes=10 elapsed=130.0s
+[sim] --- F-adr-unverifiable-claim-blocks: ADR-0105 asserts external-service behavior (retention, latency) that cannot be verified from the tip (adr-integrity duty, guilty-until-proven-innocent, SPEC-14.6)
+[sim]     expect: block
+[sim]     [OK  ] outcome=block pushes=18 elapsed=245.0s
+[sim] --- G-clean-docs-push-passes: well-formed ADR-0106, Context first, every claim verifiable at the tip, clean prose
+[sim]     expect: pass
+[sim]     [OK  ] outcome=pass pushes=11 elapsed=142.2s
+[sim] docs summary cache regenerated inline: False (0 bytes)
+[sim] original repository untouched: True
+[sim] report written to /Users/jose_ribeir/work/code-review/sim-scratch-spec14/results.json
+[sim] ==== ALL SCENARIOS PASS (1214s total) ====

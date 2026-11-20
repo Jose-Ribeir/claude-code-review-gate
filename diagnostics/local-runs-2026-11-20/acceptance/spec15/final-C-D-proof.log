@@ -1,0 +1,14 @@
+[sim] target: /Users/jose_ribeir/work/code-review/claude-code-review-gate
+[sim] scratch: /Users/jose_ribeir/work/code-review/sim-scratch-spec15-CD-proof
+[sim] seeded into the scratch baseline: .ocr/config.json, go.mod, scripts/test_check, simconst/limits.py, simgo/racy.go, simlib/feature.py, tests/test_feature.py
+[sim] gate hook installed via the repo installer: /Users/jose_ribeir/work/code-review/sim-scratch-spec15-CD-proof/hooks/pre-push
+[sim] --- C-waived-repush-passes: the same blocking push, re-pushed after every expected finding on its paths is waived, passes with the waiver loudly listed
+[sim]     expect: pass
+[sim]     [OK  ] outcome=pass pushes=18 elapsed=231.4s
+[sim] --- D-waiver-lapse-blocks: the finding's code/evidence altered since the waiver: the anchor no longer matches, the waiver lapses, it blocks again
+[sim]     expect: block
+[sim]     [OK  ] outcome=block pushes=13 elapsed=158.9s
+[sim] docs summary cache regenerated inline: False (0 bytes)
+[sim] original repository untouched: True
+[sim] report written to /Users/jose_ribeir/work/code-review/sim-scratch-spec15-CD-proof/results.json
+[sim] ==== ALL SCENARIOS PASS (391s total) ====

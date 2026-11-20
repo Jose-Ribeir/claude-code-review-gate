@@ -1,0 +1,20 @@
+9e86576 SPEC-15: race/regression test checks + granular waivers
+c1e0cce Merge branch 'spec-14/docs-quality-checks'
+727e02b merge: guilty-until-proven-innocent for ADR claims (SPEC-14.6)
+cd10dbd merge: review-finding fixes (SPEC-14)
+9075205 merge: custom-checks documentation (SPEC-14.5)
+5822ee5 merge: docs-quality gate plumbing (SPEC-14.4)
+66af05d merge: docs-checker quality duties (SPEC-14.3)
+e702d93 merge: docs quality module (SPEC-14.2)
+4f67de8 merge: checks config surface (SPEC-14.1)
+d9d0bd8 Merge pull request #3 from Jose-Ribeir/fix/ci-pre-v2-baseline
+de8f97f Merge pull request #4 from Jose-Ribeir/unified-into-main
+11ab0bd merge: bring main's history into unified (tree = unified)
+45cf93d Merge branch 'integration/restack-coverage' into piece/restack-b
+15c107a Merge branch 'piece/restack-d' into integration/restack-coverage
+5d6deb1 Merge branch 'piece/restack-c' into integration/restack-coverage
+e042891 Merge branch 'piece/restack-a' into integration/restack-coverage
+67def36 Merge branch 'integration/restack-coverage' into piece/restack-d
+4102a99 Merge branch 'wave2-t26' into integration/address-all-findings
+3b57451 Merge branch 'wave2-t25' into integration/address-all-findings
+5d0ecee Merge branch 'wave2-t24' into integration/address-all-findings

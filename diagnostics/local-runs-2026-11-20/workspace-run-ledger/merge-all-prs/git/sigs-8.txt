@@ -1,0 +1,3 @@
+N 1cd1149 fix: fourth review round — clamp at zero bars, list-item paragraphs, escape links, ADR citations
+N 10befff fix: second push-review round — sandbox, scopes, STE semantics, ADR citations
+N de775b3 fix: five push-review findings — links, clamp floor, chunk dedupe, warnings, phrase regex

@@ -1,0 +1,19 @@
+N 895abdb test(pg8): create the fixture dir before git init in the tab-path test
+N 8a793ac fix(pg8): split numstat records on the first two tabs only
+N e0e6d1a fix(pg8): parse numstat renames via -z instead of brace rewriting
+N e119bc0 fix(pg8): separator-anchored brace rename parsing
+N 9df1ca6 fix(pg8): apply the gate's own self-review findings
+N eaea518 fix(pg8): apply push-gate review findings — ancestor head check, patch-id carry-forward, prune wiring, timeout warn, docs, cleanups
+N 2ecc2b1 Merge branch 'integration/push-gate' into impl/pg5
+N 7074706 feat(pg5): orchestrator wiring — run-config consumption, MR-context consult, MR-target base resolution
+N a530e68 docs(adr): record the universal local-only push-gate decisions and config surface
+N 68f2b89 feat(pg4): tip-bound verdicts with tree-diff carry-forward, delete invalidation, audited git-mode bypass
+N 8f088f5 Merge branches 'impl/pg2' and 'impl/pg6' into integration/push-gate
+N 8ce0349 Merge branch 'integration/push-gate' into impl/pg2
+N e53d0b0 feat: add read-only MR/PR context consult with consistency findings (pg2)
+N 90f67a5 Merge branch 'integration/push-gate' into impl/pg6
+N f0c8c57 feat(pg6): default-on universal gate install with global-hooks chaining
+N 4378128 Merge branches 'impl/pg1' and 'impl/pg3' into integration/push-gate
+N b97e28f feat(pg1): user-level run-config surface with load_config()
+N c2960d4 feat(rg_store): ledger hygiene — verdict TTL with lazy prune, delete-ref invalidation, audited bypasses
+N d990cb4 test(pg1): failing tests for the user-level gate config surface

@@ -1,0 +1,7 @@
+Ordered-pair ancestry checks (git merge-base --is-ancestor A B; exit 0=yes A contained in B, 1=no)
+is-ancestor refs/merge-validator/part-6 refs/merge-validator/part-8 -> exit=1
+is-ancestor refs/merge-validator/part-6 refs/merge-validator/part-9 -> exit=1
+is-ancestor refs/merge-validator/part-8 refs/merge-validator/part-6 -> exit=1
+is-ancestor refs/merge-validator/part-8 refs/merge-validator/part-9 -> exit=1
+is-ancestor refs/merge-validator/part-9 refs/merge-validator/part-6 -> exit=1
+is-ancestor refs/merge-validator/part-9 refs/merge-validator/part-8 -> exit=1

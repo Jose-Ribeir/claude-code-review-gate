@@ -1,0 +1,3 @@
++ de775b374ef0f30f433db1aa4117104ee15775e3 fix: five push-review findings — links, clamp floor, chunk dedupe, warnings, phrase regex
++ 10befff8ce75c43b99c0381ed5955e27debda88b fix: second push-review round — sandbox, scopes, STE semantics, ADR citations
++ 1cd1149177995de149f9b4c92a417097499cf975 fix: fourth review round — clamp at zero bars, list-item paragraphs, escape links, ADR citations

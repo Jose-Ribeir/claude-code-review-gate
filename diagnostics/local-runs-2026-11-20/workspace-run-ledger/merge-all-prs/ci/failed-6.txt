@@ -1,0 +1,150 @@
+test (3.12)	UNKNOWN STEP	﻿2026-11-16T17:55:49.7625089Z Current runner version: '2.338.2'
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7640889Z ##[group]Runner Image Provisioner
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7641525Z Hosted Compute Agent
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7642319Z Version: 20261103.629
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7642788Z Commit: 15dbd9ccb5dbf34fae002b6ed1a2670f52df37bc
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7643338Z Build Date: 2026-11-03T17:26:59Z
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7643855Z Worker ID: {b000f863-0ddb-4173-ad2b-f87122e1403a}
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7644381Z Region: us-west-2
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7644831Z Cloud: AWS
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7645199Z ##[endgroup]
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7646170Z ##[group]Operating System
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7646636Z Ubuntu
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7647000Z 24.04.5
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7647361Z LTS
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7647717Z ##[endgroup]
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7648087Z ##[group]Runner Image
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7648548Z Image: ubuntu-24.04
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7648943Z Version: 20261111.127.1
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7649852Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20261111.127/images/ubuntu/Ubuntu2404-Readme.md
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7650933Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20261111.127
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7651656Z ##[endgroup]
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7652803Z ##[group]GITHUB_TOKEN Permissions
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7654382Z Contents: read
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7654781Z Metadata: read
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7655254Z Packages: read
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7655711Z ##[endgroup]
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7657145Z Secret source: Actions
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7657794Z Cache mode: write
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7658279Z Prepare workflow directory
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7886721Z Prepare all required actions
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7922232Z Getting action download info
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:50.1626501Z Download action repository 'actions/checkout@v4' (SHA:11d5960a326750d5838078e36cf38b85af677262)
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:52.4505598Z Download action repository 'actions/setup-python@v5' (SHA:a26af69be951a213d495a4c3e4e4022e16d87065)
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:52.7338571Z Complete job name: test (3.12)
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:52.7948192Z ##[group]Run actions/checkout@v4
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:52.7948932Z with:
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:52.7949402Z   repository: Jose-Ribeir/claude-code-review-gate
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:52.7953299Z   token: ***
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:52.7953773Z   ssh-strict: true
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:52.7954202Z   ssh-user: git
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:52.7954677Z   persist-credentials: true
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:52.7955201Z   clean: true
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:52.7955669Z   sparse-checkout-cone-mode: true
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:52.7956167Z   fetch-depth: 1
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:52.7956583Z   fetch-tags: false
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:52.7957018Z   show-progress: true
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:52.7957449Z   lfs: false
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:52.7957839Z   submodules: false
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:52.7958307Z   set-safe-directory: true
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:52.7958783Z   allow-unsafe-pr-checkout: false
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:52.7959485Z ##[endgroup]
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.6278930Z Syncing repository: Jose-Ribeir/claude-code-review-gate
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.6280119Z ##[group]Getting Git version info
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.6280820Z Working directory is '/home/runner/work/claude-code-review-gate/claude-code-review-gate'
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.6282067Z [command]/usr/bin/git version
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.9062820Z git version 2.56.1
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.9076108Z ##[endgroup]
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.9086304Z Temporarily overriding HOME='/home/runner/work/_temp/d2689eb1-48c6-4a9e-bc70-6b6cda4aff32' before making global git config changes
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.9087308Z Adding repository directory to the temporary git global config as a safe directory
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.9089953Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/claude-code-review-gate/claude-code-review-gate
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.9137904Z Deleting the contents of '/home/runner/work/claude-code-review-gate/claude-code-review-gate'
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.9140280Z ##[group]Initializing the repository
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.9144254Z [command]/usr/bin/git init /home/runner/work/claude-code-review-gate/claude-code-review-gate
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.9994911Z hint: Using 'master' as the name for the initial branch. This default branch name
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.9996109Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.9996564Z hint: to use in all of your new repositories, which will suppress this warning,
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.9997278Z hint: call:
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.9997515Z hint:
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.9997835Z hint: 	git config --global init.defaultBranch <name>
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.9998150Z hint:
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.9998423Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.9999011Z hint: 'development'. The just-created branch can be renamed via this command:
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.9999475Z hint:
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.9999730Z hint: 	git branch -m <name>
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:58.0000059Z hint:
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:58.0000466Z hint: Disable this message with "git config set advice.defaultBranchName false"
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:58.0002947Z Initialized empty Git repository in /home/runner/work/claude-code-review-gate/claude-code-review-gate/.git/
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:58.0010206Z [command]/usr/bin/git remote add origin https://github.com/Jose-Ribeir/claude-code-review-gate
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:58.0064034Z ##[endgroup]
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:58.0064764Z ##[group]Disabling automatic garbage collection
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:58.0067086Z [command]/usr/bin/git config --local gc.auto 0
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:58.0090967Z ##[endgroup]
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:58.0091619Z ##[group]Setting up auth
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:58.0096690Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:58.0122377Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:58.4479311Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:58.4504237Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:58.4650127Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:58.4672980Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:58.4818979Z [command]/usr/bin/git config --local http.https://github.com/.extraheader AUTHORIZATION: basic ***
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:58.4844626Z ##[endgroup]
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:58.4845049Z ##[group]Fetching the repository
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:58.4858701Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +a7e77daf43cb8fde732fbbda9b34a22fed1745c4:refs/remotes/pull/6/merge
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2079852Z From https://github.com/Jose-Ribeir/claude-code-review-gate
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2080506Z  * [new ref]         a7e77daf43cb8fde732fbbda9b34a22fed1745c4 -> pull/6/merge
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2085773Z ##[endgroup]
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2086404Z ##[group]Determining the checkout info
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2087202Z ##[endgroup]
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2099188Z [command]/usr/bin/git sparse-checkout disable
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2168195Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2188090Z ##[group]Checking out the ref
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2191896Z [command]/usr/bin/git checkout --progress --force refs/remotes/pull/6/merge
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2421058Z Note: switching to 'refs/remotes/pull/6/merge'.
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2421332Z 
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2421494Z You are in 'detached HEAD' state. You can look around, make experimental
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2422203Z changes and commit them, and you can discard any commits you make in this
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2422627Z state without impacting any branches by switching back to a branch.
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2422823Z 
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2423069Z If you want to create a new branch to retain commits you create, you may
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2423615Z do so (now or later) by using -c with the switch command. Example:
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2423841Z 
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2423935Z   git switch -c <new-branch-name>
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2424146Z 
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2424246Z Or undo this operation with:
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2424444Z 
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2424538Z   git switch -
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2424659Z 
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2424881Z Turn off this advice by setting config variable advice.detachedHead to false
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2425116Z 
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2425406Z HEAD is now at a7e77da Merge 895abdb489eb3ecf1aca10aac7a91c6421da1d72 into 1dacf08767c6e19763e1e2bd2967949369e2cf18
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2432994Z ##[endgroup]
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2466095Z [command]/usr/bin/git log -1 --format=%H
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2484909Z a7e77daf43cb8fde732fbbda9b34a22fed1745c4
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2704088Z ##[group]Run actions/setup-python@v5
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2704413Z with:
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2704644Z   python-version: 3.12
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2704912Z   check-latest: false
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2706935Z   token: ***
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2707196Z   update-environment: true
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2707444Z   allow-prereleases: false
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2707678Z   freethreaded: false
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2707909Z ##[endgroup]
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.3692207Z ##[group]Installed versions
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.6930096Z (node:2147) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.6930876Z (Use `node --trace-deprecation ...` to show where the warning was created)
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.6931506Z Successfully set up CPython (3.12.16)
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.6932345Z ##[endgroup]
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.7057961Z ##[group]Run python -m pip install ruff pytest
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.7058355Z ^[[36;1mpython -m pip install ruff pytest^[[0m
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:00.2271625Z shell: /usr/bin/bash -e {0}
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:00.2272236Z env:
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:00.2272532Z   pythonLocation: /opt/hostedtoolcache/Python/3.12.16/x64
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:00.2272966Z   PKG_CONFIG_PATH: /opt/hostedtoolcache/Python/3.12.16/x64/lib/pkgconfig
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:00.2273385Z   Python_ROOT_DIR: /opt/hostedtoolcache/Python/3.12.16/x64
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:00.2273728Z   Python2_ROOT_DIR: /opt/hostedtoolcache/Python/3.12.16/x64
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:00.2274066Z   Python3_ROOT_DIR: /opt/hostedtoolcache/Python/3.12.16/x64
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:00.2274405Z   LD_LIBRARY_PATH: /opt/hostedtoolcache/Python/3.12.16/x64/lib
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:00.2274701Z ##[endgroup]
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:05.6655145Z Collecting ruff
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:05.7186477Z   Downloading ruff-0.17.5-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (20 kB)

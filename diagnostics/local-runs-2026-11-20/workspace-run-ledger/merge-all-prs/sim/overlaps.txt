@@ -1,0 +1,19 @@
+=== files in 6 intersect 8 ===
+scripts/review-gate.py
+scripts/rg_config.py
+=== files in 6 intersect 9 ===
+CHANGELOG.md
+scripts/review-gate.py
+scripts/rg_config.py
+=== files in 8 intersect 9 ===
+agents/docs-checker.md
+scripts/review-gate.py
+scripts/rg_config.py
+=== files in 6 intersect 8 intersect 9 ===
+scripts/review-gate.py
+scripts/rg_config.py
+
+=== WHICH PARTS TOUCH KEY FILES ===
+CHANGELOG.md      -> part-6, part-9
+scripts/review-gate.py -> part-6, part-8, part-9
+scripts/rg_config.py   -> part-6, part-8, part-9

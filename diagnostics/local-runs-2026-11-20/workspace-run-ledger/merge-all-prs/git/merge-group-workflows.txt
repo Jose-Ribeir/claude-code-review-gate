@@ -1,0 +1,4 @@
+merge_group search in .github/workflows/*.yml:
+grep exit: 1 (1 = no matches)
+workflows present:
+ci.yml

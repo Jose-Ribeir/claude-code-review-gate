@@ -1,0 +1,15 @@
+9e86576 SPEC-15: race/regression test checks + granular waivers
+e272566 tests: repair cmdshim and cleanup compatibility across platforms
+ea98ce2 spec-15: satisfy lint in the evidence fingerprint
+673b61d spec-15: isolate lapse acceptance from prior waivers
+29ccf5f [W11] spec-15: stable test selection + waiver scenario coverage
+05f1381 [W10] spec-15: acceptance harness finding ids + lapse fixture
+641bef2 [W9] spec-15: scheduler cleanup, evidence anchors, budgets + telemetry
+261de0f [W7] spec-15: acceptance scenarios, ADR 0007, docs
+41ce469 [W8] spec-15: anchor fallback for command checks + harness foundations
+480c511 [W6] spec-15: reference test-check executor (selector + probes)
+00bcf0b [W5] spec-15: parallel command-check scheduling with isolated tip clone
+52a31b3 [W4] spec-15: review fixes — waiver anchor windows, wiring, warning channels
+f99ecca [W3] spec-15: executor contract warnings + evidence_source
+de2a99d [W2] spec-15: granular finding waivers
+b80a823 [W1] spec-15: checks config keys parallel + timeout

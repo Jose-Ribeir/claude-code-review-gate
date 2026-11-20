@@ -1,0 +1,2 @@
+part 1 merge    clean        refs/merge-validator/part-9
+part 2 merge    conflict     refs/merge-validator/part-6 conflicts: CHANGELOG.md

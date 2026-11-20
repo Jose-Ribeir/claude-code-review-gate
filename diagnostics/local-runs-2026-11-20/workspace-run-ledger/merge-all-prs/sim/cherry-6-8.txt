@@ -1,0 +1,19 @@
++ 6d40dece130140457a5f0e2a48119eaeb6913a71 SPEC-14.2: docs-quality evidence + finding-contract module
++ e582f807ec9413adae10fcd6df4c2747b7cac283 feat: resolve a layered checks surface in the gate settings
++ 9ac38dd356dcaa96a0ac2b8ab37f47865eb36c47 docs: extend docs-checker persona with quality duties + review-skill orchestration (SPEC-14.3)
++ 8f501d7ace25d8d376cafd5627cf2bbc35e35f4a feat: SPEC-14.4 gate plumbing -- docs_quality payload, fallback, command checks
++ 39cda95e5b883095d14e9fef33ad3ab769c1a26e docs: ADR 0006 + README/CHANGELOG for the custom-checks surface (SPEC-14.5)
++ 7c375121ed410d7c0e96370168d49cbae6eae77c fix: SPEC-14 review findings -- duty warn modes, pre-pass notes, v2 stubs, cluster rule, command-check hardening
++ 9f383a79312e2f4dfb0bce8d9672dc218f2cd3ab feat: SPEC-14.6 -- adr-integrity fails on unverifiable claims
++ 4bc9bdd73ba46618d9c07f659f31df4626d1f791 config: dogfood the ADR quality duties at warn
++ 6f6a7391144046e44fd828c885590ef169721821 tests: SPEC-14 docs-quality acceptance scenarios (seam 2)
++ a6aa9c5f7e5b7539da68c5ecd150608c6340c5f9 feat: comment-consistency finding class in the deep lane (comment-gate)
++ f977e295d182523b4ae5c6a95339d00e6bf7453b docs: record comment-gate first dogfood (adversarial 3/3, control clean)
++ fec83fc0bddc6908a613d54e0c4f31264ccf9772 config: promote dogfooded ADR duties from warn to block
++ db243a354edcbbae7bafcd9bffff5c8ab49c498b tests: SPEC-14 dogfood scenarios against the promoted ADR duties
++ 6950a473e24af1607bcfe95772bb33ec47525b81 tests: claude-profile docs-quality plumbing proof + ambient-kimchi fix for sniff test
++ e538609be6d44498d643506edd6bf2480ed17dde test: scrub ambient kimchi markers in the breadcrumb selection test
++ 8385a974935418862f80cb51a5ecc9fb80dcd250 fix: four gate findings from the OCR push review
++ de775b374ef0f30f433db1aa4117104ee15775e3 fix: five push-review findings — links, clamp floor, chunk dedupe, warnings, phrase regex
++ 10befff8ce75c43b99c0381ed5955e27debda88b fix: second push-review round — sandbox, scopes, STE semantics, ADR citations
++ 1cd1149177995de149f9b4c92a417097499cf975 fix: fourth review round — clamp at zero bars, list-item paragraphs, escape links, ADR citations

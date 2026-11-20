@@ -1,0 +1,9 @@
+# Final focused review of 5463af9
+
+**Verdict: NEEDS_FIXES**
+
+1. `/Users/jose_ribeir/work/code-review/claude-code-review-gate/examples/test-check/test_check:243-269`: `_diagnostic_text` leaves credential material in opted-in selector/probe diagnostics. Exact local probes produced `Authorization: [redacted] dXNlcjpwYXNz`, `proxy_authorization=[redacted] bearer.token.value`, and `{"access_token":"[redacted] token with spaces"}`. When diagnostics are enabled and a selector response, probe source/command, or run output contains these ordinary formats, `tests/sim_scenarios_spec16.py:647-650` copies the leaked values into the persisted simulation result. Redact complete quoted values and complete Basic/Bearer scheme payloads before truncation, reusing the R11 semantics; add selector and execute/retry regression cases.
+
+2. `/Users/jose_ribeir/work/code-review/claude-code-review-gate/scripts/rg_final_lenses.py:138-175`: `_sanitize_lens_text` redacts only the word `Basic` from `Authorization: Basic dXNlcjpwYXNz`, leaving the base64 username/password in `outcome.summary`, `received_summary`, and source rationale. Normalizing a successful worker result demonstrably retained `dXNlcjpwYXNz`, which `_record_lens_aggregation` then persists. Apply scheme-aware authorization redaction before `_LENS_SECRET_ASSIGNMENT` and test normalization plus stored lens evidence.
+
+Focused verification: 263 R10-R15/W1/W2 tests passed; changed-file Ruff and `git diff --check` passed. Full pytest reached 37% without a reported failure before the 800-second timeout. STOP ordering/environment, Windows cleanup degradation, GitLab globals/quoted keys, ADR discovery, placeholder rejection, acceptance relevance filters, deterministic run/retry probes, diagnostics activation/path isolation/cleanup, and verdict-input separation were inspected. No live model/provider was run and no real-acceptance outcome is inferred.

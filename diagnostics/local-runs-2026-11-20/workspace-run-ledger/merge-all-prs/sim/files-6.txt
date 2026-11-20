@@ -1,0 +1,15 @@
+CHANGELOG.md
+README.md
+docs/adr/0006-universal-local-only-push-gate.md
+docs/config-reference.md
+scripts/install-git-hook.sh
+scripts/review-gate.py
+scripts/rg_config.py
+scripts/rg_mr_consult.py
+scripts/rg_store.py
+tests/test_pg1_config_surface.py
+tests/test_pg2_mr_consult.py
+tests/test_pg3_ledger_hygiene.py
+tests/test_pg4_carry_forward.py
+tests/test_pg5_orchestrator.py
+tests/test_pg6_installer.py

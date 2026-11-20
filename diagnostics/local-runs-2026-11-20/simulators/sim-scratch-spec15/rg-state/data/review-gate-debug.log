@@ -1,0 +1,6 @@
+ts=2026-11-17T14:26:16Z event=phase run=2c613dd97e689a8e name=worktree s=0.16 ok=1
+ts=2026-11-17T14:26:16Z event=phase run=2c613dd97e689a8e name=plan s=0.19 files=0
+ts=2026-11-17T14:30:28Z event=call run=2c613dd97e689a8e kind=review outcome=ok s=251.2 manifest_bytes=863 first_event_s=0.72
+ts=2026-11-17T14:30:28Z event=phase run=2c613dd97e689a8e name=review s=251.25 chunks=1
+ts=2026-11-17T14:30:28Z event=phase run=2c613dd97e689a8e name=finish s=0.27
+ts=2026-11-17T14:30:28Z event=run run=2c613dd97e689a8e s=251.9 rc=0 calls=1 chunks=0

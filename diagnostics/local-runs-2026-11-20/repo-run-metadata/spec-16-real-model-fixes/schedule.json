@@ -1,0 +1,87 @@
+{
+  "version": 1,
+  "base_sha": "690df7e73e3deb04e131d56980f391e4316374fd",
+  "budget": 100000,
+  "params": {"budget": 100000, "single_max_files": 15},
+  "layers": [["C1", "C2"], ["C3"]],
+  "clusters": [
+    {
+      "id": "C1",
+      "title": "Verification parsing preserves quoted GitLab job names",
+      "wus": ["R7"],
+      "commit_tag": "[R7]",
+      "layer": 0,
+      "est_tokens": 30000,
+      "tokens_narrow": 30000,
+      "files": [
+        {"path": "scripts/rg_final_verification.py", "w": true, "mode": "exclusive", "wus": ["R7"]},
+        {"path": "tests/test_final_verification.py", "w": true, "mode": "exclusive", "wus": ["R7"]}
+      ]
+    },
+    {
+      "id": "C2",
+      "title": "Real-model completion, bounded lenses, timeout cleanup",
+      "wus": ["R8"],
+      "commit_tag": "[R8]",
+      "layer": 0,
+      "est_tokens": 95000,
+      "tokens_narrow": 95000,
+      "files": [
+        {"path": "scripts/rg_final_lenses.py", "w": true, "mode": "exclusive", "wus": ["R8"]},
+        {"path": "scripts/rg_final_execution.py", "w": true, "mode": "exclusive", "wus": ["R8"]},
+        {"path": "scripts/rg_final_review.py", "w": true, "mode": "exclusive", "wus": ["R8"]},
+        {"path": "tests/sim_harness.py", "w": true, "mode": "exclusive", "wus": ["R8"]},
+        {"path": "tests/test_final_lenses.py", "w": true, "mode": "exclusive", "wus": ["R8"]},
+        {"path": "tests/test_final_stops.py", "w": true, "mode": "exclusive", "wus": ["R8"]},
+        {"path": "tests/test_worker_env.py", "w": true, "mode": "exclusive", "wus": ["R8"]},
+        {"path": "tests/test_worker_plumbing.py", "w": true, "mode": "exclusive", "wus": ["R8"]},
+        {"path": "tests/test_sim_harness.py", "w": true, "mode": "exclusive", "wus": ["R8"]}
+      ]
+    },
+    {
+      "id": "C3",
+      "title": "Readonly full regressions and validation after R7/R8",
+      "wus": ["R9"],
+      "layer": 1,
+      "readonly": true,
+      "est_tokens": 25000,
+      "tokens_narrow": 25000,
+      "files": [
+        {"path": "scripts/rg_final_verification.py", "w": false, "mode": "readonly", "wus": ["R9"]},
+        {"path": "scripts/rg_final_lenses.py", "w": false, "mode": "readonly", "wus": ["R9"]},
+        {"path": "scripts/rg_final_execution.py", "w": false, "mode": "readonly", "wus": ["R9"]},
+        {"path": "scripts/rg_final_review.py", "w": false, "mode": "readonly", "wus": ["R9"]},
+        {"path": "tests/sim_harness.py", "w": false, "mode": "readonly", "wus": ["R9"]},
+        {"path": "tests/test_final_verification.py", "w": false, "mode": "readonly", "wus": ["R9"]},
+        {"path": "tests/test_final_lenses.py", "w": false, "mode": "readonly", "wus": ["R9"]},
+        {"path": "tests/test_final_stops.py", "w": false, "mode": "readonly", "wus": ["R9"]},
+        {"path": "tests/test_worker_env.py", "w": false, "mode": "readonly", "wus": ["R9"]},
+        {"path": "tests/test_worker_plumbing.py", "w": false, "mode": "readonly", "wus": ["R9"]},
+        {"path": "tests/test_sim_harness.py", "w": false, "mode": "readonly", "wus": ["R9"]}
+      ]
+    }
+  ],
+  "deliverables": [
+    {
+      "name": "main",
+      "clusters": ["C1", "C2", "C3"],
+      "tags": ["[R7]", "[R8]"],
+      "branch": "dk/690df7e7/main",
+      "base": "690df7e73e3deb04e131d56980f391e4316374fd",
+      "layers": [0, 1],
+      "primary_files": [
+        "scripts/rg_final_verification.py",
+        "tests/test_final_verification.py",
+        "scripts/rg_final_lenses.py",
+        "scripts/rg_final_execution.py",
+        "scripts/rg_final_review.py",
+        "tests/sim_harness.py",
+        "tests/test_final_lenses.py",
+        "tests/test_final_stops.py",
+        "tests/test_worker_env.py",
+        "tests/test_worker_plumbing.py",
+        "tests/test_sim_harness.py"
+      ]
+    }
+  ]
+}

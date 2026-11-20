@@ -1,0 +1,18 @@
+ts=2026-11-17T15:05:56Z event=phase run=42fc6104c8050afa name=worktree s=0.17 ok=1
+ts=2026-11-17T15:05:57Z event=phase run=42fc6104c8050afa name=plan s=0.19 files=0
+ts=2026-11-17T15:08:41Z event=call run=42fc6104c8050afa kind=review outcome=ok s=164.9 manifest_bytes=321 first_event_s=0.7
+ts=2026-11-17T15:08:41Z event=phase run=42fc6104c8050afa name=review s=164.94 chunks=1
+ts=2026-11-17T15:08:42Z event=phase run=42fc6104c8050afa name=finish s=0.26
+ts=2026-11-17T15:08:42Z event=run run=42fc6104c8050afa s=165.6 rc=0 calls=1 chunks=0
+ts=2026-11-17T15:08:48Z event=phase run=a56285ce2d610804 name=worktree s=0.17 ok=1
+ts=2026-11-17T15:08:48Z event=phase run=a56285ce2d610804 name=plan s=0.17 files=0
+ts=2026-11-17T15:11:36Z event=call run=a56285ce2d610804 kind=review outcome=ok s=167.56 manifest_bytes=333 first_event_s=0.79
+ts=2026-11-17T15:11:36Z event=phase run=a56285ce2d610804 name=review s=167.6 chunks=1
+ts=2026-11-17T15:11:36Z event=phase run=a56285ce2d610804 name=finish s=0.61
+ts=2026-11-17T15:11:36Z event=run run=a56285ce2d610804 s=168.5 rc=0 calls=1 chunks=0
+ts=2026-11-17T15:11:40Z event=phase run=03c86f3c13ca1c07 name=worktree s=0.26 ok=1
+ts=2026-11-17T15:11:40Z event=phase run=03c86f3c13ca1c07 name=plan s=0.25 files=0
+ts=2026-11-17T15:14:04Z event=call run=03c86f3c13ca1c07 kind=review outcome=ok s=143.92 manifest_bytes=333 first_event_s=0.68
+ts=2026-11-17T15:14:04Z event=phase run=03c86f3c13ca1c07 name=review s=143.99 chunks=1
+ts=2026-11-17T15:14:05Z event=phase run=03c86f3c13ca1c07 name=finish s=0.38
+ts=2026-11-17T15:14:05Z event=run run=03c86f3c13ca1c07 s=144.9 rc=0 calls=1 chunks=0

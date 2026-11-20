@@ -1,0 +1,3 @@
+part 1 merge    conflict     refs/merge-validator/part-6 conflicts: CHANGELOG.md
+part 2 merge    skipped      refs/merge-validator/part-8
+part 3 merge    skipped      refs/merge-validator/part-9
