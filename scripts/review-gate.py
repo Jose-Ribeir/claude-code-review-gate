@@ -81,6 +81,7 @@ import ocr_telemetry  # noqa: E402
 import ocr_profile  # noqa: E402  # backend (claude / kimchi) selection
 import ocr_cmdshim  # noqa: E402  # Windows .cmd shim -> native exe; one-line prompts
 import rg_store  # noqa: E402  # the Kimchi port's external verdict store + sandbox
+import rg_settings  # noqa: E402  # per-agent model/thinking settings layer
 import rg_config  # noqa: E402  # t15: single settings read (intent.* switches)
 import rg_tickets  # noqa: E402  # t16: ticket key discovery
 import rg_ticket_fetch  # noqa: E402  # t17: gh/glab fetch + 24h cache, fail-open
@@ -130,7 +131,8 @@ _DOCTOR_CMD = "python3 " + os.path.join(
 # the reviewer pin; the REVIEWER PERSONA carries kimi-k3 @ max thinking (D16
 # in skills/review/SKILL.md) via its Agent spawn regardless. OCR_MODEL
 # overrides this session pin for experimentation.
-_MODEL = os.environ.get("OCR_MODEL", "kimchi-dev/kimi-k3").strip() or "kimchi-dev/kimi-k3"
+_MODEL = (os.environ.get("OCR_MODEL", rg_settings.default_model("orchestrator", "kimchi")).strip()
+          or rg_settings.default_model("orchestrator", "kimchi"))
 
 
 def _read_env_model(var, default):
@@ -146,7 +148,7 @@ def _read_spotter_model():
     review skill between rule resolution and reviewer spawn. Defaults to a fast
     codebase-scanning open model -- the spotter reads every push's diff, so it
     must stay cheap; OCR_SPOTTER_MODEL trades cost for demand quality."""
-    return _read_env_model("OCR_SPOTTER_MODEL", "deepseek-v4-flash")
+    return _read_env_model("OCR_SPOTTER_MODEL", rg_settings.default_model("spotter", "kimchi"))
 
 
 _SPOTTER_MODEL = _read_spotter_model()
@@ -158,7 +160,7 @@ def _read_tier1_model():
     to the flagship open model positioned for correctness-critical review;
     the tier-1 reviewer reads every push's evidence, so OCR_TIER1_MODEL
     trades review depth for cost or a different provider."""
-    return _read_env_model("OCR_TIER1_MODEL", "kimi-k3")
+    return _read_env_model("OCR_TIER1_MODEL", rg_settings.default_model("code-reviewer", "kimchi"))
 
 
 _TIER1_MODEL = _read_tier1_model()
@@ -171,112 +173,78 @@ def _read_tier2_model():
     reviewer: the flagship open model positioned for correctness-critical
     review -- OCR_TIER2_MODEL lets a project spend more (or less) on the
     ~one-in-seven escalated pushes independently of the fast lane."""
-    return _read_env_model("OCR_TIER2_MODEL", "kimi-k3")
+    return _read_env_model("OCR_TIER2_MODEL", rg_settings.default_model("deep-reviewer", "kimchi"))
 
 
 _TIER2_MODEL = _read_tier2_model()
 
-# Per-profile tier models. The three constants above are the KIMCHI tier
-# models (open models routed through kimchi); a claude worker cannot run
-# them, so each profile carries its own map and every consumer asks
-# _tier_model(role) for the model of the backend that will actually run.
-_TIER_READERS = {
-    "spotter": ("OCR_SPOTTER_MODEL", _read_spotter_model),
-    "tier1": ("OCR_TIER1_MODEL", _read_tier1_model),
-    "tier2": ("OCR_TIER2_MODEL", _read_tier2_model),
-}
-# claude aliases (not dated ids): the pin tracks the model family, like
-# _read_claude_model's `sonnet`. The spotter reads every push, so it stays cheap.
-_CLAUDE_TIER_DEFAULTS = {"spotter": "haiku", "tier1": "sonnet", "tier2": "opus"}
+# Per-profile tier models. The three constants above are the ENV-ONLY kimchi
+# tier models read at import (kept for the telemetry and the tests that compare
+# against them). What actually runs is resolved at call time through the
+# settings layer (scripts/rg_settings.py): OCR_* env, then <repo>/.ocr/
+# settings.json, then the user settings file, then the built-in default -- for
+# the backend that will really run, so a claude worker never sees a kimchi id.
+_settings_root_cache = {}
 
 
-def _read_claude_tier_model(role):
-    """The claude model for one review tier: OCR_CLAUDE_<ROLE>_MODEL, else the
-    shared OCR_<ROLE>_MODEL when it names an Anthropic model (a kimchi id such
-    as `kimi-k3` is not runnable by claude and is ignored, so one environment
-    can serve both profiles), else the tier's alias default."""
-    shared_var = _TIER_READERS[role][0]
-    for var in ("OCR_CLAUDE_" + role.upper() + "_MODEL", shared_var):
-        value = os.environ.get(var, "").strip()
-        if not value:
-            continue
-        if var.startswith("OCR_CLAUDE_") or _model_provider(value) == "anthropic":
-            return value
-    return _CLAUDE_TIER_DEFAULTS[role]
+def _settings_repo_root():
+    """The repo top level the project settings file is read from, memoized per
+    cwd (the settings are consulted several times per run)."""
+    cwd = os.getcwd()
+    if cwd not in _settings_root_cache:
+        _settings_root_cache[cwd] = _repo_root()
+    return _settings_root_cache[cwd]
+
+
+def _settings(root=None):
+    """The loaded rg_settings.Settings for `root` (default: this repo). An
+    unreadable or invalid settings file is a ReviewGateError with the module's
+    message (file path and every problem), never a silent fallback to
+    defaults."""
+    try:
+        return rg_settings.load(root or _settings_repo_root())
+    except rg_settings.SettingsError as exc:
+        raise ReviewGateError(str(exc)) from exc
+
+
+def _agent_model(agent, backend=None):
+    """The settings-resolved model of one agent under `backend` (default: the
+    backend that reviews this push)."""
+    return _settings().model(agent, backend or _current_launch().name).value
 
 
 def _tier_model(role):
     """The model for a review tier ("spotter", "tier1", "tier2") under the
     backend that reviews this push."""
-    if _current_launch().name == "claude":
-        return _read_claude_tier_model(role)
-    return _TIER_READERS[role][1]()
+    return _agent_model(rg_settings.TIER_AGENTS[role])
 
 
 # Provider guard (spec "Models"; story 18). The account's subscription terms
 # forbid routing the gate's automated review traffic to Anthropic or OpenAI
-# models (account-lock grounds), so the review models below are vetted after
-# config/env resolution and BEFORE any review work: a blocked provider fails
-# loudly then, never mid-run. OCR_MODEL is deliberately absent from
-# _GUARDED_MODEL_VARS: it pins the headless harness session itself (the
-# pre-existing v1 surface), not a review model the v2 gate routes traffic to.
-_BLOCKED_PROVIDERS = ("anthropic", "openai")
-
-_GUARDED_MODEL_VARS = (
-    ("OCR_TIER1_MODEL", lambda: _read_tier1_model()),
-    ("OCR_SPOTTER_MODEL", lambda: _read_spotter_model()),
-    ("OCR_TIER2_MODEL", lambda: _read_tier2_model()),
-)
-
-# First-token families, lowercased. Anthropic ids are `claude-*` plus the
-# bare `sonnet`/`haiku`/`opus` shorthands; OpenAI ids are `gpt-*`,
-# `chatgpt-*`, and the reasoning series `o1`/`o3`/`o4`.
-_PROVIDER_FIRST_TOKENS = (
-    ("anthropic", ("claude", "sonnet", "haiku", "opus")),
-    ("openai", ("gpt", "chatgpt", "o1", "o3", "o4")),
-)
-
-
-def _model_provider(model):
-    """Provider family for a model id, or "" when it is unrecognized. The
-    guard is a deny-list for subscription-violating providers, so unknown
-    providers pass.
-
-    A vendor-prefixed id (openrouter-style `vendor/model`, the convention
-    this harness's own _MODEL default `kimchi-dev/kimi-k3` follows) is
-    classified on the model part AFTER the prefix: `anthropic/claude-sonnet-4-5`
-    is an anthropic model, regardless of the prefix it was routed under."""
-    ident = (model or "").strip().lower()
-    # Strip EVERY vendor prefix, not just the first: relay chains write
-    # `openrouter/anthropic/claude-...` and one split leaves the mid-chain
-    # vendor in place, defeating the deny-list (finding: double prefix).
-    while "/" in ident:
-        ident = ident.split("/", 1)[1]
-    first = ident.split("-", 1)[0]
-    for provider, tokens in _PROVIDER_FIRST_TOKENS:
-        if first in tokens:
-            return provider
-    return ""
+# models (account-lock grounds), so the review models are vetted after
+# config/env/settings resolution and BEFORE any review work: a blocked provider
+# fails loudly then, never mid-run. OCR_MODEL is deliberately outside the guard:
+# it pins the headless harness session itself (the pre-existing v1 surface),
+# not a review model the v2 gate routes traffic to. The deny-list and the
+# classifier live in rg_settings so the settings doctor shares them.
+_BLOCKED_PROVIDERS = rg_settings.BLOCKED_PROVIDERS
+_model_provider = rg_settings.model_provider
 
 
 def _provider_guard_violations():
-    """[(var, model, provider)] for every configured review model from a
-    blocked provider. Reads the RESOLVED value of each guarded var (the
-    defaults are open models, so an unset var never trips).
+    """[(label, model, provider)] for every configured kimchi review model from
+    a blocked provider: the three tier env vars (label = the variable) and any
+    value pinned in a settings file (label = the settings key and file).
 
     The guard protects the KIMCHI account: it keeps Anthropic/OpenAI models
     off the kimchi-routed review tiers. Under the claude backend the worker IS
-    Anthropic (through Claude Code itself) and _read_claude_tier_model ignores
-    any non-Anthropic id, so there is nothing to guard and no violation."""
+    Anthropic (through Claude Code itself) and the claude tier models ignore
+    any non-Anthropic shared id, so there is nothing to guard and no violation.
+    An invalid settings file is a ReviewGateError (see _settings)."""
+    settings = _settings()
     if _current_launch().name == "claude":
         return []
-    out = []
-    for var, read in _GUARDED_MODEL_VARS:
-        model = read()
-        provider = _model_provider(model)
-        if provider in _BLOCKED_PROVIDERS:
-            out.append((var, model, provider))
-    return out
+    return settings.kimchi_guard_violations()
 
 
 def _check_provider_guard():
@@ -294,8 +262,8 @@ def _check_provider_guard():
         " a provider whose use would violate the subscription account-lock"
         " terms (providers " + ", ".join(_BLOCKED_PROVIDERS) + " are blocked):\n"
         + detail +
-        "\nSet the variable to an allowed open model (e.g. kimi-k3, glm-5.3,"
-        " deepseek-v4-flash) or unset it to use the default.")
+        "\nSet the variable or settings value to an allowed open model (e.g."
+        " kimi-k3, glm-5.3, deepseek-v4-flash) or unset it to use the default.")
 
 DEFAULT_KIMI_ARGS = [
     # Kimchi headless worker argv (port spec section 4). The read-only sandbox
@@ -344,7 +312,7 @@ def _read_claude_model(*role_vars):
         if "/" in value and not var.startswith("OCR_CLAUDE_"):
             continue
         return value
-    return "sonnet"
+    return rg_settings.default_model("orchestrator", "claude")
 
 
 _CLAUDE_MODEL = _read_claude_model()
@@ -454,6 +422,16 @@ def _claude_review_args(helpers=True):
         at = args.index("--disallowedTools")
         args[at:at] = [f"Bash({cmd} *)" for cmd in _helper_cmds().values()]
     args += shlex.split(os.environ.get("OCR_CLAUDE_EXTRA_ARGS", ""))
+    _pin_model_arg(args, "orchestrator", "claude")
+    return args
+
+
+def _pin_model_arg(args, agent, backend):
+    """Replace the `--model` value in `args` (in place) with the model the
+    settings layer resolves for `agent` under `backend`, at call time. With no
+    settings file and no env override this is the value the argv already had."""
+    if "--model" in args and args.index("--model") + 1 < len(args):
+        args[args.index("--model") + 1] = _agent_model(agent, backend)
     return args
 
 
@@ -461,9 +439,7 @@ def _claude_docs_summary_args():
     """_claude_review_args with the docs-summary role's model pin (the claude
     counterpart of _docs_summary_model_args)."""
     args = _claude_review_args(helpers=False)
-    if "--model" in args and args.index("--model") + 1 < len(args):
-        args[args.index("--model") + 1] = _CLAUDE_DOCS_SUMMARY_MODEL
-    return args
+    return _pin_model_arg(args, "docs-summary", "claude")
 
 # --- C3: the deny-extension startup canary --------------------------------------
 # `-p` sessions run yolo: permission FLAGS are not enforced (verified), so the
@@ -3827,7 +3803,10 @@ def _record_tier_call(common_dir, tier, seconds, stats=None):
     role = {ocr_telemetry.TIER_SPOTTER: "spotter",
             ocr_telemetry.TIER_REVIEW: "tier1",
             ocr_telemetry.TIER_DEEP: "tier2"}.get(tier)
-    model = _tier_model(role) if role else ""
+    try:
+        model = _tier_model(role) if role else ""
+    except ReviewGateError:
+        model = ""          # telemetry is best-effort; the guard already failed closed
     ocr_telemetry.record_tier_call(common_dir, tier, model=model,
                                    cost_usd=(stats or {}).get("cost_usd"),
                                    seconds=seconds,
@@ -3951,7 +3930,7 @@ def _review_model_args():
     _worker_invocation)."""
     args = list(DEFAULT_KIMI_ARGS)
     args += shlex.split(os.environ.get("OCR_KIMI_EXTRA_ARGS", ""))
-    return args
+    return _pin_model_arg(args, "orchestrator", "kimchi")
 
 
 # --- shared worker-invocation plumbing (docs-gate 09) -------------------------
@@ -7528,6 +7507,12 @@ def _fingerprint_parts(root, tip):
     parts[".ocr/"] = _ocr_tree_oid(root, tip) or ""
     for var in _FINGERPRINT_ENV_VARS:
         parts[f"env:{var}"] = digest((os.environ.get(var) or "").encode("utf-8"))
+    # A model/thinking pinned in a settings file changes what reviews, so it is
+    # a criterion. Added only when a file pins something: with no settings file
+    # the parts (and every stored fingerprint) are exactly what they were.
+    pinned = _settings(root).file_value_digest_input()
+    if pinned:
+        parts["settings:agents"] = digest(pinned.encode("utf-8"))
     return parts
 
 
@@ -9609,8 +9594,9 @@ _DOC_BASENAME_EXCLUDED = ("changelog", "changes", "history")
 # persona tier; overridable like the reviewer's OCR_MODEL). Only the flag
 # value is swapped -- the rest of DEFAULT_KIMI_ARGS (sandbox wiring) is kept.
 _DOCS_SUMMARY_MODEL = (
-    os.environ.get("OCR_DOCS_SUMMARY_MODEL", "kimchi-dev/glm-5.3").strip()
-    or "kimchi-dev/glm-5.3")
+    os.environ.get("OCR_DOCS_SUMMARY_MODEL",
+                   rg_settings.default_model("docs-summary", "kimchi")).strip()
+    or rg_settings.default_model("docs-summary", "kimchi"))
 
 _PROMPT_DOCS_SUMMARY = (
     "Summarize this repository's documentation for a code-review gate. The "
@@ -9683,9 +9669,7 @@ def _docs_summary_model_args():
     the default argv wholesale) -- the uniform rule, see _worker_invocation."""
     args = list(DEFAULT_KIMI_ARGS)
     args += shlex.split(os.environ.get("OCR_KIMI_EXTRA_ARGS", ""))
-    if "--model" in args and args.index("--model") + 1 < len(args):
-        args[args.index("--model") + 1] = _DOCS_SUMMARY_MODEL
-    return args
+    return _pin_model_arg(args, "docs-summary", "kimchi")
 
 
 def _docs_summary_failed_message(why):

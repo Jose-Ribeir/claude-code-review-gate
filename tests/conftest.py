@@ -146,6 +146,17 @@ def _private_state_store(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_user_settings_file(tmp_path_factory, monkeypatch):
+    """The settings layer (scripts/rg_settings.py) reads a user-level file,
+    ~/.config/review-gate/settings.json. Point it at a path that does not exist
+    so a developer's real file never leaks into a test (and a test never writes
+    there). A test about settings creates the file at this path or its own."""
+    monkeypatch.setenv(
+        "OCR_SETTINGS_FILE",
+        str(tmp_path_factory.mktemp("rg-settings") / "no-such-settings.json"))
+
+
+@pytest.fixture(autouse=True)
 def _kimchi_backend_unless_a_test_selects_one(monkeypatch):
     """Backend selection (scripts/ocr_profile.py) auto-detects from the
     developer's own harness: CLAUDECODE inside Claude Code, or whichever backend
@@ -171,6 +182,7 @@ def gate_env(monkeypatch, tmp_path):
     for k in list(os.environ):
         if k.startswith(("OCR_", "STUB_")):
             monkeypatch.delenv(k)
+    monkeypatch.setenv("OCR_SETTINGS_FILE", str(tmp_path / "no-such-settings.json"))
     monkeypatch.setenv("OCR_STATE_DIR", str(tmp_path / "gate-state"))
     monkeypatch.setenv("OCR_STUB_WORKER", "1")
     monkeypatch.setenv("STUB_TRACE", str(tmp_path / "stub.trace"))
