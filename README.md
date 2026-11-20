@@ -43,11 +43,18 @@ Fix the issues, or bypass with: git push --no-verify
    and surfaces the block reason verbatim to the model. It only gates repositories
    that installed the pre-push layer; everywhere else it is inert.
 
-The review itself is always **asynchronous**: the hook spawns one detached
-supervisor (singleflight) and immediately blocks with "review started — re-run
-this push". Re-running the push joins the recorded verdict instantly. This is not
-a limitation bolted on later — the Kimchi hook timeout is 5 s and a real review
-takes minutes, so "deny + join on retry" is the only correct mode.
+The review itself runs in one detached supervisor (singleflight), so a slow review
+never depends on the hook staying alive. How long the push waits for it depends on
+the host: the Kimchi bash hook has a short budget (about 5 s), so it blocks with
+"review started — re-run this push" and re-running the push joins the recorded
+verdict instantly ("deny + join on retry"). The Claude Code hook and the git
+pre-push hook wait inline for the verdict (`behavior.inline_wait_seconds`, default
+300 s) and still deny, never allow, when that wait runs out. The knobs (models,
+thinking levels, inline wait, docs-checker, spotter skip) live in the optional
+settings file; see [docs/config-reference.md](docs/config-reference.md#settings-file-agents-and-behavior)
+and ADR 0010. To check a machine against a real Kimchi install (model pins,
+thinking suffixes, a timed sample review), run `scripts/kimchi-verify.sh` (or
+`scripts/kimchi-verify.ps1`) and keep the `kimchi-verify-report.txt` it writes.
 
 ## Install
 
