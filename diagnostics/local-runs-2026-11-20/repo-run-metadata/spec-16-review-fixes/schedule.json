@@ -1,0 +1,6750 @@
+{
+ "version": 1,
+ "base_sha": "c4bdab9e115e1312e1a3abf915b098474bef6a5f",
+ "budget": 100000,
+ "params": {
+  "budget": 100000,
+  "overhead": 30000,
+  "hop_tokens": 1500,
+  "hops_base": 6,
+  "output_in_peak": 0.5,
+  "hops_new_small": 8,
+  "hops_new": 20,
+  "hops_new_large": 30,
+  "hops_edit": 3,
+  "hops_per_file": 3,
+  "hits_per_hop": 4,
+  "hops_verify": 15,
+  "hops_doc_per_file": 2,
+  "hops_doc_base": 6,
+  "hops_fix_per_file": 5,
+  "hops_fix_verify": 6,
+  "hops_research_per_file": 2,
+  "hops_research_base": 8,
+  "size_small_tokens": 3000,
+  "size_medium_tokens": 12000,
+  "size_large_tokens": 40000,
+  "output_factor": 1.5,
+  "price_in": 2.0,
+  "price_out": 10.0,
+  "price_cw": 2.5,
+  "price_cr": 0.2,
+  "fanout": 15,
+  "low_util": 0.25,
+  "single_max_files": 15,
+  "source": {
+   "calibration": null,
+   "calibrated": [],
+   "flags": []
+  }
+ },
+ "layers": [
+  [
+   "C1",
+   "C2",
+   "C3",
+   "C4"
+  ],
+  [
+   "C5"
+  ],
+  [
+   "C6"
+  ],
+  [
+   "C7"
+  ],
+  [
+   "C8"
+  ],
+  [
+   "C9"
+  ],
+  [
+   "C10"
+  ]
+ ],
+ "clusters": [
+  {
+   "id": "C1",
+   "title": "Correct project-keyed graph branch identity",
+   "wus": [
+    "F1"
+   ],
+   "commit_tag": "[W1]",
+   "layer": 0,
+   "files": [
+    {
+     "path": "scripts/rg_final_compose.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 352,
+     "tokens_est": 3650,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 14599,
+     "tokens_narrow": 3650,
+     "lang": "python",
+     "importers_n": 3,
+     "importers": [
+      "scripts/rg_final_review.py",
+      "scripts/rg_final_stack.py",
+      "tests/test_final_composition.py"
+     ],
+     "wus": [
+      "F1"
+     ]
+    },
+    {
+     "path": "scripts/rg_final_graph.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 321,
+     "tokens_est": 3325,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 13298,
+     "tokens_narrow": 3325,
+     "lang": "python",
+     "importers_n": 5,
+     "importers": [
+      "scripts/rg_final_compose.py",
+      "scripts/rg_final_review.py",
+      "scripts/rg_final_stack.py",
+      "tests/test_final_graph.py",
+      "tests/test_final_provider_github.py"
+     ],
+     "wus": [
+      "F1"
+     ]
+    },
+    {
+     "path": "tests/test_final_composition.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 456,
+     "tokens_est": 5077,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 20306,
+     "tokens_narrow": 5077,
+     "lang": "python",
+     "wus": [
+      "F1"
+     ]
+    },
+    {
+     "path": "tests/test_final_graph.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 355,
+     "tokens_est": 3550,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 14199,
+     "tokens_narrow": 3550,
+     "lang": "python",
+     "wus": [
+      "F1"
+     ]
+    }
+   ],
+   "tests": [
+    "tests/test_final_composition.py",
+    "tests/test_final_graph.py",
+    "tests/test_final_provider_github.py"
+   ],
+   "est_tokens": 78000,
+   "est_hops": 32,
+   "siblings": [
+    "C2",
+    "C3",
+    "C4"
+   ],
+   "readonly": false,
+   "verify": false,
+   "research": false,
+   "isolation": "shared",
+   "est_output": 0,
+   "est_cum_input": 1728000,
+   "est_cost": 0.544
+  },
+  {
+   "id": "C2",
+   "title": "Make unsupported required-CI declarations visibly unassessable",
+   "wus": [
+    "F2"
+   ],
+   "commit_tag": "[W2]",
+   "layer": 0,
+   "files": [
+    {
+     "path": "scripts/rg_final_verification.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 354,
+     "tokens_est": 3715,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 14860,
+     "tokens_narrow": 3715,
+     "lang": "python",
+     "importers_n": 3,
+     "importers": [
+      "scripts/rg_final_review.py",
+      "scripts/rg_final_stack.py",
+      "tests/test_final_verification.py"
+     ],
+     "wus": [
+      "F2"
+     ]
+    },
+    {
+     "path": "tests/test_final_verification.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 305,
+     "tokens_est": 2923,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 11690,
+     "tokens_narrow": 2923,
+     "lang": "python",
+     "wus": [
+      "F2"
+     ]
+    }
+   ],
+   "tests": [
+    "tests/test_final_verification.py"
+   ],
+   "est_tokens": 63000,
+   "est_hops": 22,
+   "siblings": [
+    "C1",
+    "C3",
+    "C4"
+   ],
+   "readonly": false,
+   "verify": false,
+   "research": false,
+   "isolation": "shared",
+   "est_output": 0,
+   "est_cum_input": 1023000,
+   "est_cost": 0.322
+  },
+  {
+   "id": "C3",
+   "title": "Default and persist installed acceptance identity in the store",
+   "wus": [
+    "F5a"
+   ],
+   "commit_tag": "[W3]",
+   "layer": 0,
+   "files": [
+    {
+     "path": "scripts/rg_final_acceptance.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 256,
+     "tokens_est": 3558,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 14230,
+     "tokens_narrow": 3558,
+     "lang": "python",
+     "importers_n": 3,
+     "importers": [
+      "scripts/rg_final_store.py",
+      "tests/test_final_acceptance_registry.py",
+      "tests/test_final_views.py"
+     ],
+     "wus": [
+      "F5a"
+     ]
+    },
+    {
+     "path": "scripts/rg_final_store.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 2663,
+     "tokens_est": 32226,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 128904,
+     "tokens_narrow": 32226,
+     "lang": "python",
+     "importers_n": 20,
+     "importers": [
+      "scripts/rg_final_publish.py",
+      "scripts/rg_final_review.py",
+      "scripts/rg_final_stack.py",
+      "scripts/rg_final_views.py",
+      "tests/sim_scenarios_spec16.py",
+      "tests/test_final_acceptance_registry.py",
+      "tests/test_final_complete_standalone.py",
+      "tests/test_final_composition.py",
+      "tests/test_final_dynamic.py",
+      "tests/test_final_github_stack.py",
+      "tests/test_final_lenses.py",
+      "tests/test_final_memory.py",
+      "tests/test_final_observability_integration.py",
+      "tests/test_final_provider_github.py",
+      "tests/test_final_publication.py",
+      "tests/test_final_review_cli.py",
+      "tests/test_final_stack.py",
+      "tests/test_final_stops.py",
+      "tests/test_final_store.py",
+      "tests/test_final_views.py"
+     ],
+     "wus": [
+      "F5a"
+     ]
+    },
+    {
+     "path": "tests/test_final_acceptance_registry.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 317,
+     "tokens_est": 3672,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 14685,
+     "tokens_narrow": 3672,
+     "lang": "python",
+     "wus": [
+      "F5a"
+     ]
+    },
+    {
+     "path": "tests/test_final_store.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 585,
+     "tokens_est": 6025,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 24097,
+     "tokens_narrow": 6025,
+     "lang": "python",
+     "wus": [
+      "F5a"
+     ]
+    }
+   ],
+   "tests": [
+    "tests/sim_scenarios_spec16.py",
+    "tests/test_final_acceptance_registry.py",
+    "tests/test_final_complete_standalone.py",
+    "tests/test_final_store.py",
+    "tests/test_final_views.py"
+   ],
+   "est_tokens": 78000,
+   "est_hops": 32,
+   "siblings": [
+    "C1",
+    "C2",
+    "C4"
+   ],
+   "readonly": false,
+   "verify": false,
+   "research": false,
+   "isolation": "shared",
+   "est_output": 0,
+   "est_cum_input": 1728000,
+   "est_cost": 0.544
+  },
+  {
+   "id": "C4",
+   "title": "Document operator defaults and final-review surfaces",
+   "wus": [
+    "F7"
+   ],
+   "commit_tag": "[W4]",
+   "layer": 0,
+   "files": [
+    {
+     "path": "CHANGELOG.md",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 2030,
+     "tokens_est": 32344,
+     "w": true,
+     "mode": "additive",
+     "bytes": 129376,
+     "tokens_narrow": 32344,
+     "lang": "docs",
+     "wus": [
+      "F7"
+     ]
+    },
+    {
+     "path": "docs/adr/0008-explicit-final-whole-stack-review.md",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 201,
+     "tokens_est": 2911,
+     "w": true,
+     "mode": "additive",
+     "bytes": 11642,
+     "tokens_narrow": 2911,
+     "lang": "docs",
+     "wus": [
+      "F7"
+     ]
+    }
+   ],
+   "tests": [],
+   "est_tokens": 63000,
+   "est_hops": 22,
+   "siblings": [
+    "C1",
+    "C2",
+    "C3"
+   ],
+   "readonly": false,
+   "verify": false,
+   "research": false,
+   "isolation": "shared",
+   "est_output": 0,
+   "est_cum_input": 1023000,
+   "est_cost": 0.322
+  },
+  {
+   "id": "C5",
+   "title": "Centralize provider eligibility and adverse final-status publication",
+   "wus": [
+    "F3"
+   ],
+   "commit_tag": "[W5]",
+   "layer": 1,
+   "files": [
+    {
+     "path": "scripts/rg_final_publish.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 347,
+     "tokens_est": 4336,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 17344,
+     "tokens_narrow": 4336,
+     "lang": "python",
+     "importers_n": 7,
+     "importers": [
+      "scripts/rg_final_review.py",
+      "scripts/rg_final_stack.py",
+      "tests/test_final_complete_standalone.py",
+      "tests/test_final_github_stack.py",
+      "tests/test_final_provider_github.py",
+      "tests/test_final_publication.py",
+      "tests/test_final_stack.py"
+     ],
+     "wus": [
+      "F3"
+     ]
+    },
+    {
+     "path": "scripts/rg_final_review.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1749,
+     "tokens_est": 22064,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 88256,
+     "tokens_narrow": 22064,
+     "lang": "python",
+     "importers_n": 9,
+     "importers": [
+      "scripts/review-gate.py",
+      "scripts/rg_final_stack.py",
+      "tests/test_final_complete_standalone.py",
+      "tests/test_final_composition.py",
+      "tests/test_final_github_stack.py",
+      "tests/test_final_lenses.py",
+      "tests/test_final_observability_integration.py",
+      "tests/test_final_stack.py",
+      "tests/test_final_stops.py"
+     ],
+     "wus": [
+      "F3"
+     ]
+    },
+    {
+     "path": "scripts/rg_final_stack.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 785,
+     "tokens_est": 9311,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 37243,
+     "tokens_narrow": 9311,
+     "lang": "python",
+     "importers_n": 1,
+     "importers": [
+      "scripts/rg_final_review.py"
+     ],
+     "wus": [
+      "F3"
+     ]
+    },
+    {
+     "path": "scripts/rg_final_store.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 2663,
+     "tokens_est": 32226,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 128904,
+     "tokens_narrow": 32226,
+     "lang": "python",
+     "importers_n": 20,
+     "importers": [
+      "scripts/rg_final_publish.py",
+      "scripts/rg_final_review.py",
+      "scripts/rg_final_stack.py",
+      "scripts/rg_final_views.py",
+      "tests/sim_scenarios_spec16.py",
+      "tests/test_final_acceptance_registry.py",
+      "tests/test_final_complete_standalone.py",
+      "tests/test_final_composition.py",
+      "tests/test_final_dynamic.py",
+      "tests/test_final_github_stack.py",
+      "tests/test_final_lenses.py",
+      "tests/test_final_memory.py",
+      "tests/test_final_observability_integration.py",
+      "tests/test_final_provider_github.py",
+      "tests/test_final_publication.py",
+      "tests/test_final_review_cli.py",
+      "tests/test_final_stack.py",
+      "tests/test_final_stops.py",
+      "tests/test_final_store.py",
+      "tests/test_final_views.py"
+     ],
+     "wus": [
+      "F3"
+     ]
+    },
+    {
+     "path": "tests/test_final_publication.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 583,
+     "tokens_est": 5750,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 22997,
+     "tokens_narrow": 5750,
+     "lang": "python",
+     "wus": [
+      "F3"
+     ]
+    },
+    {
+     "path": "tests/test_final_stack.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 504,
+     "tokens_est": 5500,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 21999,
+     "tokens_narrow": 5500,
+     "lang": "python",
+     "wus": [
+      "F3"
+     ]
+    }
+   ],
+   "tests": [
+    "tests/sim_scenarios_spec16.py",
+    "tests/test_final_acceptance_registry.py",
+    "tests/test_final_complete_standalone.py",
+    "tests/test_final_composition.py",
+    "tests/test_final_github_stack.py",
+    "tests/test_final_provider_github.py",
+    "tests/test_final_publication.py",
+    "tests/test_final_stack.py",
+    "tests/test_final_stops.py",
+    "tests/test_final_store.py"
+   ],
+   "est_tokens": 93000,
+   "est_hops": 42,
+   "siblings": [],
+   "readonly": false,
+   "verify": false,
+   "research": false,
+   "isolation": "shared",
+   "est_output": 0,
+   "est_cum_input": 2583000,
+   "est_cost": 0.814
+  },
+  {
+   "id": "C6",
+   "title": "Complete standalone graph discovery and provider-selected routing",
+   "wus": [
+    "F4a"
+   ],
+   "commit_tag": "[W6]",
+   "layer": 2,
+   "files": [
+    {
+     "path": "scripts/rg_final_execution.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 418,
+     "tokens_est": 4554,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 18216,
+     "tokens_narrow": 4554,
+     "lang": "python",
+     "importers_n": 2,
+     "importers": [
+      "scripts/rg_final_review.py",
+      "scripts/rg_final_stack.py"
+     ],
+     "wus": [
+      "F4a"
+     ]
+    },
+    {
+     "path": "scripts/rg_final_review.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1749,
+     "tokens_est": 22064,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 88256,
+     "tokens_narrow": 22064,
+     "lang": "python",
+     "importers_n": 9,
+     "importers": [
+      "scripts/review-gate.py",
+      "scripts/rg_final_stack.py",
+      "tests/test_final_complete_standalone.py",
+      "tests/test_final_composition.py",
+      "tests/test_final_github_stack.py",
+      "tests/test_final_lenses.py",
+      "tests/test_final_observability_integration.py",
+      "tests/test_final_stack.py",
+      "tests/test_final_stops.py"
+     ],
+     "wus": [
+      "F4a"
+     ]
+    },
+    {
+     "path": "tests/stub_reviewer.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 715,
+     "tokens_est": 8499,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 33993,
+     "tokens_narrow": 8499,
+     "lang": "python",
+     "wus": [
+      "F4a"
+     ]
+    },
+    {
+     "path": "tests/test_final_complete_standalone.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 604,
+     "tokens_est": 6188,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 24752,
+     "tokens_narrow": 6188,
+     "lang": "python",
+     "wus": [
+      "F4a"
+     ]
+    },
+    {
+     "path": "tests/test_final_review_cli.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 689,
+     "tokens_est": 7397,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 29586,
+     "tokens_narrow": 7397,
+     "lang": "python",
+     "wus": [
+      "F4a"
+     ]
+    },
+    {
+     "path": "tests/test_worker_plumbing.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 235,
+     "tokens_est": 2678,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 10711,
+     "tokens_narrow": 2678,
+     "lang": "python",
+     "wus": [
+      "F4a"
+     ]
+    }
+   ],
+   "tests": [
+    "tests/stub_reviewer.py",
+    "tests/test_final_complete_standalone.py",
+    "tests/test_final_composition.py",
+    "tests/test_final_github_stack.py",
+    "tests/test_final_review_cli.py",
+    "tests/test_final_stops.py",
+    "tests/test_worker_plumbing.py"
+   ],
+   "est_tokens": 93000,
+   "est_hops": 42,
+   "siblings": [],
+   "readonly": false,
+   "verify": false,
+   "research": false,
+   "isolation": "shared",
+   "est_output": 0,
+   "est_cum_input": 2583000,
+   "est_cost": 0.814
+  },
+  {
+   "id": "C7",
+   "title": "Fix finding retirement and warning-versus-incomplete semantics",
+   "wus": [
+    "F4b"
+   ],
+   "commit_tag": "[W7]",
+   "layer": 3,
+   "files": [
+    {
+     "path": "scripts/rg_final_lenses.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 293,
+     "tokens_est": 2992,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 11968,
+     "tokens_narrow": 2992,
+     "lang": "python",
+     "importers_n": 7,
+     "importers": [
+      "scripts/rg_final_execution.py",
+      "scripts/rg_final_review.py",
+      "scripts/rg_final_stack.py",
+      "tests/test_final_complete_standalone.py",
+      "tests/test_final_lenses.py",
+      "tests/test_final_stack.py",
+      "tests/test_final_stops.py"
+     ],
+     "wus": [
+      "F4b"
+     ]
+    },
+    {
+     "path": "scripts/rg_final_memory.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 353,
+     "tokens_est": 3729,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 14915,
+     "tokens_narrow": 3729,
+     "lang": "python",
+     "importers_n": 5,
+     "importers": [
+      "scripts/rg_final_review.py",
+      "scripts/rg_final_stack.py",
+      "scripts/rg_final_store.py",
+      "tests/test_final_memory.py",
+      "tests/test_final_publication.py"
+     ],
+     "wus": [
+      "F4b"
+     ]
+    },
+    {
+     "path": "scripts/rg_final_review.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1749,
+     "tokens_est": 22064,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 88256,
+     "tokens_narrow": 22064,
+     "lang": "python",
+     "importers_n": 9,
+     "importers": [
+      "scripts/review-gate.py",
+      "scripts/rg_final_stack.py",
+      "tests/test_final_complete_standalone.py",
+      "tests/test_final_composition.py",
+      "tests/test_final_github_stack.py",
+      "tests/test_final_lenses.py",
+      "tests/test_final_observability_integration.py",
+      "tests/test_final_stack.py",
+      "tests/test_final_stops.py"
+     ],
+     "wus": [
+      "F4b"
+     ]
+    },
+    {
+     "path": "tests/test_final_lenses.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 472,
+     "tokens_est": 4622,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 18488,
+     "tokens_narrow": 4622,
+     "lang": "python",
+     "wus": [
+      "F4b"
+     ]
+    },
+    {
+     "path": "tests/test_final_memory.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 471,
+     "tokens_est": 5022,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 20087,
+     "tokens_narrow": 5022,
+     "lang": "python",
+     "wus": [
+      "F4b"
+     ]
+    },
+    {
+     "path": "tests/test_final_stops.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 441,
+     "tokens_est": 4554,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 18215,
+     "tokens_narrow": 4554,
+     "lang": "python",
+     "wus": [
+      "F4b"
+     ]
+    }
+   ],
+   "tests": [
+    "tests/test_final_complete_standalone.py",
+    "tests/test_final_composition.py",
+    "tests/test_final_github_stack.py",
+    "tests/test_final_lenses.py",
+    "tests/test_final_memory.py",
+    "tests/test_final_publication.py",
+    "tests/test_final_stack.py",
+    "tests/test_final_stops.py"
+   ],
+   "est_tokens": 93000,
+   "est_hops": 42,
+   "siblings": [],
+   "readonly": false,
+   "verify": false,
+   "research": false,
+   "isolation": "shared",
+   "est_output": 0,
+   "est_cum_input": 2583000,
+   "est_cost": 0.814
+  },
+  {
+   "id": "C8",
+   "title": "Wire acceptance identity through runs, stacks, and views",
+   "wus": [
+    "F5b"
+   ],
+   "commit_tag": "[W8]",
+   "layer": 4,
+   "files": [
+    {
+     "path": "scripts/rg_final_review.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1749,
+     "tokens_est": 22064,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 88256,
+     "tokens_narrow": 22064,
+     "lang": "python",
+     "importers_n": 9,
+     "importers": [
+      "scripts/review-gate.py",
+      "scripts/rg_final_stack.py",
+      "tests/test_final_complete_standalone.py",
+      "tests/test_final_composition.py",
+      "tests/test_final_github_stack.py",
+      "tests/test_final_lenses.py",
+      "tests/test_final_observability_integration.py",
+      "tests/test_final_stack.py",
+      "tests/test_final_stops.py"
+     ],
+     "wus": [
+      "F5b"
+     ]
+    },
+    {
+     "path": "scripts/rg_final_stack.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 785,
+     "tokens_est": 9311,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 37243,
+     "tokens_narrow": 9311,
+     "lang": "python",
+     "importers_n": 1,
+     "importers": [
+      "scripts/rg_final_review.py"
+     ],
+     "wus": [
+      "F5b"
+     ]
+    },
+    {
+     "path": "tests/test_final_views.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 499,
+     "tokens_est": 5304,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 21216,
+     "tokens_narrow": 5304,
+     "lang": "python",
+     "wus": [
+      "F5b"
+     ]
+    }
+   ],
+   "tests": [
+    "tests/test_final_complete_standalone.py",
+    "tests/test_final_composition.py",
+    "tests/test_final_github_stack.py",
+    "tests/test_final_stops.py",
+    "tests/test_final_views.py"
+   ],
+   "est_tokens": 70500,
+   "est_hops": 27,
+   "siblings": [],
+   "readonly": false,
+   "verify": false,
+   "research": false,
+   "isolation": "shared",
+   "est_output": 0,
+   "est_cum_input": 1356750,
+   "est_cost": 0.427
+  },
+  {
+   "id": "C9",
+   "title": "Centralize credential scrubbing without provider write tokens",
+   "wus": [
+    "F6"
+   ],
+   "commit_tag": "[W9]",
+   "layer": 5,
+   "files": [
+    {
+     "path": "examples/test-check/test_check",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 733,
+     "tokens_est": 8101,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 32402,
+     "tokens_narrow": 8101,
+     "lang": "other",
+     "wus": [
+      "F6"
+     ]
+    },
+    {
+     "path": "scripts/rg_final_dynamic.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 446,
+     "tokens_est": 4512,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 18048,
+     "tokens_narrow": 4512,
+     "lang": "python",
+     "importers_n": 5,
+     "importers": [
+      "scripts/rg_final_execution.py",
+      "scripts/rg_final_review.py",
+      "scripts/rg_final_stack.py",
+      "tests/sim_harness.py",
+      "tests/test_final_dynamic.py"
+     ],
+     "wus": [
+      "F6"
+     ]
+    },
+    {
+     "path": "scripts/rg_final_review.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1749,
+     "tokens_est": 22064,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 88256,
+     "tokens_narrow": 22064,
+     "lang": "python",
+     "importers_n": 9,
+     "importers": [
+      "scripts/review-gate.py",
+      "scripts/rg_final_stack.py",
+      "tests/test_final_complete_standalone.py",
+      "tests/test_final_composition.py",
+      "tests/test_final_github_stack.py",
+      "tests/test_final_lenses.py",
+      "tests/test_final_observability_integration.py",
+      "tests/test_final_stack.py",
+      "tests/test_final_stops.py"
+     ],
+     "wus": [
+      "F6"
+     ]
+    },
+    {
+     "path": "tests/test_final_dynamic.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 469,
+     "tokens_est": 4714,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 18855,
+     "tokens_narrow": 4714,
+     "lang": "python",
+     "wus": [
+      "F6"
+     ]
+    },
+    {
+     "path": "tests/test_worker_env.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 139,
+     "tokens_est": 1367,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 5466,
+     "tokens_narrow": 1367,
+     "lang": "python",
+     "wus": [
+      "F6"
+     ]
+    }
+   ],
+   "tests": [
+    "examples/test-check/test_check",
+    "tests/sim_harness.py",
+    "tests/test_final_complete_standalone.py",
+    "tests/test_final_composition.py",
+    "tests/test_final_dynamic.py",
+    "tests/test_final_github_stack.py",
+    "tests/test_final_stops.py",
+    "tests/test_worker_env.py"
+   ],
+   "est_tokens": 85500,
+   "est_hops": 37,
+   "siblings": [],
+   "readonly": false,
+   "verify": false,
+   "research": false,
+   "isolation": "shared",
+   "est_output": 0,
+   "est_cum_input": 2136750,
+   "est_cost": 0.673
+  },
+  {
+   "id": "C10",
+   "title": "Verify focused tests, pytest, ruff, and unrelated baseline failure",
+   "wus": [
+    "F8"
+   ],
+   "commit_tag": "[W10]",
+   "layer": 6,
+   "files": [
+    {
+     "path": "CHANGELOG.md",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 2030,
+     "tokens_est": 32344,
+     "w": false,
+     "mode": "additive",
+     "bytes": 129376,
+     "tokens_narrow": 32344,
+     "lang": "docs",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "docs/adr/0008-explicit-final-whole-stack-review.md",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 201,
+     "tokens_est": 2911,
+     "w": false,
+     "mode": "additive",
+     "bytes": 11642,
+     "tokens_narrow": 2911,
+     "lang": "docs",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/conftest.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 178,
+     "tokens_est": 1885,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 7537,
+     "tokens_narrow": 1885,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fake_backend.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 167,
+     "tokens_est": 1851,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 7402,
+     "tokens_narrow": 1851,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/argv_golden.json",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 18,
+     "tokens_est": 174,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 696,
+     "tokens_narrow": 174,
+     "lang": "config",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/demands/caller_default_changed.json",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 14,
+     "tokens_est": 156,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 622,
+     "tokens_narrow": 156,
+     "lang": "config",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/demands/empty.json",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 8,
+     "tokens_est": 38,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 152,
+     "tokens_narrow": 38,
+     "lang": "config",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/demands/malformed_prose.txt",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 9,
+     "tokens_est": 78,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 312,
+     "tokens_narrow": 78,
+     "lang": "docs",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/json-mode-stream.jsonl",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 31,
+     "tokens_est": 37542,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 150165,
+     "tokens_narrow": 37542,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/miss_categories/README.md",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 25,
+     "tokens_est": 492,
+     "w": false,
+     "mode": "additive",
+     "bytes": 1968,
+     "tokens_narrow": 492,
+     "lang": "docs",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/miss_categories/builders.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 527,
+     "tokens_est": 4852,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 19405,
+     "tokens_narrow": 4852,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/miss_categories/pre_v2/ocr_impact.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1410,
+     "tokens_est": 13254,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 53014,
+     "tokens_narrow": 13254,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/_c4_probe/RESULTS.md",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 69,
+     "tokens_est": 1097,
+     "w": false,
+     "mode": "additive",
+     "bytes": 4388,
+     "tokens_narrow": 1097,
+     "lang": "docs",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/_c4_probe/agent-spawn-evidence.jsonl",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 2,
+     "tokens_est": 8131,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 32524,
+     "tokens_narrow": 8131,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/_c4_probe/probe.sh",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 27,
+     "tokens_est": 361,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 1444,
+     "tokens_narrow": 361,
+     "lang": "shell",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/_c4_probe/verdict.json",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 50,
+     "tokens_est": 870,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 3478,
+     "tokens_narrow": 870,
+     "lang": "config",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts.git/HEAD",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 6,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 21,
+     "tokens_narrow": 6,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts.git/config",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 6,
+     "tokens_est": 28,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 111,
+     "tokens_narrow": 28,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts.git/description",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 19,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 73,
+     "tokens_narrow": 19,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts.git/hooks/applypatch-msg.sample",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 15,
+     "tokens_est": 120,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 478,
+     "tokens_narrow": 120,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts.git/hooks/commit-msg.sample",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 24,
+     "tokens_est": 224,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 896,
+     "tokens_narrow": 224,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts.git/hooks/fsmonitor-watchman.sample",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 174,
+     "tokens_est": 1182,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 4726,
+     "tokens_narrow": 1182,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts.git/hooks/post-update.sample",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 8,
+     "tokens_est": 48,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 189,
+     "tokens_narrow": 48,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts.git/hooks/pre-applypatch.sample",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 14,
+     "tokens_est": 106,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 424,
+     "tokens_narrow": 106,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts.git/hooks/pre-commit.sample",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 49,
+     "tokens_est": 413,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 1649,
+     "tokens_narrow": 413,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts.git/hooks/pre-merge-commit.sample",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 13,
+     "tokens_est": 104,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 416,
+     "tokens_narrow": 104,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts.git/hooks/pre-push.sample",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 53,
+     "tokens_est": 344,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 1374,
+     "tokens_narrow": 344,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts.git/hooks/pre-rebase.sample",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 169,
+     "tokens_est": 1225,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 4898,
+     "tokens_narrow": 1225,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts.git/hooks/pre-receive.sample",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 24,
+     "tokens_est": 136,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 544,
+     "tokens_narrow": 136,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts.git/hooks/prepare-commit-msg.sample",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 42,
+     "tokens_est": 373,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 1492,
+     "tokens_narrow": 373,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts.git/hooks/push-to-checkout.sample",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 78,
+     "tokens_est": 696,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 2783,
+     "tokens_narrow": 696,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts.git/hooks/sendemail-validate.sample",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 77,
+     "tokens_est": 577,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 2308,
+     "tokens_narrow": 577,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts.git/hooks/update.sample",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 128,
+     "tokens_est": 913,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 3650,
+     "tokens_narrow": 913,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts.git/info/exclude",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 6,
+     "tokens_est": 60,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 240,
+     "tokens_narrow": 60,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts.git/objects/05/44617eb295499e2c616c5fe8ad223627ea18be",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 3,
+     "tokens_est": 45,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 178,
+     "tokens_narrow": 45,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts.git/objects/07/cc15cb2a318c9495af6306a97701996069e0c8",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 2,
+     "tokens_est": 45,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 179,
+     "tokens_narrow": 45,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts.git/objects/09/c92aa5b15cfebfb0b62099009320b217df84c6",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 3,
+     "tokens_est": 89,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 356,
+     "tokens_narrow": 89,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts.git/objects/2d/9fbf9e37371a0bdc539264b3384774b2c70600",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 28,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 112,
+     "tokens_narrow": 28,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts.git/objects/47/ed54078e18f6fb923ae5ccf7ad25f5aafe9b41",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 30,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 120,
+     "tokens_narrow": 30,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts.git/objects/4e/b972454ccb95347c478fb9bff920f3f59f1ee6",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 3,
+     "tokens_est": 37,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 146,
+     "tokens_narrow": 37,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts.git/objects/5f/aad309bed94835f285ba58dc64a93ba4ab40e9",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 4,
+     "tokens_est": 66,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 263,
+     "tokens_narrow": 66,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts.git/objects/66/b3f422b31fd93538772e0e06fd14a319a96a11",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 94,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 374,
+     "tokens_narrow": 94,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts.git/objects/70/ac278a354ce7318f9feecc369a1001af3a96d1",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 2,
+     "tokens_est": 36,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 143,
+     "tokens_narrow": 36,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts.git/objects/80/70bf423befb9b1a1a83bedd2701a1f0ced7562",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 2,
+     "tokens_est": 31,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 121,
+     "tokens_narrow": 31,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts.git/objects/8f/cc2a1792bcbc5f8b3b75b5c6c74363a7fb7822",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 2,
+     "tokens_est": 38,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 151,
+     "tokens_narrow": 38,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts.git/objects/9e/0d1f0eff5f0e672b507da2a061ebb13ffb9da9",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 4,
+     "tokens_est": 108,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 429,
+     "tokens_narrow": 108,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts.git/objects/c6/8ce333ad688769727cc80147663aedb6fe52de",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 2,
+     "tokens_est": 31,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 121,
+     "tokens_narrow": 31,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts.git/objects/e4/61ee85233ad0afd7fe93977b427032b7a8b92e",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 14,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 55,
+     "tokens_narrow": 14,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts.git/objects/ee/1eb286ba77ad1bd816f3432575926d08274359",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 3,
+     "tokens_est": 46,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 181,
+     "tokens_narrow": 46,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts.git/refs/.gitkeep",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 0,
+     "tokens_est": 0,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 0,
+     "tokens_narrow": 0,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts.git/refs/heads/.gitkeep",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 0,
+     "tokens_est": 0,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 0,
+     "tokens_narrow": 0,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts.git/refs/heads/main",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 11,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 41,
+     "tokens_narrow": 11,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts.git/refs/tags/.gitkeep",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 0,
+     "tokens_est": 0,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 0,
+     "tokens_narrow": 0,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts/README.md",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 16,
+     "tokens_est": 165,
+     "w": false,
+     "mode": "additive",
+     "bytes": 658,
+     "tokens_narrow": 165,
+     "lang": "docs",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts/package.json",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 12,
+     "tokens_est": 49,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 193,
+     "tokens_narrow": 49,
+     "lang": "config",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts/src/calc.ts",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 28,
+     "tokens_est": 198,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 792,
+     "tokens_narrow": 198,
+     "lang": "ts",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts/src/index.ts",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 27,
+     "tokens_est": 213,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 849,
+     "tokens_narrow": 213,
+     "lang": "ts",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts/src/stats.ts",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 17,
+     "tokens_est": 125,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 498,
+     "tokens_narrow": 125,
+     "lang": "ts",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts/src/strings.ts",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 27,
+     "tokens_est": 177,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 706,
+     "tokens_narrow": 177,
+     "lang": "ts",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/clean-ts/tsconfig.json",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 13,
+     "tokens_est": 68,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 271,
+     "tokens_narrow": 68,
+     "lang": "config",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/HEAD",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 6,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 21,
+     "tokens_narrow": 6,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/config",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 8,
+     "tokens_est": 53,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 212,
+     "tokens_narrow": 53,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/description",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 19,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 73,
+     "tokens_narrow": 19,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/hooks/applypatch-msg.sample",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 15,
+     "tokens_est": 120,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 478,
+     "tokens_narrow": 120,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/hooks/commit-msg.sample",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 24,
+     "tokens_est": 224,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 896,
+     "tokens_narrow": 224,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/hooks/fsmonitor-watchman.sample",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 174,
+     "tokens_est": 1182,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 4726,
+     "tokens_narrow": 1182,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/hooks/post-update.sample",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 8,
+     "tokens_est": 48,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 189,
+     "tokens_narrow": 48,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/hooks/pre-applypatch.sample",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 14,
+     "tokens_est": 106,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 424,
+     "tokens_narrow": 106,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/hooks/pre-commit.sample",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 49,
+     "tokens_est": 413,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 1649,
+     "tokens_narrow": 413,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/hooks/pre-merge-commit.sample",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 13,
+     "tokens_est": 104,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 416,
+     "tokens_narrow": 104,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/hooks/pre-push.sample",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 53,
+     "tokens_est": 344,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 1374,
+     "tokens_narrow": 344,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/hooks/pre-rebase.sample",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 169,
+     "tokens_est": 1225,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 4898,
+     "tokens_narrow": 1225,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/hooks/pre-receive.sample",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 24,
+     "tokens_est": 136,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 544,
+     "tokens_narrow": 136,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/hooks/prepare-commit-msg.sample",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 42,
+     "tokens_est": 373,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 1492,
+     "tokens_narrow": 373,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/hooks/push-to-checkout.sample",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 78,
+     "tokens_est": 696,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 2783,
+     "tokens_narrow": 696,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/hooks/sendemail-validate.sample",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 77,
+     "tokens_est": 577,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 2308,
+     "tokens_narrow": 577,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/hooks/update.sample",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 128,
+     "tokens_est": 913,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 3650,
+     "tokens_narrow": 913,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/info/exclude",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 6,
+     "tokens_est": 60,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 240,
+     "tokens_narrow": 60,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/objects/06/e9021e106306d436ed4add52fc63772e2a87ea",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 3,
+     "tokens_est": 66,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 263,
+     "tokens_narrow": 66,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/objects/0b/a7e20662477789c6607f697de10d790eaca98c",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 37,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 148,
+     "tokens_narrow": 37,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/objects/15/ae2ff8891b071d99b23535ba404516e24339c9",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 20,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 78,
+     "tokens_narrow": 20,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/objects/27/1c07820a99712ea4cdae458cd2967a42a78ad5",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 2,
+     "tokens_est": 43,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 172,
+     "tokens_narrow": 43,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/objects/2a/dcd8349ea15d31ac1b0add61409b46e795a502",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 45,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 177,
+     "tokens_narrow": 45,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/objects/30/c3108bc187bd89c54a952b7cc108491f83753a",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 3,
+     "tokens_est": 39,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 153,
+     "tokens_narrow": 39,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/objects/3c/c8a7b7894ca295b3d4a1fcdcaccc90f91168a8",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 52,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 207,
+     "tokens_narrow": 52,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/objects/3d/83990162dfc642dc1ed1365a507d67a51501b6",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 2,
+     "tokens_est": 39,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 154,
+     "tokens_narrow": 39,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/objects/43/e34234501930465f887ca43eaa3bd507436dc3",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 28,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 109,
+     "tokens_narrow": 28,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/objects/45/6dca313593544c52945d38fd77501f3e717f0a",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 3,
+     "tokens_est": 64,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 256,
+     "tokens_narrow": 64,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/objects/45/c58276fb8ad2daa893de2336f40510720734c2",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 50,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 200,
+     "tokens_narrow": 50,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/objects/49/93ad7f7b8a47b8581badf1fd7a46c242023fd5",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 39,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 153,
+     "tokens_narrow": 39,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/objects/4b/8f28701184797b3a61b497c19f909504f250ee",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 5,
+     "tokens_est": 231,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 922,
+     "tokens_narrow": 231,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/objects/52/781e1f27807c2be1b20a714e8b81c1201031c7",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 2,
+     "tokens_est": 69,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 276,
+     "tokens_narrow": 69,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/objects/57/d61eb0c20aea436a31ed366c89e311d737f25c",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 5,
+     "tokens_est": 42,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 166,
+     "tokens_narrow": 42,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/objects/57/e31b8237d0a02f4aa721abdafc9fd6e23e687d",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 96,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 381,
+     "tokens_narrow": 96,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/objects/5a/bb07c8968df2b1325b03e6650c05c6f0b26f92",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 30,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 120,
+     "tokens_narrow": 30,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/objects/5c/997b5172569d9d0aad37004217ad336e579784",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 39,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 153,
+     "tokens_narrow": 39,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/objects/5e/a4f8f116d8142f4822b56889bcf98c2e249a04",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 20,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 78,
+     "tokens_narrow": 20,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/objects/62/20061d85f1f847db7edc42741609da40de1759",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 51,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 203,
+     "tokens_narrow": 51,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/objects/68/ad9175eccd2b00d0974dd660dbebf19dcf8e41",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 39,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 153,
+     "tokens_narrow": 39,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/objects/70/1e51c7a096658237a3d9810e18613252f6098d",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 37,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 148,
+     "tokens_narrow": 37,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/objects/75/9a7109afc5f3b01983f362560fce107dc7cc71",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 20,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 78,
+     "tokens_narrow": 20,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/objects/82/f4b76409f3284e03e83f9443f8bf4055884808",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 20,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 78,
+     "tokens_narrow": 20,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/objects/8f/b93b443d10decb70aa70b802d7ecb490d0f567",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 14,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 53,
+     "tokens_narrow": 14,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/objects/94/8118dc6789a639a7c11624eec3147fb110c765",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 50,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 200,
+     "tokens_narrow": 50,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/objects/94/d5b40e73f85576bf4be9e0cc45d1724ea770f3",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 3,
+     "tokens_est": 49,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 194,
+     "tokens_narrow": 49,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/objects/95/7f2b172472221e13a6a8494e09b4714de50aff",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 2,
+     "tokens_est": 45,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 179,
+     "tokens_narrow": 45,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/objects/96/8449c8e1faf0736791201d705bb07075f54a9b",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 37,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 148,
+     "tokens_narrow": 37,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/objects/e5/5763180d88ea7876bead7c3ccb20d2fc69d037",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 39,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 153,
+     "tokens_narrow": 39,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/objects/e9/68c0ffd4f8c49aad292d9f83c42ab52f71fbd0",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 20,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 78,
+     "tokens_narrow": 20,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/objects/eb/7c4f163fe4dfd0b693ba85bc055f31da8420f2",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 21,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 84,
+     "tokens_narrow": 21,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/objects/eb/ee4c6773ea63ea93f4521e288f99eba68607da",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 2,
+     "tokens_est": 67,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 268,
+     "tokens_narrow": 67,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/objects/f6/785e559759a29d691794a4a55ee4ea50635d51",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 3,
+     "tokens_est": 66,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 262,
+     "tokens_narrow": 66,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/objects/f8/bc3db215b3b73b7a90698c568e535f370aee05",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 49,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 193,
+     "tokens_narrow": 49,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/objects/fc/260d7d03f0603f60df0a57a7be2b8fd1adbfca",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 2,
+     "tokens_est": 41,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 164,
+     "tokens_narrow": 41,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/objects/fc/54b4f219647c67349253161fbdf1e4f2822a5e",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 20,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 78,
+     "tokens_narrow": 20,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/packed-refs",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 2,
+     "tokens_est": 26,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 103,
+     "tokens_narrow": 26,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/refs/.gitkeep",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 0,
+     "tokens_est": 0,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 0,
+     "tokens_narrow": 0,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/refs/heads/.gitkeep",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 0,
+     "tokens_est": 0,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 0,
+     "tokens_narrow": 0,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts.git/refs/tags/.gitkeep",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 0,
+     "tokens_est": 0,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 0,
+     "tokens_narrow": 0,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts/README.md",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 33,
+     "tokens_est": 418,
+     "w": false,
+     "mode": "additive",
+     "bytes": 1671,
+     "tokens_narrow": 418,
+     "lang": "docs",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts/package.json",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 14,
+     "tokens_est": 69,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 275,
+     "tokens_narrow": 69,
+     "lang": "config",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts/src/main/index.ts",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 18,
+     "tokens_est": 101,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 403,
+     "tokens_narrow": 101,
+     "lang": "ts",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts/src/main/ipc.ts",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 16,
+     "tokens_est": 152,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 605,
+     "tokens_narrow": 152,
+     "lang": "ts",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts/src/main/settings-window.ts",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 15,
+     "tokens_est": 95,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 379,
+     "tokens_narrow": 95,
+     "lang": "ts",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts/src/main/util.ts",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 14,
+     "tokens_est": 90,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 358,
+     "tokens_narrow": 90,
+     "lang": "ts",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts/src/renderer/diagnostics.ts",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 10,
+     "tokens_est": 61,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 241,
+     "tokens_narrow": 61,
+     "lang": "ts",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts/src/renderer/panel.ts",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 7,
+     "tokens_est": 60,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 240,
+     "tokens_narrow": 60,
+     "lang": "ts",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts/src/renderer/status.ts",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 6,
+     "tokens_est": 63,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 251,
+     "tokens_narrow": 63,
+     "lang": "ts",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/electron-ts/tsconfig.json",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 11,
+     "tokens_est": 52,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 207,
+     "tokens_narrow": 52,
+     "lang": "config",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/HEAD",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 6,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 21,
+     "tokens_narrow": 6,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/config",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 8,
+     "tokens_est": 52,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 207,
+     "tokens_narrow": 52,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/description",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 19,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 73,
+     "tokens_narrow": 19,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/hooks/applypatch-msg.sample",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 15,
+     "tokens_est": 120,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 478,
+     "tokens_narrow": 120,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/hooks/commit-msg.sample",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 24,
+     "tokens_est": 224,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 896,
+     "tokens_narrow": 224,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/hooks/fsmonitor-watchman.sample",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 174,
+     "tokens_est": 1182,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 4726,
+     "tokens_narrow": 1182,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/hooks/post-update.sample",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 8,
+     "tokens_est": 48,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 189,
+     "tokens_narrow": 48,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/hooks/pre-applypatch.sample",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 14,
+     "tokens_est": 106,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 424,
+     "tokens_narrow": 106,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/hooks/pre-commit.sample",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 49,
+     "tokens_est": 413,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 1649,
+     "tokens_narrow": 413,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/hooks/pre-merge-commit.sample",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 13,
+     "tokens_est": 104,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 416,
+     "tokens_narrow": 104,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/hooks/pre-push.sample",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 53,
+     "tokens_est": 344,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 1374,
+     "tokens_narrow": 344,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/hooks/pre-rebase.sample",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 169,
+     "tokens_est": 1225,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 4898,
+     "tokens_narrow": 1225,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/hooks/pre-receive.sample",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 24,
+     "tokens_est": 136,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 544,
+     "tokens_narrow": 136,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/hooks/prepare-commit-msg.sample",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 42,
+     "tokens_est": 373,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 1492,
+     "tokens_narrow": 373,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/hooks/push-to-checkout.sample",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 78,
+     "tokens_est": 696,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 2783,
+     "tokens_narrow": 696,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/hooks/sendemail-validate.sample",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 77,
+     "tokens_est": 577,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 2308,
+     "tokens_narrow": 577,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/hooks/update.sample",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 128,
+     "tokens_est": 913,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 3650,
+     "tokens_narrow": 913,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/info/exclude",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 6,
+     "tokens_est": 60,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 240,
+     "tokens_narrow": 60,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/objects/02/855f9cd592bcbe6e26bb15bd87a7bfb03d1763",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 2,
+     "tokens_est": 62,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 246,
+     "tokens_narrow": 62,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/objects/08/0b84b46c767b74e7b95bbb4f6d07eacec04538",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 3,
+     "tokens_est": 118,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 469,
+     "tokens_narrow": 118,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/objects/0f/0e3ad6cc106034a0a8a1dc6b2a708cc4b51ef8",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 2,
+     "tokens_est": 54,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 214,
+     "tokens_narrow": 54,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/objects/11/99231284b6103d08fdd3f222a142a9394e81fe",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 49,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 194,
+     "tokens_narrow": 49,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/objects/1a/5bd204ecfb098c9e56d5d5e7fb69953ed71efa",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 4,
+     "tokens_est": 45,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 180,
+     "tokens_narrow": 45,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/objects/29/9ec985a877a3103e5fa34b2a44246c77d9ccf1",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 3,
+     "tokens_est": 86,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 341,
+     "tokens_narrow": 86,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/objects/2a/c90ee1dcad1aa2a7832ced74940dd6ee980f28",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 3,
+     "tokens_est": 107,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 427,
+     "tokens_narrow": 107,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/objects/41/dc91dca5e082c1d9f3a2bff9aaad1650d2384d",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 18,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 70,
+     "tokens_narrow": 18,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/objects/42/890f2b0c40961483ba97310ff6521dc2e65b4f",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 31,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 123,
+     "tokens_narrow": 31,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/objects/48/a4c0c0495d7528d9458fd2129d1535997059c7",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 3,
+     "tokens_est": 51,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 204,
+     "tokens_narrow": 51,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/objects/5c/98b237636b5a6c66bea7eb4aae95e58c6937bd",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 2,
+     "tokens_est": 35,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 137,
+     "tokens_narrow": 35,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/objects/5c/af0da3c14d24e6d4efd138a8500027f970b6a3",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 31,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 123,
+     "tokens_narrow": 31,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/objects/61/13a3a4c705ed6fbafbd4d8129f1bf49840eec1",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 2,
+     "tokens_est": 81,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 321,
+     "tokens_narrow": 81,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/objects/94/8ef3e00a02d7abf08ed27f7dfa6d83334a274f",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 82,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 328,
+     "tokens_narrow": 82,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/objects/96/87e058876178010497be04ed2c1034767a4953",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 2,
+     "tokens_est": 69,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 273,
+     "tokens_narrow": 69,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/objects/98/d4bf6c597052988039e8343af178d33db33c11",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 31,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 123,
+     "tokens_narrow": 31,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/objects/9f/4067d2d1f38ca179c7f2e16b80c8a8c5efa68c",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 30,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 118,
+     "tokens_narrow": 30,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/objects/9f/94a3ec7c3173aa9e2e83114b3ea977c2a72fdc",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 3,
+     "tokens_est": 83,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 331,
+     "tokens_narrow": 83,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/objects/a5/ccc09c7897de437392926bbbb3eea31d700076",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 4,
+     "tokens_est": 43,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 170,
+     "tokens_narrow": 43,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/objects/a6/9ac9e84b4baa8bf9ac4dd4dc36a90170777a9a",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 2,
+     "tokens_est": 39,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 153,
+     "tokens_narrow": 39,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/objects/c6/b9a93d385aba4dcdbfd28712310e1f316489d1",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 2,
+     "tokens_est": 66,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 261,
+     "tokens_narrow": 66,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/objects/cc/c0e8b45c2c6d8a67f4728ca4d5e68306b69925",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 3,
+     "tokens_est": 53,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 209,
+     "tokens_narrow": 53,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/objects/ce/ab1fb3c8e9a4f574e0fe860dd9e2f6c92cf567",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 3,
+     "tokens_est": 54,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 213,
+     "tokens_narrow": 54,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/objects/d1/3aaf335b841f9d4ec5e9efc7e59f0cfb4c48aa",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 5,
+     "tokens_est": 183,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 729,
+     "tokens_narrow": 183,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/objects/dd/bb91281f9ce37aeab3b06c98ede570d6bfd35a",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 2,
+     "tokens_est": 49,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 195,
+     "tokens_narrow": 49,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/objects/de/97568728c9a60ede540831adb5eeb228d12cb1",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 31,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 123,
+     "tokens_narrow": 31,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/objects/e3/10ed849de4d5c9d4c8f9b37577c877a4a579d5",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 2,
+     "tokens_est": 31,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 124,
+     "tokens_narrow": 31,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/objects/e4/bb3a1f1df4fb90603c9b17efb5f6fb15397fb5",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 2,
+     "tokens_est": 100,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 397,
+     "tokens_narrow": 100,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/objects/fb/ebeda767761dcc158cc2e0b7ec3f77ebd88588",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 2,
+     "tokens_est": 66,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 263,
+     "tokens_narrow": 66,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/packed-refs",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 4,
+     "tokens_est": 57,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 227,
+     "tokens_narrow": 57,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/refs/.gitkeep",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 0,
+     "tokens_est": 0,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 0,
+     "tokens_narrow": 0,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/refs/heads/.gitkeep",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 0,
+     "tokens_est": 0,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 0,
+     "tokens_narrow": 0,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app.git/refs/tags/.gitkeep",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 0,
+     "tokens_est": 0,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 0,
+     "tokens_narrow": 0,
+     "lang": "other",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app/README.md",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 29,
+     "tokens_est": 330,
+     "w": false,
+     "mode": "additive",
+     "bytes": 1317,
+     "tokens_narrow": 330,
+     "lang": "docs",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app/app/__init__.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1,
+     "tokens_est": 14,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 55,
+     "tokens_narrow": 14,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app/app/db.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 26,
+     "tokens_est": 134,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 533,
+     "tokens_narrow": 134,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app/app/handlers.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 10,
+     "tokens_est": 90,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 359,
+     "tokens_narrow": 90,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app/app/main.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 28,
+     "tokens_est": 232,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 927,
+     "tokens_narrow": 232,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app/app/reporting.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 10,
+     "tokens_est": 103,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 409,
+     "tokens_narrow": 103,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app/app/service.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 12,
+     "tokens_est": 99,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 393,
+     "tokens_narrow": 99,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/py-app/pyproject.toml",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 5,
+     "tokens_est": 37,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 145,
+     "tokens_narrow": 37,
+     "lang": "config",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/hook_output.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 24,
+     "tokens_est": 221,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 882,
+     "tokens_narrow": 221,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/kimi_stub.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 23,
+     "tokens_est": 286,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 1143,
+     "tokens_narrow": 286,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/live/README.md",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 31,
+     "tokens_est": 488,
+     "w": false,
+     "mode": "additive",
+     "bytes": 1950,
+     "tokens_narrow": 488,
+     "lang": "docs",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/live/live_hook.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 132,
+     "tokens_est": 1645,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 6578,
+     "tokens_narrow": 1645,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/live/live_matrix.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 319,
+     "tokens_est": 4176,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 16701,
+     "tokens_narrow": 4176,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/live/smoke_claude.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 49,
+     "tokens_est": 429,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 1716,
+     "tokens_narrow": 429,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/part_s_scenarios.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 186,
+     "tokens_est": 2690,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 10759,
+     "tokens_narrow": 2690,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/sim_harness.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 912,
+     "tokens_est": 10530,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 42119,
+     "tokens_narrow": 10530,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/sim_scenarios_kimchi_studio.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 212,
+     "tokens_est": 2100,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 8398,
+     "tokens_narrow": 2100,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/sim_scenarios_spec14.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 412,
+     "tokens_est": 3692,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 14767,
+     "tokens_narrow": 3692,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/sim_scenarios_spec14_dogfood.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 124,
+     "tokens_est": 1394,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 5574,
+     "tokens_narrow": 1394,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/sim_scenarios_spec15.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 397,
+     "tokens_est": 4070,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 16278,
+     "tokens_narrow": 4070,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/sim_scenarios_spec16.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 804,
+     "tokens_est": 10037,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 40148,
+     "tokens_narrow": 10037,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/stub_reviewer.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 715,
+     "tokens_est": 8499,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 33993,
+     "tokens_narrow": 8499,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_ancestry_scoping.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 219,
+     "tokens_est": 2355,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 9420,
+     "tokens_narrow": 2355,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_argv_golden.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 150,
+     "tokens_est": 1533,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 6130,
+     "tokens_narrow": 1533,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_async_gate.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 776,
+     "tokens_est": 8884,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 35536,
+     "tokens_narrow": 8884,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_backend_select.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 348,
+     "tokens_est": 3882,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 15526,
+     "tokens_narrow": 3882,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_claude_profile.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 653,
+     "tokens_est": 7650,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 30597,
+     "tokens_narrow": 7650,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_cmdshim.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 111,
+     "tokens_est": 1131,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 4524,
+     "tokens_narrow": 1131,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_collectors.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 757,
+     "tokens_est": 8303,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 33209,
+     "tokens_narrow": 8303,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_comment_gate.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 161,
+     "tokens_est": 1674,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 6694,
+     "tokens_narrow": 1674,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_commit_intent.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 280,
+     "tokens_est": 3159,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 12635,
+     "tokens_narrow": 3159,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_conventions.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 410,
+     "tokens_est": 4218,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 16871,
+     "tokens_narrow": 4218,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_deep_gate.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 379,
+     "tokens_est": 4338,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 17351,
+     "tokens_narrow": 4338,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_demands.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 406,
+     "tokens_est": 4424,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 17695,
+     "tokens_narrow": 4424,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_deny_canary.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 145,
+     "tokens_est": 1402,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 5605,
+     "tokens_narrow": 1402,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_docs_gate.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 2001,
+     "tokens_est": 24240,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 96959,
+     "tokens_narrow": 24240,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_docs_generator.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 346,
+     "tokens_est": 3980,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 15917,
+     "tokens_narrow": 3980,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_docsquality.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 569,
+     "tokens_est": 5996,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 23982,
+     "tokens_narrow": 5996,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_doctor_backend.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 99,
+     "tokens_est": 1099,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 4393,
+     "tokens_narrow": 1099,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_executor_testcheck.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 628,
+     "tokens_est": 7081,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 28324,
+     "tokens_narrow": 7081,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_fail_closed.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 185,
+     "tokens_est": 1805,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 7217,
+     "tokens_narrow": 1805,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_final_acceptance_registry.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 317,
+     "tokens_est": 3672,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 14685,
+     "tokens_narrow": 3672,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_final_complete_standalone.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 604,
+     "tokens_est": 6188,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 24752,
+     "tokens_narrow": 6188,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_final_composition.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 456,
+     "tokens_est": 5077,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 20306,
+     "tokens_narrow": 5077,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_final_context.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 417,
+     "tokens_est": 4483,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 17931,
+     "tokens_narrow": 4483,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_final_dynamic.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 469,
+     "tokens_est": 4714,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 18855,
+     "tokens_narrow": 4714,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_final_github_stack.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 222,
+     "tokens_est": 2210,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 8840,
+     "tokens_narrow": 2210,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_final_graph.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 355,
+     "tokens_est": 3550,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 14199,
+     "tokens_narrow": 3550,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_final_lenses.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 472,
+     "tokens_est": 4622,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 18488,
+     "tokens_narrow": 4622,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_final_materialize.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 209,
+     "tokens_est": 2292,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 9168,
+     "tokens_narrow": 2292,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_final_memory.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 471,
+     "tokens_est": 5022,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 20087,
+     "tokens_narrow": 5022,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_final_observability.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 593,
+     "tokens_est": 4794,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 19176,
+     "tokens_narrow": 4794,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_final_observability_integration.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 190,
+     "tokens_est": 2180,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 8717,
+     "tokens_narrow": 2180,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_final_provider_github.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 600,
+     "tokens_est": 5689,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 22754,
+     "tokens_narrow": 5689,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_final_provider_gitlab.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 322,
+     "tokens_est": 2915,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 11658,
+     "tokens_narrow": 2915,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_final_publication.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 583,
+     "tokens_est": 5750,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 22997,
+     "tokens_narrow": 5750,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_final_review_cli.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 689,
+     "tokens_est": 7397,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 29586,
+     "tokens_narrow": 7397,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_final_stack.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 504,
+     "tokens_est": 5500,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 21999,
+     "tokens_narrow": 5500,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_final_stops.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 441,
+     "tokens_est": 4554,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 18215,
+     "tokens_narrow": 4554,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_final_store.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 585,
+     "tokens_est": 6025,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 24097,
+     "tokens_narrow": 6025,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_final_verification.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 305,
+     "tokens_est": 2923,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 11690,
+     "tokens_narrow": 2923,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_final_views.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 499,
+     "tokens_est": 5304,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 21216,
+     "tokens_narrow": 5304,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_fixture_degradation.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 238,
+     "tokens_est": 2979,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 11913,
+     "tokens_narrow": 2979,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_fixture_e2e.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 152,
+     "tokens_est": 1806,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 7222,
+     "tokens_narrow": 1806,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_fixture_m1_remount.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 161,
+     "tokens_est": 1923,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 7692,
+     "tokens_narrow": 1923,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_fixture_m2_convention.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 179,
+     "tokens_est": 2162,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 8645,
+     "tokens_narrow": 2162,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_fixture_m3_spec_callers.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 203,
+     "tokens_est": 2492,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 9967,
+     "tokens_narrow": 2492,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_fixture_m4_pointer.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 167,
+     "tokens_est": 1942,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 7767,
+     "tokens_narrow": 1942,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_forge.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 542,
+     "tokens_est": 6217,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 24868,
+     "tokens_narrow": 6217,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_gate_finding_regressions.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 157,
+     "tokens_est": 1793,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 7172,
+     "tokens_narrow": 1793,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_harness_hint.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 64,
+     "tokens_est": 740,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 2957,
+     "tokens_narrow": 740,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_hook_passthrough.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 652,
+     "tokens_est": 7200,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 28799,
+     "tokens_narrow": 7200,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_impact.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1245,
+     "tokens_est": 12820,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 51278,
+     "tokens_narrow": 12820,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_impact_gate.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 308,
+     "tokens_est": 3761,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 15042,
+     "tokens_narrow": 3761,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_index.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 434,
+     "tokens_est": 4607,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 18425,
+     "tokens_narrow": 4607,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_install_hooks_path.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 364,
+     "tokens_est": 4319,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 17275,
+     "tokens_narrow": 4319,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_intent_e2e.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 279,
+     "tokens_est": 3082,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 12325,
+     "tokens_narrow": 3082,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_intent_gap.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 254,
+     "tokens_est": 2740,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 10960,
+     "tokens_narrow": 2740,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_ledger_dekey.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 217,
+     "tokens_est": 2470,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 9879,
+     "tokens_narrow": 2470,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_ledger_scenarios.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 1423,
+     "tokens_est": 16822,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 67285,
+     "tokens_narrow": 16822,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_memory.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 446,
+     "tokens_est": 4339,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 17356,
+     "tokens_narrow": 4339,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_memory_gate.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 153,
+     "tokens_est": 1647,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 6588,
+     "tokens_narrow": 1647,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_ocr_calibrate.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 188,
+     "tokens_est": 2018,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 8070,
+     "tokens_narrow": 2018,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_ocr_doctor.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 536,
+     "tokens_est": 6036,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 24143,
+     "tokens_narrow": 6036,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_ocr_electron.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 383,
+     "tokens_est": 3860,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 15438,
+     "tokens_narrow": 3860,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_ocr_impact.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 192,
+     "tokens_est": 1748,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 6990,
+     "tokens_narrow": 1748,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_ocr_index.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 95,
+     "tokens_est": 1033,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 4129,
+     "tokens_narrow": 1033,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_ocr_janitor.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 335,
+     "tokens_est": 3434,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 13734,
+     "tokens_narrow": 3434,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_orphans_siblings_dedup.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 226,
+     "tokens_est": 2906,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 11624,
+     "tokens_narrow": 2906,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_parallel_checks.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 606,
+     "tokens_est": 7156,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 28623,
+     "tokens_narrow": 7156,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_parallel_chunks.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 517,
+     "tokens_est": 5935,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 23739,
+     "tokens_narrow": 5935,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_pre_push_resolver.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 270,
+     "tokens_est": 2765,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 11059,
+     "tokens_narrow": 2765,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_precomputed_diffs.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 563,
+     "tokens_est": 7122,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 28487,
+     "tokens_narrow": 7122,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_process_groups.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 122,
+     "tokens_est": 1170,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 4679,
+     "tokens_narrow": 1170,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_resolution_validity.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 524,
+     "tokens_est": 5879,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 23515,
+     "tokens_narrow": 5879,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_resolver_failure.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 221,
+     "tokens_est": 2424,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 9693,
+     "tokens_narrow": 2424,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_resolver_robustness.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 511,
+     "tokens_est": 6147,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 24588,
+     "tokens_narrow": 6147,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_restack_coverage.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 388,
+     "tokens_est": 3940,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 15758,
+     "tokens_narrow": 3940,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_restack_incremental.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 372,
+     "tokens_est": 3798,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 15191,
+     "tokens_narrow": 3798,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_retry_exhausted.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 184,
+     "tokens_est": 1991,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 7964,
+     "tokens_narrow": 1991,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_review_gate.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 3431,
+     "tokens_est": 37144,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 148573,
+     "tokens_narrow": 37144,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_rg_config.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 597,
+     "tokens_est": 5972,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 23885,
+     "tokens_narrow": 5972,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_rg_jira_fetch.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 377,
+     "tokens_est": 3872,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 15486,
+     "tokens_narrow": 3872,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_rg_ticket_fetch.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 390,
+     "tokens_est": 4342,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 17365,
+     "tokens_narrow": 4342,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_rg_tickets.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 203,
+     "tokens_est": 1908,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 7632,
+     "tokens_narrow": 1908,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_scripts_gate_hook.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 165,
+     "tokens_est": 1868,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 7470,
+     "tokens_narrow": 1868,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_segment.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 334,
+     "tokens_est": 4076,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 16302,
+     "tokens_narrow": 4076,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_segment_gate.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 736,
+     "tokens_est": 9607,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 38427,
+     "tokens_narrow": 9607,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_segment_scenarios.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 183,
+     "tokens_est": 2522,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 10088,
+     "tokens_narrow": 2522,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_sim_harness.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 649,
+     "tokens_est": 7585,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 30338,
+     "tokens_narrow": 7585,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_skip_logging.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 181,
+     "tokens_est": 1957,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 7828,
+     "tokens_narrow": 1957,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_spotter_gate.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 175,
+     "tokens_est": 2023,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 8091,
+     "tokens_narrow": 2023,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_stacked_base.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 494,
+     "tokens_est": 5489,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 21956,
+     "tokens_narrow": 5489,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_state_machine.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 271,
+     "tokens_est": 3039,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 12153,
+     "tokens_narrow": 3039,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_stream_extractor.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 113,
+     "tokens_est": 1143,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 4570,
+     "tokens_narrow": 1143,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_t23_gate_defects.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 239,
+     "tokens_est": 2613,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 10450,
+     "tokens_narrow": 2613,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_t24_lows.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 342,
+     "tokens_est": 3600,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 14400,
+     "tokens_narrow": 3600,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_t26_installer_sync_config.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 258,
+     "tokens_est": 2683,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 10729,
+     "tokens_narrow": 2683,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_telemetry_tiers.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 264,
+     "tokens_est": 2968,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 11869,
+     "tokens_narrow": 2968,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_telemetry_wiring.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 292,
+     "tokens_est": 3373,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 13489,
+     "tokens_narrow": 3373,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_tier1_guard.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 364,
+     "tokens_est": 4307,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 17227,
+     "tokens_narrow": 4307,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_time_metrics.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 342,
+     "tokens_est": 3881,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 15522,
+     "tokens_narrow": 3881,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_verdict_coverage.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 138,
+     "tokens_est": 1491,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 5961,
+     "tokens_narrow": 1491,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_verdict_intent.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 128,
+     "tokens_est": 1381,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 5524,
+     "tokens_narrow": 1381,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_verdict_intent_wiring.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 328,
+     "tokens_est": 3684,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 14736,
+     "tokens_narrow": 3684,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_waivers.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 643,
+     "tokens_est": 7493,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 29969,
+     "tokens_narrow": 7493,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_wave2_findings.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 353,
+     "tokens_est": 3402,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 13606,
+     "tokens_narrow": 3402,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_worker_env.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 139,
+     "tokens_est": 1367,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 5466,
+     "tokens_narrow": 1367,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    },
+    {
+     "path": "tests/test_worker_plumbing.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 235,
+     "tokens_est": 2678,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 10711,
+     "tokens_narrow": 2678,
+     "lang": "python",
+     "wus": [
+      "F8"
+     ]
+    }
+   ],
+   "tests": [
+    "tests/conftest.py",
+    "tests/fake_backend.py",
+    "tests/fixtures/argv_golden.json",
+    "tests/fixtures/demands/caller_default_changed.json",
+    "tests/fixtures/demands/empty.json",
+    "tests/fixtures/demands/malformed_prose.txt",
+    "tests/fixtures/json-mode-stream.jsonl",
+    "tests/fixtures/miss_categories/README.md",
+    "tests/fixtures/miss_categories/builders.py",
+    "tests/fixtures/miss_categories/pre_v2/ocr_impact.py",
+    "tests/fixtures/repos/_c4_probe/RESULTS.md",
+    "tests/fixtures/repos/_c4_probe/agent-spawn-evidence.jsonl",
+    "tests/fixtures/repos/_c4_probe/probe.sh",
+    "tests/fixtures/repos/_c4_probe/verdict.json",
+    "tests/fixtures/repos/clean-ts.git/HEAD",
+    "tests/fixtures/repos/clean-ts.git/config",
+    "tests/fixtures/repos/clean-ts.git/description",
+    "tests/fixtures/repos/clean-ts.git/hooks/applypatch-msg.sample",
+    "tests/fixtures/repos/clean-ts.git/hooks/commit-msg.sample",
+    "tests/fixtures/repos/clean-ts.git/hooks/fsmonitor-watchman.sample",
+    "tests/fixtures/repos/clean-ts.git/hooks/post-update.sample",
+    "tests/fixtures/repos/clean-ts.git/hooks/pre-applypatch.sample",
+    "tests/fixtures/repos/clean-ts.git/hooks/pre-commit.sample",
+    "tests/fixtures/repos/clean-ts.git/hooks/pre-merge-commit.sample",
+    "tests/fixtures/repos/clean-ts.git/hooks/pre-push.sample",
+    "tests/fixtures/repos/clean-ts.git/hooks/pre-rebase.sample",
+    "tests/fixtures/repos/clean-ts.git/hooks/pre-receive.sample",
+    "tests/fixtures/repos/clean-ts.git/hooks/prepare-commit-msg.sample",
+    "tests/fixtures/repos/clean-ts.git/hooks/push-to-checkout.sample",
+    "tests/fixtures/repos/clean-ts.git/hooks/sendemail-validate.sample",
+    "tests/fixtures/repos/clean-ts.git/hooks/update.sample",
+    "tests/fixtures/repos/clean-ts.git/info/exclude",
+    "tests/fixtures/repos/clean-ts.git/objects/05/44617eb295499e2c616c5fe8ad223627ea18be",
+    "tests/fixtures/repos/clean-ts.git/objects/07/cc15cb2a318c9495af6306a97701996069e0c8",
+    "tests/fixtures/repos/clean-ts.git/objects/09/c92aa5b15cfebfb0b62099009320b217df84c6",
+    "tests/fixtures/repos/clean-ts.git/objects/2d/9fbf9e37371a0bdc539264b3384774b2c70600",
+    "tests/fixtures/repos/clean-ts.git/objects/47/ed54078e18f6fb923ae5ccf7ad25f5aafe9b41",
+    "tests/fixtures/repos/clean-ts.git/objects/4e/b972454ccb95347c478fb9bff920f3f59f1ee6",
+    "tests/fixtures/repos/clean-ts.git/objects/5f/aad309bed94835f285ba58dc64a93ba4ab40e9",
+    "tests/fixtures/repos/clean-ts.git/objects/66/b3f422b31fd93538772e0e06fd14a319a96a11",
+    "tests/fixtures/repos/clean-ts.git/objects/70/ac278a354ce7318f9feecc369a1001af3a96d1",
+    "tests/fixtures/repos/clean-ts.git/objects/80/70bf423befb9b1a1a83bedd2701a1f0ced7562",
+    "tests/fixtures/repos/clean-ts.git/objects/8f/cc2a1792bcbc5f8b3b75b5c6c74363a7fb7822",
+    "tests/fixtures/repos/clean-ts.git/objects/9e/0d1f0eff5f0e672b507da2a061ebb13ffb9da9",
+    "tests/fixtures/repos/clean-ts.git/objects/c6/8ce333ad688769727cc80147663aedb6fe52de",
+    "tests/fixtures/repos/clean-ts.git/objects/e4/61ee85233ad0afd7fe93977b427032b7a8b92e",
+    "tests/fixtures/repos/clean-ts.git/objects/ee/1eb286ba77ad1bd816f3432575926d08274359",
+    "tests/fixtures/repos/clean-ts.git/refs/.gitkeep",
+    "tests/fixtures/repos/clean-ts.git/refs/heads/.gitkeep",
+    "tests/fixtures/repos/clean-ts.git/refs/heads/main",
+    "tests/fixtures/repos/clean-ts.git/refs/tags/.gitkeep",
+    "tests/fixtures/repos/clean-ts/README.md",
+    "tests/fixtures/repos/clean-ts/package.json",
+    "tests/fixtures/repos/clean-ts/src/calc.ts",
+    "tests/fixtures/repos/clean-ts/src/index.ts",
+    "tests/fixtures/repos/clean-ts/src/stats.ts",
+    "tests/fixtures/repos/clean-ts/src/strings.ts",
+    "tests/fixtures/repos/clean-ts/tsconfig.json",
+    "tests/fixtures/repos/electron-ts.git/HEAD",
+    "tests/fixtures/repos/electron-ts.git/config",
+    "tests/fixtures/repos/electron-ts.git/description",
+    "tests/fixtures/repos/electron-ts.git/hooks/applypatch-msg.sample",
+    "tests/fixtures/repos/electron-ts.git/hooks/commit-msg.sample",
+    "tests/fixtures/repos/electron-ts.git/hooks/fsmonitor-watchman.sample",
+    "tests/fixtures/repos/electron-ts.git/hooks/post-update.sample",
+    "tests/fixtures/repos/electron-ts.git/hooks/pre-applypatch.sample",
+    "tests/fixtures/repos/electron-ts.git/hooks/pre-commit.sample",
+    "tests/fixtures/repos/electron-ts.git/hooks/pre-merge-commit.sample",
+    "tests/fixtures/repos/electron-ts.git/hooks/pre-push.sample",
+    "tests/fixtures/repos/electron-ts.git/hooks/pre-rebase.sample",
+    "tests/fixtures/repos/electron-ts.git/hooks/pre-receive.sample",
+    "tests/fixtures/repos/electron-ts.git/hooks/prepare-commit-msg.sample",
+    "tests/fixtures/repos/electron-ts.git/hooks/push-to-checkout.sample",
+    "tests/fixtures/repos/electron-ts.git/hooks/sendemail-validate.sample",
+    "tests/fixtures/repos/electron-ts.git/hooks/update.sample",
+    "tests/fixtures/repos/electron-ts.git/info/exclude",
+    "tests/fixtures/repos/electron-ts.git/objects/06/e9021e106306d436ed4add52fc63772e2a87ea",
+    "tests/fixtures/repos/electron-ts.git/objects/0b/a7e20662477789c6607f697de10d790eaca98c",
+    "tests/fixtures/repos/electron-ts.git/objects/15/ae2ff8891b071d99b23535ba404516e24339c9",
+    "tests/fixtures/repos/electron-ts.git/objects/27/1c07820a99712ea4cdae458cd2967a42a78ad5",
+    "tests/fixtures/repos/electron-ts.git/objects/2a/dcd8349ea15d31ac1b0add61409b46e795a502",
+    "tests/fixtures/repos/electron-ts.git/objects/30/c3108bc187bd89c54a952b7cc108491f83753a",
+    "tests/fixtures/repos/electron-ts.git/objects/3c/c8a7b7894ca295b3d4a1fcdcaccc90f91168a8",
+    "tests/fixtures/repos/electron-ts.git/objects/3d/83990162dfc642dc1ed1365a507d67a51501b6",
+    "tests/fixtures/repos/electron-ts.git/objects/43/e34234501930465f887ca43eaa3bd507436dc3",
+    "tests/fixtures/repos/electron-ts.git/objects/45/6dca313593544c52945d38fd77501f3e717f0a",
+    "tests/fixtures/repos/electron-ts.git/objects/45/c58276fb8ad2daa893de2336f40510720734c2",
+    "tests/fixtures/repos/electron-ts.git/objects/49/93ad7f7b8a47b8581badf1fd7a46c242023fd5",
+    "tests/fixtures/repos/electron-ts.git/objects/4b/8f28701184797b3a61b497c19f909504f250ee",
+    "tests/fixtures/repos/electron-ts.git/objects/52/781e1f27807c2be1b20a714e8b81c1201031c7",
+    "tests/fixtures/repos/electron-ts.git/objects/57/d61eb0c20aea436a31ed366c89e311d737f25c",
+    "tests/fixtures/repos/electron-ts.git/objects/57/e31b8237d0a02f4aa721abdafc9fd6e23e687d",
+    "tests/fixtures/repos/electron-ts.git/objects/5a/bb07c8968df2b1325b03e6650c05c6f0b26f92",
+    "tests/fixtures/repos/electron-ts.git/objects/5c/997b5172569d9d0aad37004217ad336e579784",
+    "tests/fixtures/repos/electron-ts.git/objects/5e/a4f8f116d8142f4822b56889bcf98c2e249a04",
+    "tests/fixtures/repos/electron-ts.git/objects/62/20061d85f1f847db7edc42741609da40de1759",
+    "tests/fixtures/repos/electron-ts.git/objects/68/ad9175eccd2b00d0974dd660dbebf19dcf8e41",
+    "tests/fixtures/repos/electron-ts.git/objects/70/1e51c7a096658237a3d9810e18613252f6098d",
+    "tests/fixtures/repos/electron-ts.git/objects/75/9a7109afc5f3b01983f362560fce107dc7cc71",
+    "tests/fixtures/repos/electron-ts.git/objects/82/f4b76409f3284e03e83f9443f8bf4055884808",
+    "tests/fixtures/repos/electron-ts.git/objects/8f/b93b443d10decb70aa70b802d7ecb490d0f567",
+    "tests/fixtures/repos/electron-ts.git/objects/94/8118dc6789a639a7c11624eec3147fb110c765",
+    "tests/fixtures/repos/electron-ts.git/objects/94/d5b40e73f85576bf4be9e0cc45d1724ea770f3",
+    "tests/fixtures/repos/electron-ts.git/objects/95/7f2b172472221e13a6a8494e09b4714de50aff",
+    "tests/fixtures/repos/electron-ts.git/objects/96/8449c8e1faf0736791201d705bb07075f54a9b",
+    "tests/fixtures/repos/electron-ts.git/objects/e5/5763180d88ea7876bead7c3ccb20d2fc69d037",
+    "tests/fixtures/repos/electron-ts.git/objects/e9/68c0ffd4f8c49aad292d9f83c42ab52f71fbd0",
+    "tests/fixtures/repos/electron-ts.git/objects/eb/7c4f163fe4dfd0b693ba85bc055f31da8420f2",
+    "tests/fixtures/repos/electron-ts.git/objects/eb/ee4c6773ea63ea93f4521e288f99eba68607da",
+    "tests/fixtures/repos/electron-ts.git/objects/f6/785e559759a29d691794a4a55ee4ea50635d51",
+    "tests/fixtures/repos/electron-ts.git/objects/f8/bc3db215b3b73b7a90698c568e535f370aee05",
+    "tests/fixtures/repos/electron-ts.git/objects/fc/260d7d03f0603f60df0a57a7be2b8fd1adbfca",
+    "tests/fixtures/repos/electron-ts.git/objects/fc/54b4f219647c67349253161fbdf1e4f2822a5e",
+    "tests/fixtures/repos/electron-ts.git/packed-refs",
+    "tests/fixtures/repos/electron-ts.git/refs/.gitkeep",
+    "tests/fixtures/repos/electron-ts.git/refs/heads/.gitkeep",
+    "tests/fixtures/repos/electron-ts.git/refs/tags/.gitkeep",
+    "tests/fixtures/repos/electron-ts/README.md",
+    "tests/fixtures/repos/electron-ts/package.json",
+    "tests/fixtures/repos/electron-ts/src/main/index.ts",
+    "tests/fixtures/repos/electron-ts/src/main/ipc.ts",
+    "tests/fixtures/repos/electron-ts/src/main/settings-window.ts",
+    "tests/fixtures/repos/electron-ts/src/main/util.ts",
+    "tests/fixtures/repos/electron-ts/src/renderer/diagnostics.ts",
+    "tests/fixtures/repos/electron-ts/src/renderer/panel.ts",
+    "tests/fixtures/repos/electron-ts/src/renderer/status.ts",
+    "tests/fixtures/repos/electron-ts/tsconfig.json",
+    "tests/fixtures/repos/py-app.git/HEAD",
+    "tests/fixtures/repos/py-app.git/config",
+    "tests/fixtures/repos/py-app.git/description",
+    "tests/fixtures/repos/py-app.git/hooks/applypatch-msg.sample",
+    "tests/fixtures/repos/py-app.git/hooks/commit-msg.sample",
+    "tests/fixtures/repos/py-app.git/hooks/fsmonitor-watchman.sample",
+    "tests/fixtures/repos/py-app.git/hooks/post-update.sample",
+    "tests/fixtures/repos/py-app.git/hooks/pre-applypatch.sample",
+    "tests/fixtures/repos/py-app.git/hooks/pre-commit.sample",
+    "tests/fixtures/repos/py-app.git/hooks/pre-merge-commit.sample",
+    "tests/fixtures/repos/py-app.git/hooks/pre-push.sample",
+    "tests/fixtures/repos/py-app.git/hooks/pre-rebase.sample",
+    "tests/fixtures/repos/py-app.git/hooks/pre-receive.sample",
+    "tests/fixtures/repos/py-app.git/hooks/prepare-commit-msg.sample",
+    "tests/fixtures/repos/py-app.git/hooks/push-to-checkout.sample",
+    "tests/fixtures/repos/py-app.git/hooks/sendemail-validate.sample",
+    "tests/fixtures/repos/py-app.git/hooks/update.sample",
+    "tests/fixtures/repos/py-app.git/info/exclude",
+    "tests/fixtures/repos/py-app.git/objects/02/855f9cd592bcbe6e26bb15bd87a7bfb03d1763",
+    "tests/fixtures/repos/py-app.git/objects/08/0b84b46c767b74e7b95bbb4f6d07eacec04538",
+    "tests/fixtures/repos/py-app.git/objects/0f/0e3ad6cc106034a0a8a1dc6b2a708cc4b51ef8",
+    "tests/fixtures/repos/py-app.git/objects/11/99231284b6103d08fdd3f222a142a9394e81fe",
+    "tests/fixtures/repos/py-app.git/objects/1a/5bd204ecfb098c9e56d5d5e7fb69953ed71efa",
+    "tests/fixtures/repos/py-app.git/objects/29/9ec985a877a3103e5fa34b2a44246c77d9ccf1",
+    "tests/fixtures/repos/py-app.git/objects/2a/c90ee1dcad1aa2a7832ced74940dd6ee980f28",
+    "tests/fixtures/repos/py-app.git/objects/41/dc91dca5e082c1d9f3a2bff9aaad1650d2384d",
+    "tests/fixtures/repos/py-app.git/objects/42/890f2b0c40961483ba97310ff6521dc2e65b4f",
+    "tests/fixtures/repos/py-app.git/objects/48/a4c0c0495d7528d9458fd2129d1535997059c7",
+    "tests/fixtures/repos/py-app.git/objects/5c/98b237636b5a6c66bea7eb4aae95e58c6937bd",
+    "tests/fixtures/repos/py-app.git/objects/5c/af0da3c14d24e6d4efd138a8500027f970b6a3",
+    "tests/fixtures/repos/py-app.git/objects/61/13a3a4c705ed6fbafbd4d8129f1bf49840eec1",
+    "tests/fixtures/repos/py-app.git/objects/94/8ef3e00a02d7abf08ed27f7dfa6d83334a274f",
+    "tests/fixtures/repos/py-app.git/objects/96/87e058876178010497be04ed2c1034767a4953",
+    "tests/fixtures/repos/py-app.git/objects/98/d4bf6c597052988039e8343af178d33db33c11",
+    "tests/fixtures/repos/py-app.git/objects/9f/4067d2d1f38ca179c7f2e16b80c8a8c5efa68c",
+    "tests/fixtures/repos/py-app.git/objects/9f/94a3ec7c3173aa9e2e83114b3ea977c2a72fdc",
+    "tests/fixtures/repos/py-app.git/objects/a5/ccc09c7897de437392926bbbb3eea31d700076",
+    "tests/fixtures/repos/py-app.git/objects/a6/9ac9e84b4baa8bf9ac4dd4dc36a90170777a9a",
+    "tests/fixtures/repos/py-app.git/objects/c6/b9a93d385aba4dcdbfd28712310e1f316489d1",
+    "tests/fixtures/repos/py-app.git/objects/cc/c0e8b45c2c6d8a67f4728ca4d5e68306b69925",
+    "tests/fixtures/repos/py-app.git/objects/ce/ab1fb3c8e9a4f574e0fe860dd9e2f6c92cf567",
+    "tests/fixtures/repos/py-app.git/objects/d1/3aaf335b841f9d4ec5e9efc7e59f0cfb4c48aa",
+    "tests/fixtures/repos/py-app.git/objects/dd/bb91281f9ce37aeab3b06c98ede570d6bfd35a",
+    "tests/fixtures/repos/py-app.git/objects/de/97568728c9a60ede540831adb5eeb228d12cb1",
+    "tests/fixtures/repos/py-app.git/objects/e3/10ed849de4d5c9d4c8f9b37577c877a4a579d5",
+    "tests/fixtures/repos/py-app.git/objects/e4/bb3a1f1df4fb90603c9b17efb5f6fb15397fb5",
+    "tests/fixtures/repos/py-app.git/objects/fb/ebeda767761dcc158cc2e0b7ec3f77ebd88588",
+    "tests/fixtures/repos/py-app.git/packed-refs",
+    "tests/fixtures/repos/py-app.git/refs/.gitkeep",
+    "tests/fixtures/repos/py-app.git/refs/heads/.gitkeep",
+    "tests/fixtures/repos/py-app.git/refs/tags/.gitkeep",
+    "tests/fixtures/repos/py-app/README.md",
+    "tests/fixtures/repos/py-app/app/__init__.py",
+    "tests/fixtures/repos/py-app/app/db.py",
+    "tests/fixtures/repos/py-app/app/handlers.py",
+    "tests/fixtures/repos/py-app/app/main.py",
+    "tests/fixtures/repos/py-app/app/reporting.py",
+    "tests/fixtures/repos/py-app/app/service.py",
+    "tests/fixtures/repos/py-app/pyproject.toml",
+    "tests/hook_output.py",
+    "tests/kimi_stub.py",
+    "tests/live/README.md",
+    "tests/live/live_hook.py",
+    "tests/live/live_matrix.py",
+    "tests/live/smoke_claude.py",
+    "tests/part_s_scenarios.py",
+    "tests/sim_harness.py",
+    "tests/sim_scenarios_kimchi_studio.py",
+    "tests/sim_scenarios_spec14.py",
+    "tests/sim_scenarios_spec14_dogfood.py",
+    "tests/sim_scenarios_spec15.py",
+    "tests/sim_scenarios_spec16.py",
+    "tests/stub_reviewer.py",
+    "tests/test_ancestry_scoping.py",
+    "tests/test_argv_golden.py",
+    "tests/test_async_gate.py",
+    "tests/test_backend_select.py",
+    "tests/test_claude_profile.py",
+    "tests/test_cmdshim.py",
+    "tests/test_collectors.py",
+    "tests/test_comment_gate.py",
+    "tests/test_commit_intent.py",
+    "tests/test_conventions.py",
+    "tests/test_deep_gate.py",
+    "tests/test_demands.py",
+    "tests/test_deny_canary.py",
+    "tests/test_docs_gate.py",
+    "tests/test_docs_generator.py",
+    "tests/test_docsquality.py",
+    "tests/test_doctor_backend.py",
+    "tests/test_executor_testcheck.py",
+    "tests/test_fail_closed.py",
+    "tests/test_final_acceptance_registry.py",
+    "tests/test_final_complete_standalone.py",
+    "tests/test_final_composition.py",
+    "tests/test_final_context.py",
+    "tests/test_final_dynamic.py",
+    "tests/test_final_github_stack.py",
+    "tests/test_final_graph.py",
+    "tests/test_final_lenses.py",
+    "tests/test_final_materialize.py",
+    "tests/test_final_memory.py",
+    "tests/test_final_observability.py",
+    "tests/test_final_observability_integration.py",
+    "tests/test_final_provider_github.py",
+    "tests/test_final_provider_gitlab.py",
+    "tests/test_final_publication.py",
+    "tests/test_final_review_cli.py",
+    "tests/test_final_stack.py",
+    "tests/test_final_stops.py",
+    "tests/test_final_store.py",
+    "tests/test_final_verification.py",
+    "tests/test_final_views.py",
+    "tests/test_fixture_degradation.py",
+    "tests/test_fixture_e2e.py",
+    "tests/test_fixture_m1_remount.py",
+    "tests/test_fixture_m2_convention.py",
+    "tests/test_fixture_m3_spec_callers.py",
+    "tests/test_fixture_m4_pointer.py",
+    "tests/test_forge.py",
+    "tests/test_gate_finding_regressions.py",
+    "tests/test_harness_hint.py",
+    "tests/test_hook_passthrough.py",
+    "tests/test_impact.py",
+    "tests/test_impact_gate.py",
+    "tests/test_index.py",
+    "tests/test_install_hooks_path.py",
+    "tests/test_intent_e2e.py",
+    "tests/test_intent_gap.py",
+    "tests/test_ledger_dekey.py",
+    "tests/test_ledger_scenarios.py",
+    "tests/test_memory.py",
+    "tests/test_memory_gate.py",
+    "tests/test_ocr_calibrate.py",
+    "tests/test_ocr_doctor.py",
+    "tests/test_ocr_electron.py",
+    "tests/test_ocr_impact.py",
+    "tests/test_ocr_index.py",
+    "tests/test_ocr_janitor.py",
+    "tests/test_orphans_siblings_dedup.py",
+    "tests/test_parallel_checks.py",
+    "tests/test_parallel_chunks.py",
+    "tests/test_pre_push_resolver.py",
+    "tests/test_precomputed_diffs.py",
+    "tests/test_process_groups.py",
+    "tests/test_resolution_validity.py",
+    "tests/test_resolver_failure.py",
+    "tests/test_resolver_robustness.py",
+    "tests/test_restack_coverage.py",
+    "tests/test_restack_incremental.py",
+    "tests/test_retry_exhausted.py",
+    "tests/test_review_gate.py",
+    "tests/test_rg_config.py",
+    "tests/test_rg_jira_fetch.py",
+    "tests/test_rg_ticket_fetch.py",
+    "tests/test_rg_tickets.py",
+    "tests/test_scripts_gate_hook.py",
+    "tests/test_segment.py",
+    "tests/test_segment_gate.py",
+    "tests/test_segment_scenarios.py",
+    "tests/test_sim_harness.py",
+    "tests/test_skip_logging.py",
+    "tests/test_spotter_gate.py",
+    "tests/test_stacked_base.py",
+    "tests/test_state_machine.py",
+    "tests/test_stream_extractor.py",
+    "tests/test_t23_gate_defects.py",
+    "tests/test_t24_lows.py",
+    "tests/test_t26_installer_sync_config.py",
+    "tests/test_telemetry_tiers.py",
+    "tests/test_telemetry_wiring.py",
+    "tests/test_tier1_guard.py",
+    "tests/test_time_metrics.py",
+    "tests/test_verdict_coverage.py",
+    "tests/test_verdict_intent.py",
+    "tests/test_verdict_intent_wiring.py",
+    "tests/test_waivers.py",
+    "tests/test_wave2_findings.py",
+    "tests/test_worker_env.py",
+    "tests/test_worker_plumbing.py"
+   ],
+   "est_tokens": 61500,
+   "est_hops": 21,
+   "siblings": [],
+   "readonly": true,
+   "verify": true,
+   "research": false,
+   "isolation": "shared",
+   "est_output": 0,
+   "est_cum_input": 960750,
+   "est_cost": 0.303
+  }
+ ],
+ "overlap": {
+  "F1": {
+   "F8": [
+    "tests/test_final_composition.py",
+    "tests/test_final_graph.py"
+   ]
+  },
+  "F2": {
+   "F8": [
+    "tests/test_final_verification.py"
+   ]
+  },
+  "F3": {
+   "F4a": [
+    "scripts/rg_final_review.py"
+   ],
+   "F4b": [
+    "scripts/rg_final_review.py"
+   ],
+   "F5a": [
+    "scripts/rg_final_store.py"
+   ],
+   "F5b": [
+    "scripts/rg_final_review.py",
+    "scripts/rg_final_stack.py"
+   ],
+   "F6": [
+    "scripts/rg_final_review.py"
+   ],
+   "F8": [
+    "tests/test_final_publication.py",
+    "tests/test_final_stack.py"
+   ]
+  },
+  "F4a": {
+   "F4b": [
+    "scripts/rg_final_review.py"
+   ],
+   "F5b": [
+    "scripts/rg_final_review.py"
+   ],
+   "F6": [
+    "scripts/rg_final_review.py"
+   ],
+   "F8": [
+    "tests/stub_reviewer.py",
+    "tests/test_final_complete_standalone.py",
+    "tests/test_final_review_cli.py",
+    "tests/test_worker_plumbing.py"
+   ]
+  },
+  "F4b": {
+   "F5b": [
+    "scripts/rg_final_review.py"
+   ],
+   "F6": [
+    "scripts/rg_final_review.py"
+   ],
+   "F8": [
+    "tests/test_final_lenses.py",
+    "tests/test_final_memory.py",
+    "tests/test_final_stops.py"
+   ]
+  },
+  "F5a": {
+   "F8": [
+    "tests/test_final_acceptance_registry.py",
+    "tests/test_final_store.py"
+   ]
+  },
+  "F5b": {
+   "F6": [
+    "scripts/rg_final_review.py"
+   ],
+   "F8": [
+    "tests/test_final_views.py"
+   ]
+  },
+  "F6": {
+   "F8": [
+    "tests/test_final_dynamic.py",
+    "tests/test_worker_env.py"
+   ]
+  },
+  "F7": {
+   "F8": [
+    "CHANGELOG.md",
+    "docs/adr/0008-explicit-final-whole-stack-review.md"
+   ]
+  }
+ },
+ "overlap_counts": {
+  "F1": {
+   "F8": 2
+  },
+  "F2": {
+   "F8": 1
+  },
+  "F3": {
+   "F4a": 1,
+   "F4b": 1,
+   "F5a": 1,
+   "F5b": 2,
+   "F6": 1,
+   "F8": 2
+  },
+  "F4a": {
+   "F4b": 1,
+   "F5b": 1,
+   "F6": 1,
+   "F8": 4
+  },
+  "F4b": {
+   "F5b": 1,
+   "F6": 1,
+   "F8": 3
+  },
+  "F5a": {
+   "F8": 2
+  },
+  "F5b": {
+   "F6": 1,
+   "F8": 1
+  },
+  "F6": {
+   "F8": 2
+  },
+  "F7": {
+   "F8": 2
+  }
+ },
+ "interfaces": [],
+ "inferred_deps": [],
+ "coupling": {},
+ "single_agent_est": {
+  "tokens": 382500,
+  "hops": 235,
+  "files": 32,
+  "est_output": 0,
+  "est_cum_input": 48468750,
+  "est_cost": 15.268
+ },
+ "graph": {
+  "used": false
+ },
+ "wus": {
+  "F1": {
+   "title": "Correct project-keyed graph branch identity",
+   "kind": "fix",
+   "size": "large",
+   "readonly": false,
+   "depends_on": [],
+   "planned": [],
+   "excluded_hits": 0,
+   "files": [
+    "scripts/rg_final_compose.py",
+    "scripts/rg_final_graph.py",
+    "tests/test_final_composition.py",
+    "tests/test_final_graph.py"
+   ],
+   "delivers": "main"
+  },
+  "F2": {
+   "title": "Make unsupported required-CI declarations visibly unassessable",
+   "kind": "fix",
+   "size": "medium",
+   "readonly": false,
+   "depends_on": [],
+   "planned": [],
+   "excluded_hits": 0,
+   "files": [
+    "scripts/rg_final_verification.py",
+    "tests/test_final_verification.py"
+   ],
+   "delivers": "main"
+  },
+  "F3": {
+   "title": "Centralize provider eligibility and adverse final-status publication",
+   "kind": "fix",
+   "size": "large",
+   "readonly": false,
+   "depends_on": [
+    "F1"
+   ],
+   "planned": [],
+   "excluded_hits": 0,
+   "files": [
+    "scripts/rg_final_publish.py",
+    "scripts/rg_final_review.py",
+    "scripts/rg_final_stack.py",
+    "scripts/rg_final_store.py",
+    "tests/test_final_publication.py",
+    "tests/test_final_stack.py"
+   ],
+   "delivers": "main"
+  },
+  "F4a": {
+   "title": "Complete standalone graph discovery and provider-selected routing",
+   "kind": "fix",
+   "size": "large",
+   "readonly": false,
+   "depends_on": [
+    "F3"
+   ],
+   "planned": [],
+   "excluded_hits": 0,
+   "files": [
+    "scripts/rg_final_execution.py",
+    "scripts/rg_final_review.py",
+    "tests/stub_reviewer.py",
+    "tests/test_final_complete_standalone.py",
+    "tests/test_final_review_cli.py",
+    "tests/test_worker_plumbing.py"
+   ],
+   "delivers": "main"
+  },
+  "F4b": {
+   "title": "Fix finding retirement and warning-versus-incomplete semantics",
+   "kind": "fix",
+   "size": "large",
+   "readonly": false,
+   "depends_on": [
+    "F4a"
+   ],
+   "planned": [],
+   "excluded_hits": 0,
+   "files": [
+    "scripts/rg_final_lenses.py",
+    "scripts/rg_final_memory.py",
+    "scripts/rg_final_review.py",
+    "tests/test_final_lenses.py",
+    "tests/test_final_memory.py",
+    "tests/test_final_stops.py"
+   ],
+   "delivers": "main"
+  },
+  "F5a": {
+   "title": "Default and persist installed acceptance identity in the store",
+   "kind": "fix",
+   "size": "medium",
+   "readonly": false,
+   "depends_on": [],
+   "planned": [],
+   "excluded_hits": 0,
+   "files": [
+    "scripts/rg_final_acceptance.py",
+    "scripts/rg_final_store.py",
+    "tests/test_final_acceptance_registry.py",
+    "tests/test_final_store.py"
+   ],
+   "delivers": "main"
+  },
+  "F5b": {
+   "title": "Wire acceptance identity through runs, stacks, and views",
+   "kind": "fix",
+   "size": "medium",
+   "readonly": false,
+   "depends_on": [
+    "F3",
+    "F4b",
+    "F5a"
+   ],
+   "planned": [],
+   "excluded_hits": 0,
+   "files": [
+    "scripts/rg_final_review.py",
+    "scripts/rg_final_stack.py",
+    "tests/test_final_views.py"
+   ],
+   "delivers": "main"
+  },
+  "F6": {
+   "title": "Centralize credential scrubbing without provider write tokens",
+   "kind": "fix",
+   "size": "medium",
+   "readonly": false,
+   "depends_on": [
+    "F5b"
+   ],
+   "planned": [],
+   "excluded_hits": 0,
+   "files": [
+    "examples/test-check/test_check",
+    "scripts/rg_final_dynamic.py",
+    "scripts/rg_final_review.py",
+    "tests/test_final_dynamic.py",
+    "tests/test_worker_env.py"
+   ],
+   "delivers": "main"
+  },
+  "F7": {
+   "title": "Document operator defaults and final-review surfaces",
+   "kind": "fix",
+   "size": "small",
+   "readonly": false,
+   "depends_on": [],
+   "planned": [],
+   "excluded_hits": 0,
+   "files": [
+    "CHANGELOG.md",
+    "docs/adr/0008-explicit-final-whole-stack-review.md"
+   ],
+   "delivers": "main"
+  },
+  "F8": {
+   "title": "Verify focused tests, pytest, ruff, and unrelated baseline failure",
+   "kind": "verify",
+   "size": "medium",
+   "readonly": false,
+   "depends_on": [
+    "F1",
+    "F2",
+    "F3",
+    "F4a",
+    "F4b",
+    "F5a",
+    "F5b",
+    "F6",
+    "F7"
+   ],
+   "planned": [],
+   "excluded_hits": 0,
+   "files": [
+    "CHANGELOG.md",
+    "docs/adr/0008-explicit-final-whole-stack-review.md",
+    "tests/conftest.py",
+    "tests/fake_backend.py",
+    "tests/fixtures/argv_golden.json",
+    "tests/fixtures/demands/caller_default_changed.json",
+    "tests/fixtures/demands/empty.json",
+    "tests/fixtures/demands/malformed_prose.txt",
+    "tests/fixtures/json-mode-stream.jsonl",
+    "tests/fixtures/miss_categories/README.md",
+    "tests/fixtures/miss_categories/builders.py",
+    "tests/fixtures/miss_categories/pre_v2/ocr_impact.py",
+    "tests/fixtures/repos/_c4_probe/RESULTS.md",
+    "tests/fixtures/repos/_c4_probe/agent-spawn-evidence.jsonl",
+    "tests/fixtures/repos/_c4_probe/probe.sh",
+    "tests/fixtures/repos/_c4_probe/verdict.json",
+    "tests/fixtures/repos/clean-ts.git/HEAD",
+    "tests/fixtures/repos/clean-ts.git/config",
+    "tests/fixtures/repos/clean-ts.git/description",
+    "tests/fixtures/repos/clean-ts.git/hooks/applypatch-msg.sample",
+    "tests/fixtures/repos/clean-ts.git/hooks/commit-msg.sample",
+    "tests/fixtures/repos/clean-ts.git/hooks/fsmonitor-watchman.sample",
+    "tests/fixtures/repos/clean-ts.git/hooks/post-update.sample",
+    "tests/fixtures/repos/clean-ts.git/hooks/pre-applypatch.sample",
+    "tests/fixtures/repos/clean-ts.git/hooks/pre-commit.sample",
+    "tests/fixtures/repos/clean-ts.git/hooks/pre-merge-commit.sample",
+    "tests/fixtures/repos/clean-ts.git/hooks/pre-push.sample",
+    "tests/fixtures/repos/clean-ts.git/hooks/pre-rebase.sample",
+    "tests/fixtures/repos/clean-ts.git/hooks/pre-receive.sample",
+    "tests/fixtures/repos/clean-ts.git/hooks/prepare-commit-msg.sample",
+    "tests/fixtures/repos/clean-ts.git/hooks/push-to-checkout.sample",
+    "tests/fixtures/repos/clean-ts.git/hooks/sendemail-validate.sample",
+    "tests/fixtures/repos/clean-ts.git/hooks/update.sample",
+    "tests/fixtures/repos/clean-ts.git/info/exclude",
+    "tests/fixtures/repos/clean-ts.git/objects/05/44617eb295499e2c616c5fe8ad223627ea18be",
+    "tests/fixtures/repos/clean-ts.git/objects/07/cc15cb2a318c9495af6306a97701996069e0c8",
+    "tests/fixtures/repos/clean-ts.git/objects/09/c92aa5b15cfebfb0b62099009320b217df84c6",
+    "tests/fixtures/repos/clean-ts.git/objects/2d/9fbf9e37371a0bdc539264b3384774b2c70600",
+    "tests/fixtures/repos/clean-ts.git/objects/47/ed54078e18f6fb923ae5ccf7ad25f5aafe9b41",
+    "tests/fixtures/repos/clean-ts.git/objects/4e/b972454ccb95347c478fb9bff920f3f59f1ee6",
+    "tests/fixtures/repos/clean-ts.git/objects/5f/aad309bed94835f285ba58dc64a93ba4ab40e9",
+    "tests/fixtures/repos/clean-ts.git/objects/66/b3f422b31fd93538772e0e06fd14a319a96a11",
+    "tests/fixtures/repos/clean-ts.git/objects/70/ac278a354ce7318f9feecc369a1001af3a96d1",
+    "tests/fixtures/repos/clean-ts.git/objects/80/70bf423befb9b1a1a83bedd2701a1f0ced7562",
+    "tests/fixtures/repos/clean-ts.git/objects/8f/cc2a1792bcbc5f8b3b75b5c6c74363a7fb7822",
+    "tests/fixtures/repos/clean-ts.git/objects/9e/0d1f0eff5f0e672b507da2a061ebb13ffb9da9",
+    "tests/fixtures/repos/clean-ts.git/objects/c6/8ce333ad688769727cc80147663aedb6fe52de",
+    "tests/fixtures/repos/clean-ts.git/objects/e4/61ee85233ad0afd7fe93977b427032b7a8b92e",
+    "tests/fixtures/repos/clean-ts.git/objects/ee/1eb286ba77ad1bd816f3432575926d08274359",
+    "tests/fixtures/repos/clean-ts.git/refs/.gitkeep",
+    "tests/fixtures/repos/clean-ts.git/refs/heads/.gitkeep",
+    "tests/fixtures/repos/clean-ts.git/refs/heads/main",
+    "tests/fixtures/repos/clean-ts.git/refs/tags/.gitkeep",
+    "tests/fixtures/repos/clean-ts/README.md",
+    "tests/fixtures/repos/clean-ts/package.json",
+    "tests/fixtures/repos/clean-ts/src/calc.ts",
+    "tests/fixtures/repos/clean-ts/src/index.ts",
+    "tests/fixtures/repos/clean-ts/src/stats.ts",
+    "tests/fixtures/repos/clean-ts/src/strings.ts",
+    "tests/fixtures/repos/clean-ts/tsconfig.json",
+    "tests/fixtures/repos/electron-ts.git/HEAD",
+    "tests/fixtures/repos/electron-ts.git/config",
+    "tests/fixtures/repos/electron-ts.git/description",
+    "tests/fixtures/repos/electron-ts.git/hooks/applypatch-msg.sample",
+    "tests/fixtures/repos/electron-ts.git/hooks/commit-msg.sample",
+    "tests/fixtures/repos/electron-ts.git/hooks/fsmonitor-watchman.sample",
+    "tests/fixtures/repos/electron-ts.git/hooks/post-update.sample",
+    "tests/fixtures/repos/electron-ts.git/hooks/pre-applypatch.sample",
+    "tests/fixtures/repos/electron-ts.git/hooks/pre-commit.sample",
+    "tests/fixtures/repos/electron-ts.git/hooks/pre-merge-commit.sample",
+    "tests/fixtures/repos/electron-ts.git/hooks/pre-push.sample",
+    "tests/fixtures/repos/electron-ts.git/hooks/pre-rebase.sample",
+    "tests/fixtures/repos/electron-ts.git/hooks/pre-receive.sample",
+    "tests/fixtures/repos/electron-ts.git/hooks/prepare-commit-msg.sample",
+    "tests/fixtures/repos/electron-ts.git/hooks/push-to-checkout.sample",
+    "tests/fixtures/repos/electron-ts.git/hooks/sendemail-validate.sample",
+    "tests/fixtures/repos/electron-ts.git/hooks/update.sample",
+    "tests/fixtures/repos/electron-ts.git/info/exclude",
+    "tests/fixtures/repos/electron-ts.git/objects/06/e9021e106306d436ed4add52fc63772e2a87ea",
+    "tests/fixtures/repos/electron-ts.git/objects/0b/a7e20662477789c6607f697de10d790eaca98c",
+    "tests/fixtures/repos/electron-ts.git/objects/15/ae2ff8891b071d99b23535ba404516e24339c9",
+    "tests/fixtures/repos/electron-ts.git/objects/27/1c07820a99712ea4cdae458cd2967a42a78ad5",
+    "tests/fixtures/repos/electron-ts.git/objects/2a/dcd8349ea15d31ac1b0add61409b46e795a502",
+    "tests/fixtures/repos/electron-ts.git/objects/30/c3108bc187bd89c54a952b7cc108491f83753a",
+    "tests/fixtures/repos/electron-ts.git/objects/3c/c8a7b7894ca295b3d4a1fcdcaccc90f91168a8",
+    "tests/fixtures/repos/electron-ts.git/objects/3d/83990162dfc642dc1ed1365a507d67a51501b6",
+    "tests/fixtures/repos/electron-ts.git/objects/43/e34234501930465f887ca43eaa3bd507436dc3",
+    "tests/fixtures/repos/electron-ts.git/objects/45/6dca313593544c52945d38fd77501f3e717f0a",
+    "tests/fixtures/repos/electron-ts.git/objects/45/c58276fb8ad2daa893de2336f40510720734c2",
+    "tests/fixtures/repos/electron-ts.git/objects/49/93ad7f7b8a47b8581badf1fd7a46c242023fd5",
+    "tests/fixtures/repos/electron-ts.git/objects/4b/8f28701184797b3a61b497c19f909504f250ee",
+    "tests/fixtures/repos/electron-ts.git/objects/52/781e1f27807c2be1b20a714e8b81c1201031c7",
+    "tests/fixtures/repos/electron-ts.git/objects/57/d61eb0c20aea436a31ed366c89e311d737f25c",
+    "tests/fixtures/repos/electron-ts.git/objects/57/e31b8237d0a02f4aa721abdafc9fd6e23e687d",
+    "tests/fixtures/repos/electron-ts.git/objects/5a/bb07c8968df2b1325b03e6650c05c6f0b26f92",
+    "tests/fixtures/repos/electron-ts.git/objects/5c/997b5172569d9d0aad37004217ad336e579784",
+    "tests/fixtures/repos/electron-ts.git/objects/5e/a4f8f116d8142f4822b56889bcf98c2e249a04",
+    "tests/fixtures/repos/electron-ts.git/objects/62/20061d85f1f847db7edc42741609da40de1759",
+    "tests/fixtures/repos/electron-ts.git/objects/68/ad9175eccd2b00d0974dd660dbebf19dcf8e41",
+    "tests/fixtures/repos/electron-ts.git/objects/70/1e51c7a096658237a3d9810e18613252f6098d",
+    "tests/fixtures/repos/electron-ts.git/objects/75/9a7109afc5f3b01983f362560fce107dc7cc71",
+    "tests/fixtures/repos/electron-ts.git/objects/82/f4b76409f3284e03e83f9443f8bf4055884808",
+    "tests/fixtures/repos/electron-ts.git/objects/8f/b93b443d10decb70aa70b802d7ecb490d0f567",
+    "tests/fixtures/repos/electron-ts.git/objects/94/8118dc6789a639a7c11624eec3147fb110c765",
+    "tests/fixtures/repos/electron-ts.git/objects/94/d5b40e73f85576bf4be9e0cc45d1724ea770f3",
+    "tests/fixtures/repos/electron-ts.git/objects/95/7f2b172472221e13a6a8494e09b4714de50aff",
+    "tests/fixtures/repos/electron-ts.git/objects/96/8449c8e1faf0736791201d705bb07075f54a9b",
+    "tests/fixtures/repos/electron-ts.git/objects/e5/5763180d88ea7876bead7c3ccb20d2fc69d037",
+    "tests/fixtures/repos/electron-ts.git/objects/e9/68c0ffd4f8c49aad292d9f83c42ab52f71fbd0",
+    "tests/fixtures/repos/electron-ts.git/objects/eb/7c4f163fe4dfd0b693ba85bc055f31da8420f2",
+    "tests/fixtures/repos/electron-ts.git/objects/eb/ee4c6773ea63ea93f4521e288f99eba68607da",
+    "tests/fixtures/repos/electron-ts.git/objects/f6/785e559759a29d691794a4a55ee4ea50635d51",
+    "tests/fixtures/repos/electron-ts.git/objects/f8/bc3db215b3b73b7a90698c568e535f370aee05",
+    "tests/fixtures/repos/electron-ts.git/objects/fc/260d7d03f0603f60df0a57a7be2b8fd1adbfca",
+    "tests/fixtures/repos/electron-ts.git/objects/fc/54b4f219647c67349253161fbdf1e4f2822a5e",
+    "tests/fixtures/repos/electron-ts.git/packed-refs",
+    "tests/fixtures/repos/electron-ts.git/refs/.gitkeep",
+    "tests/fixtures/repos/electron-ts.git/refs/heads/.gitkeep",
+    "tests/fixtures/repos/electron-ts.git/refs/tags/.gitkeep",
+    "tests/fixtures/repos/electron-ts/README.md",
+    "tests/fixtures/repos/electron-ts/package.json",
+    "tests/fixtures/repos/electron-ts/src/main/index.ts",
+    "tests/fixtures/repos/electron-ts/src/main/ipc.ts",
+    "tests/fixtures/repos/electron-ts/src/main/settings-window.ts",
+    "tests/fixtures/repos/electron-ts/src/main/util.ts",
+    "tests/fixtures/repos/electron-ts/src/renderer/diagnostics.ts",
+    "tests/fixtures/repos/electron-ts/src/renderer/panel.ts",
+    "tests/fixtures/repos/electron-ts/src/renderer/status.ts",
+    "tests/fixtures/repos/electron-ts/tsconfig.json",
+    "tests/fixtures/repos/py-app.git/HEAD",
+    "tests/fixtures/repos/py-app.git/config",
+    "tests/fixtures/repos/py-app.git/description",
+    "tests/fixtures/repos/py-app.git/hooks/applypatch-msg.sample",
+    "tests/fixtures/repos/py-app.git/hooks/commit-msg.sample",
+    "tests/fixtures/repos/py-app.git/hooks/fsmonitor-watchman.sample",
+    "tests/fixtures/repos/py-app.git/hooks/post-update.sample",
+    "tests/fixtures/repos/py-app.git/hooks/pre-applypatch.sample",
+    "tests/fixtures/repos/py-app.git/hooks/pre-commit.sample",
+    "tests/fixtures/repos/py-app.git/hooks/pre-merge-commit.sample",
+    "tests/fixtures/repos/py-app.git/hooks/pre-push.sample",
+    "tests/fixtures/repos/py-app.git/hooks/pre-rebase.sample",
+    "tests/fixtures/repos/py-app.git/hooks/pre-receive.sample",
+    "tests/fixtures/repos/py-app.git/hooks/prepare-commit-msg.sample",
+    "tests/fixtures/repos/py-app.git/hooks/push-to-checkout.sample",
+    "tests/fixtures/repos/py-app.git/hooks/sendemail-validate.sample",
+    "tests/fixtures/repos/py-app.git/hooks/update.sample",
+    "tests/fixtures/repos/py-app.git/info/exclude",
+    "tests/fixtures/repos/py-app.git/objects/02/855f9cd592bcbe6e26bb15bd87a7bfb03d1763",
+    "tests/fixtures/repos/py-app.git/objects/08/0b84b46c767b74e7b95bbb4f6d07eacec04538",
+    "tests/fixtures/repos/py-app.git/objects/0f/0e3ad6cc106034a0a8a1dc6b2a708cc4b51ef8",
+    "tests/fixtures/repos/py-app.git/objects/11/99231284b6103d08fdd3f222a142a9394e81fe",
+    "tests/fixtures/repos/py-app.git/objects/1a/5bd204ecfb098c9e56d5d5e7fb69953ed71efa",
+    "tests/fixtures/repos/py-app.git/objects/29/9ec985a877a3103e5fa34b2a44246c77d9ccf1",
+    "tests/fixtures/repos/py-app.git/objects/2a/c90ee1dcad1aa2a7832ced74940dd6ee980f28",
+    "tests/fixtures/repos/py-app.git/objects/41/dc91dca5e082c1d9f3a2bff9aaad1650d2384d",
+    "tests/fixtures/repos/py-app.git/objects/42/890f2b0c40961483ba97310ff6521dc2e65b4f",
+    "tests/fixtures/repos/py-app.git/objects/48/a4c0c0495d7528d9458fd2129d1535997059c7",
+    "tests/fixtures/repos/py-app.git/objects/5c/98b237636b5a6c66bea7eb4aae95e58c6937bd",
+    "tests/fixtures/repos/py-app.git/objects/5c/af0da3c14d24e6d4efd138a8500027f970b6a3",
+    "tests/fixtures/repos/py-app.git/objects/61/13a3a4c705ed6fbafbd4d8129f1bf49840eec1",
+    "tests/fixtures/repos/py-app.git/objects/94/8ef3e00a02d7abf08ed27f7dfa6d83334a274f",
+    "tests/fixtures/repos/py-app.git/objects/96/87e058876178010497be04ed2c1034767a4953",
+    "tests/fixtures/repos/py-app.git/objects/98/d4bf6c597052988039e8343af178d33db33c11",
+    "tests/fixtures/repos/py-app.git/objects/9f/4067d2d1f38ca179c7f2e16b80c8a8c5efa68c",
+    "tests/fixtures/repos/py-app.git/objects/9f/94a3ec7c3173aa9e2e83114b3ea977c2a72fdc",
+    "tests/fixtures/repos/py-app.git/objects/a5/ccc09c7897de437392926bbbb3eea31d700076",
+    "tests/fixtures/repos/py-app.git/objects/a6/9ac9e84b4baa8bf9ac4dd4dc36a90170777a9a",
+    "tests/fixtures/repos/py-app.git/objects/c6/b9a93d385aba4dcdbfd28712310e1f316489d1",
+    "tests/fixtures/repos/py-app.git/objects/cc/c0e8b45c2c6d8a67f4728ca4d5e68306b69925",
+    "tests/fixtures/repos/py-app.git/objects/ce/ab1fb3c8e9a4f574e0fe860dd9e2f6c92cf567",
+    "tests/fixtures/repos/py-app.git/objects/d1/3aaf335b841f9d4ec5e9efc7e59f0cfb4c48aa",
+    "tests/fixtures/repos/py-app.git/objects/dd/bb91281f9ce37aeab3b06c98ede570d6bfd35a",
+    "tests/fixtures/repos/py-app.git/objects/de/97568728c9a60ede540831adb5eeb228d12cb1",
+    "tests/fixtures/repos/py-app.git/objects/e3/10ed849de4d5c9d4c8f9b37577c877a4a579d5",
+    "tests/fixtures/repos/py-app.git/objects/e4/bb3a1f1df4fb90603c9b17efb5f6fb15397fb5",
+    "tests/fixtures/repos/py-app.git/objects/fb/ebeda767761dcc158cc2e0b7ec3f77ebd88588",
+    "tests/fixtures/repos/py-app.git/packed-refs",
+    "tests/fixtures/repos/py-app.git/refs/.gitkeep",
+    "tests/fixtures/repos/py-app.git/refs/heads/.gitkeep",
+    "tests/fixtures/repos/py-app.git/refs/tags/.gitkeep",
+    "tests/fixtures/repos/py-app/README.md",
+    "tests/fixtures/repos/py-app/app/__init__.py",
+    "tests/fixtures/repos/py-app/app/db.py",
+    "tests/fixtures/repos/py-app/app/handlers.py",
+    "tests/fixtures/repos/py-app/app/main.py",
+    "tests/fixtures/repos/py-app/app/reporting.py",
+    "tests/fixtures/repos/py-app/app/service.py",
+    "tests/fixtures/repos/py-app/pyproject.toml",
+    "tests/hook_output.py",
+    "tests/kimi_stub.py",
+    "tests/live/README.md",
+    "tests/live/live_hook.py",
+    "tests/live/live_matrix.py",
+    "tests/live/smoke_claude.py",
+    "tests/part_s_scenarios.py",
+    "tests/sim_harness.py",
+    "tests/sim_scenarios_kimchi_studio.py",
+    "tests/sim_scenarios_spec14.py",
+    "tests/sim_scenarios_spec14_dogfood.py",
+    "tests/sim_scenarios_spec15.py",
+    "tests/sim_scenarios_spec16.py",
+    "tests/stub_reviewer.py",
+    "tests/test_ancestry_scoping.py",
+    "tests/test_argv_golden.py",
+    "tests/test_async_gate.py",
+    "tests/test_backend_select.py",
+    "tests/test_claude_profile.py",
+    "tests/test_cmdshim.py",
+    "tests/test_collectors.py",
+    "tests/test_comment_gate.py",
+    "tests/test_commit_intent.py",
+    "tests/test_conventions.py",
+    "tests/test_deep_gate.py",
+    "tests/test_demands.py",
+    "tests/test_deny_canary.py",
+    "tests/test_docs_gate.py",
+    "tests/test_docs_generator.py",
+    "tests/test_docsquality.py",
+    "tests/test_doctor_backend.py",
+    "tests/test_executor_testcheck.py",
+    "tests/test_fail_closed.py",
+    "tests/test_final_acceptance_registry.py",
+    "tests/test_final_complete_standalone.py",
+    "tests/test_final_composition.py",
+    "tests/test_final_context.py",
+    "tests/test_final_dynamic.py",
+    "tests/test_final_github_stack.py",
+    "tests/test_final_graph.py",
+    "tests/test_final_lenses.py",
+    "tests/test_final_materialize.py",
+    "tests/test_final_memory.py",
+    "tests/test_final_observability.py",
+    "tests/test_final_observability_integration.py",
+    "tests/test_final_provider_github.py",
+    "tests/test_final_provider_gitlab.py",
+    "tests/test_final_publication.py",
+    "tests/test_final_review_cli.py",
+    "tests/test_final_stack.py",
+    "tests/test_final_stops.py",
+    "tests/test_final_store.py",
+    "tests/test_final_verification.py",
+    "tests/test_final_views.py",
+    "tests/test_fixture_degradation.py",
+    "tests/test_fixture_e2e.py",
+    "tests/test_fixture_m1_remount.py",
+    "tests/test_fixture_m2_convention.py",
+    "tests/test_fixture_m3_spec_callers.py",
+    "tests/test_fixture_m4_pointer.py",
+    "tests/test_forge.py",
+    "tests/test_gate_finding_regressions.py",
+    "tests/test_harness_hint.py",
+    "tests/test_hook_passthrough.py",
+    "tests/test_impact.py",
+    "tests/test_impact_gate.py",
+    "tests/test_index.py",
+    "tests/test_install_hooks_path.py",
+    "tests/test_intent_e2e.py",
+    "tests/test_intent_gap.py",
+    "tests/test_ledger_dekey.py",
+    "tests/test_ledger_scenarios.py",
+    "tests/test_memory.py",
+    "tests/test_memory_gate.py",
+    "tests/test_ocr_calibrate.py",
+    "tests/test_ocr_doctor.py",
+    "tests/test_ocr_electron.py",
+    "tests/test_ocr_impact.py",
+    "tests/test_ocr_index.py",
+    "tests/test_ocr_janitor.py",
+    "tests/test_orphans_siblings_dedup.py",
+    "tests/test_parallel_checks.py",
+    "tests/test_parallel_chunks.py",
+    "tests/test_pre_push_resolver.py",
+    "tests/test_precomputed_diffs.py",
+    "tests/test_process_groups.py",
+    "tests/test_resolution_validity.py",
+    "tests/test_resolver_failure.py",
+    "tests/test_resolver_robustness.py",
+    "tests/test_restack_coverage.py",
+    "tests/test_restack_incremental.py",
+    "tests/test_retry_exhausted.py",
+    "tests/test_review_gate.py",
+    "tests/test_rg_config.py",
+    "tests/test_rg_jira_fetch.py",
+    "tests/test_rg_ticket_fetch.py",
+    "tests/test_rg_tickets.py",
+    "tests/test_scripts_gate_hook.py",
+    "tests/test_segment.py",
+    "tests/test_segment_gate.py",
+    "tests/test_segment_scenarios.py",
+    "tests/test_sim_harness.py",
+    "tests/test_skip_logging.py",
+    "tests/test_spotter_gate.py",
+    "tests/test_stacked_base.py",
+    "tests/test_state_machine.py",
+    "tests/test_stream_extractor.py",
+    "tests/test_t23_gate_defects.py",
+    "tests/test_t24_lows.py",
+    "tests/test_t26_installer_sync_config.py",
+    "tests/test_telemetry_tiers.py",
+    "tests/test_telemetry_wiring.py",
+    "tests/test_tier1_guard.py",
+    "tests/test_time_metrics.py",
+    "tests/test_verdict_coverage.py",
+    "tests/test_verdict_intent.py",
+    "tests/test_verdict_intent_wiring.py",
+    "tests/test_waivers.py",
+    "tests/test_wave2_findings.py",
+    "tests/test_worker_env.py",
+    "tests/test_worker_plumbing.py"
+   ],
+   "delivers": "main"
+  }
+ },
+ "input_warnings": [],
+ "warnings": [
+  {
+   "code": "HIGH_FANOUT",
+   "cluster": "C3",
+   "msg": "C3: scripts/rg_final_store.py (20 importers)"
+  },
+  {
+   "code": "HIGH_FANOUT",
+   "cluster": "C5",
+   "msg": "C5: scripts/rg_final_store.py (20 importers)"
+  },
+  {
+   "code": "DELIVERABLE_OVERSIZE",
+   "cluster": "",
+   "msg": "deliverable 'main' aggregates 32 primary files (> 8): split it or justify in the report"
+  }
+ ],
+ "isolation": "shared",
+ "deliverables": [
+  {
+   "name": "main",
+   "clusters": [
+    "C1",
+    "C2",
+    "C3",
+    "C4",
+    "C5",
+    "C6",
+    "C7",
+    "C8",
+    "C9",
+    "C10"
+   ],
+   "tags": [
+    "[W1]",
+    "[W2]",
+    "[W3]",
+    "[W4]",
+    "[W5]",
+    "[W6]",
+    "[W7]",
+    "[W8]",
+    "[W9]",
+    "[W10]"
+   ],
+   "branch": "dk/c4bdab9e/main",
+   "base": "c4bdab9e115e1312e1a3abf915b098474bef6a5f",
+   "layers": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6
+   ],
+   "primary_files": 32
+  }
+ ]
+}

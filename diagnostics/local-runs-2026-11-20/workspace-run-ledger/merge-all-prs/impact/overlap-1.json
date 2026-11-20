@@ -1,0 +1,138 @@
+{
+  "shard": "overlap-1",
+  "kind": "semantic-conflict-hunt",
+  "repo": "/Users/jose_ribeir/work/code-review/claude-code-review-gate-merge (isolated clone of Jose-Ribeir/claude-code-review-gate)",
+  "ledger": "/Users/jose_ribeir/work/code-review/.delegate-kit/runs/merge-all-prs",
+  "merge_order": ["#9", "#6", "#8"],
+  "refs": {
+    "main": "refs/merge-validator/target = 9e865761 (SPEC-15: race/regression test checks + granular waivers)",
+    "#6": "refs/merge-validator/part-6 = 895abdb, merge-base 1dacf08",
+    "#8": "refs/merge-validator/part-8 = 1cd1149, merge-base 8385a97",
+    "#9": "refs/merge-validator/part-9 = 12eee17, merge-base e272566"
+  },
+  "method": [
+    "Read-only: no checkout, no commit, no write in the clone. Diffs via git diff <merge-base>..<ref> -- <file>.",
+    "Sequential merge simulated in /tmp with `git merge-file -p` (same content-level algorithm git merge uses) in landing order: target -> +#9 -> +#6 -> +#8, for all four overlap files.",
+    "Simulation result: review-gate.py conflicts at step 3 (#8); rg_config.py conflicts at step 3 (#8); CHANGELOG.md conflicts at step 2 (#6); agents/docs-checker.md merges textually clean at every step (checked for semantic disagreement instead).",
+    "Every caller of the conflicting symbol was enumerated on target, part-6 and part-9 (git grep) to determine the post-#9+#6 arity #8 will land on."
+  ],
+  "summary": {
+    "files_analysed": ["scripts/review-gate.py", "scripts/rg_config.py", "agents/docs-checker.md", "CHANGELOG.md"],
+    "textual_conflicts_found": 3,
+    "semantic_conflicts_found": 2,
+    "highest_risk": "scripts/review-gate.py: _run_one_command_check arity/name collision between main's SPEC-15 contract (4-tuple + budget/env) and #8's symlink hardening (2-tuple returns, deletes budget/env)."
+  },
+  "findings": [
+    {
+      "id": "O1-1",
+      "severity": "high",
+      "confidence": 0.97,
+      "kind": "textual-conflict + semantic-conflict",
+      "file": "scripts/review-gate.py",
+      "target_lines": "9836-9866 (def at 9836, conflicting return at 9848, budget/env at 9853-9862)",
+      "part8_lines": "9406-9420 (symlink return 9413-9414, escapes 9416, 9418, exe=real_exe 9419)",
+      "title": "main's SPEC-15 command-check contract (4-tuple return, budget/env) collides head-on with #8's symlink hardening (2-tuple returns, no budget/env) in _run_one_command_check",
+      "quotes": {
+        "main_2348": "if not (os.path.isfile(exe) and os.access(exe, os.X_OK)):\n        return [], [], f\"command not executable or missing: {command}\", {}",
+        "part8": "# Lexical checks are not a sandbox: isfile/access/subprocess all follow\n    # symlinks, so a repo-committed symlink could point outside the tree.\n    # Resolve to the real target and require it stays inside review_root.\n    try:\n        real_exe = os.path.realpath(exe)\n        inside = os.path.realpath(str(review_root))\n        if os.path.commonpath([real_exe, inside]) != inside:\n            return [], (\"resolved command escapes the review tree (symlink \"\n                        \"outside the repo): %s; findings discarded\" % command)\n    except (OSError, ValueError):\n        return [], f\"command not resolvable inside the review tree: {command}\"\n    if not (os.path.isfile(real_exe) and os.access(real_exe, os.X_OK)):\n        return [], f\"command not executable or missing: {command}\"\n    exe = real_exe",
+        "main_callsite": "got, check_warnings, note, tele_extra = _run_one_command_check(\n            review_root, check[\"command\"], matched,\n            timeout=check.get(\"timeout\"))",
+        "main_crash_handler": "except BaseException as exc:  # noqa: BLE001 -- the file must always say why\n        failure = (\"crash\", f\"{type(exc).__name__}: {exc}\")",
+        "main_signature": "def _run_one_command_check(review_root, command, matched,\n                           timeout=_COMMAND_CHECK_TIMEOUT_S):"
+      },
+      "evidence": {
+        "single_call_site_on_target": "scripts/review-gate.py:10024 (inside _command_check_findings) unpacks FOUR values: `got, check_warnings, note, tele_extra = _run_one_command_check(...)` and passes the SPEC-15.1 `timeout=` kwarg. Same sole call site on refs/merge-validator/part-9:10024 (git grep: no other callers in scripts/). #6 does not touch this function or its caller (its review-gate.py hunks are at _read_push_updates, resolve_review_base, _hook_target, _metric_log, _main_inner, _coverage_join), so the state #8 lands on = main's 4-tuple contract.",
+        "part8_still_2_tuple": "part-8's _run_one_command_check is the pre-SPEC-15 shape: 3 params, docstring '(findings, error_note_or_None)', every return a 2-tuple, final return `return [f for f in data if isinstance(f, dict)], None`.",
+        "simulated_merge": "git merge-file target_version 8385a97_version part8_version -> exit 1, one conflict hunk at merged lines 9865-9900. The conflict body is exactly: ours = `return [], [], f\"command not executable or missing: {command}\", {}` + the SPEC-15.1 budget clamp (`budget = min(max(float(timeout), 1.0), 3600.0)`) + SPEC-15.4 env export (`env[\"OCR_CHECK_TIMEOUT_S\"] = \"%g\" % budget`); theirs = the three symlink-guard returns in 2-tuple form. Immediately AFTER the conflict the surviving (non-conflicted) lines are ours: `timeout=budget, env=env`."
+      },
+      "trigger": "Any push to a repo that declares a `command` check in `checks` (the SPEC-14.4 surface; e.g. examples/test-check/test_check) runs `_command_check_findings` -> `_run_one_command_check`.",
+      "wrong_behaviour": {
+        "if_resolver_takes_theirs_8": "Taking #8's side of the hunk (the obvious choice, since the hunk is #8's feature) deletes main's budget/env assignment while the very next surviving lines still read them: `proc = subprocess.run([exe], ..., timeout=budget, env=env)`. `budget` and `env` are then unassigned locals -> UnboundLocalError on EVERY command check that reaches subprocess.run. The surrounding handler is `except BaseException as exc: failure = (\"crash\", ...)` (target:5492-5493) -> the run is recorded `state=\"failed\", reason=\"crash\"` and `_run_review_once` returns 1. Every push that has a command check therefore dies as a machinery crash instead of running the check. It also silently deletes two SPEC-15 features (per-check timeout clamp, OCR_CHECK_TIMEOUT_S export), so #9+#6's SPEC-15 work regresses with no test pointing at it.",
+        "if_resolver_takes_ours_main": "Taking main's side of the hunk (the other obvious choice) drops #8's entire security fix: the realpath/commonpath guard and both escape returns vanish. #8's headline behaviour (a repo-committed symlink to /bin/sh or ../outside is refused instead of executed, see tests referenced in #8) silently does not ship, and the file still compiles and the old tests still pass, so the loss is invisible in CI.",
+        "if_resolver_mixes_arity": "The 'keep both' fix that is easiest to get wrong: keep main's budget/env block AND keep #8's 2-tuple escape returns. The three escape paths then `return [], \"...\"` into `got, check_warnings, note, tele_extra = ...` (target:10024) -> `ValueError: not enough values to unpack (expected 4, got 2)` -> same `failure = (\"crash\", ...)` path. This fires exactly on the degrade paths #8 exists to make fail-soft (missing executable, non-executable bit, symlink escaping the tree, OSError in realpath), i.e. the gate turns 'findings discarded, warn and continue' into a crashed run."
+      },
+      "correct_resolution": "Hand-resolve: keep main's 4-tuple contract and SPEC-15.1/15.4 body, and lift #8's guard into it with 4-element returns, e.g. `return [], [], (\"resolved command escapes the review tree (symlink outside the repo): %s; findings discarded\" % command), {}` and `return [], [], f\"command not resolvable inside the review tree: {command}\", {}`; keep `if not (os.path.isfile(real_exe) and os.access(real_exe, os.X_OK)): return [], [], f\"command not executable or missing: {command}\", {}`; keep `exe = real_exe` BEFORE the budget/env block so subprocess still runs the resolved path.",
+      "suggested_fix": "scripts/review-gate.py:9836-9866 -- apply the resolution above; then add a regression test that calls `_run_one_command_check(review_root, <symlink escaping the tree>, matched)` and asserts the 4-tuple shape `(findings, warnings, note, tele)` with `note` mentioning 'escapes the review tree', plus one asserting a missing executable returns a 4-tuple note (the existing tests at tests/test_docs_gate.py:1496 and :1923 only cover the happy path).",
+      "tests_to_add": [
+        "tests/test_docs_gate.py: symlink-escape command check returns (findings, warnings, note, tele) with note 'resolved command escapes the review tree'",
+        "tests/test_docs_gate.py: non-executable command returns (findings, warnings, note, tele) with note 'command not executable or missing'",
+        "tests/test_executor_testcheck.py: unchanged 4-tuple contract still passes with a per-check `timeout` (guards against re-introducing the 2-tuple)"
+      ]
+    },
+    {
+      "id": "O1-2",
+      "severity": "medium",
+      "confidence": 0.9,
+      "kind": "textual-conflict (documentation surface), silent feature-doc loss",
+      "file": "scripts/rg_config.py",
+      "target_lines": "30-37 (main+#9 docstring of the checks surface)",
+      "part8_lines": "30-34",
+      "title": "The module docstring that IS the config reference for `checks` is rewritten by both main(+#9) and #8; resolving to #8 deletes the documented `parallel`, `required` and `timeout` keys",
+      "quotes": {
+        "main_plus_p9": "string names a repo-relative executable (run in a later\n                      ticket); a command check also takes \"parallel\"\n                      (default False -- its executor may run concurrently\n                      against its own tip clone; SPEC-15.1), \"required\"\n                      (default False -- opt in to final-review required\n                      verification without adding a pre-push duty), and\n                      \"timeout\" (seconds, default 60 -- its answer budget). Command\n                      checks may define new check names; other unknown names\n                      are typos and are ignored.",
+        "part8": "string names a repo-relative executable the gate runs\n                      over matched changed files. Command checks may define\n                      new check names;\n                      other unknown names are typos and are ignored."
+      },
+      "trigger": "Landing #8 after #9 + #6: `git merge-file target 8385a97 part-8 -- scripts/rg_config.py` exits 1 with one conflict hunk at the docstring lines above (simulated: /tmp/mvul2/scripts_rg_config.py.s3 line 31).",
+      "wrong_behaviour": "Any resolver that takes #8's side (or resolves 'keep the more detailed wording' by hand and drops the middle clause) removes the only in-module documentation of three command-check keys: `parallel` (SPEC-15.1, main), `timeout` (SPEC-15.1, main) and `required` (SPEC-15.2/#9). `required` is defined in the same file 50 lines below (`_COMMAND_CHECK_DEFAULTS = {\"enabled\": True, \"mode\": \"block\", \"globs\": [], \"parallel\": False, \"required\": False, \"timeout\": 60}`) and is consumed by #9's final-review verification, so the key still works while `rg_config.py`'s own reference says it does not exist. Note: no runtime break -- this is documentation drift in the file that docs/config-reference.md mirrors.",
+      "correct_resolution": "Concatenate: keep main+#9's clause list verbatim, and fold #8's improvement into the first clause only, e.g. `string names a repo-relative executable the gate runs over matched changed files; a command check also takes \"parallel\" ..., \"required\" ..., and \"timeout\" ...`.",
+      "suggested_fix": "scripts/rg_config.py:30-39 -- merge the two sentences instead of choosing one; keep the words `parallel`, `required`, `timeout` present. Add a doc-surface assertion (a test that greps the rg_config docstring for every key in `_COMMAND_CHECK_DEFAULTS`) so a future docstring rewrite cannot silently drop a key."
+    },
+    {
+      "id": "O1-3",
+      "severity": "low",
+      "confidence": 0.85,
+      "kind": "textual-conflict (adjacent prepends), benign if concatenated",
+      "file": "CHANGELOG.md",
+      "part6_lines": "insertion under `## [Unreleased]` -> `### Added`",
+      "part9_lines": "same insertion point",
+      "title": "#6 and #9 both prepend their `### Added` entry at the identical position; confirmed: NOT a duplicated version heading, but a resolver that picks one side silently deletes that PR's release notes",
+      "quotes": {
+        "context": "## [Unreleased]\n\n### Added",
+        "part9_side_first_line": "- **Explicit final whole-stack review (ADR 0008, SPEC-16).**",
+        "part6_side_first_line": "- **Universal local-only push gate (ADR 0006).**"
+      },
+      "trigger": "Landing #6 second: `git merge-file <target+#9> 1dacf08 part-6 -- CHANGELOG.md` exits 1 with a single conflict hunk whose two sides are whole entry lists (`<<<<<<< s1` = #9's SPEC-16 entry, `=======` = #6's push-gate + run-config entries).",
+      "wrong_behaviour": "Both sides insert at the same offset under the one existing `## [Unreleased] / ### Added` heading, so the conflict is purely positional. No duplicated `## [Unreleased]` section and no version-number collision is introduced. The only damage is from bad resolution: taking either side wholesale drops a whole PR's user-facing entry (e.g. #6's ADR 0006 push-gate + user-level run-config notes, or #9's ADR 0008 final-review note). Ordering within `### Added` is not load-bearing.",
+      "correct_resolution": "Keep BOTH blocks, landing order first is fine (#9 then #6) or keep #6 first; do not dedupe or reorder version headings.",
+      "suggested_fix": "CHANGELOG.md: keep both entry blocks under the single `## [Unreleased] / ### Added`; re-read the merged file to confirm exactly one `## [Unreleased]` header remains."
+    },
+    {
+      "id": "O1-4",
+      "severity": "medium",
+      "confidence": 0.7,
+      "kind": "semantic (intra-#8, surfaces only in the two overlap files #8 edits)",
+      "file": "scripts/review-gate.py + agents/docs-checker.md",
+      "part8_lines": "review-gate.py 9162, 9173, 9191, 9195; agents/docs-checker.md 49-52",
+      "title": "The new `scopes` payload key #8 adds is built from the PRE-sweep match list while the evidence it is supposed to bound is built over the POST-sweep targets -- and #8's docs-checker instruction tells the agent to judge ONLY the scope paths, so `sweep: true` corpus findings are dropped",
+      "quotes": {
+        "code": "scopes[duty] = list(matched)   ...   targets = sorted(set(matched) | set(sweep))   ...   per = ocr_docsquality.compute_evidence(str(review_root), targets,",
+        "agent_instruction": "data. `scopes` (duty → repo-relative path list) bounds each duty's own matched files: judge a duty ONLY on the paths under its scope entry, never on files another duty's globs matched."
+      },
+      "evidence": "In #8's `_docs_quality_block`, `scopes[duty] = list(matched)` is assigned at 9173, before the sweep branch; the sweep branch only reassigns `targets` (9191) and `compute_evidence(..., targets, ...)` (9195) therefore produces evidence for every ADR in the records root, while `scopes[duty]` still lists only the pushed ones. `files` (the diff payload) is `+= matched` too, so a swept file is evidence-only. agents/docs-checker.md's new sentence (part-8 line ~49-52, unchanged by #9) is the only consumer of `scopes` and reads it as an exclusive judgement bound.",
+      "trigger": "Enable `adr-integrity` with `sweep: true` (the story-20 whole-corpus sweep) and push a change touching one ADR in docs/adr/, with other ADRs in docs/adr/sub/ (or any records-root file) carrying a defect.",
+      "wrong_behaviour": "The gate computes evidence for all of docs/adr/**/*.md and charges for it, then tells the checker 'judge a duty ONLY on the paths under its scope entry'. The checker skips every swept file because `scopes[\"adr-integrity\"]` contains only the pushed ADR, so the sweep's findings never materialise -- the feature is inert and its cost is still paid. The recursive `os.walk` rewrite in the same hunk makes this worse (more swept files, more evidence, still zero scope entries).",
+      "correct_resolution": "Set `scopes[duty]` AFTER the sweep expansion (i.e. `scopes[duty] = list(targets)` at the end of the loop body) so the scope entry is exactly the set the evidence covers, or add a second key (e.g. `sweep_scopes`) and amend agents/docs-checker.md to allow evidence outside `scopes` only for duties whose entry carries the sweep flag.",
+      "suggested_fix": "scripts/review-gate.py:9173 -> move the assignment to just after `targets` is finalised (line ~9191-9193); agents/docs-checker.md:49-52 -> keep the exclusive wording, which then matches the payload. Add a test asserting `payload[\"scopes\"][duty] == sorted(payload[\"evidence\"][duty])` for a sweep-enabled duty with a sub-directory records tree."
+    }
+  ],
+  "no_finding": [
+    {
+      "file": "agents/docs-checker.md",
+      "reason": "#8 (docs_context `scopes` sentence, lines ~49-52) and #9 (a new '## Explicit final-review documentation/domain lens' section inserted at line ~18) touch disjoint regions and textually merge clean at every step. Read for semantic disagreement: #9's section scopes itself to `final-review-worker-request/v1` lens `documentation/domain` and says 'You receive no other lens's findings or conclusions'; #8's edit is inside the normal `## Input you receive` docs_context section. No shared symbol, schema field or precedence claim conflicts. The one defect in this pair is O1-4, which is #8-internal and is reported against the review-gate.py half."
+    },
+    {
+      "file": "scripts/rg_config.py",
+      "reason": "No key rename/removal collision exists. #9 only ADDS `required` (`_COMMAND_CHECK_DEFAULTS` + the `key in (\"parallel\", \"required\")` branch in `_as_check_value`); #6 only ADDS a second surface (`load_config()`/`GateConfig`, `_MISSING`, `_as_depth`, `_as_timeout`, `user_config_path`) plus a `_as_switch` null-guard; #8 changes no code, only the docstring sentence covered by O1-2. `_COMMAND_CHECK_DEFAULTS` survives #6's merge unchanged (simulated step 2 exit 0), so #9's `required` is still read under its own name. #6's `_as_switch` change (None -> `(False, None)`) is additive: every pre-existing caller passes a JSON value, and a literal null was already invalid for `checks.*.parallel`/`.sweep`, so no reader changes behaviour."
+    },
+    {
+      "file": "scripts/review-gate.py",
+      "reason": "main's rewritten `_warn_mode_clamp` consumer (`compute_verdict`) and #8's clamp change merge clean at the call sites (target:9695, 10053). #6 does not touch the command-check or docs-quality regions at all, so the O1-1 collision is strictly main x #8, and #9's review-gate.py delta (11 lines: the `final-review` / `contract|acceptance|final-report` argv dispatch inserted at the top of `main()`) is out of the blast radius. #8's chunk-0-only `docs_quality` change in `_run_chunked` (`quality_attached`, target:11475+) also merges clean against main's `_run_chunked`."
+    }
+  ],
+  "gates_checked": {
+    "regression_tests_referenced": [
+      "tests/test_docs_gate.py:1496 and :1923 call `_run_one_command_check` and were UPDATED by main to the 4-tuple contract; #8 did not edit those lines, so the merge keeps main's version and they stay green -- which is why O1-1's arity break would ship with a green suite unless a new test is added.",
+      "tests/test_executor_testcheck.py:435/453 (new in main) assert the 4-tuple `findings, warnings, note, tele = review_gate._run_one_command_check(...)`; these are the cheapest guard for O1-1."
+    ],
+    "not_run": "Full pytest suite was not executed: no checkout is permitted in this clone and the merged tree does not exist (review-gate.py and rg_config.py both conflict). All conclusions above come from the three-way content merge plus static reading of the resolved regions."
+  }
+}

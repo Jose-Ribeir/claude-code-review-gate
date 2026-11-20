@@ -1,0 +1,30 @@
+N 12eee17 Remove trailing space in stop fixture
+N f5ebb45 [W3] Redact structured authorization evidence
+N 5463af9 [W2] Make dynamic probe evidence deterministic
+N 41728b9 [W1] Accept evidence across static lenses
+N 65ae2d4 [R15] Retain sanitized per-lens worker evidence
+N c966a1e [R11] Redact worker diagnostics and bound cleanup
+N 45439f5 [R10] Stabilize STOP ownership and stack environment
+N f273ac1 [R14] Recognize plain ADR domain documents
+N aa28347 [R12] Fix GitLab global key discovery
+N bf198c3 [R8] Complete real-model lens execution
+N d80d341 [R7] Preserve quoted GitLab job declarations
+N 690df7e [R2] Independently verify finding closures
+N 1a56894 [R1] Complete required verification integration
+N a95c76e [R4] Block inherited Git credential helpers
+N 35af6d6 [R3] Revalidate GitLab branch heads
+N 968a3df [R5] Isolate final composition CLI test state
+N 64fb506 [W10] Isolate final publication test state
+N 5f3477f [W9] Centralize final credential scrubbing
+N 51f7694 [W8] Decouple final review store from coding tools
+N c7f8685 [W8] Wire acceptance identity through runs and views
+N a894b5b [W7] Fix finding retirement and warning semantics
+N f3e0794 [W6] Discover standalone graphs and complete stack routing
+N 382d3d1 [W5] Centralize final publication eligibility
+N 8a44670 [W1] Key graph edges by project coordinates
+N 5f2e99b [W2] Make unsupported required CI visibly unassessable
+N c68cc89 [W4] Record SPEC-16 configuration and operator decisions
+N 09ebf97 [W3] Default installed acceptance identity in store
+N c4bdab9 [S16-10B1] Wire final review observability into runtime
+N 04f6484 [S16-10A] Implement executable SPEC-16 acceptance scenarios
+N 44f6544 [S16-10B1] Record final architecture and observability

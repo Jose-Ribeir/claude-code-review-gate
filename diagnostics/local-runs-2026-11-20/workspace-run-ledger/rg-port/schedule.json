@@ -1,0 +1,135 @@
+{
+  "base_sha": "beeb893dc5e533a3d9ff0ce473d0846e60a1c2e2",
+  "isolation": "shared",
+  "partitioner": "judgment (dk CLI unavailable on this machine)",
+  "layers": [
+    {"layer": 0, "clusters": ["C1", "C2"]},
+    {"layer": 1, "clusters": ["C3", "C4", "C5"]},
+    {"layer": 2, "clusters": ["C6", "C7"]},
+    {"layer": 3, "clusters": ["C8"]},
+    {"layer": 4, "clusters": ["C9"]}
+  ],
+  "clusters": [
+    {
+      "id": "C1",
+      "title": "green the last 4 failing suites",
+      "wus": ["W1"],
+      "commit_tag": "[W1]",
+      "kind": "fix",
+      "depends_on": [],
+      "files": ["tests/test_segment_gate.py", "tests/test_segment_scenarios.py", "tests/test_parallel_chunks.py", "tests/test_resolution_validity.py", "scripts/review-gate.py", "tests/kimi_stub.py"],
+      "file_count": 6,
+      "est_tool_calls": 25,
+      "est_tokens": 90000,
+      "notes": "All 4 suites in one agent: they share scripts/review-gate.py, so splitting per-file serializes anyway. Absorb the 3 dirty files' partial predecessor edits first (git diff at start). Apply known medicine classes (OCR_STATE_DIR/rg_store.async_dir(), patch _find_kimi, kimi_stub STUB_STREAM/item_files/cwd_diffs, GIT_TRACE scrub) and finish the ported in-process tests (reaper, gate-worktree predicate) + live-tree test."
+    },
+    {
+      "id": "C2",
+      "title": "C5 fixtures + electron checker",
+      "wus": ["W5"],
+      "commit_tag": "[W5]",
+      "kind": "build",
+      "depends_on": [],
+      "files": ["tests/fixtures/repos/py-app/", "tests/fixtures/repos/electron-ts/", "scripts/ocr_electron.py"],
+      "file_count": 14,
+      "est_tool_calls": 22,
+      "est_tokens": 60000,
+      "notes": "New files only; zero write-set overlap with any other cluster."
+    },
+    {
+      "id": "C3",
+      "title": "C3 deny extension",
+      "wus": ["W4"],
+      "commit_tag": "[W4]",
+      "kind": "build",
+      "depends_on": ["C1"],
+      "files": ["extensions/review-gate-deny.ts", "scripts/review-gate.py", "README.md"],
+      "file_count": 3,
+      "est_tool_calls": 28,
+      "est_tokens": 95000,
+      "notes": "Hardened bash ALLOWLIST + deny classes + startup canary; review-gate.py edits limited to canary wiring. Layered after C1 because review-gate.py is shared (declared depends_on W1 already requires this)."
+    },
+    {
+      "id": "C4",
+      "title": "full suite green (verification gate)",
+      "wus": ["W2"],
+      "commit_tag": "[W2]",
+      "kind": "verify",
+      "depends_on": ["C1"],
+      "files": [],
+      "file_count": 0,
+      "est_tool_calls": 12,
+      "est_tokens": 40000,
+      "notes": "9-min pytest, zero failures/hangs, <=2 documented xfails. Read-only sweep of tests/."
+    },
+    {
+      "id": "C5",
+      "title": "live smoke a-e",
+      "wus": ["W3"],
+      "commit_tag": "[W3]",
+      "kind": "verify",
+      "depends_on": ["C1"],
+      "files": [],
+      "file_count": 0,
+      "est_tool_calls": 20,
+      "est_tokens": 55000,
+      "notes": "/tmp scratch repo; stub pass/block, core.hooksPath, bypass regression sweep (push/env OCR_IN_REVIEW/bash -c/send-pack/--mirror block), embedded-string allow. Read-only on repo."
+    },
+    {
+      "id": "C6",
+      "title": "C9 ops",
+      "wus": ["W8"],
+      "commit_tag": "[W8]",
+      "kind": "build",
+      "depends_on": ["C3"],
+      "files": ["scripts/ocr_doctor.py", "scripts/ocr_janitor.py", "scripts/review-gate.py"],
+      "file_count": 3,
+      "est_tool_calls": 24,
+      "est_tokens": 75000,
+      "notes": "New ocr_doctor.py + ocr_janitor.py; review-gate.py edits limited to error-state deny wiring. Layered after C3 (both edit review-gate.py -> cannot share a layer). Declared depends_on W1 satisfied transitively."
+    },
+    {
+      "id": "C7",
+      "title": "C8 packaging",
+      "wus": ["W7"],
+      "commit_tag": "[W7]",
+      "kind": "build",
+      "depends_on": ["C3", "C2"],
+      "files": ["package.json", "README.md", ".github/workflows/review-gate-ci.yml"],
+      "file_count": 3,
+      "est_tool_calls": 14,
+      "est_tokens": 40000,
+      "notes": "README.md shared with C3 -> after C3. No overlap with C6 (review-gate.py untouched), so C6 and C7 share layer 2."
+    },
+    {
+      "id": "C8",
+      "title": "C5 calibration matrix",
+      "wus": ["W6"],
+      "commit_tag": "[W6]",
+      "kind": "verify",
+      "depends_on": ["C4", "C5", "C3", "C2", "C6"],
+      "files": [],
+      "file_count": 0,
+      "est_tool_calls": 30,
+      "est_tokens": 110000,
+      "notes": "Real-model pushes over fixtures; FP/FN matrix >=25 cleans (>=20 real human commits); D15 rule check. Most expensive step (real inference)."
+    },
+    {
+      "id": "C9",
+      "title": "C7 depth (OPTIONAL / DEFERRED)",
+      "wus": ["W9"],
+      "commit_tag": "[W9]",
+      "kind": "build",
+      "depends_on": ["C4"],
+      "files": ["scripts/ocr_impact.py", "scripts/ocr_segment.py"],
+      "file_count": 2,
+      "est_tool_calls": 28,
+      "est_tokens": 100000,
+      "notes": "tree-sitter _ts_defs() + Electron IPC caller model. Marked optional/deferred; if run, it can go in layer 3 in parallel with C8 (disjoint write-sets) or be deferred to a follow-up run."
+    }
+  ],
+  "warnings": [
+    "C8 (calibration) and C9 (C7 depth) could share layer 3 since write-sets are disjoint; kept C9 in layer 4 + flagged optional because W9 declared depends_on W2 only and is explicitly deferrable.",
+    "Predecessor's 3 dirty files (scripts/review-gate.py, tests/test_parallel_chunks.py, tests/test_resolution_validity.py) must be reviewed by C1's agent before layer 1 starts; base_sha beeb893 assumes those partial edits are either absorbed or reverted by C1."
+  ]
+}

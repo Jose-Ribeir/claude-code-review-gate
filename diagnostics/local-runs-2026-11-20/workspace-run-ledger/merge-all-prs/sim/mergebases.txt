@@ -1,0 +1,4 @@
+merge-base target <-> part-N (fork point from main) and rev-list count of unique commits part-N has vs that base
+part-6: merge-base=1dacf08767c6e19763e1e2bd2967949369e2cf18  rev-list-count(1dacf08767c6e19763e1e2bd2967949369e2cf18..part-6)=19
+part-8: merge-base=8385a974935418862f80cb51a5ecc9fb80dcd250  rev-list-count(8385a974935418862f80cb51a5ecc9fb80dcd250..part-8)=3
+part-9: merge-base=e2725667957b1651e6e666f52e69890b72c95490  rev-list-count(e2725667957b1651e6e666f52e69890b72c95490..part-9)=50

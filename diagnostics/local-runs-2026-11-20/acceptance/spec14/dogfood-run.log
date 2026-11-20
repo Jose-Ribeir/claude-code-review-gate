@@ -1,0 +1,13 @@
+[sim] target: /Users/jose_ribeir/work/code-review/claude-code-review-gate
+[sim] scratch: /Users/jose_ribeir/work/code-review/.kimchi/docs/spec14-acceptance/dogfood-scratch
+[sim] gate hook installed via the repo installer: /Users/jose_ribeir/work/code-review/.kimchi/docs/spec14-acceptance/dogfood-scratch/hooks/pre-push
+[sim] --- A-dogfood-decision-before-context-blocks: ADR-0007 states its Decision before its Context; the repo's own promoted config (adr-wait-what, mode block) must block the push
+[sim]     expect: block
+[sim]     [OK  ] outcome=block pushes=25 elapsed=344.7s
+[sim] --- B-dogfood-fixed-record-passes: ADR-0007 rewritten with Context before Decision and only verifiable claims; adr-wait-what and adr-integrity (both mode block) stay silent and the push lands
+[sim]     expect: pass
+[sim]     [OK  ] outcome=pass pushes=9 elapsed=114.9s
+[sim] docs summary cache regenerated inline: False (0 bytes)
+[sim] original repository untouched: False
+[sim] report written to /Users/jose_ribeir/work/code-review/.kimchi/docs/spec14-acceptance/dogfood-scratch/results.json
+[sim] ==== FAILURES RECORDED (460s total) ====

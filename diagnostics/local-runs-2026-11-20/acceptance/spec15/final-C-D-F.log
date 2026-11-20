@@ -1,0 +1,15 @@
+[sim] target: /Users/jose_ribeir/work/code-review/claude-code-review-gate
+[sim] scratch: /Users/jose_ribeir/work/code-review/sim-scratch-spec15-CDF
+[sim] seeded into the scratch baseline: .ocr/config.json, go.mod, scripts/test_check, simconst/limits.py, simgo/racy.go, simlib/feature.py, tests/test_feature.py
+[sim] gate hook installed via the repo installer: /Users/jose_ribeir/work/code-review/sim-scratch-spec15-CDF/hooks/pre-push
+[sim] --- C-waived-repush-passes: the same blocking push, re-pushed after its finding is waived, passes with the waiver loudly listed
+[sim]     expect: pass
+[sim]     [OK  ] outcome=pass pushes=24 elapsed=316.9s
+[sim] --- D-waiver-lapse-blocks: the finding's code/evidence altered since the waiver: the anchor no longer matches, the waiver lapses, it blocks again
+[sim]     expect: block
+[sim]     [FAIL] outcome=error pushes=0 elapsed=0s
+[sim]     failure: git commit -q -m sim D: flip the inclusive boundary in simlib.feature failed (1): 
+[sim] docs summary cache regenerated inline: False (0 bytes)
+[sim] original repository untouched: True
+[sim] report written to /Users/jose_ribeir/work/code-review/sim-scratch-spec15-CDF/results.json
+[sim] ==== FAILURES RECORDED (318s total) ====

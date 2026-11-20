@@ -1,0 +1,102 @@
+{
+  "version": 1,
+  "base_sha": "65ae2d4aac08f7f1b242d33f0210924aa7b94f0f",
+  "budget": 100000,
+  "layers": [["C1"], ["C2"]],
+  "clusters": [
+    {
+      "id": "C1",
+      "title": "Real-static evidence mapping",
+      "wus": ["W1"],
+      "commit_tag": "[W1]",
+      "layer": 0,
+      "files": [
+        {"path": "tests/sim_scenarios_spec16.py", "w": true, "mode": "exclusive", "wus": ["W1"]},
+        {"path": "tests/test_final_acceptance_registry.py", "w": true, "mode": "exclusive", "wus": ["W1"]},
+        {"path": "tests/test_sim_harness.py", "w": true, "mode": "exclusive", "wus": ["W1"]}
+      ],
+      "tests": [
+        "tests/test_final_acceptance_registry.py",
+        "tests/test_sim_harness.py"
+      ],
+      "est_tokens": 66000,
+      "est_hops": 32,
+      "siblings": [],
+      "readonly": false,
+      "verify": false,
+      "research": false,
+      "isolation": "shared",
+      "est_output": 0,
+      "est_cum_input": 1500000,
+      "est_cost": 0.60
+    },
+    {
+      "id": "C2",
+      "title": "Real-race evidence determinism and selector diagnostics",
+      "wus": ["W2"],
+      "commit_tag": "[W2]",
+      "layer": 1,
+      "files": [
+        {"path": "examples/test-check/test_check", "w": true, "mode": "exclusive", "wus": ["W2"]},
+        {"path": "tests/test_executor_testcheck.py", "w": true, "mode": "exclusive", "wus": ["W2"]},
+        {"path": "tests/sim_scenarios_spec16.py", "w": true, "mode": "exclusive", "wus": ["W2"]}
+      ],
+      "tests": [
+        "tests/test_executor_testcheck.py",
+        "tests/test_final_acceptance_registry.py"
+      ],
+      "est_tokens": 65000,
+      "est_hops": 31,
+      "siblings": [],
+      "readonly": false,
+      "verify": false,
+      "research": false,
+      "isolation": "shared",
+      "est_output": 0,
+      "est_cum_input": 1450000,
+      "est_cost": 0.59
+    }
+  ],
+  "wus": {
+    "W1": {
+      "id": "W1",
+      "title": "Real-static evidence mapping",
+      "kind": "fix",
+      "depends_on": [],
+      "size": "small",
+      "files": [
+        "tests/sim_scenarios_spec16.py",
+        "tests/test_final_acceptance_registry.py",
+        "tests/test_sim_harness.py"
+      ],
+      "delivers": "main"
+    },
+    "W2": {
+      "id": "W2",
+      "title": "Real-race evidence determinism and selector diagnostics",
+      "kind": "fix",
+      "depends_on": ["W1"],
+      "size": "small",
+      "files": [
+        "examples/test-check/test_check",
+        "tests/test_executor_testcheck.py",
+        "tests/sim_scenarios_spec16.py"
+      ],
+      "delivers": "main"
+    }
+  },
+  "input_warnings": [],
+  "warnings": [],
+  "isolation": "shared",
+  "deliverables": [
+    {
+      "name": "main",
+      "clusters": ["C1", "C2"],
+      "tags": ["W1", "W2"],
+      "branch": "dk/65ae2d4a/main",
+      "base": "65ae2d4aac08f7f1b242d33f0210924aa7b94f0f",
+      "layers": [0, 1],
+      "primary_files": 5
+    }
+  ]
+}

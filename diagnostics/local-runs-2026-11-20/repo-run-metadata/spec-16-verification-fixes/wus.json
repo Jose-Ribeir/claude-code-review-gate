@@ -1,0 +1,8 @@
+[
+  {"id":"R1","title":"Required CI honesty/status","kind":"fix","seeds":{"symbols":["rg_final_verification"],"patterns":["before_script","required"],"paths":["rg_final_verification.py"],"globs":["tests/**/*verification*"]},"depends_on":[],"delivers":"main","size":"medium"},
+  {"id":"R2","title":"Closure verification/publication option","kind":"fix","seeds":{"symbols":["publish","revalidation","anchor"],"paths":["rg_final_store.py","rg_final_memory.py","rg_final_execution.py","rg_final_lenses.py","rg_final_review.py","rg_final_stack.py"],"globs":["tests/**/*final*"]},"depends_on":["R1"],"delivers":"main","size":"large"},
+  {"id":"R3","title":"Freshness: revalidate MR refs","kind":"fix","seeds":{"symbols":["diff_refs","revalidate"],"patterns":["diff_refs"],"globs":["*gitlab*","tests/**/*gitlab*"]},"depends_on":[],"delivers":"main","size":"small"},
+  {"id":"R4","title":"Credential helper scrub for clone commands","kind":"fix","seeds":{"symbols":["credential"],"patterns":["credential.helper","submodule","lfs"],"globs":["*material*","*security*","tests/**/*security*","tests/**/*material*"]},"depends_on":[],"delivers":"main","size":"medium"},
+  {"id":"R5","title":"Final-review test store isolation","kind":"fix","seeds":{"symbols":["OCR_STATE_DIR","FINAL_REVIEW_STORE"],"paths":["tests/test_final_composition.py"],"globs":["tests/**/*final*"]},"depends_on":[],"delivers":"main","size":"small"},
+  {"id":"R6","title":"Focused/full verification and repeat reviewer","kind":"verify","seeds":{"symbols":[],"patterns":[],"paths":[],"globs":["tests/**/*verification*","tests/**/*final*","tests/**/*gitlab*","tests/**/*security*","tests/**/*material*"]},"depends_on":["R1","R2","R3","R4","R5"],"readonly":true,"delivers":"main","size":"small"}
+]

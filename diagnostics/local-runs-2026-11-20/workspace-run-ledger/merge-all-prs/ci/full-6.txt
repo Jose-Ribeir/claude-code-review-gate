@@ -1,0 +1,713 @@
+test (3.12)	UNKNOWN STEP	﻿2026-11-16T17:55:49.7625089Z Current runner version: '2.338.2'
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7640889Z ##[group]Runner Image Provisioner
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7641525Z Hosted Compute Agent
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7642319Z Version: 20261103.629
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7642788Z Commit: 15dbd9ccb5dbf34fae002b6ed1a2670f52df37bc
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7643338Z Build Date: 2026-11-03T17:26:59Z
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7643855Z Worker ID: {b000f863-0ddb-4173-ad2b-f87122e1403a}
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7644381Z Region: us-west-2
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7644831Z Cloud: AWS
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7645199Z ##[endgroup]
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7646170Z ##[group]Operating System
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7646636Z Ubuntu
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7647000Z 24.04.5
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7647361Z LTS
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7647717Z ##[endgroup]
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7648087Z ##[group]Runner Image
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7648548Z Image: ubuntu-24.04
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7648943Z Version: 20261111.127.1
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7649852Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20261111.127/images/ubuntu/Ubuntu2404-Readme.md
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7650933Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20261111.127
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7651656Z ##[endgroup]
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7652803Z ##[group]GITHUB_TOKEN Permissions
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7654382Z Contents: read
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7654781Z Metadata: read
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7655254Z Packages: read
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7655711Z ##[endgroup]
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7657145Z Secret source: Actions
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7657794Z Cache mode: write
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7658279Z Prepare workflow directory
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7886721Z Prepare all required actions
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:49.7922232Z Getting action download info
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:50.1626501Z Download action repository 'actions/checkout@v4' (SHA:11d5960a326750d5838078e36cf38b85af677262)
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:52.4505598Z Download action repository 'actions/setup-python@v5' (SHA:a26af69be951a213d495a4c3e4e4022e16d87065)
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:52.7338571Z Complete job name: test (3.12)
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:52.7948192Z ##[group]Run actions/checkout@v4
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:52.7948932Z with:
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:52.7949402Z   repository: Jose-Ribeir/claude-code-review-gate
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:52.7953299Z   token: ***
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:52.7953773Z   ssh-strict: true
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:52.7954202Z   ssh-user: git
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:52.7954677Z   persist-credentials: true
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:52.7955201Z   clean: true
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:52.7955669Z   sparse-checkout-cone-mode: true
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:52.7956167Z   fetch-depth: 1
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:52.7956583Z   fetch-tags: false
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:52.7957018Z   show-progress: true
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:52.7957449Z   lfs: false
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:52.7957839Z   submodules: false
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:52.7958307Z   set-safe-directory: true
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:52.7958783Z   allow-unsafe-pr-checkout: false
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:52.7959485Z ##[endgroup]
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.6278930Z Syncing repository: Jose-Ribeir/claude-code-review-gate
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.6280119Z ##[group]Getting Git version info
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.6280820Z Working directory is '/home/runner/work/claude-code-review-gate/claude-code-review-gate'
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.6282067Z [command]/usr/bin/git version
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.9062820Z git version 2.56.1
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.9076108Z ##[endgroup]
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.9086304Z Temporarily overriding HOME='/home/runner/work/_temp/d2689eb1-48c6-4a9e-bc70-6b6cda4aff32' before making global git config changes
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.9087308Z Adding repository directory to the temporary git global config as a safe directory
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.9089953Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/claude-code-review-gate/claude-code-review-gate
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.9137904Z Deleting the contents of '/home/runner/work/claude-code-review-gate/claude-code-review-gate'
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.9140280Z ##[group]Initializing the repository
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.9144254Z [command]/usr/bin/git init /home/runner/work/claude-code-review-gate/claude-code-review-gate
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.9994911Z hint: Using 'master' as the name for the initial branch. This default branch name
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.9996109Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.9996564Z hint: to use in all of your new repositories, which will suppress this warning,
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.9997278Z hint: call:
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.9997515Z hint:
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.9997835Z hint: 	git config --global init.defaultBranch <name>
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.9998150Z hint:
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.9998423Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.9999011Z hint: 'development'. The just-created branch can be renamed via this command:
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.9999475Z hint:
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:57.9999730Z hint: 	git branch -m <name>
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:58.0000059Z hint:
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:58.0000466Z hint: Disable this message with "git config set advice.defaultBranchName false"
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:58.0002947Z Initialized empty Git repository in /home/runner/work/claude-code-review-gate/claude-code-review-gate/.git/
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:58.0010206Z [command]/usr/bin/git remote add origin https://github.com/Jose-Ribeir/claude-code-review-gate
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:58.0064034Z ##[endgroup]
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:58.0064764Z ##[group]Disabling automatic garbage collection
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:58.0067086Z [command]/usr/bin/git config --local gc.auto 0
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:58.0090967Z ##[endgroup]
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:58.0091619Z ##[group]Setting up auth
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:58.0096690Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:58.0122377Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:58.4479311Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:58.4504237Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:58.4650127Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:58.4672980Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:58.4818979Z [command]/usr/bin/git config --local http.https://github.com/.extraheader AUTHORIZATION: basic ***
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:58.4844626Z ##[endgroup]
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:58.4845049Z ##[group]Fetching the repository
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:58.4858701Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +a7e77daf43cb8fde732fbbda9b34a22fed1745c4:refs/remotes/pull/6/merge
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2079852Z From https://github.com/Jose-Ribeir/claude-code-review-gate
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2080506Z  * [new ref]         a7e77daf43cb8fde732fbbda9b34a22fed1745c4 -> pull/6/merge
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2085773Z ##[endgroup]
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2086404Z ##[group]Determining the checkout info
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2087202Z ##[endgroup]
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2099188Z [command]/usr/bin/git sparse-checkout disable
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2168195Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2188090Z ##[group]Checking out the ref
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2191896Z [command]/usr/bin/git checkout --progress --force refs/remotes/pull/6/merge
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2421058Z Note: switching to 'refs/remotes/pull/6/merge'.
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2421332Z 
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2421494Z You are in 'detached HEAD' state. You can look around, make experimental
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2422203Z changes and commit them, and you can discard any commits you make in this
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2422627Z state without impacting any branches by switching back to a branch.
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2422823Z 
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2423069Z If you want to create a new branch to retain commits you create, you may
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2423615Z do so (now or later) by using -c with the switch command. Example:
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2423841Z 
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2423935Z   git switch -c <new-branch-name>
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2424146Z 
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2424246Z Or undo this operation with:
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2424444Z 
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2424538Z   git switch -
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2424659Z 
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2424881Z Turn off this advice by setting config variable advice.detachedHead to false
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2425116Z 
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2425406Z HEAD is now at a7e77da Merge 895abdb489eb3ecf1aca10aac7a91c6421da1d72 into 1dacf08767c6e19763e1e2bd2967949369e2cf18
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2432994Z ##[endgroup]
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2466095Z [command]/usr/bin/git log -1 --format=%H
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2484909Z a7e77daf43cb8fde732fbbda9b34a22fed1745c4
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2704088Z ##[group]Run actions/setup-python@v5
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2704413Z with:
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2704644Z   python-version: 3.12
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2704912Z   check-latest: false
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2706935Z   token: ***
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2707196Z   update-environment: true
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2707444Z   allow-prereleases: false
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2707678Z   freethreaded: false
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.2707909Z ##[endgroup]
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.3692207Z ##[group]Installed versions
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.6930096Z (node:2147) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.6930876Z (Use `node --trace-deprecation ...` to show where the warning was created)
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.6931506Z Successfully set up CPython (3.12.16)
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.6932345Z ##[endgroup]
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.7057961Z ##[group]Run python -m pip install ruff pytest
+test (3.12)	UNKNOWN STEP	2026-11-16T17:55:59.7058355Z ^[[36;1mpython -m pip install ruff pytest^[[0m
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:00.2271625Z shell: /usr/bin/bash -e {0}
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:00.2272236Z env:
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:00.2272532Z   pythonLocation: /opt/hostedtoolcache/Python/3.12.16/x64
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:00.2272966Z   PKG_CONFIG_PATH: /opt/hostedtoolcache/Python/3.12.16/x64/lib/pkgconfig
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:00.2273385Z   Python_ROOT_DIR: /opt/hostedtoolcache/Python/3.12.16/x64
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:00.2273728Z   Python2_ROOT_DIR: /opt/hostedtoolcache/Python/3.12.16/x64
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:00.2274066Z   Python3_ROOT_DIR: /opt/hostedtoolcache/Python/3.12.16/x64
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:00.2274405Z   LD_LIBRARY_PATH: /opt/hostedtoolcache/Python/3.12.16/x64/lib
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:00.2274701Z ##[endgroup]
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:05.6655145Z Collecting ruff
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:05.7186477Z   Downloading ruff-0.17.5-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (20 kB)
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:05.7480646Z Collecting pytest
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:05.7564160Z   Downloading pytest-9.2.0-py3-none-any.whl.metadata (7.9 kB)
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:05.7733117Z Collecting iniconfig>=2 (from pytest)
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:05.7814798Z   Downloading iniconfig-2.3.1-py3-none-any.whl.metadata (2.8 kB)
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:05.7964045Z Collecting packaging>=24 (from pytest)
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:05.8082548Z   Downloading packaging-26.3-py3-none-any.whl.metadata (3.5 kB)
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:05.8217996Z Collecting pluggy<2,>=1.6 (from pytest)
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:05.8297777Z   Downloading pluggy-1.7.0-py3-none-any.whl.metadata (5.0 kB)
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:05.8464929Z Collecting pygments>=2.15 (from pytest)
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:05.8546706Z   Downloading pygments-2.21.0-py3-none-any.whl.metadata (2.5 kB)
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:05.8658429Z Downloading ruff-0.17.5-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (10.6 MB)
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:05.9876940Z    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 10.6/10.6 MB 215.5 MB/s  0:00:00
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:05.9962283Z Downloading pytest-9.2.0-py3-none-any.whl (411 kB)
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:06.0064013Z Downloading pluggy-1.7.0-py3-none-any.whl (27 kB)
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:06.0162875Z Downloading iniconfig-2.3.1-py3-none-any.whl (7.6 kB)
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:06.0262989Z Downloading packaging-26.3-py3-none-any.whl (129 kB)
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:06.0362876Z Downloading pygments-2.21.0-py3-none-any.whl (1.3 MB)
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:06.0411480Z    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.3/1.3 MB 334.7 MB/s  0:00:00
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:06.4896214Z Installing collected packages: ruff, pygments, pluggy, packaging, iniconfig, pytest
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:07.2870983Z 
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:07.2883193Z Successfully installed iniconfig-2.3.1 packaging-26.3 pluggy-1.7.0 pygments-2.21.0 pytest-9.2.0 ruff-0.17.5
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:07.3491452Z ##[group]Run set -o pipefail
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:07.3491915Z ^[[36;1mset -o pipefail^[[0m
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:07.3492202Z ^[[36;1mpython -m pytest -q -rfE 2>&1 | tee pytest.log^[[0m
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:07.3517784Z shell: /usr/bin/bash -e {0}
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:07.3518053Z env:
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:07.3518339Z   pythonLocation: /opt/hostedtoolcache/Python/3.12.16/x64
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:07.3518777Z   PKG_CONFIG_PATH: /opt/hostedtoolcache/Python/3.12.16/x64/lib/pkgconfig
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:07.3519133Z   Python_ROOT_DIR: /opt/hostedtoolcache/Python/3.12.16/x64
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:07.3519516Z   Python2_ROOT_DIR: /opt/hostedtoolcache/Python/3.12.16/x64
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:07.3519847Z   Python3_ROOT_DIR: /opt/hostedtoolcache/Python/3.12.16/x64
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:07.3520182Z   LD_LIBRARY_PATH: /opt/hostedtoolcache/Python/3.12.16/x64/lib
+test (3.12)	UNKNOWN STEP	2026-11-16T17:56:07.3520496Z ##[endgroup]
+test (3.12)	UNKNOWN STEP	2026-11-16T17:57:12.4042400Z ........................................................................ [  3%]
+test (3.12)	UNKNOWN STEP	2026-11-16T17:57:55.3262974Z ........................................................................ [  7%]
+test (3.12)	UNKNOWN STEP	2026-11-16T17:57:59.6004449Z .....F....s............................................................. [ 11%]
+test (3.12)	UNKNOWN STEP	2026-11-16T17:58:46.5158291Z ........................................................................ [ 15%]
+test (3.12)	UNKNOWN STEP	2026-11-16T17:59:10.8827221Z ........................................................................ [ 18%]
+test (3.12)	UNKNOWN STEP	2026-11-16T17:59:51.1268520Z ........................................................................ [ 22%]
+test (3.12)	UNKNOWN STEP	2026-11-16T17:59:56.3957615Z ........................................................................ [ 26%]
+test (3.12)	UNKNOWN STEP	2026-11-16T18:00:07.5629291Z ........................................................................ [ 30%]
+test (3.12)	UNKNOWN STEP	2026-11-16T18:00:23.2062732Z ........................................................................ [ 34%]
+test (3.12)	UNKNOWN STEP	2026-11-16T18:00:48.3826097Z ........................................................................ [ 37%]
+test (3.12)	UNKNOWN STEP	2026-11-16T18:00:55.1746100Z .s.......................................s..s........................... [ 41%]
+test (3.12)	UNKNOWN STEP	2026-11-16T18:01:03.5819064Z ........................................................................ [ 45%]
+test (3.12)	UNKNOWN STEP	2026-11-16T18:03:01.0787601Z ........................................................................ [ 49%]
+test (3.12)	UNKNOWN STEP	2026-11-16T18:03:16.3622025Z ........................................................................ [ 53%]
+test (3.12)	UNKNOWN STEP	2026-11-16T18:03:52.9010938Z ...........................s............................................ [ 56%]
+test (3.12)	UNKNOWN STEP	2026-11-16T18:05:04.5993584Z ........................................................................ [ 60%]
+test (3.12)	UNKNOWN STEP	2026-11-16T18:05:06.0541832Z ........................................................................ [ 64%]
+test (3.12)	UNKNOWN STEP	2026-11-16T18:05:06.3788199Z ........................................................................ [ 68%]
+test (3.12)	UNKNOWN STEP	2026-11-16T18:05:06.4966667Z .....................................s.................................. [ 72%]
+test (3.12)	UNKNOWN STEP	2026-11-16T18:05:06.5711349Z ........................................................................ [ 75%]
+test (3.12)	UNKNOWN STEP	2026-11-16T18:05:06.7704571Z ........................................................................ [ 79%]
+test (3.12)	UNKNOWN STEP	2026-11-16T18:05:21.7485084Z ........................................................................ [ 83%]
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:00.3770876Z ........................................................................ [ 87%]
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:00.4949698Z ........................................................................ [ 91%]
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:03.2067903Z ........................................................................ [ 94%]
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:16.3068592Z ........................................................................ [ 98%]
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.4926656Z ........................                                                 [100%]
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.4927234Z =================================== FAILURES ===================================
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.4927897Z ______________ test_unwrap_follows_an_npm_shim_to_the_native_exe _______________
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.4928232Z 
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.4928770Z tmp_path = PosixPath('/tmp/pytest-of-runner/pytest-0/test_unwrap_follows_an_npm_shi0')
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.4929200Z as_windows = None
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.4929318Z 
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.4929522Z     def test_unwrap_follows_an_npm_shim_to_the_native_exe(tmp_path, as_windows):
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.4929864Z         shim, exe = _shim(tmp_path)
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.4930239Z >       assert ocr_cmdshim.unwrap(str(shim)) == os.path.normpath(str(exe))
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.4930691Z E       AssertionError: assert '/tmp/pytest-...shi0/tool.CMD' == '/tmp/pytest-.../bin/tool.exe'
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.4931081Z E         
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.4931427Z E         Skipping 53 identical leading characters in diff, use -v to show
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.4932010Z E         - _npm_shi0/node_modules/pkg/bin/tool.exe
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.4932377Z E         + _npm_shi0/tool.CMD
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.4932515Z 
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.4932646Z tests/test_cmdshim.py:49: AssertionError
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.4932964Z =========================== short test summary info ============================
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.4933601Z FAILED tests/test_cmdshim.py::test_unwrap_follows_an_npm_shim_to_the_native_exe - AssertionError: assert '/tmp/pytest-...shi0/tool.CMD' == '/tmp/pytest-.../bin/tool.exe'
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.4934124Z   
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.4934419Z   Skipping 53 identical leading characters in diff, use -v to show
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.4934759Z   - _npm_shi0/node_modules/pkg/bin/tool.exe
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.4935086Z   + _npm_shi0/tool.CMD
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.4935465Z 1 failed, 1889 passed, 6 skipped in 611.26s (0:10:11)
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.6002890Z ##[error]Process completed with exit code 1.
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.6047725Z ##[group]Run python - <<'PY'
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.6048063Z ^[[36;1mpython - <<'PY'^[[0m
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.6048415Z ^[[36;1mlines = [l.rstrip() for l in open("pytest.log", encoding="utf-8", errors="replace")]^[[0m
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.6048863Z ^[[36;1mfailed = [l for l in lines if l.startswith(("FAILED", "ERROR"))]^[[0m
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.6049256Z ^[[36;1merrs = [l for l in lines if l.startswith("E   ")][:25]^[[0m
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.6049531Z ^[[36;1mdef esc(s):^[[0m
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.6049845Z ^[[36;1m    return s.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")^[[0m
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.6050217Z ^[[36;1mbody = failed[:80] + (["...", *errs] if errs else [])^[[0m
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.6050676Z ^[[36;1mprint("::error title=pytest: %d failed/errored::%s" % (len(failed), esc("\n".join(x[:260] for x in body))))^[[0m
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.6051188Z ^[[36;1mprint("::notice title=pytest summary::%s" % esc(lines[-1] if lines else "no output"))^[[0m
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.6051558Z ^[[36;1mPY^[[0m
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.6079093Z shell: /usr/bin/bash -e {0}
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.6079406Z env:
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.6079674Z   pythonLocation: /opt/hostedtoolcache/Python/3.12.16/x64
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.6080064Z   PKG_CONFIG_PATH: /opt/hostedtoolcache/Python/3.12.16/x64/lib/pkgconfig
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.6080445Z   Python_ROOT_DIR: /opt/hostedtoolcache/Python/3.12.16/x64
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.6080773Z   Python2_ROOT_DIR: /opt/hostedtoolcache/Python/3.12.16/x64
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.6081126Z   Python3_ROOT_DIR: /opt/hostedtoolcache/Python/3.12.16/x64
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.6081465Z   LD_LIBRARY_PATH: /opt/hostedtoolcache/Python/3.12.16/x64/lib
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.6081959Z ##[endgroup]
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.6216278Z ##[error]FAILED tests/test_cmdshim.py::test_unwrap_follows_an_npm_shim_to_the_native_exe - AssertionError: assert '/tmp/pytest-...shi0/tool.CMD' == '/tmp/pytest-.../bin/tool.exe'
+test (3.12)	UNKNOWN STEP	...
+test (3.12)	UNKNOWN STEP	E       AssertionError: assert '/tmp/pytest-...shi0/tool.CMD' == '/tmp/pytest-.../bin/tool.exe'
+test (3.12)	UNKNOWN STEP	E         Skipping 53 identical leading characters in diff, use -v to show
+test (3.12)	UNKNOWN STEP	E         - _npm_shi0/node_modules/pkg/bin/tool.exe
+test (3.12)	UNKNOWN STEP	E         + _npm_shi0/tool.CMD
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.6220534Z ##[notice]1 failed, 1889 passed, 6 skipped in 611.26s (0:10:11)
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.6320066Z Post job cleanup.
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.6962501Z [command]/usr/bin/git version
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.6986677Z git version 2.56.1
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.7052763Z Temporarily overriding HOME='/home/runner/work/_temp/5bbfa123-9d22-47c0-a525-7a160f6d5992' before making global git config changes
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.7053558Z Adding repository directory to the temporary git global config as a safe directory
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.7054222Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/claude-code-review-gate/claude-code-review-gate
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.7055137Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.7074215Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.7217589Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.7239765Z http.https://github.com/.extraheader
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.7241650Z [command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.7265423Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.7420508Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.7444873Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.7739069Z Cleaning up orphan processes
+test (3.12)	UNKNOWN STEP	2026-11-16T18:06:19.7979042Z ##[warning]Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@v4, actions/setup-python@v5. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+test (3.9)	UNKNOWN STEP	﻿2026-11-16T17:55:49.1291056Z Current runner version: '2.338.2'
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.1323528Z ##[group]Runner Image Provisioner
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.1324733Z Hosted Compute Agent
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.1326090Z Version: 20261103.629
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.1327187Z Commit: 15dbd9ccb5dbf34fae002b6ed1a2670f52df37bc
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.1328342Z Build Date: 2026-11-03T17:26:59Z
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.1329645Z Worker ID: {c2ac8ff5-6165-417a-80cf-c59f46bc7c9f}
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.1330795Z Region: southcentralus
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.1331747Z Cloud: Azure
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.1332803Z ##[endgroup]
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.1334949Z ##[group]Operating System
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.1336278Z Ubuntu
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.1337168Z 24.04.5
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.1338224Z LTS
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.1339126Z ##[endgroup]
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.1340047Z ##[group]Runner Image
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.1340966Z Image: ubuntu-24.04
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.1341862Z Version: 20261111.370.1
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.1343973Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20261111.370/images/ubuntu/Ubuntu2404-Readme.md
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.1346835Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20261111.370
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.1348568Z ##[endgroup]
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.1350395Z ##[group]GITHUB_TOKEN Permissions
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.1353100Z Contents: read
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.1354084Z Metadata: read
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.1355146Z Packages: read
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.1356385Z ##[endgroup]
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.1359178Z Secret source: Actions
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.1360798Z Cache mode: write
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.1362087Z Prepare workflow directory
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.1716173Z Prepare all required actions
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.1768724Z Getting action download info
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.4687301Z Download action repository 'actions/checkout@v4' (SHA:11d5960a326750d5838078e36cf38b85af677262)
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.6017480Z Download action repository 'actions/setup-python@v5' (SHA:a26af69be951a213d495a4c3e4e4022e16d87065)
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.7880492Z Complete job name: test (3.9)
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.8727517Z ##[group]Run actions/checkout@v4
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.8728332Z with:
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.8728849Z   repository: Jose-Ribeir/claude-code-review-gate
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.8732683Z   token: ***
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.8733147Z   ssh-strict: true
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.8733609Z   ssh-user: git
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.8734073Z   persist-credentials: true
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.8734567Z   clean: true
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.8735022Z   sparse-checkout-cone-mode: true
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.8735723Z   fetch-depth: 1
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.8736168Z   fetch-tags: false
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.8736632Z   show-progress: true
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.8737098Z   lfs: false
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.8737526Z   submodules: false
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.8737991Z   set-safe-directory: true
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.8738515Z   allow-unsafe-pr-checkout: false
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:49.8739236Z ##[endgroup]
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.0822135Z Syncing repository: Jose-Ribeir/claude-code-review-gate
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.0825583Z ##[group]Getting Git version info
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.0827057Z Working directory is '/home/runner/work/claude-code-review-gate/claude-code-review-gate'
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.0829204Z [command]/usr/bin/git version
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.0879383Z git version 2.56.1
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.0911309Z ##[endgroup]
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.0928075Z Temporarily overriding HOME='/home/runner/work/_temp/dc4e308e-0b81-4a5a-870f-e3bf0f456e17' before making global git config changes
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.0930327Z Adding repository directory to the temporary git global config as a safe directory
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.0933356Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/claude-code-review-gate/claude-code-review-gate
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.0982031Z Deleting the contents of '/home/runner/work/claude-code-review-gate/claude-code-review-gate'
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.0988264Z ##[group]Initializing the repository
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.1008539Z [command]/usr/bin/git init /home/runner/work/claude-code-review-gate/claude-code-review-gate
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.1096865Z hint: Using 'master' as the name for the initial branch. This default branch name
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.1098957Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.1100328Z hint: to use in all of your new repositories, which will suppress this warning,
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.1101476Z hint: call:
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.1102247Z hint:
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.1103022Z hint: 	git config --global init.defaultBranch <name>
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.1104056Z hint:
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.1104695Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.1106300Z hint: 'development'. The just-created branch can be renamed via this command:
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.1107338Z hint:
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.1107983Z hint: 	git branch -m <name>
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.1108506Z hint:
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.1109147Z hint: Disable this message with "git config set advice.defaultBranchName false"
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.1110372Z Initialized empty Git repository in /home/runner/work/claude-code-review-gate/claude-code-review-gate/.git/
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.1117201Z [command]/usr/bin/git remote add origin https://github.com/Jose-Ribeir/claude-code-review-gate
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.1164771Z ##[endgroup]
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.1166027Z ##[group]Disabling automatic garbage collection
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.1169887Z [command]/usr/bin/git config --local gc.auto 0
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.1206591Z ##[endgroup]
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.1207687Z ##[group]Setting up auth
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.1214032Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.1253860Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.1651575Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.1720526Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.2023943Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.2078808Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.2360553Z [command]/usr/bin/git config --local http.https://github.com/.extraheader AUTHORIZATION: basic ***
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.2413600Z ##[endgroup]
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.2414825Z ##[group]Fetching the repository
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.2425948Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +a7e77daf43cb8fde732fbbda9b34a22fed1745c4:refs/remotes/pull/6/merge
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.8848375Z From https://github.com/Jose-Ribeir/claude-code-review-gate
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.8850326Z  * [new ref]         a7e77daf43cb8fde732fbbda9b34a22fed1745c4 -> pull/6/merge
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.8897121Z ##[endgroup]
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.8898357Z ##[group]Determining the checkout info
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.8899863Z ##[endgroup]
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.8900755Z [command]/usr/bin/git sparse-checkout disable
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.8948363Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.8994707Z ##[group]Checking out the ref
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.9000273Z [command]/usr/bin/git checkout --progress --force refs/remotes/pull/6/merge
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.9386606Z Note: switching to 'refs/remotes/pull/6/merge'.
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.9387824Z 
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.9388724Z You are in 'detached HEAD' state. You can look around, make experimental
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.9390087Z changes and commit them, and you can discard any commits you make in this
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.9391324Z state without impacting any branches by switching back to a branch.
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.9392035Z 
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.9392682Z If you want to create a new branch to retain commits you create, you may
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.9394142Z do so (now or later) by using -c with the switch command. Example:
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.9394848Z 
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.9395421Z   git switch -c <new-branch-name>
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.9396118Z 
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.9396495Z Or undo this operation with:
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.9397019Z 
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.9397345Z   git switch -
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.9397980Z 
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.9398909Z Turn off this advice by setting config variable advice.detachedHead to false
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.9400223Z 
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.9401776Z HEAD is now at a7e77da Merge 895abdb489eb3ecf1aca10aac7a91c6421da1d72 into 1dacf08767c6e19763e1e2bd2967949369e2cf18
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.9406063Z ##[endgroup]
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.9456341Z [command]/usr/bin/git log -1 --format=%H
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.9493224Z a7e77daf43cb8fde732fbbda9b34a22fed1745c4
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.9983427Z ##[group]Run actions/setup-python@v5
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.9985536Z with:
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.9986925Z   python-version: 3.9
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.9988465Z   check-latest: false
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:50.9998954Z   token: ***
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:51.0000005Z   update-environment: true
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:51.0001138Z   allow-prereleases: false
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:51.0002264Z   freethreaded: false
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:51.0003280Z ##[endgroup]
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:51.1470525Z ##[group]Installed versions
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:51.1552961Z Version 3.9 was not found in the local cache
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:51.1714143Z (node:2349) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:51.1715887Z (Use `node --trace-deprecation ...` to show where the warning was created)
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:54.8121367Z Version 3.9 is available for downloading
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:54.8123457Z Download from "https://github.com/actions/python-versions/releases/download/3.9.25-19039189640/python-3.9.25-linux-24.04-x64.tar.gz"
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:55.4731970Z Extract downloaded archive
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:55.4868353Z [command]/usr/bin/tar xz --warning=no-unknown-keyword --overwrite -C /home/runner/work/_temp/d1e8522c-7a39-4c89-8635-df0b52ec79c1 -f /home/runner/work/_temp/e9028987-62d3-4299-a1de-59b42d90c994
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:56.9964248Z Execute installation script
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:57.0078894Z Check if Python hostedtoolcache folder exist...
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:57.0079689Z Create Python 3.9.25 folder
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:57.0095158Z Copy Python binaries to hostedtoolcache folder
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:57.4573462Z Create additional symlinks (Required for the UsePythonVersion Azure Pipelines task and the setup-python GitHub Action)
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:57.4618941Z Upgrading pip...
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:59.7444928Z Looking in links: /tmp/tmpeyfmifsl
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:59.7448832Z Requirement already satisfied: setuptools in /opt/hostedtoolcache/Python/3.9.25/x64/lib/python3.9/site-packages (79.0.1)
+test (3.9)	UNKNOWN STEP	2026-11-16T17:55:59.7453587Z Requirement already satisfied: pip in /opt/hostedtoolcache/Python/3.9.25/x64/lib/python3.9/site-packages (23.0.1)
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:01.0022039Z Collecting pip
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:01.0712378Z Downloading pip-26.0.1-py3-none-any.whl (1.8 MB)
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:01.1477791Z ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.8/1.8 MB 24.3 MB/s eta 0:00:00
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:01.1478312Z 
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:01.2049606Z Installing collected packages: pip
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:01.2050002Z Attempting uninstall: pip
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:01.2057227Z Found existing installation: pip 23.0.1
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:01.3791402Z Uninstalling pip-23.0.1:
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:01.3862320Z Successfully uninstalled pip-23.0.1
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:02.2415939Z Successfully installed pip-26.0.1
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:02.2974812Z Create complete file
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:02.3021092Z Successfully set up CPython (3.9.25)
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:02.3022324Z ##[endgroup]
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:02.3232854Z ##[group]Run python -m pip install ruff pytest
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:02.3233322Z ^[[36;1mpython -m pip install ruff pytest^[[0m
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:02.3261433Z shell: /usr/bin/bash -e {0}
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:02.3261752Z env:
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:02.3262341Z   pythonLocation: /opt/hostedtoolcache/Python/3.9.25/x64
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:02.3262845Z   PKG_CONFIG_PATH: /opt/hostedtoolcache/Python/3.9.25/x64/lib/pkgconfig
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:02.3263308Z   Python_ROOT_DIR: /opt/hostedtoolcache/Python/3.9.25/x64
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:02.3263707Z   Python2_ROOT_DIR: /opt/hostedtoolcache/Python/3.9.25/x64
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:02.3264101Z   Python3_ROOT_DIR: /opt/hostedtoolcache/Python/3.9.25/x64
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:02.3264492Z   LD_LIBRARY_PATH: /opt/hostedtoolcache/Python/3.9.25/x64/lib
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:02.3264841Z ##[endgroup]
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:03.1610509Z Collecting ruff
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:03.2212251Z   Downloading ruff-0.17.5-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (20 kB)
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:03.2688977Z Collecting pytest
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:03.2836253Z   Downloading pytest-8.4.2-py3-none-any.whl.metadata (7.7 kB)
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:03.3066132Z Collecting exceptiongroup>=1 (from pytest)
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:03.3210790Z   Downloading exceptiongroup-1.3.1-py3-none-any.whl.metadata (6.7 kB)
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:03.3395469Z Collecting iniconfig>=1 (from pytest)
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:03.3534876Z   Downloading iniconfig-2.1.0-py3-none-any.whl.metadata (2.7 kB)
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:03.3771953Z Collecting packaging>=20 (from pytest)
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:03.3910038Z   Downloading packaging-26.3-py3-none-any.whl.metadata (3.5 kB)
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:03.4106305Z Collecting pluggy<2,>=1.5 (from pytest)
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:03.4243617Z   Downloading pluggy-1.6.0-py3-none-any.whl.metadata (4.8 kB)
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:03.4527960Z Collecting pygments>=2.7.2 (from pytest)
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:03.4667401Z   Downloading pygments-2.21.0-py3-none-any.whl.metadata (2.5 kB)
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:03.5225138Z Collecting tomli>=1 (from pytest)
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:03.5367564Z   Downloading tomli-2.5.0-py3-none-any.whl.metadata (10 kB)
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:03.5626805Z Collecting typing-extensions>=4.6.0 (from exceptiongroup>=1->pytest)
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:03.5768095Z   Downloading typing_extensions-4.16.0-py3-none-any.whl.metadata (3.3 kB)
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:03.5943261Z Downloading ruff-0.17.5-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (10.6 MB)
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:03.6941196Z    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 10.6/10.6 MB 147.9 MB/s  0:00:00
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:03.7080676Z Downloading pytest-8.4.2-py3-none-any.whl (365 kB)
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:03.7249087Z Downloading pluggy-1.6.0-py3-none-any.whl (20 kB)
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:03.7405581Z Downloading exceptiongroup-1.3.1-py3-none-any.whl (16 kB)
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:03.7563571Z Downloading iniconfig-2.1.0-py3-none-any.whl (6.0 kB)
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:03.7717785Z Downloading packaging-26.3-py3-none-any.whl (129 kB)
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:03.7878357Z Downloading pygments-2.21.0-py3-none-any.whl (1.3 MB)
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:03.7944809Z    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.3/1.3 MB 234.1 MB/s  0:00:00
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:03.8083400Z Downloading tomli-2.5.0-py3-none-any.whl (14 kB)
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:03.8241194Z Downloading typing_extensions-4.16.0-py3-none-any.whl (45 kB)
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:03.8696588Z Installing collected packages: typing-extensions, tomli, ruff, pygments, pluggy, packaging, iniconfig, exceptiongroup, pytest
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:05.0197005Z 
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:05.0221451Z Successfully installed exceptiongroup-1.3.1 iniconfig-2.1.0 packaging-26.3 pluggy-1.6.0 pygments-2.21.0 pytest-8.4.2 ruff-0.17.5 tomli-2.5.0 typing-extensions-4.16.0
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:05.2133932Z ##[group]Run set -o pipefail
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:05.2134251Z ^[[36;1mset -o pipefail^[[0m
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:05.2134575Z ^[[36;1mpython -m pytest -q -rfE 2>&1 | tee pytest.log^[[0m
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:05.2157903Z shell: /usr/bin/bash -e {0}
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:05.2158159Z env:
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:05.2158436Z   pythonLocation: /opt/hostedtoolcache/Python/3.9.25/x64
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:05.2159002Z   PKG_CONFIG_PATH: /opt/hostedtoolcache/Python/3.9.25/x64/lib/pkgconfig
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:05.2159647Z   Python_ROOT_DIR: /opt/hostedtoolcache/Python/3.9.25/x64
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:05.2160022Z   Python2_ROOT_DIR: /opt/hostedtoolcache/Python/3.9.25/x64
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:05.2160383Z   Python3_ROOT_DIR: /opt/hostedtoolcache/Python/3.9.25/x64
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:05.2160968Z   LD_LIBRARY_PATH: /opt/hostedtoolcache/Python/3.9.25/x64/lib
+test (3.9)	UNKNOWN STEP	2026-11-16T17:56:05.2161290Z ##[endgroup]
+test (3.9)	UNKNOWN STEP	2026-11-16T17:57:27.6180755Z ........................................................................ [  3%]
+test (3.9)	UNKNOWN STEP	2026-11-16T17:58:18.8062936Z ........................................................................ [  7%]
+test (3.9)	UNKNOWN STEP	2026-11-16T17:58:25.5246481Z .....F....s............................................................. [ 11%]
+test (3.9)	UNKNOWN STEP	2026-11-16T17:59:14.9418288Z ........................................................................ [ 15%]
+test (3.9)	UNKNOWN STEP	2026-11-16T17:59:44.0095051Z ........................................................................ [ 18%]
+test (3.9)	UNKNOWN STEP	2026-11-16T18:00:33.4893903Z ........................................................................ [ 22%]
+test (3.9)	UNKNOWN STEP	2026-11-16T18:00:43.8081443Z ........................................................................ [ 26%]
+test (3.9)	UNKNOWN STEP	2026-11-16T18:00:59.1657485Z ........................................................................ [ 30%]
+test (3.9)	UNKNOWN STEP	2026-11-16T18:01:20.0614156Z ........................................................................ [ 34%]
+test (3.9)	UNKNOWN STEP	2026-11-16T18:01:52.0256172Z ........................................................................ [ 37%]
+test (3.9)	UNKNOWN STEP	2026-11-16T18:02:01.8306769Z .s.......................................s..s........................... [ 41%]
+test (3.9)	UNKNOWN STEP	2026-11-16T18:02:14.0426232Z ........................................................................ [ 45%]
+test (3.9)	UNKNOWN STEP	2026-11-16T18:04:18.6321988Z ...F.................................................................... [ 49%]
+test (3.9)	UNKNOWN STEP	2026-11-16T18:04:36.9626739Z ........................................................................ [ 53%]
+test (3.9)	UNKNOWN STEP	2026-11-16T18:05:22.9149710Z ...........................s............................................ [ 56%]
+test (3.9)	UNKNOWN STEP	2026-11-16T18:06:51.0376452Z ........................................................................ [ 60%]
+test (3.9)	UNKNOWN STEP	2026-11-16T18:06:53.4849924Z ........................................................................ [ 64%]
+test (3.9)	UNKNOWN STEP	2026-11-16T18:06:55.9097381Z ........................................................................ [ 68%]
+test (3.9)	UNKNOWN STEP	2026-11-16T18:06:56.7762504Z .....................................s.................................. [ 72%]
+test (3.9)	UNKNOWN STEP	2026-11-16T18:06:57.5648382Z ........................................................................ [ 75%]
+test (3.9)	UNKNOWN STEP	2026-11-16T18:06:58.7441561Z ........................................................................ [ 79%]
+test (3.9)	UNKNOWN STEP	2026-11-16T18:07:38.5782394Z ........................................................................ [ 83%]
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:28.5002834Z ...........F..F......................................................... [ 87%]
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:29.5546205Z ........................................................................ [ 91%]
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:33.9722850Z ........................................................................ [ 94%]
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:53.5379559Z ........................................................................ [ 98%]
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1613428Z ........................                                                 [100%]
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1614164Z =================================== FAILURES ===================================
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1616976Z ______________ test_unwrap_follows_an_npm_shim_to_the_native_exe _______________
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1617504Z 
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1618378Z tmp_path = PosixPath('/tmp/pytest-of-runner/pytest-0/test_unwrap_follows_an_npm_shi0')
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1619101Z as_windows = None
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1619301Z 
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1619668Z     def test_unwrap_follows_an_npm_shim_to_the_native_exe(tmp_path, as_windows):
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1620309Z         shim, exe = _shim(tmp_path)
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1620875Z >       assert ocr_cmdshim.unwrap(str(shim)) == os.path.normpath(str(exe))
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1621743Z E       AssertionError: assert '/tmp/pytest-...shi0/tool.CMD' == '/tmp/pytest-.../bin/tool.exe'
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1622419Z E         
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1622876Z E         Skipping 53 identical leading characters in diff, use -v to show
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1623768Z E         - _npm_shi0/node_modules/pkg/bin/tool.exe
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1624235Z E         + _npm_shi0/tool.CMD
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1624476Z 
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1624652Z tests/test_cmdshim.py:49: AssertionError
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1625484Z ____ test_a_limit_stops_the_sibling_but_finished_chunks_keep_their_records _____
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1625985Z 
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1626282Z tmp_path = PosixPath('/tmp/pytest-of-runner/pytest-0/test_a_limit_stops_the_sibling0')
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1626618Z 
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1626850Z     def test_a_limit_stops_the_sibling_but_finished_chunks_keep_their_records(tmp_path):
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1627383Z         """Chunk 1 hits the usage limit while chunk 0 is still running: chunk 0 is killed
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1627900Z         (no record), no chunk after them starts, and the run fails as `limit`. A chunk
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1628446Z         that finished before the limit keeps its record: run at concurrency 2 with chunk 2
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1628966Z         hitting the limit after chunks 0 and 1 are recorded."""
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1629335Z         work = ag._big_repo(tmp_path, n_files=4)
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1629736Z         tip = ag._git(["rev-parse", "HEAD"], cwd=work)
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1630124Z         env = _env(tmp_path, STUB_CHUNK_VERDICT=json.dumps({"2": "limit"}),
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1630530Z                    STUB_CHUNK_SLEEP=json.dumps({"3": 45}))
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1630859Z         decision, reason, _, _ = _push(work, env)
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1631168Z         assert decision == "deny", reason
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1631500Z         st = ag._wait_state(work, tip, {"failed"}, timeout=60)
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1631927Z         assert st.get("reason") == "limit" and int(st.get("attempts") or 0) == 0, st
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1632307Z         calls = _reviews(tmp_path)
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1632673Z >       assert sorted(c["manifest"]["chunk_index"] for c in calls) == [0, 1, 2, 3]
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1633053Z E       assert [0, 1, 2] == [0, 1, 2, 3]
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1633320Z E         
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1633534Z E         Right contains one more item: 3
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1633793Z E         
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1633976Z E         Full diff:
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1634187Z E           [
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1634386Z E               0,
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1634590Z E               1,
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1634787Z E               2,
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1634987Z E         -     3,
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1635351Z E           ]
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1635522Z 
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1635733Z tests/test_parallel_chunks.py:149: AssertionError
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1636191Z _______ test_drive_push_transport_failure_is_a_harness_error_not_a_block _______
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1636496Z 
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1636750Z tmp_path = PosixPath('/tmp/pytest-of-runner/pytest-0/test_drive_push_transport_fail0')
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1637075Z 
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1637303Z     def test_drive_push_transport_failure_is_a_harness_error_not_a_block(tmp_path):
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1637807Z         """The 2026-11-11 defect, in miniature: something outside the harness
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1638264Z         deletes the fake origin mid-scenario; the next push dies with git's
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1638726Z         'does not appear to be a git repository' and NOT A WORD from the gate.
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1639382Z         That must surface as a SimError (harness error), never as a gate
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1639794Z         'block' the scenario assertions then chew on."""
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1640115Z         target = _toy_repo(tmp_path)
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1640450Z         scratch = sim.make_scratch(target, tmp_path / "scratch")
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1640846Z         env, _ = _fake_gate_env(scratch, _FAKE_GATE_BLOCK, tmp_path)
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1641332Z         sim.apply_commit(scratch.work, sim.CommitSpec(message="c", write={"f.py": "z = 1\n"}))
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1641835Z >       force_rmtree(scratch.origin)  # the deleter: outside the harness
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1642090Z 
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1642332Z tests/test_sim_harness.py:228: 
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1642641Z _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1642880Z 
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1643176Z path = PosixPath('/tmp/pytest-of-runner/pytest-0/test_drive_push_transport_fail0/scratch/origin.git')
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1643566Z 
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1643665Z     def force_rmtree(path):
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1644011Z         """shutil.rmtree that also removes git's read-only object files (Windows
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1644500Z         refuses to unlink a read-only file, where POSIX only checks the directory)."""
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1644891Z         import shutil
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1645108Z         import stat
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1645550Z     
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1645791Z         def _chmod_and_retry(func, target, exc):
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1646171Z             os.chmod(target, stat.S_IWRITE)
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1646453Z             func(target)
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1646664Z     
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1646900Z >       shutil.rmtree(str(path), onexc=_chmod_and_retry)
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1647287Z E       TypeError: rmtree() got an unexpected keyword argument 'onexc'
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1647543Z 
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1647650Z tests/conftest.py:97: TypeError
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1648021Z ______ test_run_scenario_propagates_transport_failures_as_harness_errors _______
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1648319Z 
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1648542Z tmp_path = PosixPath('/tmp/pytest-of-runner/pytest-0/test_run_scenario_propagates_t0')
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1648862Z 
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1649083Z     def test_run_scenario_propagates_transport_failures_as_harness_errors(tmp_path):
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1649584Z         """run_scenario must not swallow a transport failure into an outcome:
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1650040Z         the SimError propagates to main(), which records outcome='error'."""
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1650406Z         target = _toy_repo(tmp_path)
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1650735Z         scratch = sim.make_scratch(target, tmp_path / "scratch")
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1651117Z         env, _ = _fake_gate_env(scratch, _FAKE_GATE_BLOCK, tmp_path)
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1651565Z >       force_rmtree(scratch.origin)
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1651734Z 
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1651829Z tests/test_sim_harness.py:289: 
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1652122Z _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1652351Z 
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1652637Z path = PosixPath('/tmp/pytest-of-runner/pytest-0/test_run_scenario_propagates_t0/scratch/origin.git')
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1653001Z 
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1653102Z     def force_rmtree(path):
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1653432Z         """shutil.rmtree that also removes git's read-only object files (Windows
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1653911Z         refuses to unlink a read-only file, where POSIX only checks the directory)."""
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1654287Z         import shutil
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1654502Z         import stat
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1654700Z     
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1654913Z         def _chmod_and_retry(func, target, exc):
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1655383Z             os.chmod(target, stat.S_IWRITE)
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1655734Z             func(target)
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1655944Z     
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1656164Z >       shutil.rmtree(str(path), onexc=_chmod_and_retry)
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1656732Z E       TypeError: rmtree() got an unexpected keyword argument 'onexc'
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1657020Z 
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1657118Z tests/conftest.py:97: TypeError
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1657413Z =========================== short test summary info ============================
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1658191Z FAILED tests/test_cmdshim.py::test_unwrap_follows_an_npm_shim_to_the_native_exe - AssertionError: assert '/tmp/pytest-...shi0/tool.CMD' == '/tmp/pytest-.../bin/tool.exe'
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1658845Z   
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1659129Z   Skipping 53 identical leading characters in diff, use -v to show
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1659495Z   - _npm_shi0/node_modules/pkg/bin/tool.exe
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1659775Z   + _npm_shi0/tool.CMD
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1660462Z FAILED tests/test_parallel_chunks.py::test_a_limit_stops_the_sibling_but_finished_chunks_keep_their_records - assert [0, 1, 2] == [0, 1, 2, 3]
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1661028Z   
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1661229Z   Right contains one more item: 3
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1661468Z   
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1661657Z   Full diff:
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1661856Z     [
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1662046Z         0,
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1662245Z         1,
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1662423Z         2,
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1662604Z   -     3,
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1662783Z     ]
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1663365Z FAILED tests/test_sim_harness.py::test_drive_push_transport_failure_is_a_harness_error_not_a_block - TypeError: rmtree() got an unexpected keyword argument 'onexc'
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1664387Z FAILED tests/test_sim_harness.py::test_run_scenario_propagates_transport_failures_as_harness_errors - TypeError: rmtree() got an unexpected keyword argument 'onexc'
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.1665071Z 4 failed, 1886 passed, 6 skipped in 771.61s (0:12:51)
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.2990057Z ##[error]Process completed with exit code 1.
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.3045940Z ##[group]Run python - <<'PY'
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.3046281Z ^[[36;1mpython - <<'PY'^[[0m
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.3046711Z ^[[36;1mlines = [l.rstrip() for l in open("pytest.log", encoding="utf-8", errors="replace")]^[[0m
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.3047268Z ^[[36;1mfailed = [l for l in lines if l.startswith(("FAILED", "ERROR"))]^[[0m
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.3047704Z ^[[36;1merrs = [l for l in lines if l.startswith("E   ")][:25]^[[0m
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.3048024Z ^[[36;1mdef esc(s):^[[0m
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.3048351Z ^[[36;1m    return s.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")^[[0m
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.3048777Z ^[[36;1mbody = failed[:80] + (["...", *errs] if errs else [])^[[0m
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.3049297Z ^[[36;1mprint("::error title=pytest: %d failed/errored::%s" % (len(failed), esc("\n".join(x[:260] for x in body))))^[[0m
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.3049909Z ^[[36;1mprint("::notice title=pytest summary::%s" % esc(lines[-1] if lines else "no output"))^[[0m
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.3050349Z ^[[36;1mPY^[[0m
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.3073026Z shell: /usr/bin/bash -e {0}
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.3073301Z env:
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.3073579Z   pythonLocation: /opt/hostedtoolcache/Python/3.9.25/x64
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.3074019Z   PKG_CONFIG_PATH: /opt/hostedtoolcache/Python/3.9.25/x64/lib/pkgconfig
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.3074437Z   Python_ROOT_DIR: /opt/hostedtoolcache/Python/3.9.25/x64
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.3074801Z   Python2_ROOT_DIR: /opt/hostedtoolcache/Python/3.9.25/x64
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.3075168Z   Python3_ROOT_DIR: /opt/hostedtoolcache/Python/3.9.25/x64
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.3075725Z   LD_LIBRARY_PATH: /opt/hostedtoolcache/Python/3.9.25/x64/lib
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.3076049Z ##[endgroup]
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.3266788Z ##[error]FAILED tests/test_cmdshim.py::test_unwrap_follows_an_npm_shim_to_the_native_exe - AssertionError: assert '/tmp/pytest-...shi0/tool.CMD' == '/tmp/pytest-.../bin/tool.exe'
+test (3.9)	UNKNOWN STEP	FAILED tests/test_parallel_chunks.py::test_a_limit_stops_the_sibling_but_finished_chunks_keep_their_records - assert [0, 1, 2] == [0, 1, 2, 3]
+test (3.9)	UNKNOWN STEP	FAILED tests/test_sim_harness.py::test_drive_push_transport_failure_is_a_harness_error_not_a_block - TypeError: rmtree() got an unexpected keyword argument 'onexc'
+test (3.9)	UNKNOWN STEP	FAILED tests/test_sim_harness.py::test_run_scenario_propagates_transport_failures_as_harness_errors - TypeError: rmtree() got an unexpected keyword argument 'onexc'
+test (3.9)	UNKNOWN STEP	...
+test (3.9)	UNKNOWN STEP	E       AssertionError: assert '/tmp/pytest-...shi0/tool.CMD' == '/tmp/pytest-.../bin/tool.exe'
+test (3.9)	UNKNOWN STEP	E         Skipping 53 identical leading characters in diff, use -v to show
+test (3.9)	UNKNOWN STEP	E         - _npm_shi0/node_modules/pkg/bin/tool.exe
+test (3.9)	UNKNOWN STEP	E         + _npm_shi0/tool.CMD
+test (3.9)	UNKNOWN STEP	E       assert [0, 1, 2] == [0, 1, 2, 3]
+test (3.9)	UNKNOWN STEP	E         Right contains one more item: 3
+test (3.9)	UNKNOWN STEP	E         Full diff:
+test (3.9)	UNKNOWN STEP	E           [
+test (3.9)	UNKNOWN STEP	E               0,
+test (3.9)	UNKNOWN STEP	E               1,
+test (3.9)	UNKNOWN STEP	E               2,
+test (3.9)	UNKNOWN STEP	E         -     3,
+test (3.9)	UNKNOWN STEP	E           ]
+test (3.9)	UNKNOWN STEP	E       TypeError: rmtree() got an unexpected keyword argument 'onexc'
+test (3.9)	UNKNOWN STEP	E       TypeError: rmtree() got an unexpected keyword argument 'onexc'
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.3272873Z ##[notice]4 failed, 1886 passed, 6 skipped in 771.61s (0:12:51)
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.3397877Z Post job cleanup.
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.4284628Z [command]/usr/bin/git version
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.4361123Z git version 2.56.1
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.4399007Z Temporarily overriding HOME='/home/runner/work/_temp/d4306c97-8108-4f75-90b7-f87b87d97579' before making global git config changes
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.4400421Z Adding repository directory to the temporary git global config as a safe directory
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.4404541Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/claude-code-review-gate/claude-code-review-gate
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.4447554Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.4487294Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.4879670Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.4916231Z http.https://github.com/.extraheader
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.4944853Z [command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.4998902Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.5396452Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.5452615Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.5927354Z Cleaning up orphan processes
+test (3.9)	UNKNOWN STEP	2026-11-16T18:08:57.6375815Z ##[warning]Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@v4, actions/setup-python@v5. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/

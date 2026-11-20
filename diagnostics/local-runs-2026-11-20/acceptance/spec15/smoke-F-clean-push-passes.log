@@ -1,0 +1,12 @@
+[sim] target: /Users/jose_ribeir/work/code-review/claude-code-review-gate
+[sim] scratch: /Users/jose_ribeir/work/code-review/sim-scratch-spec15
+[sim] seeded into the scratch baseline: .ocr/config.json, go.mod, scripts/test_check, simconst/limits.py, simgo/racy.go, simlib/feature.py, tests/test_feature.py
+[sim] gate hook installed via the repo installer: /Users/jose_ribeir/work/code-review/sim-scratch-spec15/hooks/pre-push
+[sim] --- F-clean-push-passes: a clean documentation-only push: no glob match, no check, no findings
+[sim]     expect: pass
+[sim]     [OK  ] outcome=pass pushes=19 elapsed=257.9s
+[sim] docs summary cache regenerated inline: False (0 bytes)
+[sim] original repository untouched: True
+[sim] report written to /Users/jose_ribeir/work/code-review/sim-scratch-spec15/results.json
+[sim] ==== ALL SCENARIOS PASS (259s total) ====
+EXIT=0

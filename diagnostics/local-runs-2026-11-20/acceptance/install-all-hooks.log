@@ -1,0 +1,191 @@
+=== INSTALL --repo /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/0130e7c1-5bea-4751-a77b-750ffeb31530 (common: /Users/jose_ribeir/work/kimchi-studio/.git) ===
+core.hooksPath is set to /Users/jose_ribeir/.config/review-gate/repos/4f00dabdcaa9d3d0/hooks; installing the pre-push into /Users/jose_ribeir/.config/review-gate/repos/4f00dabdcaa9d3d0/hooks
+Installed the review-gate (Kimchi port).
+  repo          : /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/0130e7c1-5bea-4751-a77b-750ffeb31530
+  pre-push      : /Users/jose_ribeir/.config/review-gate/repos/4f00dabdcaa9d3d0/hooks/pre-push (PRIMARY gate)
+  kimchi hook   : /Users/jose_ribeir/.config/kimchi/harness/hooks/bash/review-gate.sh (UX layer, inert outside gated repos)
+  ext slot      : /Users/jose_ribeir/.config/kimchi/harness/extensions/review-gate-deny.ts (reserved)
+  reviewer      : /Users/jose_ribeir/work/code-review/kimchi-review-gate/scripts/review-gate.py
+  version       : 0.13.0
+
+The gate FAILS CLOSED: a review that times out, crashes, or returns
+unparseable output BLOCKS the push rather than letting it through, as do a
+missing Python 3 or a reviewer this hook cannot locate.
+
+Bypasses:
+  git push --no-verify   skip hooks entirely for one push (the human escape)
+  OCR_FAIL_OPEN=1        one-shot fail-open escape hatch
+  OCR_ADVISORY=1         warn only, never block
+
+Uninstall: /Users/jose_ribeir/work/code-review/kimchi-review-gate/scripts/uninstall-kimchi-hook.sh
+RESULT: OK /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/0130e7c1-5bea-4751-a77b-750ffeb31530
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/0e2a3858-ed9f-4a02-a014-0da767adf7b8
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/0ef3b944-3193-4fd3-952b-13d3ed01c068
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/11f66218-a0aa-401e-bf7c-73066e50f6d7
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/1e635117-d3b5-4122-b474-0839d286e3f9
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/238421d7-b076-498b-8137-c78a3758bb27
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/26767d52-13d7-49b2-b27c-60d11f490cb8
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/271b4189-c634-4bf6-bc08-9e76a102519a
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/298fab7c-a059-427f-ba4e-ff8100bbadbf
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/29b41584-318d-43c0-a6ae-a57ce08960cb
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/2d620579-c348-4d27-8daa-73a18dfab37e
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/2f94055e-6a32-4eec-aec6-318641fe44f8
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/3d370be1-27c3-4783-81e9-3357085733ee
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/4515c668-e683-49ff-a3df-f610e7c00911
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/5353ad9d-5927-474e-89e3-f6003c5f15b1
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/5a6ffebc-acc4-4183-bad0-bfd485008e01
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/5c517688-c3ea-44d6-9381-d3210d56fe28
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/5d926a8f-96d8-459c-8877-978624950178
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/5ea0ef3f-0328-4606-9702-c577f7146148
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/63e9b0c2-47c0-406e-9c40-ce2fab0229fd
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/6621361f-3457-4340-baf4-61a67d4fed06
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/664507b0-5b78-4e05-8c35-1b8d1a496b89
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/67d0f952-ac99-4415-b0f5-916735ad84e0
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/70718b3d-24a9-4f29-bbac-691fda997af1
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/709a4900-8fe9-4133-a99c-40761879ec0c
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/79e66799-4640-4b6d-af84-76ae32aca9e7
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/802a1f5a-a449-4a5a-a123-a39799c78556
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/8fafde2a-7dfe-44a7-a072-a5461d2b35aa
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/9302e567-4d2f-4a65-9351-247fe7cb576e
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/a8ee3f9e-8a9b-47b5-b36e-ab53d9e42640
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/b397d4de-4703-4303-a968-1ae7c0ceeb81
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/b86b3546-3e4a-4f6d-af2a-2c16b257486c
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/c7d3206e-8200-430e-b5e5-a9fb82a386dc
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/d17ef700-a309-4140-9214-fd5470e66976
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/d421f481-fa3e-4202-83d6-4cd89fb3c24f
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/ddc9c297-fc56-483a-ad99-d97323c046b2
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/f7cf7b4e-c9be-4875-bc9d-5bac1e3734d6
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/fb9e2c29-c961-4ff4-85cb-f58e78a1d242
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/fc2001a2-e7cf-4463-a341-7d868707fabc
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/review-wt2/core
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/review-wt2/titles
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi-studio/review-wt2/ui
+=== INSTALL --repo /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi/0d9a0dba-b455-43bb-9457-f411ccd0f194 (common: /Users/jose_ribeir/work/kimchi/.git) ===
+core.hooksPath is set to /Users/jose_ribeir/.config/review-gate/repos/de60267c15904889/hooks; installing the pre-push into /Users/jose_ribeir/.config/review-gate/repos/de60267c15904889/hooks
+Installed the review-gate (Kimchi port).
+  repo          : /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi/0d9a0dba-b455-43bb-9457-f411ccd0f194
+  pre-push      : /Users/jose_ribeir/.config/review-gate/repos/de60267c15904889/hooks/pre-push (PRIMARY gate)
+  kimchi hook   : /Users/jose_ribeir/.config/kimchi/harness/hooks/bash/review-gate.sh (UX layer, inert outside gated repos)
+  ext slot      : /Users/jose_ribeir/.config/kimchi/harness/extensions/review-gate-deny.ts (reserved)
+  reviewer      : /Users/jose_ribeir/work/code-review/kimchi-review-gate/scripts/review-gate.py
+  version       : 0.13.0
+
+The gate FAILS CLOSED: a review that times out, crashes, or returns
+unparseable output BLOCKS the push rather than letting it through, as do a
+missing Python 3 or a reviewer this hook cannot locate.
+
+Bypasses:
+  git push --no-verify   skip hooks entirely for one push (the human escape)
+  OCR_FAIL_OPEN=1        one-shot fail-open escape hatch
+  OCR_ADVISORY=1         warn only, never block
+
+Uninstall: /Users/jose_ribeir/work/code-review/kimchi-review-gate/scripts/uninstall-kimchi-hook.sh
+RESULT: OK /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi/0d9a0dba-b455-43bb-9457-f411ccd0f194
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi/280a38d3-1d91-495e-812a-44b1b364a31f
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi/8cdc76c9-b293-44ee-a186-55939f24c2aa
+SKIP(dup-common) /Users/jose_ribeir/.config/kimchi/desktop/worktrees/kimchi/a5a3a20c-d674-4799-bb0b-1b9b147acefb
+=== INSTALL --repo /Users/jose_ribeir/.config/kimchi/harness/vendor/mattpocock-skills (common: /Users/jose_ribeir/.config/kimchi/harness/vendor/mattpocock-skills/.git) ===
+Installed the review-gate (Kimchi port).
+  repo          : /Users/jose_ribeir/.config/kimchi/harness/vendor/mattpocock-skills
+  pre-push      : /Users/jose_ribeir/.config/kimchi/harness/vendor/mattpocock-skills/.git/hooks/pre-push (PRIMARY gate)
+  kimchi hook   : /Users/jose_ribeir/.config/kimchi/harness/hooks/bash/review-gate.sh (UX layer, inert outside gated repos)
+  ext slot      : /Users/jose_ribeir/.config/kimchi/harness/extensions/review-gate-deny.ts (reserved)
+  reviewer      : /Users/jose_ribeir/work/code-review/kimchi-review-gate/scripts/review-gate.py
+  version       : 0.13.0
+
+The gate FAILS CLOSED: a review that times out, crashes, or returns
+unparseable output BLOCKS the push rather than letting it through, as do a
+missing Python 3 or a reviewer this hook cannot locate.
+
+Bypasses:
+  git push --no-verify   skip hooks entirely for one push (the human escape)
+  OCR_FAIL_OPEN=1        one-shot fail-open escape hatch
+  OCR_ADVISORY=1         warn only, never block
+
+Uninstall: /Users/jose_ribeir/work/code-review/kimchi-review-gate/scripts/uninstall-kimchi-hook.sh
+RESULT: OK /Users/jose_ribeir/.config/kimchi/harness/vendor/mattpocock-skills
+=== INSTALL --repo /Users/jose_ribeir/work/code-review/.rg-worktrees/integration (common: /Users/jose_ribeir/work/code-review/claude-code-review-gate/.git) ===
+Installed the review-gate (Kimchi port).
+  repo          : /Users/jose_ribeir/work/code-review/.rg-worktrees/integration
+  pre-push      : /Users/jose_ribeir/work/code-review/claude-code-review-gate/.git/hooks/pre-push (PRIMARY gate)
+  kimchi hook   : /Users/jose_ribeir/.config/kimchi/harness/hooks/bash/review-gate.sh (UX layer, inert outside gated repos)
+  ext slot      : /Users/jose_ribeir/.config/kimchi/harness/extensions/review-gate-deny.ts (reserved)
+  reviewer      : /Users/jose_ribeir/work/code-review/kimchi-review-gate/scripts/review-gate.py
+  version       : 0.13.0
+
+The gate FAILS CLOSED: a review that times out, crashes, or returns
+unparseable output BLOCKS the push rather than letting it through, as do a
+missing Python 3 or a reviewer this hook cannot locate.
+
+Bypasses:
+  git push --no-verify   skip hooks entirely for one push (the human escape)
+  OCR_FAIL_OPEN=1        one-shot fail-open escape hatch
+  OCR_ADVISORY=1         warn only, never block
+
+Uninstall: /Users/jose_ribeir/work/code-review/kimchi-review-gate/scripts/uninstall-kimchi-hook.sh
+RESULT: OK /Users/jose_ribeir/work/code-review/.rg-worktrees/integration
+=== INSTALL --repo /Users/jose_ribeir/work/code-review/.rg-worktrees/kimchi-integration (common: /Users/jose_ribeir/work/code-review/kimchi-review-gate/.git) ===
+Installed the review-gate (Kimchi port).
+  repo          : /Users/jose_ribeir/work/code-review/.rg-worktrees/kimchi-integration
+  pre-push      : /Users/jose_ribeir/work/code-review/kimchi-review-gate/.git/hooks/pre-push (PRIMARY gate)
+  kimchi hook   : /Users/jose_ribeir/.config/kimchi/harness/hooks/bash/review-gate.sh (UX layer, inert outside gated repos)
+  ext slot      : /Users/jose_ribeir/.config/kimchi/harness/extensions/review-gate-deny.ts (reserved)
+  reviewer      : /Users/jose_ribeir/work/code-review/kimchi-review-gate/scripts/review-gate.py
+  version       : 0.13.0
+
+The gate FAILS CLOSED: a review that times out, crashes, or returns
+unparseable output BLOCKS the push rather than letting it through, as do a
+missing Python 3 or a reviewer this hook cannot locate.
+
+Bypasses:
+  git push --no-verify   skip hooks entirely for one push (the human escape)
+  OCR_FAIL_OPEN=1        one-shot fail-open escape hatch
+  OCR_ADVISORY=1         warn only, never block
+
+Uninstall: /Users/jose_ribeir/work/code-review/kimchi-review-gate/scripts/uninstall-kimchi-hook.sh
+RESULT: OK /Users/jose_ribeir/work/code-review/.rg-worktrees/kimchi-integration
+SKIP(dup-common) /Users/jose_ribeir/work/code-review/claude-code-review-gate
+SKIP(dup-common) /Users/jose_ribeir/work/code-review/gate-runtime
+SKIP(dup-common) /Users/jose_ribeir/work/code-review/kimchi-review-gate
+=== INSTALL --repo /Users/jose_ribeir/work/delegate-kit (common: /Users/jose_ribeir/work/delegate-kit/.git) ===
+Installed the review-gate (Kimchi port).
+  repo          : /Users/jose_ribeir/work/delegate-kit
+  pre-push      : /Users/jose_ribeir/work/delegate-kit/.git/hooks/pre-push (PRIMARY gate)
+  kimchi hook   : /Users/jose_ribeir/.config/kimchi/harness/hooks/bash/review-gate.sh (UX layer, inert outside gated repos)
+  ext slot      : /Users/jose_ribeir/.config/kimchi/harness/extensions/review-gate-deny.ts (reserved)
+  reviewer      : /Users/jose_ribeir/work/code-review/kimchi-review-gate/scripts/review-gate.py
+  version       : 0.13.0
+
+The gate FAILS CLOSED: a review that times out, crashes, or returns
+unparseable output BLOCKS the push rather than letting it through, as do a
+missing Python 3 or a reviewer this hook cannot locate.
+
+Bypasses:
+  git push --no-verify   skip hooks entirely for one push (the human escape)
+  OCR_FAIL_OPEN=1        one-shot fail-open escape hatch
+  OCR_ADVISORY=1         warn only, never block
+
+Uninstall: /Users/jose_ribeir/work/code-review/kimchi-review-gate/scripts/uninstall-kimchi-hook.sh
+RESULT: OK /Users/jose_ribeir/work/delegate-kit
+=== INSTALL --repo /Users/jose_ribeir/work/director-mode/.kimchi/docs/kimchi-src (common: /Users/jose_ribeir/work/director-mode/.kimchi/docs/kimchi-src/.git) ===
+Installed the review-gate (Kimchi port).
+  repo          : /Users/jose_ribeir/work/director-mode/.kimchi/docs/kimchi-src
+  pre-push      : /Users/jose_ribeir/work/director-mode/.kimchi/docs/kimchi-src/.git/hooks/pre-push (PRIMARY gate)
+  kimchi hook   : /Users/jose_ribeir/.config/kimchi/harness/hooks/bash/review-gate.sh (UX layer, inert outside gated repos)
+  ext slot      : /Users/jose_ribeir/.config/kimchi/harness/extensions/review-gate-deny.ts (reserved)
+  reviewer      : /Users/jose_ribeir/work/code-review/kimchi-review-gate/scripts/review-gate.py
+  version       : 0.13.0
+
+The gate FAILS CLOSED: a review that times out, crashes, or returns
+unparseable output BLOCKS the push rather than letting it through, as do a
+missing Python 3 or a reviewer this hook cannot locate.
+
+Bypasses:
+  git push --no-verify   skip hooks entirely for one push (the human escape)
+  OCR_FAIL_OPEN=1        one-shot fail-open escape hatch
+  OCR_ADVISORY=1         warn only, never block
+
+Uninstall: /Users/jose_ribeir/work/code-review/kimchi-review-gate/scripts/uninstall-kimchi-hook.sh
+RESULT: OK /Users/jose_ribeir/work/director-mode/.kimchi/docs/kimchi-src
+SKIP(dup-common) /Users/jose_ribeir/work/kimchi
+SKIP(dup-common) /Users/jose_ribeir/work/kimchi-studio

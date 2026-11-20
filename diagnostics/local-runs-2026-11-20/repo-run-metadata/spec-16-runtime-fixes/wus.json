@@ -1,0 +1,167 @@
+[
+  {
+    "id": "R10",
+    "title": "Stable STOP ownership and explicit stack env",
+    "kind": "fix",
+    "seeds": {
+      "symbols": [
+        "execute_unit",
+        "stopped"
+      ],
+      "patterns": [
+        "rg_final_execution",
+        "rg_final_stack"
+      ],
+      "paths": [
+        "scripts/rg_final_execution.py",
+        "scripts/rg_final_stack.py",
+        "tests/test_final_stops.py",
+        "tests/test_final_stack.py"
+      ],
+      "globs": [
+        "tests/test_final_{stops,stack}.py"
+      ]
+    },
+    "depends_on": [],
+    "size": "medium",
+    "delivers": "main"
+  },
+  {
+    "id": "R11",
+    "title": "Secret-safe response diagnostics and bounded Windows cleanup",
+    "kind": "fix",
+    "seeds": {
+      "symbols": [
+        "redact",
+        "taskkill",
+        "Authorization"
+      ],
+      "patterns": [
+        "rg_final_review",
+        "worker",
+        "process_groups"
+      ],
+      "paths": [
+        "scripts/rg_final_review.py",
+        "tests/test_worker_plumbing.py",
+        "tests/test_worker_env.py",
+        "tests/test_process_groups.py",
+        "tests/sim_harness.py",
+        "tests/sim_scenarios_spec16.py"
+      ],
+      "globs": [
+        "tests/test_worker_*.py",
+        "tests/test_process_groups.py",
+        "tests/sim_*.py"
+      ]
+    },
+    "depends_on": [],
+    "size": "large",
+    "delivers": "main"
+  },
+  {
+    "id": "R12",
+    "title": "GitLab global identifiers",
+    "kind": "fix",
+    "seeds": {
+      "symbols": [
+        "image",
+        "ruby",
+        "verification"
+      ],
+      "patterns": [
+        "rg_final_verification",
+        "gitlab"
+      ],
+      "paths": [
+        "scripts/rg_final_verification.py",
+        "tests/test_final_verification.py",
+        "tests/test_final_provider_gitlab.py"
+      ],
+      "globs": [
+        "tests/test_final_{verification,provider_gitlab}.py"
+      ]
+    },
+    "depends_on": [],
+    "size": "small",
+    "delivers": "main"
+  },
+  {
+    "id": "R13",
+    "title": "Targeted review and full regressions",
+    "kind": "verify",
+    "seeds": {
+      "symbols": [],
+      "patterns": [],
+      "paths": [
+        "scripts/rg_final_execution.py",
+        "scripts/rg_final_stack.py",
+        "scripts/rg_final_review.py",
+        "scripts/rg_final_verification.py"
+      ],
+      "globs": []
+    },
+    "depends_on": [
+      "R10",
+      "R11",
+      "R12"
+    ],
+    "readonly": true,
+    "size": "medium",
+    "delivers": "main"
+  },
+  {
+    "id": "R14",
+    "title": "Recognize plain ADR and glossary domain documents",
+    "kind": "fix",
+    "seeds": {
+      "symbols": [
+        "_document_kind"
+      ],
+      "patterns": [
+        "adr",
+        "glossary",
+        "domain-lens"
+      ],
+      "paths": [
+        "scripts/rg_final_context.py",
+        "tests/test_final_context.py"
+      ],
+      "globs": []
+    },
+    "depends_on": [],
+    "size": "small",
+    "delivers": "main"
+  },
+  {
+    "id": "R15",
+    "title": "Retain sanitized per-lens worker evidence",
+    "kind": "fix",
+    "seeds": {
+      "symbols": [
+        "normalize_worker_result",
+        "record_lens",
+        "_write_reports"
+      ],
+      "patterns": [
+        "sources_read",
+        "evidence_references",
+        "worker evidence"
+      ],
+      "paths": [
+        "scripts/rg_final_review.py",
+        "scripts/rg_final_lenses.py",
+        "tests/test_final_lenses.py",
+        "tests/test_worker_plumbing.py",
+        "tests/test_final_observability.py",
+        "tests/test_final_observability_integration.py"
+      ],
+      "globs": []
+    },
+    "depends_on": [
+      "R11"
+    ],
+    "size": "medium",
+    "delivers": "main"
+  }
+]

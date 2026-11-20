@@ -1,0 +1,40 @@
++ 6d40dece130140457a5f0e2a48119eaeb6913a71 SPEC-14.2: docs-quality evidence + finding-contract module
++ e582f807ec9413adae10fcd6df4c2747b7cac283 feat: resolve a layered checks surface in the gate settings
++ 9ac38dd356dcaa96a0ac2b8ab37f47865eb36c47 docs: extend docs-checker persona with quality duties + review-skill orchestration (SPEC-14.3)
++ 8f501d7ace25d8d376cafd5627cf2bbc35e35f4a feat: SPEC-14.4 gate plumbing -- docs_quality payload, fallback, command checks
++ 39cda95e5b883095d14e9fef33ad3ab769c1a26e docs: ADR 0006 + README/CHANGELOG for the custom-checks surface (SPEC-14.5)
++ 7c375121ed410d7c0e96370168d49cbae6eae77c fix: SPEC-14 review findings -- duty warn modes, pre-pass notes, v2 stubs, cluster rule, command-check hardening
++ 9f383a79312e2f4dfb0bce8d9672dc218f2cd3ab feat: SPEC-14.6 -- adr-integrity fails on unverifiable claims
++ 4bc9bdd73ba46618d9c07f659f31df4626d1f791 config: dogfood the ADR quality duties at warn
++ 6f6a7391144046e44fd828c885590ef169721821 tests: SPEC-14 docs-quality acceptance scenarios (seam 2)
++ a6aa9c5f7e5b7539da68c5ecd150608c6340c5f9 feat: comment-consistency finding class in the deep lane (comment-gate)
++ f977e295d182523b4ae5c6a95339d00e6bf7453b docs: record comment-gate first dogfood (adversarial 3/3, control clean)
++ fec83fc0bddc6908a613d54e0c4f31264ccf9772 config: promote dogfooded ADR duties from warn to block
++ db243a354edcbbae7bafcd9bffff5c8ab49c498b tests: SPEC-14 dogfood scenarios against the promoted ADR duties
++ 6950a473e24af1607bcfe95772bb33ec47525b81 tests: claude-profile docs-quality plumbing proof + ambient-kimchi fix for sniff test
++ e538609be6d44498d643506edd6bf2480ed17dde test: scrub ambient kimchi markers in the breadcrumb selection test
++ 8385a974935418862f80cb51a5ecc9fb80dcd250 fix: four gate findings from the OCR push review
++ b80a82386ec19a354fdd036686d9caae4d4ad82f [W1] spec-15: checks config keys parallel + timeout
++ de2a99d6c51f6a724e1d357d4701c96aefced01b [W2] spec-15: granular finding waivers
++ f99eccab2e8875a6000b4b3c02e92a7ffa0c1926 [W3] spec-15: executor contract warnings + evidence_source
++ 52a31b3ea62592d0b06155898595dca8c920bd8a [W4] spec-15: review fixes — waiver anchor windows, wiring, warning channels
++ 00bcf0bdf4fb1a159fc34030c6f9952f10d75799 [W5] spec-15: parallel command-check scheduling with isolated tip clone
++ 480c511e4c7196609c354ce2ea42b4c9fd67e927 [W6] spec-15: reference test-check executor (selector + probes)
++ 41ce469c28e9d3eadd8c489fd5787444cdec0e40 [W8] spec-15: anchor fallback for command checks + harness foundations
++ 261de0faedaad38b2ef71230d205ea7642ca566b [W7] spec-15: acceptance scenarios, ADR 0007, docs
++ 641bef2771ba4e4ddf1aca68e9e3cf128fd4ecd5 [W9] spec-15: scheduler cleanup, evidence anchors, budgets + telemetry
++ 05f1381ce8f03e90ac80fb35b4e18c765c26f8c2 [W10] spec-15: acceptance harness finding ids + lapse fixture
++ 29ccf5f1e3cafc91f60cea5ba7ef35f55a5b6a63 [W11] spec-15: stable test selection + waiver scenario coverage
++ 673b61d161442b1e8a74525d10093e9fec136782 spec-15: isolate lapse acceptance from prior waivers
++ ea98ce2d731376bfbdece095646b7ece8bbab222 spec-15: satisfy lint in the evidence fingerprint
++ e2725667957b1651e6e666f52e69890b72c95490 tests: repair cmdshim and cleanup compatibility across platforms
++ b5c3d94647b20e288404b79cdd0a3589ad77bd61 [S16-01B] Materialize immutable final-review repositories
++ c0657b5205deb43b1eabc32277d3859fb1beb40a [S16-01C] Add versioned final-review SQLite store
++ 33a21a4d6352197d478d85a7597ed04ca87e1c3b [S16-01A] add GitLab final-review provider metadata
++ f1de92911698779588ab0f7447ef335a2c7ea3b8 [S16-01D] Add standalone final-review correctness stage
++ f593b31daa7f3d1dd5a040fded669ea1e0763c77 [S16-06A] Add validated GitLab final-review graphs
++ c579f3f3f21218824670476ef29d3ae805e4c0d4 [S16-02B] Add complete final-review repository context
++ dc8d286981eb7f203cdc98138cbc026e9ee170e0 [S16-02A] Add independent final-review static lenses
++ f255226147063af6094376386552da109c9d37a3 [S16-02A] Repair independent-lens CLI regressions
++ b9990021048fa341e046b7fa78dc83a8a100aead [S16-03B] Add isolated final-review dynamic checks
++ 889273e6bca561925889c3649b7300e93ac46618 [S16-06B] Add ordered final stack composition

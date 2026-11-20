@@ -1,0 +1,28 @@
+[sim] target: /Users/jose_ribeir/work/code-review/claude-code-review-gate
+[sim] scratch: /Users/jose_ribeir/work/code-review/sim-scratch-spec15-final-proof
+[sim] seeded into the scratch baseline: .ocr/config.json, go.mod, scripts/test_check, simconst/limits.py, simgo/racy.go, simlib/feature.py, tests/test_feature.py
+[sim] gate hook installed via the repo installer: /Users/jose_ribeir/work/code-review/sim-scratch-spec15-final-proof/hooks/pre-push
+[sim] --- A-race-probe-blocks: a fabricated data race in changed Go code is caught by an ephemeral probe run under go test -race and blocks
+[sim]     expect: block
+[sim]     [OK  ] outcome=block pushes=10 elapsed=129.4s
+[sim] --- B-regression-blocks: a fabricated behavioral regression in a long-standing feature blocks via the selected existing test
+[sim]     expect: block
+[sim]     [OK  ] outcome=block pushes=11 elapsed=143.3s
+[sim] --- C-waived-repush-passes: the same blocking push, re-pushed after every expected finding on its paths is waived, passes with the waiver loudly listed
+[sim]     expect: pass
+[sim]     [OK  ] outcome=pass pushes=18 elapsed=229.3s
+[sim] --- D-waiver-lapse-blocks: the finding's code/evidence altered since the waiver: the anchor no longer matches, the waiver lapses, it blocks again
+[sim]     expect: block
+[sim]     [FAIL] outcome=block pushes=12 elapsed=144.6s
+[sim]     failure: step 'the boundary regression blocks': expected 'block', got 'pass'
+[sim]     failure: step 'the boundary regression blocks': message missing required text: 'reproduced failure of existing test'
+[sim] --- E-coverage-gap-passes-with-warning: a constants-only change leaves nothing to select or probe: the push passes with the canonical coverage warning, never a block
+[sim]     expect: pass
+[sim]     [OK  ] outcome=pass pushes=11 elapsed=130.6s
+[sim] --- F-clean-push-passes: a clean documentation-only push: no glob match, no check, no findings
+[sim]     expect: pass
+[sim]     [OK  ] outcome=pass pushes=5 elapsed=62.6s
+[sim] docs summary cache regenerated inline: False (0 bytes)
+[sim] original repository untouched: True
+[sim] report written to /Users/jose_ribeir/work/code-review/sim-scratch-spec15-final-proof/results.json
+[sim] ==== FAILURES RECORDED (841s total) ====

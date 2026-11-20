@@ -1,0 +1,50 @@
++ b5c3d94647b20e288404b79cdd0a3589ad77bd61 [S16-01B] Materialize immutable final-review repositories
++ c0657b5205deb43b1eabc32277d3859fb1beb40a [S16-01C] Add versioned final-review SQLite store
++ 33a21a4d6352197d478d85a7597ed04ca87e1c3b [S16-01A] add GitLab final-review provider metadata
++ f1de92911698779588ab0f7447ef335a2c7ea3b8 [S16-01D] Add standalone final-review correctness stage
++ f593b31daa7f3d1dd5a040fded669ea1e0763c77 [S16-06A] Add validated GitLab final-review graphs
++ c579f3f3f21218824670476ef29d3ae805e4c0d4 [S16-02B] Add complete final-review repository context
++ dc8d286981eb7f203cdc98138cbc026e9ee170e0 [S16-02A] Add independent final-review static lenses
++ f255226147063af6094376386552da109c9d37a3 [S16-02A] Repair independent-lens CLI regressions
++ b9990021048fa341e046b7fa78dc83a8a100aead [S16-03B] Add isolated final-review dynamic checks
++ 889273e6bca561925889c3649b7300e93ac46618 [S16-06B] Add ordered final stack composition
++ 467a1e13918ad44494064f1c4c00b8cdba295b89 [S16-03A] Add isolated required final verification
++ db9591b46f7388581511b274aa7b419fbf7d804d [S16-04A] Add durable final finding memory
++ 74c073e84b3fc8d2be0639d054850daadf024cb1 [S16-04B] Complete scoped final execution stops
++ 36171478403d73f2ed12eb893ddff7d97e6dd283 [S16-05] Add guarded GitLab final publication
++ c09201d72035426f7981ec516909804d3bf1826f [S16-07] Complete standalone final review
++ 35ca2f42454fd0199c9329480df978f90ad86787 [S16-07] Repair standalone orchestration regressions
++ 4da0c45c11d6dea38e57850b9bd5dcfbf1a51702 [S16-07] Finish final stack regression coverage
++ bd60e5f3db98777a11e612d0a992fbeaf2dcc057 [S16-08] Add GitHub final review parity
++ be13df8ca95abab267df1bf486772cd0165364cd [S16-09A] Add versioned final acceptance registry
++ 62eb6db26982e19e968f392e8987ef0ec8d2ab47 [S16-09B] Add database-backed final review views
++ 44f6544e1608ca37bc67b260004309578d48e4f4 [S16-10B1] Record final architecture and observability
++ 04f6484669a4e2c77a034a241091a24a0aaf1987 [S16-10A] Implement executable SPEC-16 acceptance scenarios
++ c4bdab9e115e1312e1a3abf915b098474bef6a5f [S16-10B1] Wire final review observability into runtime
++ 09ebf9779948f591b496223d3bb05fb2f795a5b5 [W3] Default installed acceptance identity in store
++ c68cc892c162d69fafbe8375fbce540d90e63acd [W4] Record SPEC-16 configuration and operator decisions
++ 5f2e99b3ca04cd2c268d34a5dc6fd5ab4f1a5c90 [W2] Make unsupported required CI visibly unassessable
++ 8a44670734faea04da06c248aa6cc712d34360e3 [W1] Key graph edges by project coordinates
++ 382d3d10815feed5b6b9e237a6a2aff46f76c031 [W5] Centralize final publication eligibility
++ f3e0794cb12d2444e423a5f0b04ae36d1a2ad042 [W6] Discover standalone graphs and complete stack routing
++ a894b5b82a21ea96ba89deab7400b224854208a9 [W7] Fix finding retirement and warning semantics
++ c7f8685cdc34864c5221a0f407b5994f3ca0f453 [W8] Wire acceptance identity through runs and views
++ 51f769430bfc9d76c9113add41cbc4ee9a8f5923 [W8] Decouple final review store from coding tools
++ 5f3477f407f0d384833683c7aa55efdcf455bcf6 [W9] Centralize final credential scrubbing
++ 64fb50675302df67d77fc8403b2c481d4532354d [W10] Isolate final publication test state
++ 968a3df948b944752d3a3be9f47858ca55bc265a [R5] Isolate final composition CLI test state
++ 35af6d6293afcae9208331b92df6a6f06248532f [R3] Revalidate GitLab branch heads
++ a95c76e19ab7ac67da060b8b80c54c52d1a6f785 [R4] Block inherited Git credential helpers
++ 1a5689441e435ba498c558660fafd9ff481f6ca9 [R1] Complete required verification integration
++ 690df7e73e3deb04e131d56980f391e4316374fd [R2] Independently verify finding closures
++ d80d34136d3ba57283d53a5c9cbffd265913278b [R7] Preserve quoted GitLab job declarations
++ bf198c33f277a9b13d71caf5702ad90facdd12ec [R8] Complete real-model lens execution
++ aa28347d7d96400b0198f549bdece94fc31e4d53 [R12] Fix GitLab global key discovery
++ f273ac17ec8d4c3feb8d86dc598cbdb720a02655 [R14] Recognize plain ADR domain documents
++ 45439f588232564bd3e1dd6a0f82f621f6854df5 [R10] Stabilize STOP ownership and stack environment
++ c966a1edd6818d4ec436bcb83340e5ceb2f083b9 [R11] Redact worker diagnostics and bound cleanup
++ 65ae2d4aac08f7f1b242d33f0210924aa7b94f0f [R15] Retain sanitized per-lens worker evidence
++ 41728b9e05da654c45acd476d5d760a3f4ff7b97 [W1] Accept evidence across static lenses
++ 5463af95d36bd151a4abaa9ac068526e9be52bb5 [W2] Make dynamic probe evidence deterministic
++ f5ebb457ebc234e87c0cf0b0ffaa6cfb9e58def4 [W3] Redact structured authorization evidence
++ 12eee1714a3b4bbab544e5a1d2f0789a5fb131db Remove trailing space in stop fixture

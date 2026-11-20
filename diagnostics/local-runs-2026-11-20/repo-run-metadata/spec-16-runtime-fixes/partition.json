@@ -1,0 +1,3185 @@
+{
+ "version": 1,
+ "base_sha": "bf198c33f277a9b13d71caf5702ad90facdd12ec",
+ "budget": 100000,
+ "params": {
+  "budget": 100000,
+  "overhead": 30000,
+  "hop_tokens": 1500,
+  "hops_base": 6,
+  "output_in_peak": 0.5,
+  "hops_new_small": 8,
+  "hops_new": 20,
+  "hops_new_large": 30,
+  "hops_edit": 3,
+  "hops_per_file": 3,
+  "hits_per_hop": 4,
+  "hops_verify": 15,
+  "hops_doc_per_file": 2,
+  "hops_doc_base": 6,
+  "hops_fix_per_file": 5,
+  "hops_fix_verify": 6,
+  "hops_research_per_file": 2,
+  "hops_research_base": 8,
+  "size_small_tokens": 3000,
+  "size_medium_tokens": 12000,
+  "size_large_tokens": 40000,
+  "output_factor": 1.5,
+  "price_in": 2.0,
+  "price_out": 10.0,
+  "price_cw": 2.5,
+  "price_cr": 0.2,
+  "fanout": 15,
+  "low_util": 0.25,
+  "single_max_files": 15,
+  "source": {
+   "calibration": null,
+   "calibrated": [],
+   "flags": []
+  }
+ },
+ "layers": [
+  [
+   "C1"
+  ],
+  [
+   "C2"
+  ]
+ ],
+ "clusters": [
+  {
+   "id": "C1",
+   "title": "Stable STOP ownership and explicit stack env (+2)",
+   "wus": [
+    "R10",
+    "R11",
+    "R12"
+   ],
+   "commit_tag": "[R10]",
+   "layer": 0,
+   "files": [
+    {
+     "path": "scripts/review-gate.py",
+     "hits": 120,
+     "hit_lines": [
+      179,
+      267,
+      300,
+      314,
+      316
+     ],
+     "lines": 14895,
+     "tokens_est": 175092,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 700365,
+     "tokens_narrow": 19408,
+     "lang": "python",
+     "importers_n": 2,
+     "importers": [
+      "extensions/review-gate-deny.test.mjs",
+      "scripts/ocr_profile.py"
+     ],
+     "wus": [
+      "R10",
+      "R11"
+     ]
+    },
+    {
+     "path": "tests/test_final_verification.py",
+     "hits": 86,
+     "hit_lines": [
+      1,
+      12,
+      13,
+      25,
+      42
+     ],
+     "lines": 704,
+     "tokens_est": 6424,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 25695,
+     "tokens_narrow": 6315,
+     "lang": "python",
+     "wus": [
+      "R10",
+      "R11",
+      "R12"
+     ]
+    },
+    {
+     "path": "scripts/rg_final_review.py",
+     "hits": 77,
+     "hit_lines": [
+      8,
+      32,
+      43,
+      44,
+      48
+     ],
+     "lines": 2012,
+     "tokens_est": 25121,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 100482,
+     "tokens_narrow": 13634,
+     "lang": "python",
+     "importers_n": 13,
+     "importers": [
+      "scripts/review-gate.py",
+      "scripts/rg_final_stack.py",
+      "tests/sim_harness.py",
+      "tests/test_final_complete_standalone.py",
+      "tests/test_final_composition.py",
+      "tests/test_final_github_stack.py",
+      "tests/test_final_lenses.py",
+      "tests/test_final_observability_integration.py",
+      "tests/test_final_review_cli.py",
+      "tests/test_final_stack.py",
+      "tests/test_final_stops.py",
+      "tests/test_worker_env.py",
+      "tests/test_worker_plumbing.py"
+     ],
+     "wus": [
+      "R10",
+      "R11",
+      "R12"
+     ]
+    },
+    {
+     "path": "tests/test_worker_plumbing.py",
+     "hits": 61,
+     "hit_lines": [
+      1,
+      2,
+      4,
+      6,
+      7
+     ],
+     "lines": 356,
+     "tokens_est": 3962,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 15846,
+     "tokens_narrow": 3962,
+     "lang": "python",
+     "wus": [
+      "R11"
+     ]
+    },
+    {
+     "path": "tests/test_final_complete_standalone.py",
+     "hits": 57,
+     "hit_lines": [
+      3,
+      20,
+      35,
+      36,
+      38
+     ],
+     "lines": 864,
+     "tokens_est": 9035,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 36140,
+     "tokens_narrow": 6264,
+     "lang": "python",
+     "wus": [
+      "R11",
+      "R12"
+     ]
+    },
+    {
+     "path": "tests/test_final_lenses.py",
+     "hits": 49,
+     "hit_lines": [
+      16,
+      42,
+      61,
+      64,
+      78
+     ],
+     "lines": 589,
+     "tokens_est": 5846,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 23383,
+     "tokens_narrow": 5489,
+     "lang": "python",
+     "wus": [
+      "R11",
+      "R12"
+     ]
+    },
+    {
+     "path": "tests/test_final_provider_gitlab.py",
+     "hits": 47,
+     "hit_lines": [
+      11,
+      27,
+      46,
+      47,
+      48
+     ],
+     "lines": 406,
+     "tokens_est": 3859,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 15434,
+     "tokens_narrow": 3811,
+     "lang": "python",
+     "wus": [
+      "R12"
+     ]
+    },
+    {
+     "path": "tests/test_final_stops.py",
+     "hits": 46,
+     "hit_lines": [
+      15,
+      16,
+      21,
+      23,
+      60
+     ],
+     "lines": 489,
+     "tokens_est": 5034,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 20135,
+     "tokens_narrow": 4540,
+     "lang": "python",
+     "wus": [
+      "R10",
+      "R11",
+      "R12"
+     ]
+    },
+    {
+     "path": "tests/test_final_review_cli.py",
+     "hits": 39,
+     "hit_lines": [
+      33,
+      92,
+      116,
+      166,
+      174
+     ],
+     "lines": 845,
+     "tokens_est": 9247,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 36986,
+     "tokens_narrow": 6643,
+     "lang": "python",
+     "wus": [
+      "R11",
+      "R12"
+     ]
+    },
+    {
+     "path": "scripts/rg_final_lenses.py",
+     "hits": 36,
+     "hit_lines": [
+      25,
+      36,
+      46,
+      95,
+      121
+     ],
+     "lines": 455,
+     "tokens_est": 4771,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 19082,
+     "tokens_narrow": 3523,
+     "lang": "python",
+     "importers_n": 7,
+     "importers": [
+      "scripts/rg_final_execution.py",
+      "scripts/rg_final_review.py",
+      "scripts/rg_final_stack.py",
+      "tests/test_final_complete_standalone.py",
+      "tests/test_final_lenses.py",
+      "tests/test_final_stack.py",
+      "tests/test_final_stops.py"
+     ],
+     "wus": [
+      "R10",
+      "R11",
+      "R12"
+     ]
+    },
+    {
+     "path": "tests/test_final_stack.py",
+     "hits": 33,
+     "hit_lines": [
+      3,
+      20,
+      45,
+      46,
+      48
+     ],
+     "lines": 770,
+     "tokens_est": 8496,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 33983,
+     "tokens_narrow": 4215,
+     "lang": "python",
+     "wus": [
+      "R10",
+      "R11",
+      "R12"
+     ]
+    },
+    {
+     "path": "scripts/rg_final_verification.py",
+     "hits": 26,
+     "hit_lines": [
+      1,
+      17,
+      199,
+      230,
+      240
+     ],
+     "lines": 606,
+     "tokens_est": 6437,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 25745,
+     "tokens_narrow": 3633,
+     "lang": "python",
+     "importers_n": 3,
+     "importers": [
+      "scripts/rg_final_review.py",
+      "scripts/rg_final_stack.py",
+      "tests/test_final_verification.py"
+     ],
+     "wus": [
+      "R12"
+     ]
+    },
+    {
+     "path": "scripts/rg_final_execution.py",
+     "hits": 24,
+     "hit_lines": [
+      23,
+      31,
+      37,
+      162,
+      169
+     ],
+     "lines": 439,
+     "tokens_est": 4782,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 19125,
+     "tokens_narrow": 2963,
+     "lang": "python",
+     "importers_n": 4,
+     "importers": [
+      "scripts/rg_final_review.py",
+      "scripts/rg_final_stack.py",
+      "tests/test_final_stops.py",
+      "tests/test_final_verification.py"
+     ],
+     "wus": [
+      "R10",
+      "R11",
+      "R12"
+     ]
+    },
+    {
+     "path": "scripts/rg_final_store.py",
+     "hits": 24,
+     "hit_lines": [
+      662,
+      1738,
+      1740,
+      1741,
+      1742
+     ],
+     "lines": 2812,
+     "tokens_est": 34349,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 137394,
+     "tokens_narrow": 3775,
+     "lang": "python",
+     "importers_n": 20,
+     "importers": [
+      "scripts/rg_final_publish.py",
+      "scripts/rg_final_review.py",
+      "scripts/rg_final_stack.py",
+      "scripts/rg_final_views.py",
+      "tests/sim_scenarios_spec16.py",
+      "tests/test_final_acceptance_registry.py",
+      "tests/test_final_complete_standalone.py",
+      "tests/test_final_composition.py",
+      "tests/test_final_dynamic.py",
+      "tests/test_final_github_stack.py",
+      "tests/test_final_lenses.py",
+      "tests/test_final_memory.py",
+      "tests/test_final_observability_integration.py",
+      "tests/test_final_provider_github.py",
+      "tests/test_final_publication.py",
+      "tests/test_final_review_cli.py",
+      "tests/test_final_stack.py",
+      "tests/test_final_stops.py",
+      "tests/test_final_store.py",
+      "tests/test_final_views.py"
+     ],
+     "wus": [
+      "R10",
+      "R12"
+     ]
+    },
+    {
+     "path": "tests/test_final_provider_github.py",
+     "hits": 24,
+     "hit_lines": [
+      23,
+      276,
+      418,
+      422,
+      424
+     ],
+     "lines": 603,
+     "tokens_est": 5743,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 22971,
+     "tokens_narrow": 2467,
+     "lang": "python",
+     "wus": [
+      "R12"
+     ]
+    },
+    {
+     "path": "tests/test_final_composition.py",
+     "hits": 23,
+     "hit_lines": [
+      18,
+      37,
+      38,
+      40,
+      66
+     ],
+     "lines": 506,
+     "tokens_est": 5610,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 22437,
+     "tokens_narrow": 2883,
+     "lang": "python",
+     "wus": [
+      "R11",
+      "R12"
+     ]
+    },
+    {
+     "path": "tests/test_claude_profile.py",
+     "hits": 16,
+     "hit_lines": [
+      68,
+      164,
+      421,
+      430,
+      435
+     ],
+     "lines": 653,
+     "tokens_est": 7650,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 30597,
+     "tokens_narrow": 3128,
+     "lang": "python",
+     "wus": [
+      "R11"
+     ]
+    },
+    {
+     "path": "tests/test_final_graph.py",
+     "hits": 16,
+     "hit_lines": [
+      13,
+      22,
+      23,
+      25,
+      33
+     ],
+     "lines": 411,
+     "tokens_est": 4167,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 16665,
+     "tokens_narrow": 1531,
+     "lang": "python",
+     "wus": [
+      "R12"
+     ]
+    },
+    {
+     "path": "scripts/rg_final_stack.py",
+     "hits": 14,
+     "hit_lines": [
+      4,
+      18,
+      22,
+      23,
+      35
+     ],
+     "lines": 806,
+     "tokens_est": 9578,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 38310,
+     "tokens_narrow": 2591,
+     "lang": "python",
+     "importers_n": 1,
+     "importers": [
+      "scripts/rg_final_review.py"
+     ],
+     "wus": [
+      "R10",
+      "R11",
+      "R12"
+     ]
+    },
+    {
+     "path": "tests/test_parallel_checks.py",
+     "hits": 14,
+     "hit_lines": [
+      365,
+      422,
+      510,
+      512,
+      521
+     ],
+     "lines": 606,
+     "tokens_est": 7156,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 28623,
+     "tokens_narrow": 2055,
+     "lang": "python",
+     "wus": [
+      "R11"
+     ]
+    },
+    {
+     "path": "CHANGELOG.md",
+     "hits": 13,
+     "hit_lines": [
+      40,
+      99,
+      179,
+      230,
+      235
+     ],
+     "lines": 2062,
+     "tokens_est": 32928,
+     "w": true,
+     "mode": "additive",
+     "bytes": 131710,
+     "tokens_narrow": 5765,
+     "lang": "docs",
+     "wus": [
+      "R10",
+      "R11",
+      "R12"
+     ],
+     "suspect": "docs"
+    },
+    {
+     "path": "tests/test_docs_generator.py",
+     "hits": 13,
+     "hit_lines": [
+      4,
+      5,
+      131,
+      182,
+      290
+     ],
+     "lines": 346,
+     "tokens_est": 3980,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 15917,
+     "tokens_narrow": 1772,
+     "lang": "python",
+     "wus": [
+      "R11"
+     ]
+    },
+    {
+     "path": "tests/test_final_github_stack.py",
+     "hits": 13,
+     "hit_lines": [
+      3,
+      20,
+      73,
+      80,
+      172
+     ],
+     "lines": 305,
+     "tokens_est": 3337,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 13348,
+     "tokens_narrow": 2014,
+     "lang": "python",
+     "wus": [
+      "R11"
+     ]
+    },
+    {
+     "path": "tests/test_worker_env.py",
+     "hits": 13,
+     "hit_lines": [
+      1,
+      19,
+      23,
+      34,
+      39
+     ],
+     "lines": 168,
+     "tokens_est": 1663,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 6649,
+     "tokens_narrow": 1554,
+     "lang": "python",
+     "wus": [
+      "R11",
+      "R12"
+     ]
+    },
+    {
+     "path": "README.md",
+     "hits": 12,
+     "hit_lines": [
+      17,
+      78,
+      157,
+      159,
+      201
+     ],
+     "lines": 500,
+     "tokens_est": 7264,
+     "w": true,
+     "mode": "additive",
+     "bytes": 29053,
+     "tokens_narrow": 3676,
+     "lang": "docs",
+     "wus": [
+      "R11",
+      "R12"
+     ],
+     "suspect": "docs"
+    },
+    {
+     "path": "scripts/rg_final_provider.py",
+     "hits": 11,
+     "hit_lines": [
+      62,
+      72,
+      79,
+      83,
+      93
+     ],
+     "lines": 232,
+     "tokens_est": 2265,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 9057,
+     "tokens_narrow": 1250,
+     "lang": "python",
+     "importers_n": 10,
+     "importers": [
+      "scripts/rg_final_github.py",
+      "scripts/rg_final_gitlab.py",
+      "scripts/rg_final_graph.py",
+      "scripts/rg_final_publish.py",
+      "scripts/rg_final_review.py",
+      "scripts/rg_final_store.py",
+      "tests/test_final_complete_standalone.py",
+      "tests/test_final_graph.py",
+      "tests/test_final_provider_github.py",
+      "tests/test_final_provider_gitlab.py"
+     ],
+     "wus": [
+      "R12"
+     ]
+    },
+    {
+     "path": "tests/test_rg_ticket_fetch.py",
+     "hits": 11,
+     "hit_lines": [
+      9,
+      31,
+      116,
+      143,
+      145
+     ],
+     "lines": 390,
+     "tokens_est": 4342,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 17365,
+     "tokens_narrow": 1470,
+     "lang": "python",
+     "wus": [
+      "R11",
+      "R12"
+     ]
+    },
+    {
+     "path": "tests/sim_scenarios_spec16.py",
+     "hits": 9,
+     "hit_lines": [
+      35,
+      82,
+      178,
+      182,
+      236
+     ],
+     "lines": 804,
+     "tokens_est": 10037,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 40148,
+     "tokens_narrow": 2734,
+     "lang": "python",
+     "wus": [
+      "R11",
+      "R12"
+     ]
+    },
+    {
+     "path": "tests/test_final_observability.py",
+     "hits": 9,
+     "hit_lines": [
+      34,
+      158,
+      208,
+      353,
+      425
+     ],
+     "lines": 593,
+     "tokens_est": 4794,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 19176,
+     "tokens_narrow": 1795,
+     "lang": "python",
+     "wus": [
+      "R11",
+      "R12"
+     ]
+    },
+    {
+     "path": "tests/test_final_views.py",
+     "hits": 9,
+     "hit_lines": [
+      39,
+      52,
+      254,
+      261,
+      272
+     ],
+     "lines": 755,
+     "tokens_est": 8360,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 33439,
+     "tokens_narrow": 1739,
+     "lang": "python",
+     "wus": [
+      "R11",
+      "R12"
+     ]
+    },
+    {
+     "path": "extensions/review-gate-deny.ts",
+     "hits": 8,
+     "hit_lines": [
+      1,
+      9,
+      59,
+      336,
+      339
+     ],
+     "lines": 403,
+     "tokens_est": 4421,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 17683,
+     "tokens_narrow": 1470,
+     "lang": "ts",
+     "importers_n": 1,
+     "importers": [
+      "extensions/review-gate-deny.test.mjs"
+     ],
+     "wus": [
+      "R11",
+      "R12"
+     ]
+    },
+    {
+     "path": "scripts/rg_ticket_fetch.py",
+     "hits": 8,
+     "hit_lines": [
+      11,
+      13,
+      16,
+      21,
+      150
+     ],
+     "lines": 405,
+     "tokens_est": 4531,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 18121,
+     "tokens_narrow": 929,
+     "lang": "python",
+     "importers_n": 5,
+     "importers": [
+      "scripts/review-gate.py",
+      "scripts/rg_final_context.py",
+      "tests/test_final_context.py",
+      "tests/test_rg_jira_fetch.py",
+      "tests/test_rg_ticket_fetch.py"
+     ],
+     "wus": [
+      "R11",
+      "R12"
+     ]
+    },
+    {
+     "path": "tests/test_final_memory.py",
+     "hits": 8,
+     "hit_lines": [
+      33,
+      34,
+      36,
+      56,
+      122
+     ],
+     "lines": 596,
+     "tokens_est": 6360,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 25437,
+     "tokens_narrow": 1697,
+     "lang": "python",
+     "wus": [
+      "R11",
+      "R12"
+     ]
+    },
+    {
+     "path": "tests/test_final_publication.py",
+     "hits": 8,
+     "hit_lines": [
+      32,
+      33,
+      35,
+      56,
+      72
+     ],
+     "lines": 673,
+     "tokens_est": 6777,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 27107,
+     "tokens_narrow": 1652,
+     "lang": "python",
+     "wus": [
+      "R11",
+      "R12"
+     ]
+    },
+    {
+     "path": "tests/test_backend_select.py",
+     "hits": 7,
+     "hit_lines": [
+      208,
+      248,
+      257,
+      258,
+      260
+     ],
+     "lines": 348,
+     "tokens_est": 3882,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 15526,
+     "tokens_narrow": 1194,
+     "lang": "python",
+     "wus": [
+      "R11"
+     ]
+    },
+    {
+     "path": "tests/test_fixture_degradation.py",
+     "hits": 7,
+     "hit_lines": [
+      80,
+      81,
+      82,
+      87,
+      94
+     ],
+     "lines": 238,
+     "tokens_est": 2979,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 11913,
+     "tokens_narrow": 1114,
+     "lang": "python",
+     "wus": [
+      "R12"
+     ]
+    },
+    {
+     "path": ".kimchi/docs/review.md",
+     "hits": 6,
+     "hit_lines": [
+      5,
+      7,
+      9,
+      11,
+      13
+     ],
+     "lines": 15,
+     "tokens_est": 688,
+     "w": true,
+     "mode": "additive",
+     "bytes": 2750,
+     "tokens_narrow": 688,
+     "lang": "docs",
+     "wus": [
+      "R10",
+      "R11",
+      "R12"
+     ],
+     "suspect": "docs"
+    },
+    {
+     "path": "docs/adr/0008-explicit-final-whole-stack-review.md",
+     "hits": 6,
+     "hit_lines": [
+      65,
+      70,
+      92,
+      100,
+      206
+     ],
+     "lines": 285,
+     "tokens_est": 5196,
+     "w": true,
+     "mode": "additive",
+     "bytes": 20784,
+     "tokens_narrow": 1878,
+     "lang": "docs",
+     "wus": [
+      "R11",
+      "R12"
+     ],
+     "suspect": "docs"
+    },
+    {
+     "path": "tests/live/live_matrix.py",
+     "hits": 6,
+     "hit_lines": [
+      176,
+      184,
+      191,
+      193,
+      199
+     ],
+     "lines": 319,
+     "tokens_est": 4176,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 16701,
+     "tokens_narrow": 720,
+     "lang": "python",
+     "wus": [
+      "R11"
+     ]
+    },
+    {
+     "path": "tests/test_final_observability_integration.py",
+     "hits": 6,
+     "hit_lines": [
+      14,
+      22,
+      161,
+      165,
+      168
+     ],
+     "lines": 190,
+     "tokens_est": 2180,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 8717,
+     "tokens_narrow": 884,
+     "lang": "python",
+     "wus": [
+      "R11"
+     ]
+    },
+    {
+     "path": "scripts/rg_final_acceptance.py",
+     "hits": 5,
+     "hit_lines": [
+      46,
+      78,
+      92,
+      93,
+      139
+     ],
+     "lines": 256,
+     "tokens_est": 3558,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 14230,
+     "tokens_narrow": 1501,
+     "lang": "python",
+     "importers_n": 4,
+     "importers": [
+      "scripts/rg_final_store.py",
+      "tests/test_final_acceptance_registry.py",
+      "tests/test_final_store.py",
+      "tests/test_final_views.py"
+     ],
+     "wus": [
+      "R11",
+      "R12"
+     ]
+    },
+    {
+     "path": "scripts/rg_final_contract.py",
+     "hits": 5,
+     "hit_lines": [
+      30,
+      32,
+      50,
+      65,
+      66
+     ],
+     "lines": 98,
+     "tokens_est": 3816,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 15262,
+     "tokens_narrow": 2609,
+     "lang": "python",
+     "importers_n": 3,
+     "importers": [
+      "scripts/rg_final_store.py",
+      "tests/test_final_store.py",
+      "tests/test_final_views.py"
+     ],
+     "wus": [
+      "R10",
+      "R11",
+      "R12"
+     ]
+    },
+    {
+     "path": "tests/test_fail_closed.py",
+     "hits": 5,
+     "hit_lines": [
+      1,
+      3,
+      136,
+      156,
+      184
+     ],
+     "lines": 185,
+     "tokens_est": 1805,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 7217,
+     "tokens_narrow": 810,
+     "lang": "python",
+     "wus": [
+      "R11"
+     ]
+    },
+    {
+     "path": "tests/test_final_acceptance_registry.py",
+     "hits": 5,
+     "hit_lines": [
+      79,
+      147,
+      151,
+      154,
+      298
+     ],
+     "lines": 317,
+     "tokens_est": 3672,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 14685,
+     "tokens_narrow": 1159,
+     "lang": "python",
+     "wus": [
+      "R10",
+      "R12"
+     ]
+    },
+    {
+     "path": "tests/test_final_credentials.py",
+     "hits": 5,
+     "hit_lines": [
+      1,
+      60,
+      62,
+      89,
+      145
+     ],
+     "lines": 188,
+     "tokens_est": 1773,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 7090,
+     "tokens_narrow": 1009,
+     "lang": "python",
+     "wus": [
+      "R11",
+      "R12"
+     ]
+    },
+    {
+     "path": "tests/test_forge.py",
+     "hits": 5,
+     "hit_lines": [
+      302,
+      310,
+      312,
+      327,
+      506
+     ],
+     "lines": 542,
+     "tokens_est": 6217,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 24868,
+     "tokens_narrow": 998,
+     "lang": "python",
+     "wus": [
+      "R12"
+     ]
+    },
+    {
+     "path": "tests/test_rg_jira_fetch.py",
+     "hits": 5,
+     "hit_lines": [
+      1,
+      4,
+      65,
+      361,
+      363
+     ],
+     "lines": 377,
+     "tokens_est": 3872,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 15486,
+     "tokens_narrow": 843,
+     "lang": "python",
+     "wus": [
+      "R11",
+      "R12"
+     ]
+    },
+    {
+     "path": "tests/test_sim_harness.py",
+     "hits": 5,
+     "hit_lines": [
+      7,
+      25,
+      152,
+      444,
+      533
+     ],
+     "lines": 707,
+     "tokens_est": 8265,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 33059,
+     "tokens_narrow": 1555,
+     "lang": "python",
+     "wus": [
+      "R11",
+      "R12"
+     ]
+    },
+    {
+     "path": "docs/review-latency-analysis.md",
+     "hits": 4,
+     "hit_lines": [
+      45,
+      72,
+      77,
+      106
+     ],
+     "lines": 115,
+     "tokens_est": 1982,
+     "w": true,
+     "mode": "additive",
+     "bytes": 7925,
+     "tokens_narrow": 1482,
+     "lang": "docs",
+     "wus": [
+      "R11",
+      "R12"
+     ],
+     "suspect": "docs"
+    },
+    {
+     "path": "scripts/ocr_doctor.py",
+     "hits": 4,
+     "hit_lines": [
+      17,
+      299,
+      314,
+      613
+     ],
+     "lines": 690,
+     "tokens_est": 7038,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 28152,
+     "tokens_narrow": 1102,
+     "lang": "python",
+     "importers_n": 1,
+     "importers": [
+      "tests/test_gate_finding_regressions.py"
+     ],
+     "wus": [
+      "R11"
+     ]
+    },
+    {
+     "path": "scripts/rg_final_gitlab.py",
+     "hits": 4,
+     "hit_lines": [
+      41,
+      55,
+      208,
+      209
+     ],
+     "lines": 245,
+     "tokens_est": 2624,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 10493,
+     "tokens_narrow": 825,
+     "lang": "python",
+     "importers_n": 5,
+     "importers": [
+      "scripts/rg_final_provider.py",
+      "scripts/rg_final_review.py",
+      "scripts/rg_final_stack.py",
+      "tests/test_final_graph.py",
+      "tests/test_final_provider_gitlab.py"
+     ],
+     "wus": [
+      "R12"
+     ]
+    },
+    {
+     "path": "scripts/rg_final_memory.py",
+     "hits": 4,
+     "hit_lines": [
+      25,
+      457,
+      482,
+      541
+     ],
+     "lines": 666,
+     "tokens_est": 7461,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 29844,
+     "tokens_narrow": 1322,
+     "lang": "python",
+     "importers_n": 5,
+     "importers": [
+      "scripts/rg_final_review.py",
+      "scripts/rg_final_stack.py",
+      "scripts/rg_final_store.py",
+      "tests/test_final_memory.py",
+      "tests/test_final_publication.py"
+     ],
+     "wus": [
+      "R11",
+      "R12"
+     ]
+    },
+    {
+     "path": "scripts/rg_final_telemetry.py",
+     "hits": 4,
+     "hit_lines": [
+      162,
+      163,
+      168,
+      174
+     ],
+     "lines": 463,
+     "tokens_est": 4358,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 17432,
+     "tokens_narrow": 405,
+     "lang": "python",
+     "importers_n": 5,
+     "importers": [
+      "scripts/rg_final_review.py",
+      "scripts/rg_final_stack.py",
+      "scripts/rg_final_store.py",
+      "tests/test_final_observability.py",
+      "tests/test_final_observability_integration.py"
+     ],
+     "wus": [
+      "R10",
+      "R12"
+     ]
+    },
+    {
+     "path": "scripts/rg_jira_fetch.py",
+     "hits": 4,
+     "hit_lines": [
+      1,
+      6,
+      80,
+      158
+     ],
+     "lines": 256,
+     "tokens_est": 2801,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 11202,
+     "tokens_narrow": 908,
+     "lang": "python",
+     "importers_n": 3,
+     "importers": [
+      "scripts/rg_ticket_fetch.py",
+      "tests/test_claude_profile.py",
+      "tests/test_rg_jira_fetch.py"
+     ],
+     "wus": [
+      "R11"
+     ]
+    },
+    {
+     "path": "tests/test_argv_golden.py",
+     "hits": 4,
+     "hit_lines": [
+      94,
+      111,
+      116,
+      146
+     ],
+     "lines": 150,
+     "tokens_est": 1533,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 6130,
+     "tokens_narrow": 736,
+     "lang": "python",
+     "wus": [
+      "R11"
+     ]
+    },
+    {
+     "path": "tests/test_deny_canary.py",
+     "hits": 4,
+     "hit_lines": [
+      72,
+      110,
+      111,
+      112
+     ],
+     "lines": 145,
+     "tokens_est": 1402,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 5605,
+     "tokens_narrow": 619,
+     "lang": "python",
+     "wus": [
+      "R11"
+     ]
+    },
+    {
+     "path": "tests/test_final_dynamic.py",
+     "hits": 4,
+     "hit_lines": [
+      89,
+      129,
+      210,
+      218
+     ],
+     "lines": 483,
+     "tokens_est": 4955,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 19820,
+     "tokens_narrow": 1037,
+     "lang": "python",
+     "wus": [
+      "R12"
+     ]
+    },
+    {
+     "path": "agents/docs-checker.md",
+     "hits": 3,
+     "hit_lines": [
+      21,
+      30,
+      72
+     ],
+     "lines": 301,
+     "tokens_est": 4669,
+     "w": true,
+     "mode": "additive",
+     "bytes": 18675,
+     "tokens_narrow": 1102,
+     "lang": "docs",
+     "wus": [
+      "R11",
+      "R12"
+     ],
+     "suspect": "docs"
+    },
+    {
+     "path": "docs/adr/0007-race-regression-test-checks-and-finding-waivers.md",
+     "hits": 3,
+     "hit_lines": [
+      79,
+      84,
+      87
+     ],
+     "lines": 249,
+     "tokens_est": 3522,
+     "w": true,
+     "mode": "additive",
+     "bytes": 14088,
+     "tokens_narrow": 552,
+     "lang": "docs",
+     "wus": [
+      "R11"
+     ],
+     "suspect": "docs"
+    },
+    {
+     "path": "docs/calibration.md",
+     "hits": 3,
+     "hit_lines": [
+      6,
+      11,
+      69
+     ],
+     "lines": 104,
+     "tokens_est": 3759,
+     "w": true,
+     "mode": "additive",
+     "bytes": 15034,
+     "tokens_narrow": 2060,
+     "lang": "docs",
+     "wus": [
+      "R11"
+     ],
+     "suspect": "docs"
+    },
+    {
+     "path": "extensions/review-gate-deny.test.mjs",
+     "hits": 3,
+     "hit_lines": [
+      28,
+      48,
+      49
+     ],
+     "lines": 279,
+     "tokens_est": 3055,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 12219,
+     "tokens_narrow": 570,
+     "lang": "js",
+     "wus": [
+      "R11"
+     ],
+     "suspect": "comments"
+    },
+    {
+     "path": "scripts/ocr_calibrate.py",
+     "hits": 3,
+     "hit_lines": [
+      106,
+      460,
+      502
+     ],
+     "lines": 574,
+     "tokens_est": 6258,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 25030,
+     "tokens_narrow": 1014,
+     "lang": "python",
+     "importers_n": 1,
+     "importers": [
+      "tests/test_ocr_calibrate.py"
+     ],
+     "wus": [
+      "R11"
+     ]
+    },
+    {
+     "path": "scripts/ocr_forge.py",
+     "hits": 3,
+     "hit_lines": [
+      21,
+      262,
+      271
+     ],
+     "lines": 477,
+     "tokens_est": 5075,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 20298,
+     "tokens_narrow": 756,
+     "lang": "python",
+     "importers_n": 6,
+     "importers": [
+      "scripts/ocr_collectors.py",
+      "tests/test_fixture_degradation.py",
+      "tests/test_fixture_m4_pointer.py",
+      "tests/test_forge.py",
+      "tests/test_gate_finding_regressions.py",
+      "tests/test_ocr_impact.py"
+     ],
+     "wus": [
+      "R12"
+     ]
+    },
+    {
+     "path": "scripts/rg_final_publish.py",
+     "hits": 3,
+     "hit_lines": [
+      3,
+      179,
+      181
+     ],
+     "lines": 319,
+     "tokens_est": 3903,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 15609,
+     "tokens_narrow": 624,
+     "lang": "python",
+     "importers_n": 7,
+     "importers": [
+      "scripts/rg_final_review.py",
+      "scripts/rg_final_stack.py",
+      "tests/test_final_complete_standalone.py",
+      "tests/test_final_github_stack.py",
+      "tests/test_final_provider_github.py",
+      "tests/test_final_publication.py",
+      "tests/test_final_stack.py"
+     ],
+     "wus": [
+      "R11",
+      "R12"
+     ]
+    },
+    {
+     "path": "tests/fixtures/json-mode-stream.jsonl",
+     "hits": 3,
+     "hit_lines": [
+      6,
+      7,
+      30
+     ],
+     "lines": 31,
+     "tokens_est": 37542,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 150165,
+     "tokens_narrow": 37542,
+     "lang": "other",
+     "wus": [
+      "R12"
+     ]
+    },
+    {
+     "path": "tests/sim_harness.py",
+     "hits": 3,
+     "hit_lines": [
+      5,
+      62,
+      278
+     ],
+     "lines": 935,
+     "tokens_est": 10794,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 43174,
+     "tokens_narrow": 947,
+     "lang": "python",
+     "wus": [
+      "R11"
+     ]
+    },
+    {
+     "path": "tests/stub_reviewer.py",
+     "hits": 3,
+     "hit_lines": [
+      220,
+      229,
+      460
+     ],
+     "lines": 765,
+     "tokens_est": 9034,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 36134,
+     "tokens_narrow": 839,
+     "lang": "python",
+     "wus": [
+      "R11"
+     ]
+    },
+    {
+     "path": "tests/test_docs_gate.py",
+     "hits": 3,
+     "hit_lines": [
+      758,
+      970,
+      1979
+     ],
+     "lines": 2001,
+     "tokens_est": 24240,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 96959,
+     "tokens_narrow": 1127,
+     "lang": "python",
+     "wus": [
+      "R11"
+     ]
+    },
+    {
+     "path": "tests/test_final_store.py",
+     "hits": 3,
+     "hit_lines": [
+      31,
+      342,
+      488
+     ],
+     "lines": 850,
+     "tokens_est": 9150,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 36598,
+     "tokens_narrow": 1002,
+     "lang": "python",
+     "wus": [
+      "R12"
+     ]
+    },
+    {
+     "path": "tests/test_fixture_m4_pointer.py",
+     "hits": 3,
+     "hit_lines": [
+      46,
+      54,
+      83
+     ],
+     "lines": 167,
+     "tokens_est": 1942,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 7767,
+     "tokens_narrow": 791,
+     "lang": "python",
+     "wus": [
+      "R12"
+     ]
+    },
+    {
+     "path": "tests/test_process_groups.py",
+     "hits": 3,
+     "hit_lines": [
+      5,
+      83,
+      96
+     ],
+     "lines": 122,
+     "tokens_est": 1170,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 4679,
+     "tokens_narrow": 614,
+     "lang": "python",
+     "wus": [
+      "R11"
+     ]
+    },
+    {
+     "path": "tests/test_review_gate.py",
+     "hits": 3,
+     "hit_lines": [
+      131,
+      233,
+      563
+     ],
+     "lines": 3431,
+     "tokens_est": 37144,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 148573,
+     "tokens_narrow": 1007,
+     "lang": "python",
+     "wus": [
+      "R11"
+     ]
+    },
+    {
+     "path": "agents/code-reviewer.md",
+     "hits": 2,
+     "hit_lines": [
+      30,
+      40
+     ],
+     "lines": 414,
+     "tokens_est": 6088,
+     "w": true,
+     "mode": "additive",
+     "bytes": 24350,
+     "tokens_narrow": 603,
+     "lang": "docs",
+     "wus": [
+      "R11"
+     ],
+     "suspect": "docs"
+    },
+    {
+     "path": "docs/adr/0005-claude-backend-tier-models-guard-and-jira-routing.md",
+     "hits": 2,
+     "hit_lines": [
+      13,
+      38
+     ],
+     "lines": 53,
+     "tokens_est": 670,
+     "w": true,
+     "mode": "additive",
+     "bytes": 2680,
+     "tokens_narrow": 670,
+     "lang": "docs",
+     "wus": [
+      "R11"
+     ],
+     "suspect": "docs"
+    },
+    {
+     "path": "docs/architecture-split-proposal.md",
+     "hits": 2,
+     "hit_lines": [
+      44,
+      83
+     ],
+     "lines": 117,
+     "tokens_est": 1835,
+     "w": true,
+     "mode": "additive",
+     "bytes": 7338,
+     "tokens_narrow": 973,
+     "lang": "docs",
+     "wus": [
+      "R11"
+     ],
+     "suspect": "docs"
+    },
+    {
+     "path": "docs/plans/resume-truncated-chunks.md",
+     "hits": 2,
+     "hit_lines": [
+      17,
+      223
+     ],
+     "lines": 545,
+     "tokens_est": 6960,
+     "w": true,
+     "mode": "additive",
+     "bytes": 27838,
+     "tokens_narrow": 792,
+     "lang": "docs",
+     "wus": [
+      "R11",
+      "R12"
+     ],
+     "suspect": "docs"
+    },
+    {
+     "path": "docs/specs/unified-review-gate.md",
+     "hits": 2,
+     "hit_lines": [
+      82,
+      84
+     ],
+     "lines": 130,
+     "tokens_est": 4747,
+     "w": true,
+     "mode": "additive",
+     "bytes": 18985,
+     "tokens_narrow": 1205,
+     "lang": "docs",
+     "wus": [
+      "R11",
+      "R12"
+     ],
+     "suspect": "docs"
+    },
+    {
+     "path": "scripts/ocr_impact.py",
+     "hits": 2,
+     "hit_lines": [
+      151,
+      521
+     ],
+     "lines": 1511,
+     "tokens_est": 14524,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 58096,
+     "tokens_narrow": 596,
+     "lang": "python",
+     "importers_n": 11,
+     "importers": [
+      "scripts/ocr_collectors.py",
+      "scripts/ocr_forge.py",
+      "scripts/ocr_index.py",
+      "scripts/ocr_memory.py",
+      "scripts/ocr_segment.py",
+      "scripts/review-gate.py",
+      "tests/test_fixture_m3_spec_callers.py",
+      "tests/test_gate_finding_regressions.py",
+      "tests/test_impact.py",
+      "tests/test_impact_gate.py",
+      "tests/test_ocr_impact.py"
+     ],
+     "wus": [
+      "R12"
+     ]
+    },
+    {
+     "path": "scripts/rg_config.py",
+     "hits": 2,
+     "hit_lines": [
+      36,
+      55
+     ],
+     "lines": 391,
+     "tokens_est": 4369,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 17475,
+     "tokens_narrow": 559,
+     "lang": "python",
+     "importers_n": 7,
+     "importers": [
+      "scripts/review-gate.py",
+      "tests/test_docs_gate.py",
+      "tests/test_executor_testcheck.py",
+      "tests/test_final_verification.py",
+      "tests/test_rg_config.py",
+      "tests/test_rg_ticket_fetch.py",
+      "tests/test_rg_tickets.py"
+     ],
+     "wus": [
+      "R12"
+     ]
+    },
+    {
+     "path": "scripts/rg_final_env.py",
+     "hits": 2,
+     "hit_lines": [
+      1,
+      5
+     ],
+     "lines": 70,
+     "tokens_est": 732,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 2928,
+     "tokens_narrow": 210,
+     "lang": "python",
+     "importers_n": 4,
+     "importers": [
+      "scripts/rg_final_dynamic.py",
+      "scripts/rg_final_review.py",
+      "tests/test_final_credentials.py",
+      "tests/test_worker_env.py"
+     ],
+     "wus": [
+      "R11"
+     ]
+    },
+    {
+     "path": "skills/review/SKILL.md",
+     "hits": 2,
+     "hit_lines": [
+      917,
+      918
+     ],
+     "lines": 1691,
+     "tokens_est": 23053,
+     "w": true,
+     "mode": "additive",
+     "bytes": 92209,
+     "tokens_narrow": 437,
+     "lang": "docs",
+     "wus": [
+      "R11"
+     ],
+     "suspect": "docs"
+    },
+    {
+     "path": "tests/fixtures/miss_categories/pre_v2/ocr_impact.py",
+     "hits": 2,
+     "hit_lines": [
+      110,
+      468
+     ],
+     "lines": 1410,
+     "tokens_est": 13254,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 53014,
+     "tokens_narrow": 583,
+     "lang": "python",
+     "wus": [
+      "R12"
+     ]
+    },
+    {
+     "path": "tests/test_async_gate.py",
+     "hits": 2,
+     "hit_lines": [
+      75,
+      479
+     ],
+     "lines": 776,
+     "tokens_est": 8884,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 35536,
+     "tokens_narrow": 710,
+     "lang": "python",
+     "wus": [
+      "R11"
+     ],
+     "suspect": "comments"
+    },
+    {
+     "path": "tests/test_final_context.py",
+     "hits": 2,
+     "hit_lines": [
+      272,
+      310
+     ],
+     "lines": 417,
+     "tokens_est": 4483,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 17931,
+     "tokens_narrow": 667,
+     "lang": "python",
+     "wus": [
+      "R12"
+     ]
+    },
+    {
+     "path": "tests/test_rg_config.py",
+     "hits": 2,
+     "hit_lines": [
+      46,
+      169
+     ],
+     "lines": 597,
+     "tokens_est": 5972,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 23885,
+     "tokens_narrow": 621,
+     "lang": "python",
+     "wus": [
+      "R12"
+     ]
+    },
+    {
+     "path": ".github/workflows/ci.yml",
+     "hits": 1,
+     "hit_lines": [
+      60
+     ],
+     "lines": 112,
+     "tokens_est": 942,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 3766,
+     "tokens_narrow": 261,
+     "lang": "config",
+     "wus": [
+      "R11"
+     ],
+     "suspect": "comments"
+    },
+    {
+     "path": ".kimchi/docs/verification.md",
+     "hits": 1,
+     "hit_lines": [
+      1
+     ],
+     "lines": 8,
+     "tokens_est": 287,
+     "w": true,
+     "mode": "additive",
+     "bytes": 1145,
+     "tokens_narrow": 287,
+     "lang": "docs",
+     "wus": [
+      "R12"
+     ],
+     "suspect": "docs"
+    },
+    {
+     "path": ".kimchi/plans/comment-consistency-checks-spec.md",
+     "hits": 1,
+     "hit_lines": [
+      99
+     ],
+     "lines": 141,
+     "tokens_est": 2212,
+     "w": true,
+     "mode": "additive",
+     "bytes": 8847,
+     "tokens_narrow": 487,
+     "lang": "docs",
+     "wus": [
+      "R12"
+     ],
+     "suspect": "docs"
+    },
+    {
+     "path": "docs/adr/0001-loosening-verdict-validation-for-enumerated-improvised-report-families.md",
+     "hits": 1,
+     "hit_lines": [
+      14
+     ],
+     "lines": 99,
+     "tokens_est": 1378,
+     "w": true,
+     "mode": "additive",
+     "bytes": 5509,
+     "tokens_narrow": 404,
+     "lang": "docs",
+     "wus": [
+      "R11"
+     ],
+     "suspect": "docs"
+    },
+    {
+     "path": "docs/pointer-artifact-registry.md",
+     "hits": 1,
+     "hit_lines": [
+      53
+     ],
+     "lines": 80,
+     "tokens_est": 1014,
+     "w": true,
+     "mode": "additive",
+     "bytes": 4054,
+     "tokens_narrow": 393,
+     "lang": "docs",
+     "wus": [
+      "R12"
+     ],
+     "suspect": "docs"
+    },
+    {
+     "path": "hooks/sh/gate-hook.sh",
+     "hits": 1,
+     "hit_lines": [
+      597
+     ],
+     "lines": 677,
+     "tokens_est": 6948,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 27791,
+     "tokens_narrow": 319,
+     "lang": "shell",
+     "wus": [
+      "R11"
+     ],
+     "suspect": "comments"
+    },
+    {
+     "path": "package.json",
+     "hits": 1,
+     "hit_lines": [
+      5
+     ],
+     "lines": 34,
+     "tokens_est": 221,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 881,
+     "tokens_narrow": 130,
+     "lang": "config",
+     "wus": [
+      "R11"
+     ]
+    },
+    {
+     "path": "scripts/ocr_cmdshim.py",
+     "hits": 1,
+     "hit_lines": [
+      1
+     ],
+     "lines": 65,
+     "tokens_est": 657,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 2627,
+     "tokens_narrow": 162,
+     "lang": "python",
+     "importers_n": 3,
+     "importers": [
+      "scripts/review-gate.py",
+      "scripts/rg_jira_fetch.py",
+      "tests/test_cmdshim.py"
+     ],
+     "wus": [
+      "R11"
+     ],
+     "suspect": "comments"
+    },
+    {
+     "path": "scripts/ocr_docsquality.py",
+     "hits": 1,
+     "hit_lines": [
+      240
+     ],
+     "lines": 735,
+     "tokens_est": 7743,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 30969,
+     "tokens_narrow": 327,
+     "lang": "python",
+     "importers_n": 2,
+     "importers": [
+      "scripts/review-gate.py",
+      "tests/test_docsquality.py"
+     ],
+     "wus": [
+      "R12"
+     ]
+    },
+    {
+     "path": "scripts/ocr_electron.py",
+     "hits": 1,
+     "hit_lines": [
+      91
+     ],
+     "lines": 486,
+     "tokens_est": 5056,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 20222,
+     "tokens_narrow": 323,
+     "lang": "python",
+     "wus": [
+      "R11"
+     ]
+    },
+    {
+     "path": "scripts/ocr_segment.py",
+     "hits": 1,
+     "hit_lines": [
+      289
+     ],
+     "lines": 748,
+     "tokens_est": 7753,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 31010,
+     "tokens_narrow": 322,
+     "lang": "python",
+     "importers_n": 3,
+     "importers": [
+      "scripts/review-gate.py",
+      "tests/test_segment.py",
+      "tests/test_segment_gate.py"
+     ],
+     "wus": [
+      "R12"
+     ]
+    },
+    {
+     "path": "scripts/rg_final_compose.py",
+     "hits": 1,
+     "hit_lines": [
+      14
+     ],
+     "lines": 358,
+     "tokens_est": 3693,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 14772,
+     "tokens_narrow": 300,
+     "lang": "python",
+     "importers_n": 3,
+     "importers": [
+      "scripts/rg_final_review.py",
+      "scripts/rg_final_stack.py",
+      "tests/test_final_composition.py"
+     ],
+     "wus": [
+      "R12"
+     ]
+    },
+    {
+     "path": "scripts/rg_final_dynamic.py",
+     "hits": 1,
+     "hit_lines": [
+      8
+     ],
+     "lines": 427,
+     "tokens_est": 4323,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 17289,
+     "tokens_narrow": 233,
+     "lang": "python",
+     "importers_n": 5,
+     "importers": [
+      "scripts/rg_final_execution.py",
+      "scripts/rg_final_review.py",
+      "scripts/rg_final_stack.py",
+      "tests/sim_harness.py",
+      "tests/test_final_dynamic.py"
+     ],
+     "wus": [
+      "R12"
+     ]
+    },
+    {
+     "path": "skills/review/rules/electron.md",
+     "hits": 1,
+     "hit_lines": [
+      84
+     ],
+     "lines": 93,
+     "tokens_est": 1844,
+     "w": true,
+     "mode": "additive",
+     "bytes": 7376,
+     "tokens_narrow": 496,
+     "lang": "docs",
+     "wus": [
+      "R12"
+     ],
+     "suspect": "docs"
+    },
+    {
+     "path": "tests/fake_backend.py",
+     "hits": 1,
+     "hit_lines": [
+      136
+     ],
+     "lines": 167,
+     "tokens_est": 1851,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 7402,
+     "tokens_narrow": 344,
+     "lang": "python",
+     "wus": [
+      "R11"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/_c4_probe/RESULTS.md",
+     "hits": 1,
+     "hit_lines": [
+      44
+     ],
+     "lines": 69,
+     "tokens_est": 1097,
+     "w": true,
+     "mode": "additive",
+     "bytes": 4388,
+     "tokens_narrow": 493,
+     "lang": "docs",
+     "wus": [
+      "R11"
+     ],
+     "suspect": "docs"
+    },
+    {
+     "path": "tests/kimi_stub.py",
+     "hits": 1,
+     "hit_lines": [
+      10
+     ],
+     "lines": 23,
+     "tokens_est": 286,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 1143,
+     "tokens_narrow": 286,
+     "lang": "python",
+     "wus": [
+      "R11"
+     ]
+    },
+    {
+     "path": "tests/live/smoke_claude.py",
+     "hits": 1,
+     "hit_lines": [
+      1
+     ],
+     "lines": 49,
+     "tokens_est": 429,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 1716,
+     "tokens_narrow": 141,
+     "lang": "python",
+     "wus": [
+      "R11"
+     ],
+     "suspect": "comments"
+    },
+    {
+     "path": "tests/test_cmdshim.py",
+     "hits": 1,
+     "hit_lines": [
+      1
+     ],
+     "lines": 111,
+     "tokens_est": 1131,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 4524,
+     "tokens_narrow": 164,
+     "lang": "python",
+     "wus": [
+      "R11"
+     ],
+     "suspect": "comments"
+    },
+    {
+     "path": "tests/test_hook_passthrough.py",
+     "hits": 1,
+     "hit_lines": [
+      402
+     ],
+     "lines": 652,
+     "tokens_est": 7200,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 28799,
+     "tokens_narrow": 343,
+     "lang": "python",
+     "wus": [
+      "R11"
+     ],
+     "suspect": "comments"
+    },
+    {
+     "path": "tests/test_impact.py",
+     "hits": 1,
+     "hit_lines": [
+      974
+     ],
+     "lines": 1245,
+     "tokens_est": 12820,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 51278,
+     "tokens_narrow": 320,
+     "lang": "python",
+     "wus": [
+      "R12"
+     ]
+    },
+    {
+     "path": "tests/test_ocr_calibrate.py",
+     "hits": 1,
+     "hit_lines": [
+      99
+     ],
+     "lines": 188,
+     "tokens_est": 2018,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 8070,
+     "tokens_narrow": 333,
+     "lang": "python",
+     "wus": [
+      "R11"
+     ]
+    },
+    {
+     "path": "tests/test_ocr_doctor.py",
+     "hits": 1,
+     "hit_lines": [
+      143
+     ],
+     "lines": 536,
+     "tokens_est": 6036,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 24143,
+     "tokens_narrow": 350,
+     "lang": "python",
+     "wus": [
+      "R11"
+     ],
+     "suspect": "comments"
+    },
+    {
+     "path": "tests/test_time_metrics.py",
+     "hits": 1,
+     "hit_lines": [
+      116
+     ],
+     "lines": 342,
+     "tokens_est": 3881,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 15522,
+     "tokens_narrow": 352,
+     "lang": "python",
+     "wus": [
+      "R11"
+     ],
+     "suspect": "comments"
+    },
+    {
+     "path": "tests/test_verdict_intent_wiring.py",
+     "hits": 1,
+     "hit_lines": [
+      21
+     ],
+     "lines": 328,
+     "tokens_est": 3684,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 14736,
+     "tokens_narrow": 349,
+     "lang": "python",
+     "wus": [
+      "R11"
+     ]
+    },
+    {
+     "path": "tests/sim_scenarios_kimchi_studio.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 212,
+     "tokens_est": 2100,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 8398,
+     "tokens_narrow": 2100,
+     "lang": "python",
+     "wus": [
+      "R11"
+     ]
+    },
+    {
+     "path": "tests/sim_scenarios_spec14.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 412,
+     "tokens_est": 3692,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 14767,
+     "tokens_narrow": 3692,
+     "lang": "python",
+     "wus": [
+      "R11"
+     ]
+    },
+    {
+     "path": "tests/sim_scenarios_spec14_dogfood.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 124,
+     "tokens_est": 1394,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 5574,
+     "tokens_narrow": 1394,
+     "lang": "python",
+     "wus": [
+      "R11"
+     ]
+    },
+    {
+     "path": "tests/sim_scenarios_spec15.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 397,
+     "tokens_est": 4070,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 16278,
+     "tokens_narrow": 4070,
+     "lang": "python",
+     "wus": [
+      "R11"
+     ]
+    },
+    {
+     "path": "tests/test_final_{stops,stack}.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 0,
+     "tokens_est": 0,
+     "w": true,
+     "mode": "exclusive",
+     "planned": true,
+     "wus": [
+      "R10"
+     ]
+    },
+    {
+     "path": "tests/test_final_{verification,provider_gitlab}.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 0,
+     "tokens_est": 0,
+     "w": true,
+     "mode": "exclusive",
+     "planned": true,
+     "wus": [
+      "R12"
+     ]
+    }
+   ],
+   "tests": [
+    "docs/specs/unified-review-gate.md",
+    "examples/test-check/test_check",
+    "extensions/review-gate-deny.test.mjs",
+    "tests/fake_backend.py",
+    "tests/fixtures/json-mode-stream.jsonl",
+    "tests/fixtures/miss_categories/pre_v2/ocr_impact.py",
+    "tests/fixtures/repos/_c4_probe/RESULTS.md",
+    "tests/kimi_stub.py",
+    "tests/live/live_matrix.py",
+    "tests/live/smoke_claude.py",
+    "tests/sim_harness.py",
+    "tests/sim_scenarios_kimchi_studio.py",
+    "tests/sim_scenarios_spec14.py",
+    "tests/sim_scenarios_spec14_dogfood.py",
+    "tests/sim_scenarios_spec15.py",
+    "tests/sim_scenarios_spec16.py",
+    "tests/stub_reviewer.py",
+    "tests/test_argv_golden.py",
+    "tests/test_async_gate.py",
+    "tests/test_backend_select.py",
+    "tests/test_claude_profile.py",
+    "tests/test_cmdshim.py",
+    "tests/test_deny_canary.py",
+    "tests/test_docs_gate.py",
+    "tests/test_docs_generator.py",
+    "tests/test_docsquality.py",
+    "tests/test_executor_testcheck.py",
+    "tests/test_fail_closed.py",
+    "tests/test_final_acceptance_registry.py",
+    "tests/test_final_complete_standalone.py",
+    "tests/test_final_composition.py",
+    "tests/test_final_context.py",
+    "tests/test_final_credentials.py",
+    "tests/test_final_dynamic.py",
+    "tests/test_final_github_stack.py",
+    "tests/test_final_graph.py",
+    "tests/test_final_lenses.py",
+    "tests/test_final_memory.py",
+    "tests/test_final_observability.py",
+    "tests/test_final_observability_integration.py",
+    "tests/test_final_provider_github.py",
+    "tests/test_final_provider_gitlab.py",
+    "tests/test_final_publication.py",
+    "tests/test_final_review_cli.py",
+    "tests/test_final_stack.py",
+    "tests/test_final_stops.py",
+    "tests/test_final_store.py",
+    "tests/test_final_verification.py",
+    "tests/test_final_views.py",
+    "tests/test_fixture_degradation.py",
+    "tests/test_fixture_m4_pointer.py",
+    "tests/test_forge.py",
+    "tests/test_gate_finding_regressions.py",
+    "tests/test_harness_hint.py",
+    "tests/test_hook_passthrough.py",
+    "tests/test_impact.py",
+    "tests/test_ocr_calibrate.py",
+    "tests/test_ocr_doctor.py",
+    "tests/test_ocr_electron.py",
+    "tests/test_ocr_impact.py",
+    "tests/test_parallel_checks.py",
+    "tests/test_process_groups.py",
+    "tests/test_review_gate.py",
+    "tests/test_rg_config.py",
+    "tests/test_rg_jira_fetch.py",
+    "tests/test_rg_ticket_fetch.py",
+    "tests/test_scripts_gate_hook.py",
+    "tests/test_segment.py",
+    "tests/test_segment_gate.py",
+    "tests/test_sim_harness.py",
+    "tests/test_t26_installer_sync_config.py",
+    "tests/test_time_metrics.py",
+    "tests/test_verdict_intent_wiring.py",
+    "tests/test_worker_env.py",
+    "tests/test_worker_plumbing.py"
+   ],
+   "est_tokens": 1381125,
+   "est_hops": 901,
+   "siblings": [],
+   "readonly": false,
+   "verify": false,
+   "research": false,
+   "isolation": "shared",
+   "est_output": 0,
+   "est_cum_input": 635711812,
+   "est_cost": 200.249
+  },
+  {
+   "id": "C2",
+   "title": "Targeted review and full regressions",
+   "wus": [
+    "R13"
+   ],
+   "commit_tag": "[R13]",
+   "layer": 1,
+   "files": [
+    {
+     "path": "scripts/rg_final_execution.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 439,
+     "tokens_est": 4782,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 19125,
+     "tokens_narrow": 2963,
+     "lang": "python",
+     "importers_n": 4,
+     "importers": [
+      "scripts/rg_final_review.py",
+      "scripts/rg_final_stack.py",
+      "tests/test_final_stops.py",
+      "tests/test_final_verification.py"
+     ],
+     "wus": [
+      "R13"
+     ]
+    },
+    {
+     "path": "scripts/rg_final_review.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 2012,
+     "tokens_est": 25121,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 100482,
+     "tokens_narrow": 13634,
+     "lang": "python",
+     "importers_n": 13,
+     "importers": [
+      "scripts/review-gate.py",
+      "scripts/rg_final_stack.py",
+      "tests/sim_harness.py",
+      "tests/test_final_complete_standalone.py",
+      "tests/test_final_composition.py",
+      "tests/test_final_github_stack.py",
+      "tests/test_final_lenses.py",
+      "tests/test_final_observability_integration.py",
+      "tests/test_final_review_cli.py",
+      "tests/test_final_stack.py",
+      "tests/test_final_stops.py",
+      "tests/test_worker_env.py",
+      "tests/test_worker_plumbing.py"
+     ],
+     "wus": [
+      "R13"
+     ]
+    },
+    {
+     "path": "scripts/rg_final_stack.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 806,
+     "tokens_est": 9578,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 38310,
+     "tokens_narrow": 2591,
+     "lang": "python",
+     "importers_n": 1,
+     "importers": [
+      "scripts/rg_final_review.py"
+     ],
+     "wus": [
+      "R13"
+     ]
+    },
+    {
+     "path": "scripts/rg_final_verification.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 606,
+     "tokens_est": 6437,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 25745,
+     "tokens_narrow": 3633,
+     "lang": "python",
+     "importers_n": 3,
+     "importers": [
+      "scripts/rg_final_review.py",
+      "scripts/rg_final_stack.py",
+      "tests/test_final_verification.py"
+     ],
+     "wus": [
+      "R13"
+     ]
+    }
+   ],
+   "tests": [
+    "tests/test_final_complete_standalone.py",
+    "tests/test_final_composition.py",
+    "tests/test_final_stack.py",
+    "tests/test_final_stops.py",
+    "tests/test_final_verification.py"
+   ],
+   "est_tokens": 61500,
+   "est_hops": 21,
+   "siblings": [],
+   "readonly": true,
+   "verify": true,
+   "research": false,
+   "isolation": "shared",
+   "est_output": 0,
+   "est_cum_input": 960750,
+   "est_cost": 0.303
+  }
+ ],
+ "overlap": {
+  "R10": {
+   "R11": [
+    ".kimchi/docs/review.md",
+    "CHANGELOG.md",
+    "scripts/review-gate.py",
+    "scripts/rg_final_contract.py",
+    "scripts/rg_final_execution.py",
+    "scripts/rg_final_lenses.py",
+    "scripts/rg_final_review.py",
+    "scripts/rg_final_stack.py",
+    "tests/test_final_stack.py",
+    "tests/test_final_stops.py",
+    "tests/test_final_verification.py"
+   ],
+   "R12": [
+    ".kimchi/docs/review.md",
+    "CHANGELOG.md",
+    "scripts/rg_final_contract.py",
+    "scripts/rg_final_execution.py",
+    "scripts/rg_final_lenses.py",
+    "scripts/rg_final_review.py",
+    "scripts/rg_final_stack.py",
+    "scripts/rg_final_store.py",
+    "scripts/rg_final_telemetry.py",
+    "tests/test_final_acceptance_registry.py",
+    "tests/test_final_stack.py",
+    "tests/test_final_stops.py",
+    "tests/test_final_verification.py"
+   ],
+   "R13": [
+    "scripts/rg_final_execution.py",
+    "scripts/rg_final_review.py",
+    "scripts/rg_final_stack.py"
+   ]
+  },
+  "R11": {
+   "R12": [
+    ".kimchi/docs/review.md",
+    "CHANGELOG.md",
+    "README.md",
+    "agents/docs-checker.md",
+    "docs/adr/0008-explicit-final-whole-stack-review.md",
+    "docs/plans/resume-truncated-chunks.md",
+    "docs/review-latency-analysis.md",
+    "docs/specs/unified-review-gate.md",
+    "extensions/review-gate-deny.ts",
+    "scripts/rg_final_acceptance.py",
+    "scripts/rg_final_contract.py",
+    "scripts/rg_final_execution.py",
+    "scripts/rg_final_lenses.py",
+    "scripts/rg_final_memory.py",
+    "scripts/rg_final_publish.py",
+    "scripts/rg_final_review.py",
+    "scripts/rg_final_stack.py",
+    "scripts/rg_ticket_fetch.py",
+    "tests/sim_scenarios_spec16.py",
+    "tests/test_final_complete_standalone.py"
+   ],
+   "R13": [
+    "scripts/rg_final_execution.py",
+    "scripts/rg_final_review.py",
+    "scripts/rg_final_stack.py"
+   ]
+  },
+  "R12": {
+   "R13": [
+    "scripts/rg_final_execution.py",
+    "scripts/rg_final_review.py",
+    "scripts/rg_final_stack.py",
+    "scripts/rg_final_verification.py"
+   ]
+  }
+ },
+ "overlap_counts": {
+  "R10": {
+   "R11": 11,
+   "R12": 13,
+   "R13": 3
+  },
+  "R11": {
+   "R12": 35,
+   "R13": 3
+  },
+  "R12": {
+   "R13": 4
+  }
+ },
+ "interfaces": [],
+ "inferred_deps": [],
+ "coupling": {},
+ "single_agent_est": {
+  "tokens": 1403625,
+  "hops": 916,
+  "files": 116,
+  "est_output": 0,
+  "est_cum_input": 656600250,
+  "est_cost": 206.829
+ },
+ "graph": {
+  "used": false
+ },
+ "wus": {
+  "R10": {
+   "title": "Stable STOP ownership and explicit stack env",
+   "kind": "fix",
+   "size": "medium",
+   "readonly": false,
+   "depends_on": [],
+   "planned": [
+    "tests/test_final_{stops,stack}.py"
+   ],
+   "excluded_hits": 0,
+   "files": [
+    ".kimchi/docs/review.md",
+    "CHANGELOG.md",
+    "scripts/review-gate.py",
+    "scripts/rg_final_contract.py",
+    "scripts/rg_final_execution.py",
+    "scripts/rg_final_lenses.py",
+    "scripts/rg_final_review.py",
+    "scripts/rg_final_stack.py",
+    "scripts/rg_final_store.py",
+    "scripts/rg_final_telemetry.py",
+    "tests/test_final_acceptance_registry.py",
+    "tests/test_final_stack.py",
+    "tests/test_final_stops.py",
+    "tests/test_final_verification.py",
+    "tests/test_final_{stops,stack}.py"
+   ],
+   "delivers": "main"
+  },
+  "R11": {
+   "title": "Secret-safe response diagnostics and bounded Windows cleanup",
+   "kind": "fix",
+   "size": "large",
+   "readonly": false,
+   "depends_on": [],
+   "planned": [],
+   "excluded_hits": 0,
+   "files": [
+    ".github/workflows/ci.yml",
+    ".kimchi/docs/review.md",
+    "CHANGELOG.md",
+    "README.md",
+    "agents/code-reviewer.md",
+    "agents/docs-checker.md",
+    "docs/adr/0001-loosening-verdict-validation-for-enumerated-improvised-report-families.md",
+    "docs/adr/0005-claude-backend-tier-models-guard-and-jira-routing.md",
+    "docs/adr/0007-race-regression-test-checks-and-finding-waivers.md",
+    "docs/adr/0008-explicit-final-whole-stack-review.md",
+    "docs/architecture-split-proposal.md",
+    "docs/calibration.md",
+    "docs/plans/resume-truncated-chunks.md",
+    "docs/review-latency-analysis.md",
+    "docs/specs/unified-review-gate.md",
+    "extensions/review-gate-deny.test.mjs",
+    "extensions/review-gate-deny.ts",
+    "hooks/sh/gate-hook.sh",
+    "package.json",
+    "scripts/ocr_calibrate.py",
+    "scripts/ocr_cmdshim.py",
+    "scripts/ocr_doctor.py",
+    "scripts/ocr_electron.py",
+    "scripts/review-gate.py",
+    "scripts/rg_final_acceptance.py",
+    "scripts/rg_final_contract.py",
+    "scripts/rg_final_env.py",
+    "scripts/rg_final_execution.py",
+    "scripts/rg_final_lenses.py",
+    "scripts/rg_final_memory.py",
+    "scripts/rg_final_publish.py",
+    "scripts/rg_final_review.py",
+    "scripts/rg_final_stack.py",
+    "scripts/rg_jira_fetch.py",
+    "scripts/rg_ticket_fetch.py",
+    "skills/review/SKILL.md",
+    "tests/fake_backend.py",
+    "tests/fixtures/repos/_c4_probe/RESULTS.md",
+    "tests/kimi_stub.py",
+    "tests/live/live_matrix.py",
+    "tests/live/smoke_claude.py",
+    "tests/sim_harness.py",
+    "tests/sim_scenarios_kimchi_studio.py",
+    "tests/sim_scenarios_spec14.py",
+    "tests/sim_scenarios_spec14_dogfood.py",
+    "tests/sim_scenarios_spec15.py",
+    "tests/sim_scenarios_spec16.py",
+    "tests/stub_reviewer.py",
+    "tests/test_argv_golden.py",
+    "tests/test_async_gate.py",
+    "tests/test_backend_select.py",
+    "tests/test_claude_profile.py",
+    "tests/test_cmdshim.py",
+    "tests/test_deny_canary.py",
+    "tests/test_docs_gate.py",
+    "tests/test_docs_generator.py",
+    "tests/test_fail_closed.py",
+    "tests/test_final_complete_standalone.py",
+    "tests/test_final_composition.py",
+    "tests/test_final_credentials.py",
+    "tests/test_final_github_stack.py",
+    "tests/test_final_lenses.py",
+    "tests/test_final_memory.py",
+    "tests/test_final_observability.py",
+    "tests/test_final_observability_integration.py",
+    "tests/test_final_publication.py",
+    "tests/test_final_review_cli.py",
+    "tests/test_final_stack.py",
+    "tests/test_final_stops.py",
+    "tests/test_final_verification.py",
+    "tests/test_final_views.py",
+    "tests/test_hook_passthrough.py",
+    "tests/test_ocr_calibrate.py",
+    "tests/test_ocr_doctor.py",
+    "tests/test_parallel_checks.py",
+    "tests/test_process_groups.py",
+    "tests/test_review_gate.py",
+    "tests/test_rg_jira_fetch.py",
+    "tests/test_rg_ticket_fetch.py",
+    "tests/test_sim_harness.py",
+    "tests/test_time_metrics.py",
+    "tests/test_verdict_intent_wiring.py",
+    "tests/test_worker_env.py",
+    "tests/test_worker_plumbing.py"
+   ],
+   "delivers": "main"
+  },
+  "R12": {
+   "title": "GitLab global identifiers",
+   "kind": "fix",
+   "size": "small",
+   "readonly": false,
+   "depends_on": [],
+   "planned": [
+    "tests/test_final_{verification,provider_gitlab}.py"
+   ],
+   "excluded_hits": 0,
+   "files": [
+    ".kimchi/docs/review.md",
+    ".kimchi/docs/verification.md",
+    ".kimchi/plans/comment-consistency-checks-spec.md",
+    "CHANGELOG.md",
+    "README.md",
+    "agents/docs-checker.md",
+    "docs/adr/0008-explicit-final-whole-stack-review.md",
+    "docs/plans/resume-truncated-chunks.md",
+    "docs/pointer-artifact-registry.md",
+    "docs/review-latency-analysis.md",
+    "docs/specs/unified-review-gate.md",
+    "extensions/review-gate-deny.ts",
+    "scripts/ocr_docsquality.py",
+    "scripts/ocr_forge.py",
+    "scripts/ocr_impact.py",
+    "scripts/ocr_segment.py",
+    "scripts/rg_config.py",
+    "scripts/rg_final_acceptance.py",
+    "scripts/rg_final_compose.py",
+    "scripts/rg_final_contract.py",
+    "scripts/rg_final_dynamic.py",
+    "scripts/rg_final_execution.py",
+    "scripts/rg_final_gitlab.py",
+    "scripts/rg_final_lenses.py",
+    "scripts/rg_final_memory.py",
+    "scripts/rg_final_provider.py",
+    "scripts/rg_final_publish.py",
+    "scripts/rg_final_review.py",
+    "scripts/rg_final_stack.py",
+    "scripts/rg_final_store.py",
+    "scripts/rg_final_telemetry.py",
+    "scripts/rg_final_verification.py",
+    "scripts/rg_ticket_fetch.py",
+    "skills/review/rules/electron.md",
+    "tests/fixtures/json-mode-stream.jsonl",
+    "tests/fixtures/miss_categories/pre_v2/ocr_impact.py",
+    "tests/sim_scenarios_spec16.py",
+    "tests/test_final_acceptance_registry.py",
+    "tests/test_final_complete_standalone.py",
+    "tests/test_final_composition.py",
+    "tests/test_final_context.py",
+    "tests/test_final_credentials.py",
+    "tests/test_final_dynamic.py",
+    "tests/test_final_graph.py",
+    "tests/test_final_lenses.py",
+    "tests/test_final_memory.py",
+    "tests/test_final_observability.py",
+    "tests/test_final_provider_github.py",
+    "tests/test_final_provider_gitlab.py",
+    "tests/test_final_publication.py",
+    "tests/test_final_review_cli.py",
+    "tests/test_final_stack.py",
+    "tests/test_final_stops.py",
+    "tests/test_final_store.py",
+    "tests/test_final_verification.py",
+    "tests/test_final_views.py",
+    "tests/test_final_{verification,provider_gitlab}.py",
+    "tests/test_fixture_degradation.py",
+    "tests/test_fixture_m4_pointer.py",
+    "tests/test_forge.py",
+    "tests/test_impact.py",
+    "tests/test_rg_config.py",
+    "tests/test_rg_jira_fetch.py",
+    "tests/test_rg_ticket_fetch.py",
+    "tests/test_sim_harness.py",
+    "tests/test_worker_env.py"
+   ],
+   "delivers": "main"
+  },
+  "R13": {
+   "title": "Targeted review and full regressions",
+   "kind": "verify",
+   "size": "medium",
+   "readonly": true,
+   "depends_on": [
+    "R10",
+    "R11",
+    "R12"
+   ],
+   "planned": [],
+   "excluded_hits": 0,
+   "files": [
+    "scripts/rg_final_execution.py",
+    "scripts/rg_final_review.py",
+    "scripts/rg_final_stack.py",
+    "scripts/rg_final_verification.py"
+   ],
+   "delivers": "main"
+  }
+ },
+ "input_warnings": [],
+ "warnings": [
+  {
+   "code": "OVERSIZE",
+   "cluster": "C1",
+   "msg": "C1 est 1381.1k tok > budget 100k (116 files, 901 hops); split it"
+  },
+  {
+   "code": "MONOLITH",
+   "cluster": "C1",
+   "msg": "C1: scripts/review-gate.py is ~175.1k tok (> budget); read by hit ranges only"
+  },
+  {
+   "code": "HIGH_FANOUT",
+   "cluster": "C1",
+   "msg": "C1: scripts/rg_final_store.py (20 importers)"
+  },
+  {
+   "code": "SUSPECT_HITS",
+   "cluster": "C1",
+   "msg": "C1: hits only in docs/comments: CHANGELOG.md (docs), README.md (docs), .kimchi/docs/review.md (docs) +27 more"
+  },
+  {
+   "code": "PLANNED_PATH_MISSING",
+   "cluster": "C1",
+   "msg": "C1: R10 seeds path(s) that do not exist: tests/test_final_{stops,stack}.py"
+  },
+  {
+   "code": "PLANNED_PATH_MISSING",
+   "cluster": "C1",
+   "msg": "C1: R12 seeds path(s) that do not exist: tests/test_final_{verification,provider_gitlab}.py"
+  },
+  {
+   "code": "DELIVERABLE_OVERSIZE",
+   "cluster": "",
+   "msg": "deliverable 'main' aggregates 116 primary files (> 8): split it or justify in the report"
+  }
+ ],
+ "isolation": "shared",
+ "deliverables": [
+  {
+   "name": "main",
+   "clusters": [
+    "C1",
+    "C2"
+   ],
+   "tags": [
+    "R10",
+    "R13"
+   ],
+   "branch": "dk/bf198c33/main",
+   "base": "bf198c33f277a9b13d71caf5702ad90facdd12ec",
+   "layers": [
+    0,
+    1
+   ],
+   "primary_files": 116
+  }
+ ]
+}

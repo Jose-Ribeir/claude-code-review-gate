@@ -1,0 +1,1030 @@
+{
+ "version": 1,
+ "root": "/Users/jose_ribeir/work/code-review/claude-code-review-gate",
+ "git": true,
+ "head": "e2725667957b1651e6e666f52e69890b72c95490",
+ "bytes_per_token": 4,
+ "graph": {
+  "used": false
+ },
+ "coupling": [],
+ "wus": [
+  {
+   "id": "S16-01A",
+   "title": "1a GitLab final-review references and provider-pinned metadata",
+   "kind": "build",
+   "size": "small",
+   "readonly": false,
+   "depends_on": [],
+   "seeds": {
+    "symbols": [],
+    "patterns": [],
+    "paths": [
+     "scripts/rg_final_provider.py",
+     "scripts/rg_final_gitlab.py",
+     "scripts/rg_ticket_fetch.py",
+     "tests/test_final_provider_gitlab.py",
+     "tests/conftest.py"
+    ],
+    "globs": []
+   },
+   "planned": [
+    "scripts/rg_final_gitlab.py",
+    "scripts/rg_final_provider.py",
+    "tests/test_final_provider_gitlab.py"
+   ],
+   "excluded": {
+    "hits": 0,
+    "files": 0
+   },
+   "hits": {
+    "scripts/rg_ticket_fetch.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "path"
+     ]
+    },
+    "tests/conftest.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "path"
+     ]
+    }
+   },
+   "delivers": "main"
+  },
+  {
+   "id": "S16-01B",
+   "title": "1b immutable whole-repo materialization and merge-base diffs",
+   "kind": "build",
+   "size": "small",
+   "readonly": false,
+   "depends_on": [],
+   "seeds": {
+    "symbols": [],
+    "patterns": [],
+    "paths": [
+     "scripts/rg_final_materialize.py",
+     "tests/test_final_materialize.py",
+     "tests/test_parallel_checks.py"
+    ],
+    "globs": []
+   },
+   "planned": [
+    "scripts/rg_final_materialize.py",
+    "tests/test_final_materialize.py"
+   ],
+   "excluded": {
+    "hits": 0,
+    "files": 0
+   },
+   "hits": {
+    "tests/test_parallel_checks.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "path"
+     ]
+    }
+   },
+   "delivers": "main"
+  },
+  {
+   "id": "S16-01C",
+   "title": "1c versioned SQLite run/store/contract identity and reports",
+   "kind": "build",
+   "size": "small",
+   "readonly": false,
+   "depends_on": [],
+   "seeds": {
+    "symbols": [],
+    "patterns": [],
+    "paths": [
+     "scripts/rg_final_store.py",
+     "scripts/rg_final_contract.py",
+     "tests/test_final_store.py"
+    ],
+    "globs": []
+   },
+   "planned": [
+    "scripts/rg_final_contract.py",
+    "scripts/rg_final_store.py",
+    "tests/test_final_store.py"
+   ],
+   "excluded": {
+    "hits": 0,
+    "files": 0
+   },
+   "hits": {},
+   "delivers": "main"
+  },
+  {
+   "id": "S16-01D",
+   "title": "1d standalone final-review CLI and one correctness lens",
+   "kind": "build",
+   "size": "small",
+   "readonly": false,
+   "depends_on": [
+    "S16-01A",
+    "S16-01B",
+    "S16-01C"
+   ],
+   "seeds": {
+    "symbols": [],
+    "patterns": [],
+    "paths": [
+     "scripts/review-gate.py",
+     "scripts/rg_final_review.py",
+     "scripts/ocr_verdict.py",
+     "tests/test_final_review_cli.py",
+     "tests/stub_reviewer.py"
+    ],
+    "globs": []
+   },
+   "planned": [
+    "scripts/rg_final_review.py",
+    "tests/test_final_review_cli.py"
+   ],
+   "excluded": {
+    "hits": 0,
+    "files": 0
+   },
+   "hits": {
+    "scripts/ocr_verdict.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "path"
+     ]
+    },
+    "scripts/review-gate.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "path"
+     ]
+    },
+    "tests/stub_reviewer.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "path"
+     ]
+    }
+   },
+   "delivers": "main"
+  },
+  {
+   "id": "S16-02A",
+   "title": "2a independent full static lens aggregation",
+   "kind": "build",
+   "size": "small",
+   "readonly": false,
+   "depends_on": [
+    "S16-01D"
+   ],
+   "seeds": {
+    "symbols": [],
+    "patterns": [],
+    "paths": [
+     "scripts/rg_final_lenses.py",
+     "scripts/rg_final_review.py",
+     "agents/code-reviewer.md",
+     "agents/docs-checker.md",
+     "tests/test_final_lenses.py"
+    ],
+    "globs": []
+   },
+   "planned": [
+    "scripts/rg_final_lenses.py",
+    "scripts/rg_final_review.py",
+    "tests/test_final_lenses.py"
+   ],
+   "excluded": {
+    "hits": 0,
+    "files": 0
+   },
+   "hits": {
+    "agents/code-reviewer.md": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "path"
+     ]
+    },
+    "agents/docs-checker.md": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "path"
+     ]
+    }
+   },
+   "delivers": "main"
+  },
+  {
+   "id": "S16-02B",
+   "title": "2b complete-repository context, intent, submodules and LFS",
+   "kind": "build",
+   "size": "small",
+   "readonly": false,
+   "depends_on": [
+    "S16-01D"
+   ],
+   "seeds": {
+    "symbols": [],
+    "patterns": [],
+    "paths": [
+     "scripts/rg_final_context.py",
+     "scripts/rg_final_materialize.py",
+     "scripts/rg_ticket_fetch.py",
+     "tests/test_final_context.py",
+     "tests/test_intent_gap.py"
+    ],
+    "globs": []
+   },
+   "planned": [
+    "scripts/rg_final_context.py",
+    "scripts/rg_final_materialize.py",
+    "tests/test_final_context.py"
+   ],
+   "excluded": {
+    "hits": 0,
+    "files": 0
+   },
+   "hits": {
+    "scripts/rg_ticket_fetch.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "path"
+     ]
+    },
+    "tests/test_intent_gap.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "path"
+     ]
+    }
+   },
+   "delivers": "main"
+  },
+  {
+   "id": "S16-03A",
+   "title": "3a declared required verification in isolated credential-free clones",
+   "kind": "build",
+   "size": "small",
+   "readonly": false,
+   "depends_on": [
+    "S16-02A",
+    "S16-02B"
+   ],
+   "seeds": {
+    "symbols": [],
+    "patterns": [],
+    "paths": [
+     "scripts/rg_final_verification.py",
+     "scripts/rg_config.py",
+     "tests/test_final_verification.py",
+     "tests/test_parallel_checks.py"
+    ],
+    "globs": []
+   },
+   "planned": [
+    "scripts/rg_final_verification.py",
+    "tests/test_final_verification.py"
+   ],
+   "excluded": {
+    "hits": 0,
+    "files": 0
+   },
+   "hits": {
+    "scripts/rg_config.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "path"
+     ]
+    },
+    "tests/test_parallel_checks.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "path"
+     ]
+    }
+   },
+   "delivers": "main"
+  },
+  {
+   "id": "S16-03B",
+   "title": "3b SPEC-15 dynamic checks for final-review units",
+   "kind": "build",
+   "size": "small",
+   "readonly": false,
+   "depends_on": [
+    "S16-02A",
+    "S16-02B"
+   ],
+   "seeds": {
+    "symbols": [],
+    "patterns": [],
+    "paths": [
+     "scripts/rg_final_dynamic.py",
+     "examples/test-check/test_check",
+     "examples/test-check/README.md",
+     "tests/test_final_dynamic.py",
+     "tests/test_executor_testcheck.py"
+    ],
+    "globs": []
+   },
+   "planned": [
+    "scripts/rg_final_dynamic.py",
+    "tests/test_final_dynamic.py"
+   ],
+   "excluded": {
+    "hits": 0,
+    "files": 0
+   },
+   "hits": {
+    "examples/test-check/README.md": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "path"
+     ]
+    },
+    "examples/test-check/test_check": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "path"
+     ]
+    },
+    "tests/test_executor_testcheck.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "path"
+     ]
+    }
+   },
+   "delivers": "main"
+  },
+  {
+   "id": "S16-04A",
+   "title": "4a finding memory, SHA freshness and waiver isolation",
+   "kind": "build",
+   "size": "small",
+   "readonly": false,
+   "depends_on": [
+    "S16-03A",
+    "S16-03B"
+   ],
+   "seeds": {
+    "symbols": [],
+    "patterns": [],
+    "paths": [
+     "scripts/rg_final_memory.py",
+     "scripts/rg_final_store.py",
+     "tests/test_final_memory.py",
+     "tests/test_waivers.py",
+     "tests/test_memory_gate.py"
+    ],
+    "globs": []
+   },
+   "planned": [
+    "scripts/rg_final_memory.py",
+    "scripts/rg_final_store.py",
+    "tests/test_final_memory.py"
+   ],
+   "excluded": {
+    "hits": 0,
+    "files": 0
+   },
+   "hits": {
+    "tests/test_memory_gate.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "path"
+     ]
+    },
+    "tests/test_waivers.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "path"
+     ]
+    }
+   },
+   "delivers": "main"
+  },
+  {
+   "id": "S16-04B",
+   "title": "4b scoped structured critical stops and safe completion",
+   "kind": "build",
+   "size": "small",
+   "readonly": false,
+   "depends_on": [
+    "S16-03A",
+    "S16-03B"
+   ],
+   "seeds": {
+    "symbols": [],
+    "patterns": [],
+    "paths": [
+     "scripts/rg_final_execution.py",
+     "scripts/rg_final_review.py",
+     "tests/test_final_stops.py"
+    ],
+    "globs": []
+   },
+   "planned": [
+    "scripts/rg_final_execution.py",
+    "scripts/rg_final_review.py",
+    "tests/test_final_stops.py"
+   ],
+   "excluded": {
+    "hits": 0,
+    "files": 0
+   },
+   "hits": {},
+   "delivers": "main"
+  },
+  {
+   "id": "S16-05",
+   "title": "5 GitLab final statuses, degradation and same-store run ordering",
+   "kind": "build",
+   "size": "small",
+   "readonly": false,
+   "depends_on": [
+    "S16-04A",
+    "S16-04B"
+   ],
+   "seeds": {
+    "symbols": [],
+    "patterns": [],
+    "paths": [
+     "scripts/rg_final_publish.py",
+     "scripts/rg_final_store.py",
+     "tests/test_final_publication.py"
+    ],
+    "globs": []
+   },
+   "planned": [
+    "scripts/rg_final_publish.py",
+    "scripts/rg_final_store.py",
+    "tests/test_final_publication.py"
+   ],
+   "excluded": {
+    "hits": 0,
+    "files": 0
+   },
+   "hits": {},
+   "delivers": "main"
+  },
+  {
+   "id": "S16-06A",
+   "title": "6a GitLab linear graph discovery and corrected commands",
+   "kind": "build",
+   "size": "small",
+   "readonly": false,
+   "depends_on": [
+    "S16-01D"
+   ],
+   "seeds": {
+    "symbols": [],
+    "patterns": [],
+    "paths": [
+     "scripts/rg_final_graph.py",
+     "scripts/rg_final_provider.py",
+     "tests/test_final_graph.py"
+    ],
+    "globs": []
+   },
+   "planned": [
+    "scripts/rg_final_graph.py",
+    "scripts/rg_final_provider.py",
+    "tests/test_final_graph.py"
+   ],
+   "excluded": {
+    "hits": 0,
+    "files": 0
+   },
+   "hits": {},
+   "delivers": "main"
+  },
+  {
+   "id": "S16-06B",
+   "title": "6b ordered combined/prospective composition and initial correctness",
+   "kind": "build",
+   "size": "small",
+   "readonly": false,
+   "depends_on": [
+    "S16-06A"
+   ],
+   "seeds": {
+    "symbols": [],
+    "patterns": [],
+    "paths": [
+     "scripts/rg_final_compose.py",
+     "scripts/rg_final_review.py",
+     "tests/test_final_composition.py"
+    ],
+    "globs": []
+   },
+   "planned": [
+    "scripts/rg_final_compose.py",
+    "scripts/rg_final_review.py",
+    "tests/test_final_composition.py"
+   ],
+   "excluded": {
+    "hits": 0,
+    "files": 0
+   },
+   "hits": {},
+   "delivers": "main"
+  },
+  {
+   "id": "S16-07",
+   "title": "7 complete GitLab individual+combined final orchestration",
+   "kind": "build",
+   "size": "small",
+   "readonly": false,
+   "depends_on": [
+    "S16-05",
+    "S16-06B"
+   ],
+   "seeds": {
+    "symbols": [],
+    "patterns": [],
+    "paths": [
+     "scripts/rg_final_stack.py",
+     "scripts/rg_final_review.py",
+     "tests/test_final_stack.py"
+    ],
+    "globs": []
+   },
+   "planned": [
+    "scripts/rg_final_review.py",
+    "scripts/rg_final_stack.py",
+    "tests/test_final_stack.py"
+   ],
+   "excluded": {
+    "hits": 0,
+    "files": 0
+   },
+   "hits": {},
+   "delivers": "main"
+  },
+  {
+   "id": "S16-08",
+   "title": "8 GitHub standalone+stack/fork/status parity via common adapter",
+   "kind": "build",
+   "size": "small",
+   "readonly": false,
+   "depends_on": [
+    "S16-07"
+   ],
+   "seeds": {
+    "symbols": [],
+    "patterns": [],
+    "paths": [
+     "scripts/rg_final_github.py",
+     "scripts/rg_final_provider.py",
+     "tests/test_final_provider_github.py",
+     "tests/test_final_github_stack.py"
+    ],
+    "globs": []
+   },
+   "planned": [
+    "scripts/rg_final_github.py",
+    "scripts/rg_final_provider.py",
+    "tests/test_final_github_stack.py",
+    "tests/test_final_provider_github.py"
+   ],
+   "excluded": {
+    "hits": 0,
+    "files": 0
+   },
+   "hits": {},
+   "delivers": "main"
+  },
+  {
+   "id": "S16-09A",
+   "title": "9a versioned acceptance registry and all 21 scenario definitions",
+   "kind": "build",
+   "size": "small",
+   "readonly": false,
+   "depends_on": [
+    "S16-08"
+   ],
+   "seeds": {
+    "symbols": [],
+    "patterns": [],
+    "paths": [
+     "scripts/rg_final_acceptance.py",
+     "scripts/rg_final_store.py",
+     "tests/test_final_acceptance_registry.py",
+     "tests/sim_scenarios_spec16.py"
+    ],
+    "globs": []
+   },
+   "planned": [
+    "scripts/rg_final_acceptance.py",
+    "scripts/rg_final_store.py",
+    "tests/sim_scenarios_spec16.py",
+    "tests/test_final_acceptance_registry.py"
+   ],
+   "excluded": {
+    "hits": 0,
+    "files": 0
+   },
+   "hits": {},
+   "delivers": "main"
+  },
+  {
+   "id": "S16-09B",
+   "title": "9b database-backed operator views and historical migrations",
+   "kind": "build",
+   "size": "small",
+   "readonly": false,
+   "depends_on": [
+    "S16-09A"
+   ],
+   "seeds": {
+    "symbols": [],
+    "patterns": [],
+    "paths": [
+     "scripts/rg_final_views.py",
+     "scripts/review-gate.py",
+     "tests/test_final_views.py"
+    ],
+    "globs": []
+   },
+   "planned": [
+    "scripts/rg_final_views.py",
+    "tests/test_final_views.py"
+   ],
+   "excluded": {
+    "hits": 0,
+    "files": 0
+   },
+   "hits": {
+    "scripts/review-gate.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "path"
+     ]
+    }
+   },
+   "delivers": "main"
+  },
+  {
+   "id": "S16-10A",
+   "title": "10a real-model and deterministic SPEC-16 acceptance",
+   "kind": "build",
+   "size": "small",
+   "readonly": false,
+   "depends_on": [
+    "S16-09B"
+   ],
+   "seeds": {
+    "symbols": [],
+    "patterns": [],
+    "paths": [
+     "tests/sim_harness.py",
+     "tests/sim_scenarios_spec16.py",
+     "tests/test_final_review_cli.py",
+     "tests/test_sim_harness.py"
+    ],
+    "globs": []
+   },
+   "planned": [
+    "tests/sim_scenarios_spec16.py",
+    "tests/test_final_review_cli.py"
+   ],
+   "excluded": {
+    "hits": 0,
+    "files": 0
+   },
+   "hits": {
+    "tests/sim_harness.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "path"
+     ]
+    },
+    "tests/test_sim_harness.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "path"
+     ]
+    }
+   },
+   "delivers": "main"
+  },
+  {
+   "id": "S16-10B1",
+   "title": "10b1 successor ADR and final-review observability",
+   "kind": "build",
+   "size": "small",
+   "readonly": false,
+   "depends_on": [
+    "S16-10A"
+   ],
+   "seeds": {
+    "symbols": [],
+    "patterns": [],
+    "paths": [
+     "docs/adr/0008-explicit-final-whole-stack-review.md",
+     "scripts/rg_final_telemetry.py",
+     "tests/test_final_observability.py"
+    ],
+    "globs": []
+   },
+   "planned": [
+    "docs/adr/0008-explicit-final-whole-stack-review.md",
+    "scripts/rg_final_telemetry.py",
+    "tests/test_final_observability.py"
+   ],
+   "excluded": {
+    "hits": 0,
+    "files": 0
+   },
+   "hits": {},
+   "delivers": "main"
+  },
+  {
+   "id": "S16-10B2",
+   "title": "10b2 full pytest/ruff and SPEC-15/pre-push regression verification",
+   "kind": "verify",
+   "size": "medium",
+   "readonly": false,
+   "depends_on": [
+    "S16-10B1"
+   ],
+   "seeds": {
+    "symbols": [],
+    "patterns": [],
+    "paths": [],
+    "globs": []
+   },
+   "planned": [],
+   "excluded": {
+    "hits": 0,
+    "files": 0
+   },
+   "hits": {},
+   "delivers": "main"
+  }
+ ],
+ "files": {
+  "agents/code-reviewer.md": {
+   "lines": 395,
+   "bytes": 23191,
+   "tokens_est": 5798,
+   "tokens_narrow": 5798,
+   "lang": "docs",
+   "is_test": false,
+   "tests": []
+  },
+  "agents/docs-checker.md": {
+   "lines": 284,
+   "bytes": 17678,
+   "tokens_est": 4420,
+   "tokens_narrow": 4420,
+   "lang": "docs",
+   "is_test": false,
+   "tests": []
+  },
+  "examples/test-check/README.md": {
+   "lines": 119,
+   "bytes": 5797,
+   "tokens_est": 1450,
+   "tokens_narrow": 1450,
+   "lang": "docs",
+   "is_test": false,
+   "tests": []
+  },
+  "examples/test-check/test_check": {
+   "lines": 688,
+   "bytes": 30356,
+   "tokens_est": 7589,
+   "tokens_narrow": 7589,
+   "lang": "other",
+   "is_test": true,
+   "tests": [
+    "examples/test-check/test_check"
+   ]
+  },
+  "scripts/ocr_verdict.py": {
+   "lines": 257,
+   "bytes": 11265,
+   "tokens_est": 2817,
+   "tokens_narrow": 2817,
+   "lang": "python",
+   "is_test": false,
+   "tests": [
+    "tests/test_comment_gate.py",
+    "tests/test_intent_gap.py",
+    "tests/test_parallel_chunks.py",
+    "tests/test_deep_gate.py"
+   ],
+   "importers_n": 5,
+   "importers": [
+    "scripts/review-gate.py",
+    "tests/test_comment_gate.py",
+    "tests/test_intent_gap.py",
+    "tests/test_memory.py",
+    "tests/test_parallel_chunks.py"
+   ]
+  },
+  "scripts/review-gate.py": {
+   "lines": 14884,
+   "bytes": 699776,
+   "tokens_est": 174944,
+   "tokens_narrow": 174944,
+   "lang": "python",
+   "is_test": false,
+   "tests": [
+    "tests/test_review_gate.py"
+   ],
+   "importers_n": 2,
+   "importers": [
+    "extensions/review-gate-deny.test.mjs",
+    "scripts/ocr_profile.py"
+   ]
+  },
+  "scripts/rg_config.py": {
+   "lines": 389,
+   "bytes": 17293,
+   "tokens_est": 4324,
+   "tokens_narrow": 4324,
+   "lang": "python",
+   "is_test": false,
+   "tests": [
+    "tests/test_rg_config.py"
+   ],
+   "importers_n": 6,
+   "importers": [
+    "scripts/review-gate.py",
+    "tests/test_docs_gate.py",
+    "tests/test_executor_testcheck.py",
+    "tests/test_rg_config.py",
+    "tests/test_rg_ticket_fetch.py",
+    "tests/test_rg_tickets.py"
+   ]
+  },
+  "scripts/rg_ticket_fetch.py": {
+   "lines": 303,
+   "bytes": 13017,
+   "tokens_est": 3255,
+   "tokens_narrow": 3255,
+   "lang": "python",
+   "is_test": false,
+   "tests": [
+    "tests/test_rg_ticket_fetch.py"
+   ],
+   "importers_n": 3,
+   "importers": [
+    "scripts/review-gate.py",
+    "tests/test_rg_jira_fetch.py",
+    "tests/test_rg_ticket_fetch.py"
+   ]
+  },
+  "tests/conftest.py": {
+   "lines": 178,
+   "bytes": 7537,
+   "tokens_est": 1885,
+   "tokens_narrow": 1885,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/conftest.py"
+   ]
+  },
+  "tests/sim_harness.py": {
+   "lines": 654,
+   "bytes": 30802,
+   "tokens_est": 7701,
+   "tokens_narrow": 7701,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/sim_harness.py"
+   ]
+  },
+  "tests/stub_reviewer.py": {
+   "lines": 621,
+   "bytes": 30124,
+   "tokens_est": 7531,
+   "tokens_narrow": 7531,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/stub_reviewer.py"
+   ]
+  },
+  "tests/test_executor_testcheck.py": {
+   "lines": 576,
+   "bytes": 26178,
+   "tokens_est": 6545,
+   "tokens_narrow": 6545,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_executor_testcheck.py"
+   ]
+  },
+  "tests/test_intent_gap.py": {
+   "lines": 254,
+   "bytes": 10960,
+   "tokens_est": 2740,
+   "tokens_narrow": 2740,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_intent_gap.py"
+   ]
+  },
+  "tests/test_memory_gate.py": {
+   "lines": 153,
+   "bytes": 6588,
+   "tokens_est": 1647,
+   "tokens_narrow": 1647,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_memory_gate.py"
+   ]
+  },
+  "tests/test_parallel_checks.py": {
+   "lines": 606,
+   "bytes": 28623,
+   "tokens_est": 7156,
+   "tokens_narrow": 7156,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_parallel_checks.py"
+   ]
+  },
+  "tests/test_sim_harness.py": {
+   "lines": 499,
+   "bytes": 23232,
+   "tokens_est": 5808,
+   "tokens_narrow": 5808,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_sim_harness.py"
+   ]
+  },
+  "tests/test_waivers.py": {
+   "lines": 643,
+   "bytes": 29969,
+   "tokens_est": 7493,
+   "tokens_narrow": 7493,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_waivers.py"
+   ]
+  }
+ },
+ "input_warnings": [
+  {
+   "code": "INPUT",
+   "cluster": "",
+   "msg": "S16-10B2: seeds matched no files"
+  }
+ ]
+}

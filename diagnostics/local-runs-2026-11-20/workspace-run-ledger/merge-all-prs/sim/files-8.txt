@@ -1,0 +1,7 @@
+agents/docs-checker.md
+docs/adr/0006-custom-checks-and-documentation-quality-duties.md
+scripts/ocr_docsquality.py
+scripts/review-gate.py
+scripts/rg_config.py
+tests/test_docs_gate.py
+tests/test_docsquality.py

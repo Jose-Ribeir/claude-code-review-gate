@@ -1,0 +1,2774 @@
+{
+ "version": 1,
+ "base_sha": "65ae2d4aac08f7f1b242d33f0210924aa7b94f0f",
+ "budget": 100000,
+ "params": {
+  "budget": 100000,
+  "overhead": 30000,
+  "hop_tokens": 1500,
+  "hops_base": 6,
+  "output_in_peak": 0.5,
+  "hops_new_small": 8,
+  "hops_new": 20,
+  "hops_new_large": 30,
+  "hops_edit": 3,
+  "hops_per_file": 3,
+  "hits_per_hop": 4,
+  "hops_verify": 15,
+  "hops_doc_per_file": 2,
+  "hops_doc_base": 6,
+  "hops_fix_per_file": 5,
+  "hops_fix_verify": 6,
+  "hops_research_per_file": 2,
+  "hops_research_base": 8,
+  "size_small_tokens": 3000,
+  "size_medium_tokens": 12000,
+  "size_large_tokens": 40000,
+  "output_factor": 1.5,
+  "price_in": 2.0,
+  "price_out": 10.0,
+  "price_cw": 2.5,
+  "price_cr": 0.2,
+  "fanout": 15,
+  "low_util": 0.25,
+  "single_max_files": 15,
+  "source": {
+   "calibration": null,
+   "calibrated": [],
+   "flags": []
+  }
+ },
+ "layers": [
+  [
+   "C1"
+  ],
+  [
+   "C2"
+  ]
+ ],
+ "clusters": [
+  {
+   "id": "C1",
+   "title": "Real-static evidence mapping",
+   "wus": [
+    "W1"
+   ],
+   "commit_tag": "[W1]",
+   "layer": 0,
+   "files": [
+    {
+     "path": "tests/sim_scenarios_spec16.py",
+     "hits": 5,
+     "hit_lines": [
+      411,
+      422,
+      457,
+      472,
+      722
+     ],
+     "lines": 804,
+     "tokens_est": 10037,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 40148,
+     "tokens_narrow": 5531,
+     "lang": "python",
+     "wus": [
+      "W1"
+     ]
+    },
+    {
+     "path": "tests/test_final_acceptance_registry.py",
+     "hits": 2,
+     "hit_lines": [
+      24,
+      25
+     ],
+     "lines": 317,
+     "tokens_est": 3672,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 14685,
+     "tokens_narrow": 1425,
+     "lang": "python",
+     "wus": [
+      "W1"
+     ]
+    },
+    {
+     "path": "tests/sim_harness.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 951,
+     "tokens_est": 10989,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 43954,
+     "tokens_narrow": 1768,
+     "lang": "python",
+     "wus": [
+      "W1"
+     ]
+    },
+    {
+     "path": "tests/test_harness_hint.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 64,
+     "tokens_est": 740,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 2957,
+     "tokens_narrow": 740,
+     "lang": "python",
+     "wus": [
+      "W1"
+     ]
+    },
+    {
+     "path": "tests/test_sim_harness.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 707,
+     "tokens_est": 8265,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 33059,
+     "tokens_narrow": 1263,
+     "lang": "python",
+     "wus": [
+      "W1"
+     ]
+    }
+   ],
+   "tests": [
+    "tests/sim_harness.py",
+    "tests/sim_scenarios_spec16.py",
+    "tests/test_final_acceptance_registry.py",
+    "tests/test_harness_hint.py",
+    "tests/test_sim_harness.py"
+   ],
+   "est_tokens": 88125,
+   "est_hops": 39,
+   "siblings": [],
+   "readonly": false,
+   "verify": false,
+   "research": false,
+   "isolation": "shared",
+   "est_output": 0,
+   "est_cum_input": 2303437,
+   "est_cost": 0.726
+  },
+  {
+   "id": "C2",
+   "title": "Real-race evidence determinism and selector diagnostics",
+   "wus": [
+    "W2"
+   ],
+   "commit_tag": "[W2]",
+   "layer": 1,
+   "files": [
+    {
+     "path": "examples/test-check/test_check",
+     "hits": 125,
+     "hit_lines": [
+      2,
+      19,
+      22,
+      23,
+      24
+     ],
+     "lines": 747,
+     "tokens_est": 8233,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 32932,
+     "tokens_narrow": 6536,
+     "lang": "other",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_docs_gate.py",
+     "hits": 107,
+     "hit_lines": [
+      104,
+      113,
+      138,
+      139,
+      143
+     ],
+     "lines": 2001,
+     "tokens_est": 24240,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 96959,
+     "tokens_narrow": 17614,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_executor_testcheck.py",
+     "hits": 80,
+     "hit_lines": [
+      4,
+      13,
+      17,
+      18,
+      20
+     ],
+     "lines": 631,
+     "tokens_est": 7126,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 28503,
+     "tokens_narrow": 6404,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_parallel_checks.py",
+     "hits": 53,
+     "hit_lines": [
+      6,
+      90,
+      96,
+      178,
+      180
+     ],
+     "lines": 606,
+     "tokens_est": 7156,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 28623,
+     "tokens_narrow": 4806,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_final_dynamic.py",
+     "hits": 37,
+     "hit_lines": [
+      5,
+      76,
+      77,
+      79,
+      107
+     ],
+     "lines": 483,
+     "tokens_est": 4955,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 19820,
+     "tokens_narrow": 4135,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "examples/test-check/README.md",
+     "hits": 35,
+     "hit_lines": [
+      1,
+      4,
+      5,
+      6,
+      12
+     ],
+     "lines": 149,
+     "tokens_est": 1893,
+     "w": true,
+     "mode": "additive",
+     "bytes": 7569,
+     "tokens_narrow": 1893,
+     "lang": "docs",
+     "wus": [
+      "W2"
+     ],
+     "suspect": "docs"
+    },
+    {
+     "path": "tests/sim_scenarios_spec16.py",
+     "hits": 34,
+     "hit_lines": [
+      147,
+      152,
+      157,
+      162,
+      176
+     ],
+     "lines": 804,
+     "tokens_est": 10037,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 40148,
+     "tokens_narrow": 5531,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_final_review_cli.py",
+     "hits": 34,
+     "hit_lines": [
+      102,
+      166,
+      179,
+      205,
+      207
+     ],
+     "lines": 845,
+     "tokens_est": 9247,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 36986,
+     "tokens_narrow": 5253,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "scripts/review-gate.py",
+     "hits": 30,
+     "hit_lines": [
+      382,
+      425,
+      478,
+      490,
+      1433
+     ],
+     "lines": 14895,
+     "tokens_est": 175092,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 700365,
+     "tokens_narrow": 9028,
+     "lang": "python",
+     "importers_n": 2,
+     "importers": [
+      "extensions/review-gate-deny.test.mjs",
+      "scripts/ocr_profile.py"
+     ],
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_restack_incremental.py",
+     "hits": 30,
+     "hit_lines": [
+      8,
+      40,
+      93,
+      100,
+      116
+     ],
+     "lines": 372,
+     "tokens_est": 3798,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 15191,
+     "tokens_narrow": 3227,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_async_gate.py",
+     "hits": 29,
+     "hit_lines": [
+      33,
+      77,
+      86,
+      116,
+      118
+     ],
+     "lines": 776,
+     "tokens_est": 8884,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 35536,
+     "tokens_narrow": 4546,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_docs_generator.py",
+     "hits": 29,
+     "hit_lines": [
+      94,
+      100,
+      125,
+      126,
+      130
+     ],
+     "lines": 346,
+     "tokens_est": 3980,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 15917,
+     "tokens_narrow": 2577,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_ledger_scenarios.py",
+     "hits": 27,
+     "hit_lines": [
+      45,
+      95,
+      103,
+      123,
+      426
+     ],
+     "lines": 1423,
+     "tokens_est": 16822,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 67285,
+     "tokens_narrow": 4670,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "docs/adr/0007-race-regression-test-checks-and-finding-waivers.md",
+     "hits": 24,
+     "hit_lines": [
+      18,
+      20,
+      40,
+      41,
+      70
+     ],
+     "lines": 249,
+     "tokens_est": 3522,
+     "w": true,
+     "mode": "additive",
+     "bytes": 14088,
+     "tokens_narrow": 2943,
+     "lang": "docs",
+     "wus": [
+      "W2"
+     ],
+     "suspect": "docs"
+    },
+    {
+     "path": "tests/test_final_acceptance_registry.py",
+     "hits": 24,
+     "hit_lines": [
+      20,
+      21,
+      22,
+      23,
+      24
+     ],
+     "lines": 317,
+     "tokens_est": 3672,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 14685,
+     "tokens_narrow": 1425,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_impact_gate.py",
+     "hits": 23,
+     "hit_lines": [
+      65,
+      78,
+      103,
+      104,
+      108
+     ],
+     "lines": 308,
+     "tokens_est": 3761,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 15042,
+     "tokens_narrow": 2894,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_resolver_robustness.py",
+     "hits": 23,
+     "hit_lines": [
+      28,
+      67,
+      68,
+      81,
+      98
+     ],
+     "lines": 511,
+     "tokens_est": 6147,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 24588,
+     "tokens_narrow": 3910,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/sim_scenarios_spec15.py",
+     "hits": 21,
+     "hit_lines": [
+      1,
+      2,
+      11,
+      13,
+      26
+     ],
+     "lines": 397,
+     "tokens_est": 4070,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 16278,
+     "tokens_narrow": 2604,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "CHANGELOG.md",
+     "hits": 19,
+     "hit_lines": [
+      45,
+      52,
+      53,
+      55,
+      58
+     ],
+     "lines": 2062,
+     "tokens_est": 32928,
+     "w": true,
+     "mode": "additive",
+     "bytes": 131710,
+     "tokens_narrow": 5398,
+     "lang": "docs",
+     "wus": [
+      "W2"
+     ],
+     "suspect": "docs"
+    },
+    {
+     "path": "tests/test_worker_plumbing.py",
+     "hits": 19,
+     "hit_lines": [
+      44,
+      102,
+      104,
+      105,
+      106
+     ],
+     "lines": 703,
+     "tokens_est": 7673,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 30691,
+     "tokens_narrow": 1594,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_forge.py",
+     "hits": 17,
+     "hit_lines": [
+      238,
+      240,
+      257,
+      259,
+      265
+     ],
+     "lines": 542,
+     "tokens_est": 6217,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 24868,
+     "tokens_narrow": 1870,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "scripts/rg_final_dynamic.py",
+     "hits": 16,
+     "hit_lines": [
+      5,
+      7,
+      11,
+      31,
+      73
+     ],
+     "lines": 427,
+     "tokens_est": 4323,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 17289,
+     "tokens_narrow": 1934,
+     "lang": "python",
+     "importers_n": 5,
+     "importers": [
+      "scripts/rg_final_execution.py",
+      "scripts/rg_final_review.py",
+      "scripts/rg_final_stack.py",
+      "tests/sim_harness.py",
+      "tests/test_final_dynamic.py"
+     ],
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_final_composition.py",
+     "hits": 16,
+     "hit_lines": [
+      242,
+      243,
+      265,
+      273,
+      307
+     ],
+     "lines": 506,
+     "tokens_est": 5610,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 22437,
+     "tokens_narrow": 2606,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/stub_reviewer.py",
+     "hits": 15,
+     "hit_lines": [
+      43,
+      88,
+      194,
+      195,
+      200
+     ],
+     "lines": 765,
+     "tokens_est": 9034,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 36134,
+     "tokens_narrow": 2468,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_final_credentials.py",
+     "hits": 14,
+     "hit_lines": [
+      67,
+      68,
+      69,
+      79,
+      80
+     ],
+     "lines": 188,
+     "tokens_est": 1773,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 7090,
+     "tokens_narrow": 1207,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_restack_coverage.py",
+     "hits": 14,
+     "hit_lines": [
+      39,
+      93,
+      100,
+      116,
+      117
+     ],
+     "lines": 388,
+     "tokens_est": 3940,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 15758,
+     "tokens_narrow": 2112,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_deny_canary.py",
+     "hits": 13,
+     "hit_lines": [
+      1,
+      71,
+      72,
+      82,
+      95
+     ],
+     "lines": 145,
+     "tokens_est": 1402,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 5605,
+     "tokens_narrow": 1025,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_stacked_base.py",
+     "hits": 13,
+     "hit_lines": [
+      33,
+      266,
+      272,
+      286,
+      287
+     ],
+     "lines": 494,
+     "tokens_est": 5489,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 21956,
+     "tokens_narrow": 2256,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_worker_env.py",
+     "hits": 13,
+     "hit_lines": [
+      35,
+      64,
+      66,
+      133,
+      134
+     ],
+     "lines": 168,
+     "tokens_est": 1663,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 6649,
+     "tokens_narrow": 1119,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_claude_profile.py",
+     "hits": 12,
+     "hit_lines": [
+      13,
+      84,
+      94,
+      95,
+      100
+     ],
+     "lines": 653,
+     "tokens_est": 7650,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 30597,
+     "tokens_narrow": 2566,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_intent_e2e.py",
+     "hits": 11,
+     "hit_lines": [
+      82,
+      90,
+      115,
+      116,
+      120
+     ],
+     "lines": 279,
+     "tokens_est": 3082,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 12325,
+     "tokens_narrow": 1977,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "scripts/rg_final_acceptance.py",
+     "hits": 10,
+     "hit_lines": [
+      30,
+      86,
+      87,
+      88,
+      89
+     ],
+     "lines": 256,
+     "tokens_est": 3558,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 14230,
+     "tokens_narrow": 1557,
+     "lang": "python",
+     "importers_n": 4,
+     "importers": [
+      "scripts/rg_final_store.py",
+      "tests/test_final_acceptance_registry.py",
+      "tests/test_final_store.py",
+      "tests/test_final_views.py"
+     ],
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_final_stack.py",
+     "hits": 10,
+     "hit_lines": [
+      183,
+      205,
+      210,
+      243,
+      244
+     ],
+     "lines": 819,
+     "tokens_est": 8960,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 35839,
+     "tokens_narrow": 1707,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_resolution_validity.py",
+     "hits": 10,
+     "hit_lines": [
+      24,
+      441,
+      442,
+      452,
+      469
+     ],
+     "lines": 524,
+     "tokens_est": 5879,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 23515,
+     "tokens_narrow": 1459,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/sim_harness.py",
+     "hits": 9,
+     "hit_lines": [
+      448,
+      550,
+      754,
+      775,
+      786
+     ],
+     "lines": 951,
+     "tokens_est": 10989,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 43954,
+     "tokens_narrow": 1768,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_review_gate.py",
+     "hits": 9,
+     "hit_lines": [
+      1,
+      79,
+      83,
+      115,
+      805
+     ],
+     "lines": 3431,
+     "tokens_est": 37144,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 148573,
+     "tokens_narrow": 1678,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_orphans_siblings_dedup.py",
+     "hits": 8,
+     "hit_lines": [
+      112,
+      118,
+      120,
+      128,
+      137
+     ],
+     "lines": 226,
+     "tokens_est": 2906,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 11624,
+     "tokens_narrow": 1209,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_resolver_failure.py",
+     "hits": 8,
+     "hit_lines": [
+      16,
+      26,
+      167,
+      172,
+      195
+     ],
+     "lines": 221,
+     "tokens_est": 2424,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 9693,
+     "tokens_narrow": 1218,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "agents/deep-reviewer.md",
+     "hits": 7,
+     "hit_lines": [
+      3,
+      22,
+      34,
+      83,
+      90
+     ],
+     "lines": 207,
+     "tokens_est": 2924,
+     "w": true,
+     "mode": "additive",
+     "bytes": 11696,
+     "tokens_narrow": 1851,
+     "lang": "docs",
+     "wus": [
+      "W2"
+     ],
+     "suspect": "docs"
+    },
+    {
+     "path": "tests/test_precomputed_diffs.py",
+     "hits": 7,
+     "hit_lines": [
+      6,
+      316,
+      317,
+      520,
+      521
+     ],
+     "lines": 563,
+     "tokens_est": 7122,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 28487,
+     "tokens_narrow": 1316,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "scripts/ocr_doctor.py",
+     "hits": 6,
+     "hit_lines": [
+      515,
+      517,
+      518,
+      519,
+      520
+     ],
+     "lines": 690,
+     "tokens_est": 7038,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 28152,
+     "tokens_narrow": 419,
+     "lang": "python",
+     "importers_n": 1,
+     "importers": [
+      "tests/test_gate_finding_regressions.py"
+     ],
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "scripts/ocr_electron.py",
+     "hits": 6,
+     "hit_lines": [
+      15,
+      239,
+      241,
+      242,
+      243
+     ],
+     "lines": 486,
+     "tokens_est": 5056,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 20222,
+     "tokens_narrow": 801,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_final_github_stack.py",
+     "hits": 6,
+     "hit_lines": [
+      180,
+      181,
+      227,
+      228,
+      229
+     ],
+     "lines": 305,
+     "tokens_est": 3337,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 13348,
+     "tokens_narrow": 744,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_final_stops.py",
+     "hits": 6,
+     "hit_lines": [
+      122,
+      358,
+      378,
+      384,
+      387
+     ],
+     "lines": 575,
+     "tokens_est": 5975,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 23899,
+     "tokens_narrow": 967,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_install_hooks_path.py",
+     "hits": 6,
+     "hit_lines": [
+      63,
+      73,
+      143,
+      162,
+      167
+     ],
+     "lines": 364,
+     "tokens_est": 4319,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 17275,
+     "tokens_narrow": 1151,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_retry_exhausted.py",
+     "hits": 6,
+     "hit_lines": [
+      30,
+      97,
+      119,
+      131,
+      138
+     ],
+     "lines": 184,
+     "tokens_est": 1991,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 7964,
+     "tokens_narrow": 1299,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_tier1_guard.py",
+     "hits": 6,
+     "hit_lines": [
+      80,
+      106,
+      107,
+      112,
+      113
+     ],
+     "lines": 364,
+     "tokens_est": 4307,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 17227,
+     "tokens_narrow": 781,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/fake_backend.py",
+     "hits": 5,
+     "hit_lines": [
+      25,
+      73,
+      128,
+      129,
+      130
+     ],
+     "lines": 167,
+     "tokens_est": 1851,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 7402,
+     "tokens_narrow": 1053,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_deep_gate.py",
+     "hits": 5,
+     "hit_lines": [
+      80,
+      107,
+      108,
+      110,
+      373
+     ],
+     "lines": 379,
+     "tokens_est": 4338,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 17351,
+     "tokens_narrow": 950,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_segment_gate.py",
+     "hits": 5,
+     "hit_lines": [
+      4,
+      55,
+      56,
+      58,
+      68
+     ],
+     "lines": 736,
+     "tokens_est": 9607,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 38427,
+     "tokens_narrow": 823,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_spotter_gate.py",
+     "hits": 5,
+     "hit_lines": [
+      72,
+      98,
+      99,
+      173,
+      174
+     ],
+     "lines": 175,
+     "tokens_est": 2023,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 8091,
+     "tokens_narrow": 879,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "README.md",
+     "hits": 4,
+     "hit_lines": [
+      434,
+      443,
+      458,
+      459
+     ],
+     "lines": 500,
+     "tokens_est": 7264,
+     "w": true,
+     "mode": "additive",
+     "bytes": 29053,
+     "tokens_narrow": 814,
+     "lang": "docs",
+     "wus": [
+      "W2"
+     ],
+     "suspect": "docs"
+    },
+    {
+     "path": "tests/conftest.py",
+     "hits": 4,
+     "hit_lines": [
+      14,
+      20,
+      143,
+      176
+     ],
+     "lines": 178,
+     "tokens_est": 1885,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 7537,
+     "tokens_narrow": 890,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/fixtures/miss_categories/builders.py",
+     "hits": 4,
+     "hit_lines": [
+      159,
+      192,
+      193,
+      194
+     ],
+     "lines": 527,
+     "tokens_est": 4852,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 19405,
+     "tokens_narrow": 590,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_final_complete_standalone.py",
+     "hits": 4,
+     "hit_lines": [
+      203,
+      479,
+      480,
+      481
+     ],
+     "lines": 864,
+     "tokens_est": 9035,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 36140,
+     "tokens_narrow": 670,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_hook_passthrough.py",
+     "hits": 4,
+     "hit_lines": [
+      416,
+      419,
+      423,
+      434
+     ],
+     "lines": 652,
+     "tokens_est": 7200,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 28799,
+     "tokens_narrow": 542,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_sim_harness.py",
+     "hits": 4,
+     "hit_lines": [
+      118,
+      490,
+      666,
+      681
+     ],
+     "lines": 707,
+     "tokens_est": 8265,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 33059,
+     "tokens_narrow": 1263,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "scripts/ocr_segment.py",
+     "hits": 3,
+     "hit_lines": [
+      238,
+      290,
+      322
+     ],
+     "lines": 748,
+     "tokens_est": 7753,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 31010,
+     "tokens_narrow": 964,
+     "lang": "python",
+     "importers_n": 3,
+     "importers": [
+      "scripts/review-gate.py",
+      "tests/test_segment.py",
+      "tests/test_segment_gate.py"
+     ],
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "scripts/rg_final_contract.py",
+     "hits": 3,
+     "hit_lines": [
+      31,
+      32,
+      43
+     ],
+     "lines": 98,
+     "tokens_est": 3816,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 15262,
+     "tokens_narrow": 1675,
+     "lang": "python",
+     "importers_n": 3,
+     "importers": [
+      "scripts/rg_final_store.py",
+      "tests/test_final_store.py",
+      "tests/test_final_views.py"
+     ],
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "skills/review/SKILL.md",
+     "hits": 3,
+     "hit_lines": [
+      802,
+      806,
+      948
+     ],
+     "lines": 1691,
+     "tokens_est": 23053,
+     "w": true,
+     "mode": "additive",
+     "bytes": 92209,
+     "tokens_narrow": 900,
+     "lang": "docs",
+     "wus": [
+      "W2"
+     ],
+     "suspect": "docs"
+    },
+    {
+     "path": "tests/fixtures/json-mode-stream.jsonl",
+     "hits": 3,
+     "hit_lines": [
+      21,
+      23,
+      26
+     ],
+     "lines": 31,
+     "tokens_est": 37542,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 150165,
+     "tokens_narrow": 31487,
+     "lang": "other",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/fixtures/repos/_c4_probe/RESULTS.md",
+     "hits": 3,
+     "hit_lines": [
+      1,
+      6,
+      63
+     ],
+     "lines": 69,
+     "tokens_est": 1097,
+     "w": true,
+     "mode": "additive",
+     "bytes": 4388,
+     "tokens_narrow": 684,
+     "lang": "docs",
+     "wus": [
+      "W2"
+     ],
+     "suspect": "docs"
+    },
+    {
+     "path": "tests/live/live_matrix.py",
+     "hits": 3,
+     "hit_lines": [
+      98,
+      112,
+      146
+     ],
+     "lines": 319,
+     "tokens_est": 4176,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 16701,
+     "tokens_narrow": 995,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_gate_finding_regressions.py",
+     "hits": 3,
+     "hit_lines": [
+      43,
+      54,
+      72
+     ],
+     "lines": 157,
+     "tokens_est": 1793,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 7172,
+     "tokens_narrow": 686,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_ocr_impact.py",
+     "hits": 3,
+     "hit_lines": [
+      49,
+      50,
+      70
+     ],
+     "lines": 192,
+     "tokens_est": 1748,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 6990,
+     "tokens_narrow": 474,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_pre_push_resolver.py",
+     "hits": 3,
+     "hit_lines": [
+      19,
+      40,
+      222
+     ],
+     "lines": 270,
+     "tokens_est": 2765,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 11059,
+     "tokens_narrow": 850,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_segment.py",
+     "hits": 3,
+     "hit_lines": [
+      100,
+      105,
+      174
+     ],
+     "lines": 334,
+     "tokens_est": 4076,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 16302,
+     "tokens_narrow": 818,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_skip_logging.py",
+     "hits": 3,
+     "hit_lines": [
+      29,
+      62,
+      170
+     ],
+     "lines": 181,
+     "tokens_est": 1957,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 7828,
+     "tokens_narrow": 963,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_verdict_intent_wiring.py",
+     "hits": 3,
+     "hit_lines": [
+      38,
+      279,
+      284
+     ],
+     "lines": 328,
+     "tokens_est": 3684,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 14736,
+     "tokens_narrow": 753,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "commands/doctor.md",
+     "hits": 2,
+     "hit_lines": [
+      23,
+      74
+     ],
+     "lines": 242,
+     "tokens_est": 3592,
+     "w": true,
+     "mode": "additive",
+     "bytes": 14367,
+     "tokens_narrow": 921,
+     "lang": "docs",
+     "wus": [
+      "W2"
+     ],
+     "suspect": "docs"
+    },
+    {
+     "path": "docs/adr/0008-explicit-final-whole-stack-review.md",
+     "hits": 2,
+     "hit_lines": [
+      91,
+      173
+     ],
+     "lines": 285,
+     "tokens_est": 5196,
+     "w": true,
+     "mode": "additive",
+     "bytes": 20784,
+     "tokens_narrow": 1131,
+     "lang": "docs",
+     "wus": [
+      "W2"
+     ],
+     "suspect": "docs"
+    },
+    {
+     "path": "docs/calibration.md",
+     "hits": 2,
+     "hit_lines": [
+      97,
+      99
+     ],
+     "lines": 104,
+     "tokens_est": 3759,
+     "w": true,
+     "mode": "additive",
+     "bytes": 15034,
+     "tokens_narrow": 832,
+     "lang": "docs",
+     "wus": [
+      "W2"
+     ],
+     "suspect": "docs"
+    },
+    {
+     "path": "docs/plans/resume-truncated-chunks.md",
+     "hits": 2,
+     "hit_lines": [
+      260,
+      484
+     ],
+     "lines": 545,
+     "tokens_est": 6960,
+     "w": true,
+     "mode": "additive",
+     "bytes": 27838,
+     "tokens_narrow": 792,
+     "lang": "docs",
+     "wus": [
+      "W2"
+     ],
+     "suspect": "docs"
+    },
+    {
+     "path": "scripts/ocr_docsquality.py",
+     "hits": 2,
+     "hit_lines": [
+      14,
+      62
+     ],
+     "lines": 735,
+     "tokens_est": 7743,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 30969,
+     "tokens_narrow": 633,
+     "lang": "python",
+     "importers_n": 2,
+     "importers": [
+      "scripts/review-gate.py",
+      "tests/test_docsquality.py"
+     ],
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "scripts/ocr_index.py",
+     "hits": 2,
+     "hit_lines": [
+      534,
+      538
+     ],
+     "lines": 684,
+     "tokens_est": 6791,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 27163,
+     "tokens_narrow": 348,
+     "lang": "python",
+     "importers_n": 11,
+     "importers": [
+      "scripts/ocr_collectors.py",
+      "scripts/ocr_forge.py",
+      "scripts/review-gate.py",
+      "tests/test_collectors.py",
+      "tests/test_fixture_degradation.py",
+      "tests/test_fixture_m1_remount.py",
+      "tests/test_fixture_m4_pointer.py",
+      "tests/test_forge.py",
+      "tests/test_gate_finding_regressions.py",
+      "tests/test_index.py",
+      "tests/test_ocr_index.py"
+     ],
+     "wus": [
+      "W2"
+     ],
+     "suspect": "comments"
+    },
+    {
+     "path": "scripts/rg_final_env.py",
+     "hits": 2,
+     "hit_lines": [
+      3,
+      5
+     ],
+     "lines": 70,
+     "tokens_est": 732,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 2928,
+     "tokens_narrow": 210,
+     "lang": "python",
+     "importers_n": 4,
+     "importers": [
+      "scripts/rg_final_dynamic.py",
+      "scripts/rg_final_review.py",
+      "tests/test_final_credentials.py",
+      "tests/test_worker_env.py"
+     ],
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "scripts/session-start-check.sh",
+     "hits": 2,
+     "hit_lines": [
+      12,
+      18
+     ],
+     "lines": 53,
+     "tokens_est": 657,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 2627,
+     "tokens_narrow": 409,
+     "lang": "shell",
+     "wus": [
+      "W2"
+     ],
+     "suspect": "comments"
+    },
+    {
+     "path": "tests/live/live_hook.py",
+     "hits": 2,
+     "hit_lines": [
+      67,
+      93
+     ],
+     "lines": 132,
+     "tokens_est": 1645,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 6578,
+     "tokens_narrow": 711,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_commit_intent.py",
+     "hits": 2,
+     "hit_lines": [
+      175,
+      200
+     ],
+     "lines": 280,
+     "tokens_est": 3159,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 12635,
+     "tokens_narrow": 632,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_final_store.py",
+     "hits": 2,
+     "hit_lines": [
+      550,
+      557
+     ],
+     "lines": 850,
+     "tokens_est": 9150,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 36598,
+     "tokens_narrow": 410,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_impact.py",
+     "hits": 2,
+     "hit_lines": [
+      967,
+      978
+     ],
+     "lines": 1245,
+     "tokens_est": 12820,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 51278,
+     "tokens_narrow": 433,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_ocr_doctor.py",
+     "hits": 2,
+     "hit_lines": [
+      249,
+      250
+     ],
+     "lines": 536,
+     "tokens_est": 6036,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 24143,
+     "tokens_narrow": 361,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_waivers.py",
+     "hits": 2,
+     "hit_lines": [
+      41,
+      84
+     ],
+     "lines": 643,
+     "tokens_est": 7493,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 29969,
+     "tokens_narrow": 723,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_wave2_findings.py",
+     "hits": 2,
+     "hit_lines": [
+      301,
+      312
+     ],
+     "lines": 353,
+     "tokens_est": 3402,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 13606,
+     "tokens_narrow": 405,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "docs/adr/0003-wave-2-environment-switch-semantics.md",
+     "hits": 1,
+     "hit_lines": [
+      46
+     ],
+     "lines": 113,
+     "tokens_est": 1521,
+     "w": true,
+     "mode": "additive",
+     "bytes": 6084,
+     "tokens_narrow": 418,
+     "lang": "docs",
+     "wus": [
+      "W2"
+     ],
+     "suspect": "docs"
+    },
+    {
+     "path": "docs/architecture-split-proposal.md",
+     "hits": 1,
+     "hit_lines": [
+      39
+     ],
+     "lines": 117,
+     "tokens_est": 1835,
+     "w": true,
+     "mode": "additive",
+     "bytes": 7338,
+     "tokens_narrow": 487,
+     "lang": "docs",
+     "wus": [
+      "W2"
+     ],
+     "suspect": "docs"
+    },
+    {
+     "path": "docs/review-latency-analysis.md",
+     "hits": 1,
+     "hit_lines": [
+      64
+     ],
+     "lines": 115,
+     "tokens_est": 1982,
+     "w": true,
+     "mode": "additive",
+     "bytes": 7925,
+     "tokens_narrow": 535,
+     "lang": "docs",
+     "wus": [
+      "W2"
+     ],
+     "suspect": "docs"
+    },
+    {
+     "path": "examples/.ocr/rule.json",
+     "hits": 1,
+     "hit_lines": [
+      13
+     ],
+     "lines": 31,
+     "tokens_est": 463,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 1851,
+     "tokens_narrow": 418,
+     "lang": "config",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "schemas/finding.schema.json",
+     "hits": 1,
+     "hit_lines": [
+      77
+     ],
+     "lines": 82,
+     "tokens_est": 776,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 3103,
+     "tokens_narrow": 199,
+     "lang": "config",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "scripts/deslop_catalog.json",
+     "hits": 1,
+     "hit_lines": [
+      150
+     ],
+     "lines": 685,
+     "tokens_est": 4285,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 17139,
+     "tokens_narrow": 194,
+     "lang": "config",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "scripts/gate-hook.ps1",
+     "hits": 1,
+     "hit_lines": [
+      88
+     ],
+     "lines": 200,
+     "tokens_est": 2414,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 9655,
+     "tokens_narrow": 375,
+     "lang": "powershell",
+     "wus": [
+      "W2"
+     ],
+     "suspect": "comments"
+    },
+    {
+     "path": "scripts/ocr_impact.py",
+     "hits": 1,
+     "hit_lines": [
+      155
+     ],
+     "lines": 1511,
+     "tokens_est": 14524,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 58096,
+     "tokens_narrow": 298,
+     "lang": "python",
+     "importers_n": 11,
+     "importers": [
+      "scripts/ocr_collectors.py",
+      "scripts/ocr_forge.py",
+      "scripts/ocr_index.py",
+      "scripts/ocr_memory.py",
+      "scripts/ocr_segment.py",
+      "scripts/review-gate.py",
+      "tests/test_fixture_m3_spec_callers.py",
+      "tests/test_gate_finding_regressions.py",
+      "tests/test_impact.py",
+      "tests/test_impact_gate.py",
+      "tests/test_ocr_impact.py"
+     ],
+     "wus": [
+      "W2"
+     ],
+     "suspect": "comments"
+    },
+    {
+     "path": "scripts/rg_final_lenses.py",
+     "hits": 1,
+     "hit_lines": [
+      105
+     ],
+     "lines": 746,
+     "tokens_est": 7885,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 31540,
+     "tokens_narrow": 328,
+     "lang": "python",
+     "importers_n": 9,
+     "importers": [
+      "scripts/rg_final_execution.py",
+      "scripts/rg_final_review.py",
+      "scripts/rg_final_stack.py",
+      "tests/test_final_complete_standalone.py",
+      "tests/test_final_context.py",
+      "tests/test_final_lenses.py",
+      "tests/test_final_stack.py",
+      "tests/test_final_stops.py",
+      "tests/test_worker_plumbing.py"
+     ],
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "scripts/rg_final_review.py",
+     "hits": 1,
+     "hit_lines": [
+      1160
+     ],
+     "lines": 2219,
+     "tokens_est": 27533,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 110131,
+     "tokens_narrow": 385,
+     "lang": "python",
+     "importers_n": 13,
+     "importers": [
+      "scripts/review-gate.py",
+      "scripts/rg_final_stack.py",
+      "tests/sim_harness.py",
+      "tests/test_final_complete_standalone.py",
+      "tests/test_final_composition.py",
+      "tests/test_final_github_stack.py",
+      "tests/test_final_lenses.py",
+      "tests/test_final_observability_integration.py",
+      "tests/test_final_review_cli.py",
+      "tests/test_final_stack.py",
+      "tests/test_final_stops.py",
+      "tests/test_worker_env.py",
+      "tests/test_worker_plumbing.py"
+     ],
+     "wus": [
+      "W2"
+     ],
+     "suspect": "comments"
+    },
+    {
+     "path": "scripts/rg_final_store.py",
+     "hits": 1,
+     "hit_lines": [
+      742
+     ],
+     "lines": 2812,
+     "tokens_est": 34349,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 137394,
+     "tokens_narrow": 379,
+     "lang": "python",
+     "importers_n": 20,
+     "importers": [
+      "scripts/rg_final_publish.py",
+      "scripts/rg_final_review.py",
+      "scripts/rg_final_stack.py",
+      "scripts/rg_final_views.py",
+      "tests/sim_scenarios_spec16.py",
+      "tests/test_final_acceptance_registry.py",
+      "tests/test_final_complete_standalone.py",
+      "tests/test_final_composition.py",
+      "tests/test_final_dynamic.py",
+      "tests/test_final_github_stack.py",
+      "tests/test_final_lenses.py",
+      "tests/test_final_memory.py",
+      "tests/test_final_observability_integration.py",
+      "tests/test_final_provider_github.py",
+      "tests/test_final_publication.py",
+      "tests/test_final_review_cli.py",
+      "tests/test_final_stack.py",
+      "tests/test_final_stops.py",
+      "tests/test_final_store.py",
+      "tests/test_final_views.py"
+     ],
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "skills/review/rules/llm-authored-code.md",
+     "hits": 1,
+     "hit_lines": [
+      109
+     ],
+     "lines": 113,
+     "tokens_est": 1519,
+     "w": true,
+     "mode": "additive",
+     "bytes": 6076,
+     "tokens_narrow": 269,
+     "lang": "docs",
+     "wus": [
+      "W2"
+     ],
+     "suspect": "docs"
+    },
+    {
+     "path": "tests/fixtures/miss_categories/pre_v2/ocr_impact.py",
+     "hits": 1,
+     "hit_lines": [
+      114
+     ],
+     "lines": 1410,
+     "tokens_est": 13254,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 53014,
+     "tokens_narrow": 292,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ],
+     "suspect": "comments"
+    },
+    {
+     "path": "tests/fixtures/repos/_c4_probe/probe.sh",
+     "hits": 1,
+     "hit_lines": [
+      2
+     ],
+     "lines": 27,
+     "tokens_est": 361,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 1444,
+     "tokens_narrow": 228,
+     "lang": "shell",
+     "wus": [
+      "W2"
+     ],
+     "suspect": "comments"
+    },
+    {
+     "path": "tests/kimi_stub.py",
+     "hits": 1,
+     "hit_lines": [
+      7
+     ],
+     "lines": 23,
+     "tokens_est": 286,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 1143,
+     "tokens_narrow": 274,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_final_lenses.py",
+     "hits": 1,
+     "hit_lines": [
+      534
+     ],
+     "lines": 810,
+     "tokens_est": 8456,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 33824,
+     "tokens_narrow": 324,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_final_publication.py",
+     "hits": 1,
+     "hit_lines": [
+      125
+     ],
+     "lines": 673,
+     "tokens_est": 6777,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 27107,
+     "tokens_narrow": 313,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_final_verification.py",
+     "hits": 1,
+     "hit_lines": [
+      128
+     ],
+     "lines": 769,
+     "tokens_est": 7034,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 28133,
+     "tokens_narrow": 284,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_final_views.py",
+     "hits": 1,
+     "hit_lines": [
+      34
+     ],
+     "lines": 755,
+     "tokens_est": 8360,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 33439,
+     "tokens_narrow": 344,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_fixture_e2e.py",
+     "hits": 1,
+     "hit_lines": [
+      142
+     ],
+     "lines": 152,
+     "tokens_est": 1806,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 7222,
+     "tokens_narrow": 309,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_index.py",
+     "hits": 1,
+     "hit_lines": [
+      416
+     ],
+     "lines": 434,
+     "tokens_est": 4607,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 18425,
+     "tokens_narrow": 330,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ],
+     "suspect": "comments"
+    },
+    {
+     "path": "tests/test_memory_gate.py",
+     "hits": 1,
+     "hit_lines": [
+      63
+     ],
+     "lines": 153,
+     "tokens_est": 1647,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 6588,
+     "tokens_narrow": 334,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_ocr_electron.py",
+     "hits": 1,
+     "hit_lines": [
+      376
+     ],
+     "lines": 383,
+     "tokens_est": 3860,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 15438,
+     "tokens_narrow": 232,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ],
+     "suspect": "comments"
+    },
+    {
+     "path": "tests/test_parallel_chunks.py",
+     "hits": 1,
+     "hit_lines": [
+      22
+     ],
+     "lines": 517,
+     "tokens_est": 5935,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 23739,
+     "tokens_narrow": 356,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/test_telemetry_wiring.py",
+     "hits": 1,
+     "hit_lines": [
+      83
+     ],
+     "lines": 292,
+     "tokens_est": 3373,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 13489,
+     "tokens_narrow": 359,
+     "lang": "python",
+     "wus": [
+      "W2"
+     ]
+    },
+    {
+     "path": "tests/*test_check*",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 0,
+     "tokens_est": 0,
+     "w": true,
+     "mode": "exclusive",
+     "planned": true,
+     "wus": [
+      "W2"
+     ]
+    }
+   ],
+   "tests": [
+    "examples/test-check/test_check",
+    "tests/conftest.py",
+    "tests/fake_backend.py",
+    "tests/fixtures/json-mode-stream.jsonl",
+    "tests/fixtures/miss_categories/builders.py",
+    "tests/fixtures/miss_categories/pre_v2/ocr_impact.py",
+    "tests/fixtures/repos/_c4_probe/RESULTS.md",
+    "tests/fixtures/repos/_c4_probe/probe.sh",
+    "tests/kimi_stub.py",
+    "tests/live/live_hook.py",
+    "tests/live/live_matrix.py",
+    "tests/sim_harness.py",
+    "tests/sim_scenarios_spec15.py",
+    "tests/sim_scenarios_spec16.py",
+    "tests/stub_reviewer.py",
+    "tests/test_async_gate.py",
+    "tests/test_claude_profile.py",
+    "tests/test_commit_intent.py",
+    "tests/test_deep_gate.py",
+    "tests/test_deny_canary.py",
+    "tests/test_docs_gate.py",
+    "tests/test_docs_generator.py",
+    "tests/test_docsquality.py",
+    "tests/test_executor_testcheck.py",
+    "tests/test_final_acceptance_registry.py",
+    "tests/test_final_complete_standalone.py",
+    "tests/test_final_composition.py",
+    "tests/test_final_context.py",
+    "tests/test_final_credentials.py",
+    "tests/test_final_dynamic.py",
+    "tests/test_final_github_stack.py",
+    "tests/test_final_lenses.py",
+    "tests/test_final_publication.py",
+    "tests/test_final_review_cli.py",
+    "tests/test_final_stack.py",
+    "tests/test_final_stops.py",
+    "tests/test_final_store.py",
+    "tests/test_final_verification.py",
+    "tests/test_final_views.py",
+    "tests/test_fixture_e2e.py",
+    "tests/test_forge.py",
+    "tests/test_gate_finding_regressions.py",
+    "tests/test_harness_hint.py",
+    "tests/test_hook_passthrough.py",
+    "tests/test_impact.py",
+    "tests/test_impact_gate.py",
+    "tests/test_index.py",
+    "tests/test_install_hooks_path.py",
+    "tests/test_intent_e2e.py",
+    "tests/test_ledger_scenarios.py",
+    "tests/test_memory_gate.py",
+    "tests/test_ocr_doctor.py",
+    "tests/test_ocr_electron.py",
+    "tests/test_ocr_impact.py",
+    "tests/test_ocr_index.py",
+    "tests/test_orphans_siblings_dedup.py",
+    "tests/test_parallel_checks.py",
+    "tests/test_parallel_chunks.py",
+    "tests/test_pre_push_resolver.py",
+    "tests/test_precomputed_diffs.py",
+    "tests/test_resolution_validity.py",
+    "tests/test_resolver_failure.py",
+    "tests/test_resolver_robustness.py",
+    "tests/test_restack_coverage.py",
+    "tests/test_restack_incremental.py",
+    "tests/test_retry_exhausted.py",
+    "tests/test_review_gate.py",
+    "tests/test_scripts_gate_hook.py",
+    "tests/test_segment.py",
+    "tests/test_segment_gate.py",
+    "tests/test_sim_harness.py",
+    "tests/test_skip_logging.py",
+    "tests/test_spotter_gate.py",
+    "tests/test_stacked_base.py",
+    "tests/test_t26_installer_sync_config.py",
+    "tests/test_telemetry_wiring.py",
+    "tests/test_tier1_guard.py",
+    "tests/test_verdict_intent_wiring.py",
+    "tests/test_waivers.py",
+    "tests/test_wave2_findings.py",
+    "tests/test_worker_env.py",
+    "tests/test_worker_plumbing.py"
+   ],
+   "est_tokens": 1327500,
+   "est_hops": 865,
+   "siblings": [],
+   "readonly": false,
+   "verify": false,
+   "research": false,
+   "isolation": "shared",
+   "est_output": 0,
+   "est_cum_input": 587118750,
+   "est_cost": 184.942
+  }
+ ],
+ "overlap": {
+  "W1": {
+   "W2": [
+    "tests/sim_harness.py",
+    "tests/sim_scenarios_spec16.py",
+    "tests/test_final_acceptance_registry.py",
+    "tests/test_sim_harness.py"
+   ]
+  }
+ },
+ "overlap_counts": {
+  "W1": {
+   "W2": 4
+  }
+ },
+ "interfaces": [],
+ "inferred_deps": [],
+ "coupling": {},
+ "single_agent_est": {
+  "tokens": 1346625,
+  "hops": 878,
+  "files": 111,
+  "est_output": 0,
+  "est_cum_input": 604338375,
+  "est_cost": 190.367
+ },
+ "graph": {
+  "used": false
+ },
+ "wus": {
+  "W1": {
+   "title": "Real-static evidence mapping",
+   "kind": "fix",
+   "size": "small",
+   "readonly": false,
+   "depends_on": [],
+   "planned": [],
+   "excluded_hits": 0,
+   "files": [
+    "tests/sim_harness.py",
+    "tests/sim_scenarios_spec16.py",
+    "tests/test_final_acceptance_registry.py",
+    "tests/test_harness_hint.py",
+    "tests/test_sim_harness.py"
+   ],
+   "delivers": "main"
+  },
+  "W2": {
+   "title": "Real-race evidence determinism and selector diagnostics",
+   "kind": "fix",
+   "size": "small",
+   "readonly": false,
+   "depends_on": [
+    "W1"
+   ],
+   "planned": [
+    "tests/*test_check*"
+   ],
+   "excluded_hits": 0,
+   "files": [
+    "CHANGELOG.md",
+    "README.md",
+    "agents/deep-reviewer.md",
+    "commands/doctor.md",
+    "docs/adr/0003-wave-2-environment-switch-semantics.md",
+    "docs/adr/0007-race-regression-test-checks-and-finding-waivers.md",
+    "docs/adr/0008-explicit-final-whole-stack-review.md",
+    "docs/architecture-split-proposal.md",
+    "docs/calibration.md",
+    "docs/plans/resume-truncated-chunks.md",
+    "docs/review-latency-analysis.md",
+    "examples/.ocr/rule.json",
+    "examples/test-check/README.md",
+    "examples/test-check/test_check",
+    "schemas/finding.schema.json",
+    "scripts/deslop_catalog.json",
+    "scripts/gate-hook.ps1",
+    "scripts/ocr_docsquality.py",
+    "scripts/ocr_doctor.py",
+    "scripts/ocr_electron.py",
+    "scripts/ocr_impact.py",
+    "scripts/ocr_index.py",
+    "scripts/ocr_segment.py",
+    "scripts/review-gate.py",
+    "scripts/rg_final_acceptance.py",
+    "scripts/rg_final_contract.py",
+    "scripts/rg_final_dynamic.py",
+    "scripts/rg_final_env.py",
+    "scripts/rg_final_lenses.py",
+    "scripts/rg_final_review.py",
+    "scripts/rg_final_store.py",
+    "scripts/session-start-check.sh",
+    "skills/review/SKILL.md",
+    "skills/review/rules/llm-authored-code.md",
+    "tests/*test_check*",
+    "tests/conftest.py",
+    "tests/fake_backend.py",
+    "tests/fixtures/json-mode-stream.jsonl",
+    "tests/fixtures/miss_categories/builders.py",
+    "tests/fixtures/miss_categories/pre_v2/ocr_impact.py",
+    "tests/fixtures/repos/_c4_probe/RESULTS.md",
+    "tests/fixtures/repos/_c4_probe/probe.sh",
+    "tests/kimi_stub.py",
+    "tests/live/live_hook.py",
+    "tests/live/live_matrix.py",
+    "tests/sim_harness.py",
+    "tests/sim_scenarios_spec15.py",
+    "tests/sim_scenarios_spec16.py",
+    "tests/stub_reviewer.py",
+    "tests/test_async_gate.py",
+    "tests/test_claude_profile.py",
+    "tests/test_commit_intent.py",
+    "tests/test_deep_gate.py",
+    "tests/test_deny_canary.py",
+    "tests/test_docs_gate.py",
+    "tests/test_docs_generator.py",
+    "tests/test_executor_testcheck.py",
+    "tests/test_final_acceptance_registry.py",
+    "tests/test_final_complete_standalone.py",
+    "tests/test_final_composition.py",
+    "tests/test_final_credentials.py",
+    "tests/test_final_dynamic.py",
+    "tests/test_final_github_stack.py",
+    "tests/test_final_lenses.py",
+    "tests/test_final_publication.py",
+    "tests/test_final_review_cli.py",
+    "tests/test_final_stack.py",
+    "tests/test_final_stops.py",
+    "tests/test_final_store.py",
+    "tests/test_final_verification.py",
+    "tests/test_final_views.py",
+    "tests/test_fixture_e2e.py",
+    "tests/test_forge.py",
+    "tests/test_gate_finding_regressions.py",
+    "tests/test_hook_passthrough.py",
+    "tests/test_impact.py",
+    "tests/test_impact_gate.py",
+    "tests/test_index.py",
+    "tests/test_install_hooks_path.py",
+    "tests/test_intent_e2e.py",
+    "tests/test_ledger_scenarios.py",
+    "tests/test_memory_gate.py",
+    "tests/test_ocr_doctor.py",
+    "tests/test_ocr_electron.py",
+    "tests/test_ocr_impact.py",
+    "tests/test_orphans_siblings_dedup.py",
+    "tests/test_parallel_checks.py",
+    "tests/test_parallel_chunks.py",
+    "tests/test_pre_push_resolver.py",
+    "tests/test_precomputed_diffs.py",
+    "tests/test_resolution_validity.py",
+    "tests/test_resolver_failure.py",
+    "tests/test_resolver_robustness.py",
+    "tests/test_restack_coverage.py",
+    "tests/test_restack_incremental.py",
+    "tests/test_retry_exhausted.py",
+    "tests/test_review_gate.py",
+    "tests/test_segment.py",
+    "tests/test_segment_gate.py",
+    "tests/test_sim_harness.py",
+    "tests/test_skip_logging.py",
+    "tests/test_spotter_gate.py",
+    "tests/test_stacked_base.py",
+    "tests/test_telemetry_wiring.py",
+    "tests/test_tier1_guard.py",
+    "tests/test_verdict_intent_wiring.py",
+    "tests/test_waivers.py",
+    "tests/test_wave2_findings.py",
+    "tests/test_worker_env.py",
+    "tests/test_worker_plumbing.py"
+   ],
+   "delivers": "main"
+  }
+ },
+ "input_warnings": [],
+ "warnings": [
+  {
+   "code": "OVERSIZE",
+   "cluster": "C2",
+   "msg": "C2 est 1327.5k tok > budget 100k (110 files, 865 hops); split it"
+  },
+  {
+   "code": "MONOLITH",
+   "cluster": "C2",
+   "msg": "C2: scripts/review-gate.py is ~175.1k tok (> budget); read by hit ranges only"
+  },
+  {
+   "code": "HIGH_FANOUT",
+   "cluster": "C2",
+   "msg": "C2: scripts/rg_final_store.py (20 importers)"
+  },
+  {
+   "code": "SUSPECT_HITS",
+   "cluster": "C2",
+   "msg": "C2: hits only in docs/comments: examples/test-check/README.md (docs), docs/adr/0007-race-regression-test-checks-and-finding-waivers.md (docs), CHANGELOG.md (docs) +21 ..."
+  },
+  {
+   "code": "PLANNED_PATH_MISSING",
+   "cluster": "C2",
+   "msg": "C2: W2 seeds path(s) that do not exist: tests/*test_check*"
+  },
+  {
+   "code": "DELIVERABLE_OVERSIZE",
+   "cluster": "",
+   "msg": "deliverable 'main' aggregates 111 primary files (> 8): split it or justify in the report"
+  }
+ ],
+ "isolation": "shared",
+ "deliverables": [
+  {
+   "name": "main",
+   "clusters": [
+    "C1",
+    "C2"
+   ],
+   "tags": [
+    "W1",
+    "W2"
+   ],
+   "branch": "dk/65ae2d4a/main",
+   "base": "65ae2d4aac08f7f1b242d33f0210924aa7b94f0f",
+   "layers": [
+    0,
+    1
+   ],
+   "primary_files": 111
+  }
+ ]
+}

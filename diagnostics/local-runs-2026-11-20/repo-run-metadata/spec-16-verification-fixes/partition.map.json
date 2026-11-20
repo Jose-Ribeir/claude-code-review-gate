@@ -1,0 +1,5246 @@
+{
+ "version": 1,
+ "root": "/Users/jose_ribeir/work/code-review/claude-code-review-gate",
+ "git": true,
+ "head": "64fb50675302df67d77fc8403b2c481d4532354d",
+ "bytes_per_token": 4,
+ "graph": {
+  "used": false
+ },
+ "coupling": [],
+ "wus": [
+  {
+   "id": "R1",
+   "title": "Required CI honesty/status",
+   "kind": "fix",
+   "size": "medium",
+   "readonly": false,
+   "depends_on": [],
+   "seeds": {
+    "symbols": [
+     "rg_final_verification"
+    ],
+    "patterns": [
+     "before_script",
+     "required"
+    ],
+    "paths": [
+     "rg_final_verification.py"
+    ],
+    "globs": [
+     "tests/**/*verification*"
+    ]
+   },
+   "planned": [
+    "rg_final_verification.py"
+   ],
+   "excluded": {
+    "hits": 0,
+    "files": 0
+   },
+   "hits": {
+    ".github/workflows/ci.yml": {
+     "hits": 1,
+     "hit_lines": [
+      106
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    ".kimchi/docs/review.md": {
+     "hits": 1,
+     "hit_lines": [
+      7
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    ".kimchi/plans/comment-consistency-checks-spec.md": {
+     "hits": 1,
+     "hit_lines": [
+      45
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "CHANGELOG.md": {
+     "hits": 5,
+     "hit_lines": [
+      17,
+      39,
+      40,
+      969,
+      1947
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "LICENSE": {
+     "hits": 4,
+     "hit_lines": [
+      140,
+      143,
+      155,
+      197
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "agents/code-reviewer.md": {
+     "hits": 3,
+     "hit_lines": [
+      41,
+      373,
+      398
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "agents/context-spotter.md": {
+     "hits": 1,
+     "hit_lines": [
+      77
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "agents/deep-reviewer.md": {
+     "hits": 3,
+     "hit_lines": [
+      157,
+      189,
+      193
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "agents/docs-checker.md": {
+     "hits": 3,
+     "hit_lines": [
+      31,
+      169,
+      172
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "docs/adr/0001-loosening-verdict-validation-for-enumerated-improvised-report-families.md": {
+     "hits": 1,
+     "hit_lines": [
+      63
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "docs/adr/0003-wave-2-environment-switch-semantics.md": {
+     "hits": 1,
+     "hit_lines": [
+      53
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "docs/adr/0008-explicit-final-whole-stack-review.md": {
+     "hits": 12,
+     "hit_lines": [
+      54,
+      72,
+      73,
+      74,
+      82
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "docs/plans/resume-truncated-chunks.md": {
+     "hits": 1,
+     "hit_lines": [
+      338
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "examples/test-check/README.md": {
+     "hits": 2,
+     "hit_lines": [
+      130,
+      137
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "examples/test-check/test_check": {
+     "hits": 1,
+     "hit_lines": [
+      182
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "schemas/demands.schema.json": {
+     "hits": 2,
+     "hit_lines": [
+      7,
+      77
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "schemas/docsquality.schema.json": {
+     "hits": 15,
+     "hit_lines": [
+      7,
+      17,
+      30,
+      56,
+      75
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "schemas/finding.schema.json": {
+     "hits": 3,
+     "hit_lines": [
+      7,
+      19,
+      47
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/gate-hook.sh": {
+     "hits": 1,
+     "hit_lines": [
+      26
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/ocr_calibrate.py": {
+     "hits": 1,
+     "hit_lines": [
+      498
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/ocr_conventions.py": {
+     "hits": 1,
+     "hit_lines": [
+      275
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/ocr_demands.py": {
+     "hits": 2,
+     "hit_lines": [
+      217,
+      224
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/ocr_docsquality.py": {
+     "hits": 14,
+     "hit_lines": [
+      555,
+      560,
+      570,
+      577,
+      584
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/ocr_electron.py": {
+     "hits": 1,
+     "hit_lines": [
+      473
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/ocr_index.py": {
+     "hits": 2,
+     "hit_lines": [
+      63,
+      393
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/ocr_verdict.py": {
+     "hits": 1,
+     "hit_lines": [
+      115
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/review-gate.py": {
+     "hits": 1,
+     "hit_lines": [
+      410
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_config.py": {
+     "hits": 4,
+     "hit_lines": [
+      34,
+      35,
+      85,
+      323
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_final_acceptance.py": {
+     "hits": 5,
+     "hit_lines": [
+      34,
+      83,
+      98,
+      99,
+      101
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_final_context.py": {
+     "hits": 5,
+     "hit_lines": [
+      59,
+      156,
+      175,
+      195,
+      256
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_final_contract.py": {
+     "hits": 6,
+     "hit_lines": [
+      24,
+      25,
+      30,
+      39,
+      56
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_final_dynamic.py": {
+     "hits": 2,
+     "hit_lines": [
+      8,
+      313
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_final_execution.py": {
+     "hits": 38,
+     "hit_lines": [
+      30,
+      44,
+      57,
+      66,
+      71
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_final_graph.py": {
+     "hits": 1,
+     "hit_lines": [
+      187
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_final_lenses.py": {
+     "hits": 6,
+     "hit_lines": [
+      83,
+      258,
+      278,
+      280,
+      293
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_final_materialize.py": {
+     "hits": 7,
+     "hit_lines": [
+      90,
+      104,
+      128,
+      135,
+      142
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_final_memory.py": {
+     "hits": 5,
+     "hit_lines": [
+      183,
+      186,
+      283,
+      284,
+      332
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_final_publish.py": {
+     "hits": 3,
+     "hit_lines": [
+      36,
+      164,
+      165
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_final_review.py": {
+     "hits": 38,
+     "hit_lines": [
+      4,
+      47,
+      65,
+      71,
+      323
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_final_stack.py": {
+     "hits": 14,
+     "hit_lines": [
+      6,
+      35,
+      94,
+      98,
+      104
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_final_store.py": {
+     "hits": 68,
+     "hit_lines": [
+      92,
+      95,
+      151,
+      357,
+      683
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_final_telemetry.py": {
+     "hits": 13,
+     "hit_lines": [
+      66,
+      68,
+      163,
+      176,
+      192
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_final_verification.py": {
+     "hits": 23,
+     "hit_lines": [
+      1,
+      17,
+      61,
+      70,
+      76
+     ],
+     "comment_hits": 4,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_final_views.py": {
+     "hits": 6,
+     "hit_lines": [
+      97,
+      223,
+      384,
+      387,
+      394
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_ticket_fetch.py": {
+     "hits": 1,
+     "hit_lines": [
+      307
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "skills/review/SKILL.md": {
+     "hits": 3,
+     "hit_lines": [
+      356,
+      1445,
+      1470
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/fixtures/json-mode-stream.jsonl": {
+     "hits": 3,
+     "hit_lines": [
+      6,
+      7,
+      30
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/fixtures/repos/_c4_probe/agent-spawn-evidence.jsonl": {
+     "hits": 1,
+     "hit_lines": [
+      1
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/fixtures/repos/clean-ts.git/hooks/pre-commit.sample": {
+     "hits": 1,
+     "hit_lines": [
+      29
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/fixtures/repos/electron-ts.git/hooks/pre-commit.sample": {
+     "hits": 1,
+     "hit_lines": [
+      29
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/fixtures/repos/py-app.git/hooks/pre-commit.sample": {
+     "hits": 1,
+     "hit_lines": [
+      29
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/sim_harness.py": {
+     "hits": 4,
+     "hit_lines": [
+      82,
+      520,
+      816,
+      817
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/sim_scenarios_spec14.py": {
+     "hits": 1,
+     "hit_lines": [
+      189
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/sim_scenarios_spec16.py": {
+     "hits": 14,
+     "hit_lines": [
+      4,
+      143,
+      167,
+      169,
+      172
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/stub_reviewer.py": {
+     "hits": 1,
+     "hit_lines": [
+      103
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_conventions.py": {
+     "hits": 1,
+     "hit_lines": [
+      356
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_demands.py": {
+     "hits": 5,
+     "hit_lines": [
+      249,
+      252,
+      255,
+      277,
+      300
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_docs_gate.py": {
+     "hits": 1,
+     "hit_lines": [
+      675
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_docsquality.py": {
+     "hits": 7,
+     "hit_lines": [
+      551,
+      553,
+      559,
+      563,
+      565
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_final_acceptance_registry.py": {
+     "hits": 8,
+     "hit_lines": [
+      30,
+      59,
+      60,
+      74,
+      271
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_final_complete_standalone.py": {
+     "hits": 26,
+     "hit_lines": [
+      3,
+      73,
+      81,
+      240,
+      241
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_final_composition.py": {
+     "hits": 2,
+     "hit_lines": [
+      281,
+      337
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_final_context.py": {
+     "hits": 8,
+     "hit_lines": [
+      158,
+      164,
+      165,
+      167,
+      288
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_final_dynamic.py": {
+     "hits": 5,
+     "hit_lines": [
+      5,
+      160,
+      166,
+      168,
+      207
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_final_github_stack.py": {
+     "hits": 10,
+     "hit_lines": [
+      3,
+      75,
+      140,
+      155,
+      189
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_final_lenses.py": {
+     "hits": 10,
+     "hit_lines": [
+      149,
+      166,
+      383,
+      384,
+      407
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_final_materialize.py": {
+     "hits": 2,
+     "hit_lines": [
+      157,
+      167
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_final_memory.py": {
+     "hits": 7,
+     "hit_lines": [
+      121,
+      284,
+      413,
+      432,
+      452
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_final_observability.py": {
+     "hits": 10,
+     "hit_lines": [
+      91,
+      116,
+      223,
+      224,
+      225
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_final_observability_integration.py": {
+     "hits": 5,
+     "hit_lines": [
+      47,
+      78,
+      104,
+      118,
+      123
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_final_publication.py": {
+     "hits": 2,
+     "hit_lines": [
+      124,
+      483
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_final_review_cli.py": {
+     "hits": 9,
+     "hit_lines": [
+      373,
+      442,
+      475,
+      514,
+      517
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_final_stack.py": {
+     "hits": 20,
+     "hit_lines": [
+      133,
+      163,
+      167,
+      169,
+      205
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_final_stops.py": {
+     "hits": 26,
+     "hit_lines": [
+      30,
+      139,
+      140,
+      141,
+      151
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_final_store.py": {
+     "hits": 11,
+     "hit_lines": [
+      137,
+      143,
+      488,
+      537,
+      540
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_final_verification.py": {
+     "hits": 70,
+     "hit_lines": [
+      1,
+      12,
+      38,
+      41,
+      47
+     ],
+     "comment_hits": 1,
+     "via": [
+      "glob",
+      "grep"
+     ]
+    },
+    "tests/test_final_views.py": {
+     "hits": 9,
+     "hit_lines": [
+      81,
+      95,
+      117,
+      256,
+      276
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_fixture_m2_convention.py": {
+     "hits": 1,
+     "hit_lines": [
+      59
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_ledger_scenarios.py": {
+     "hits": 1,
+     "hit_lines": [
+      1343
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_sim_harness.py": {
+     "hits": 1,
+     "hit_lines": [
+      338
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    }
+   },
+   "delivers": "main"
+  },
+  {
+   "id": "R2",
+   "title": "Closure verification/publication option",
+   "kind": "fix",
+   "size": "large",
+   "readonly": false,
+   "depends_on": [
+    "R1"
+   ],
+   "seeds": {
+    "symbols": [
+     "publish",
+     "revalidation",
+     "anchor"
+    ],
+    "patterns": [],
+    "paths": [
+     "rg_final_store.py",
+     "rg_final_memory.py",
+     "rg_final_execution.py",
+     "rg_final_lenses.py",
+     "rg_final_review.py",
+     "rg_final_stack.py"
+    ],
+    "globs": [
+     "tests/**/*final*"
+    ]
+   },
+   "planned": [
+    "rg_final_execution.py",
+    "rg_final_lenses.py",
+    "rg_final_memory.py",
+    "rg_final_review.py",
+    "rg_final_stack.py",
+    "rg_final_store.py"
+   ],
+   "excluded": {
+    "hits": 0,
+    "files": 0
+   },
+   "hits": {
+    ".kimchi/plans/comment-consistency-checks-spec.md": {
+     "hits": 1,
+     "hit_lines": [
+      9
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "CHANGELOG.md": {
+     "hits": 6,
+     "hit_lines": [
+      69,
+      73,
+      99,
+      129,
+      373
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "README.md": {
+     "hits": 2,
+     "hit_lines": [
+      476,
+      480
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "agents/code-reviewer.md": {
+     "hits": 3,
+     "hit_lines": [
+      126,
+      208,
+      210
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "agents/deep-reviewer.md": {
+     "hits": 1,
+     "hit_lines": [
+      127
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "agents/docs-checker.md": {
+     "hits": 1,
+     "hit_lines": [
+      244
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "docs/adr/0006-custom-checks-and-documentation-quality-duties.md": {
+     "hits": 1,
+     "hit_lines": [
+      101
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "docs/adr/0007-race-regression-test-checks-and-finding-waivers.md": {
+     "hits": 7,
+     "hit_lines": [
+      13,
+      160,
+      165,
+      169,
+      177
+     ],
+     "comment_hits": 2,
+     "via": [
+      "grep"
+     ]
+    },
+    "docs/architecture-split-proposal.md": {
+     "hits": 2,
+     "hit_lines": [
+      36,
+      59
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "docs/plans/restack-content-keyed-coverage.md": {
+     "hits": 1,
+     "hit_lines": [
+      159
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "docs/plans/resume-truncated-chunks.md": {
+     "hits": 1,
+     "hit_lines": [
+      323
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "docs/specs/unified-review-gate.md": {
+     "hits": 1,
+     "hit_lines": [
+      3
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "examples/test-check/README.md": {
+     "hits": 2,
+     "hit_lines": [
+      22,
+      24
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "examples/test-check/test_check": {
+     "hits": 2,
+     "hit_lines": [
+      53,
+      635
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/ocr_index.py": {
+     "hits": 2,
+     "hit_lines": [
+      102,
+      117
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/review-gate.py": {
+     "hits": 18,
+     "hit_lines": [
+      5241,
+      5603,
+      6349,
+      6366,
+      6369
+     ],
+     "comment_hits": 7,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_final_acceptance.py": {
+     "hits": 2,
+     "hit_lines": [
+      105,
+      128
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_final_contract.py": {
+     "hits": 2,
+     "hit_lines": [
+      35,
+      58
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_final_dynamic.py": {
+     "hits": 1,
+     "hit_lines": [
+      395
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_final_execution.py": {
+     "hits": 1,
+     "hit_lines": [
+      385
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_final_github.py": {
+     "hits": 1,
+     "hit_lines": [
+      7
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_final_gitlab.py": {
+     "hits": 1,
+     "hit_lines": [
+      69
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_final_lenses.py": {
+     "hits": 1,
+     "hit_lines": [
+      170
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_final_memory.py": {
+     "hits": 21,
+     "hit_lines": [
+      10,
+      25,
+      51,
+      52,
+      61
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_final_publish.py": {
+     "hits": 5,
+     "hit_lines": [
+      51,
+      66,
+      71,
+      160,
+      166
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_final_review.py": {
+     "hits": 13,
+     "hit_lines": [
+      193,
+      337,
+      348,
+      807,
+      827
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_final_stack.py": {
+     "hits": 6,
+     "hit_lines": [
+      151,
+      411,
+      595,
+      600,
+      630
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_final_store.py": {
+     "hits": 34,
+     "hit_lines": [
+      234,
+      237,
+      1449,
+      1450,
+      1452
+     ],
+     "comment_hits": 3,
+     "via": [
+      "grep"
+     ]
+    },
+    "skills/review/SKILL.md": {
+     "hits": 2,
+     "hit_lines": [
+      1031,
+      1290
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/fixtures/repos/_c4_probe/agent-spawn-evidence.jsonl": {
+     "hits": 1,
+     "hit_lines": [
+      1
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/fixtures/repos/clean-ts.git/hooks/pre-rebase.sample": {
+     "hits": 6,
+     "hit_lines": [
+      18,
+      54,
+      55,
+      67,
+      107
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/fixtures/repos/electron-ts.git/hooks/pre-rebase.sample": {
+     "hits": 6,
+     "hit_lines": [
+      18,
+      54,
+      55,
+      67,
+      107
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/fixtures/repos/py-app.git/hooks/pre-rebase.sample": {
+     "hits": 6,
+     "hit_lines": [
+      18,
+      54,
+      55,
+      67,
+      107
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/sim_harness.py": {
+     "hits": 2,
+     "hit_lines": [
+      387,
+      447
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/sim_scenarios_spec15.py": {
+     "hits": 5,
+     "hit_lines": [
+      170,
+      175,
+      299,
+      320,
+      346
+     ],
+     "comment_hits": 4,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/stub_reviewer.py": {
+     "hits": 2,
+     "hit_lines": [
+      630,
+      633
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_docs_gate.py": {
+     "hits": 16,
+     "hit_lines": [
+      804,
+      806,
+      828,
+      829,
+      838
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_executor_testcheck.py": {
+     "hits": 2,
+     "hit_lines": [
+      294,
+      590
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_final_acceptance_registry.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_complete_standalone.py": {
+     "hits": 18,
+     "hit_lines": [
+      295,
+      343,
+      370,
+      384,
+      430
+     ],
+     "comment_hits": 0,
+     "via": [
+      "glob",
+      "grep"
+     ]
+    },
+    "tests/test_final_composition.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_context.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_credentials.py": {
+     "hits": 1,
+     "hit_lines": [
+      40
+     ],
+     "comment_hits": 0,
+     "via": [
+      "glob",
+      "grep"
+     ]
+    },
+    "tests/test_final_dynamic.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_github_stack.py": {
+     "hits": 7,
+     "hit_lines": [
+      103,
+      143,
+      199,
+      205,
+      231
+     ],
+     "comment_hits": 0,
+     "via": [
+      "glob",
+      "grep"
+     ]
+    },
+    "tests/test_final_graph.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_lenses.py": {
+     "hits": 3,
+     "hit_lines": [
+      214,
+      217,
+      239
+     ],
+     "comment_hits": 0,
+     "via": [
+      "glob",
+      "grep"
+     ]
+    },
+    "tests/test_final_materialize.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_memory.py": {
+     "hits": 13,
+     "hit_lines": [
+      85,
+      153,
+      154,
+      162,
+      197
+     ],
+     "comment_hits": 0,
+     "via": [
+      "glob",
+      "grep"
+     ]
+    },
+    "tests/test_final_observability.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_observability_integration.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_provider_github.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_provider_gitlab.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_publication.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_review_cli.py": {
+     "hits": 1,
+     "hit_lines": [
+      473
+     ],
+     "comment_hits": 0,
+     "via": [
+      "glob",
+      "grep"
+     ]
+    },
+    "tests/test_final_stack.py": {
+     "hits": 6,
+     "hit_lines": [
+      258,
+      343,
+      350,
+      396,
+      441
+     ],
+     "comment_hits": 0,
+     "via": [
+      "glob",
+      "grep"
+     ]
+    },
+    "tests/test_final_stops.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_store.py": {
+     "hits": 1,
+     "hit_lines": [
+      638
+     ],
+     "comment_hits": 0,
+     "via": [
+      "glob",
+      "grep"
+     ]
+    },
+    "tests/test_final_verification.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_views.py": {
+     "hits": 1,
+     "hit_lines": [
+      124
+     ],
+     "comment_hits": 0,
+     "via": [
+      "glob",
+      "grep"
+     ]
+    },
+    "tests/test_restack_incremental.py": {
+     "hits": 1,
+     "hit_lines": [
+      11
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_segment_gate.py": {
+     "hits": 2,
+     "hit_lines": [
+      377,
+      395
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_sim_harness.py": {
+     "hits": 1,
+     "hit_lines": [
+      144
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_t24_lows.py": {
+     "hits": 1,
+     "hit_lines": [
+      264
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_waivers.py": {
+     "hits": 15,
+     "hit_lines": [
+      12,
+      226,
+      243,
+      249,
+      303
+     ],
+     "comment_hits": 5,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_wave2_findings.py": {
+     "hits": 1,
+     "hit_lines": [
+      92
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    }
+   },
+   "delivers": "main"
+  },
+  {
+   "id": "R3",
+   "title": "Freshness: revalidate MR refs",
+   "kind": "fix",
+   "size": "small",
+   "readonly": false,
+   "depends_on": [],
+   "seeds": {
+    "symbols": [
+     "diff_refs",
+     "revalidate"
+    ],
+    "patterns": [
+     "diff_refs"
+    ],
+    "paths": [],
+    "globs": [
+     "*gitlab*",
+     "tests/**/*gitlab*"
+    ]
+   },
+   "planned": [
+    "*gitlab*"
+   ],
+   "excluded": {
+    "hits": 0,
+    "files": 0
+   },
+   "hits": {
+    "scripts/rg_final_github.py": {
+     "hits": 2,
+     "hit_lines": [
+      63,
+      104
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_final_gitlab.py": {
+     "hits": 7,
+     "hit_lines": [
+      60,
+      92,
+      134,
+      135,
+      136
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_final_memory.py": {
+     "hits": 1,
+     "hit_lines": [
+      23
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_final_provider.py": {
+     "hits": 1,
+     "hit_lines": [
+      127
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_final_review.py": {
+     "hits": 2,
+     "hit_lines": [
+      603,
+      1650
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_final_complete_standalone.py": {
+     "hits": 1,
+     "hit_lines": [
+      145
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_final_composition.py": {
+     "hits": 1,
+     "hit_lines": [
+      232
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_final_graph.py": {
+     "hits": 1,
+     "hit_lines": [
+      332
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_final_lenses.py": {
+     "hits": 1,
+     "hit_lines": [
+      337
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_final_provider_github.py": {
+     "hits": 2,
+     "hit_lines": [
+      214,
+      246
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_final_provider_gitlab.py": {
+     "hits": 10,
+     "hit_lines": [
+      34,
+      173,
+      188,
+      190,
+      192
+     ],
+     "comment_hits": 0,
+     "via": [
+      "glob",
+      "grep"
+     ]
+    },
+    "tests/test_final_review_cli.py": {
+     "hits": 8,
+     "hit_lines": [
+      122,
+      241,
+      252,
+      415,
+      556
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_final_stack.py": {
+     "hits": 1,
+     "hit_lines": [
+      118
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_final_stops.py": {
+     "hits": 1,
+     "hit_lines": [
+      78
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    }
+   },
+   "delivers": "main"
+  },
+  {
+   "id": "R4",
+   "title": "Credential helper scrub for clone commands",
+   "kind": "fix",
+   "size": "medium",
+   "readonly": false,
+   "depends_on": [],
+   "seeds": {
+    "symbols": [
+     "credential"
+    ],
+    "patterns": [
+     "credential.helper",
+     "submodule",
+     "lfs"
+    ],
+    "paths": [],
+    "globs": [
+     "*material*",
+     "*security*",
+     "tests/**/*security*",
+     "tests/**/*material*"
+    ]
+   },
+   "planned": [
+    "*material*",
+    "*security*",
+    "tests/**/*security*"
+   ],
+   "excluded": {
+    "hits": 0,
+    "files": 0
+   },
+   "hits": {
+    ".kimchi/docs/review.md": {
+     "hits": 1,
+     "hit_lines": [
+      13
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "CHANGELOG.md": {
+     "hits": 2,
+     "hit_lines": [
+      17,
+      1970
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "docs/adr/0008-explicit-final-whole-stack-review.md": {
+     "hits": 2,
+     "hit_lines": [
+      55,
+      189
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "examples/test-check/README.md": {
+     "hits": 2,
+     "hit_lines": [
+      28,
+      112
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "examples/test-check/test_check": {
+     "hits": 1,
+     "hit_lines": [
+      100
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/review-gate.py": {
+     "hits": 3,
+     "hit_lines": [
+      2186,
+      2189,
+      2197
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_final_compose.py": {
+     "hits": 2,
+     "hit_lines": [
+      250,
+      282
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_final_context.py": {
+     "hits": 17,
+     "hit_lines": [
+      53,
+      55,
+      59,
+      81,
+      151
+     ],
+     "comment_hits": 2,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_final_contract.py": {
+     "hits": 1,
+     "hit_lines": [
+      25
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_final_materialize.py": {
+     "hits": 32,
+     "hit_lines": [
+      31,
+      32,
+      33,
+      35,
+      54
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_final_review.py": {
+     "hits": 26,
+     "hit_lines": [
+      256,
+      363,
+      364,
+      365,
+      545
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_final_stack.py": {
+     "hits": 8,
+     "hit_lines": [
+      167,
+      168,
+      177,
+      178,
+      179
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_final_telemetry.py": {
+     "hits": 2,
+     "hit_lines": [
+      13,
+      151
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_final_verification.py": {
+     "hits": 1,
+     "hit_lines": [
+      282
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/fixtures/repos/clean-ts.git/hooks/push-to-checkout.sample": {
+     "hits": 3,
+     "hit_lines": [
+      50,
+      55,
+      70
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/fixtures/repos/electron-ts.git/hooks/push-to-checkout.sample": {
+     "hits": 3,
+     "hit_lines": [
+      50,
+      55,
+      70
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/fixtures/repos/py-app.git/hooks/push-to-checkout.sample": {
+     "hits": 3,
+     "hit_lines": [
+      50,
+      55,
+      70
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_final_complete_standalone.py": {
+     "hits": 4,
+     "hit_lines": [
+      102,
+      199,
+      200,
+      226
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_final_context.py": {
+     "hits": 35,
+     "hit_lines": [
+      158,
+      161,
+      162,
+      174,
+      175
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_final_credentials.py": {
+     "hits": 1,
+     "hit_lines": [
+      78
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_final_dynamic.py": {
+     "hits": 6,
+     "hit_lines": [
+      76,
+      124,
+      125,
+      212,
+      260
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_final_lenses.py": {
+     "hits": 5,
+     "hit_lines": [
+      359,
+      360,
+      361,
+      379,
+      476
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_final_materialize.py": {
+     "hits": 20,
+     "hit_lines": [
+      127,
+      135,
+      143,
+      144,
+      145
+     ],
+     "comment_hits": 0,
+     "via": [
+      "glob",
+      "grep"
+     ]
+    },
+    "tests/test_final_publication.py": {
+     "hits": 1,
+     "hit_lines": [
+      637
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_final_stack.py": {
+     "hits": 2,
+     "hit_lines": [
+      150,
+      156
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_final_stops.py": {
+     "hits": 2,
+     "hit_lines": [
+      101,
+      115
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_final_store.py": {
+     "hits": 1,
+     "hit_lines": [
+      651
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    }
+   },
+   "delivers": "main"
+  },
+  {
+   "id": "R5",
+   "title": "Final-review test store isolation",
+   "kind": "fix",
+   "size": "small",
+   "readonly": false,
+   "depends_on": [],
+   "seeds": {
+    "symbols": [
+     "OCR_STATE_DIR",
+     "FINAL_REVIEW_STORE"
+    ],
+    "patterns": [],
+    "paths": [
+     "tests/test_final_composition.py"
+    ],
+    "globs": [
+     "tests/**/*final*"
+    ]
+   },
+   "planned": [],
+   "excluded": {
+    "hits": 0,
+    "files": 0
+   },
+   "hits": {
+    "CHANGELOG.md": {
+     "hits": 2,
+     "hit_lines": [
+      23,
+      25
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "README.md": {
+     "hits": 1,
+     "hit_lines": [
+      304
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "docs/adr/0008-explicit-final-whole-stack-review.md": {
+     "hits": 3,
+     "hit_lines": [
+      115,
+      118,
+      211
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "hooks/git/pre-push": {
+     "hits": 1,
+     "hit_lines": [
+      49
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "hooks/sh/gate-hook.sh": {
+     "hits": 1,
+     "hit_lines": [
+      55
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/install-kimchi-hook.sh": {
+     "hits": 1,
+     "hit_lines": [
+      48
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/ocr_calibrate.py": {
+     "hits": 6,
+     "hit_lines": [
+      13,
+      134,
+      137,
+      242,
+      264
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/ocr_doctor.py": {
+     "hits": 1,
+     "hit_lines": [
+      87
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/ocr_janitor.py": {
+     "hits": 1,
+     "hit_lines": [
+      358
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/ocr_report.py": {
+     "hits": 1,
+     "hit_lines": [
+      7
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_config.py": {
+     "hits": 2,
+     "hit_lines": [
+      12,
+      109
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_final_store.py": {
+     "hits": 2,
+     "hit_lines": [
+      402,
+      408
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_final_views.py": {
+     "hits": 1,
+     "hit_lines": [
+      371
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/rg_store.py": {
+     "hits": 2,
+     "hit_lines": [
+      19,
+      39
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "scripts/uninstall-kimchi-hook.sh": {
+     "hits": 1,
+     "hit_lines": [
+      88
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/conftest.py": {
+     "hits": 2,
+     "hit_lines": [
+      139,
+      174
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/fixtures/miss_categories/builders.py": {
+     "hits": 3,
+     "hit_lines": [
+      25,
+      149,
+      156
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/live/live_hook.py": {
+     "hits": 1,
+     "hit_lines": [
+      65
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/live/live_matrix.py": {
+     "hits": 2,
+     "hit_lines": [
+      104,
+      151
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/sim_harness.py": {
+     "hits": 6,
+     "hit_lines": [
+      286,
+      566,
+      757,
+      758,
+      766
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/sim_scenarios_spec16.py": {
+     "hits": 1,
+     "hit_lines": [
+      274
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_async_gate.py": {
+     "hits": 2,
+     "hit_lines": [
+      13,
+      82
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_deep_gate.py": {
+     "hits": 1,
+     "hit_lines": [
+      77
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_docs_gate.py": {
+     "hits": 2,
+     "hit_lines": [
+      109,
+      111
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_docs_generator.py": {
+     "hits": 1,
+     "hit_lines": [
+      98
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_doctor_backend.py": {
+     "hits": 1,
+     "hit_lines": [
+      43
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_fail_closed.py": {
+     "hits": 1,
+     "hit_lines": [
+      79
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_final_acceptance_registry.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_complete_standalone.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_composition.py": {
+     "hits": 1,
+     "hit_lines": [
+      423
+     ],
+     "comment_hits": 0,
+     "via": [
+      "glob",
+      "grep",
+      "path"
+     ]
+    },
+    "tests/test_final_context.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_credentials.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_dynamic.py": {
+     "hits": 10,
+     "hit_lines": [
+      120,
+      163,
+      250,
+      300,
+      339
+     ],
+     "comment_hits": 0,
+     "via": [
+      "glob",
+      "grep"
+     ]
+    },
+    "tests/test_final_github_stack.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_graph.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_lenses.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_materialize.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_memory.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_observability.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_observability_integration.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_provider_github.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_provider_gitlab.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_publication.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_review_cli.py": {
+     "hits": 2,
+     "hit_lines": [
+      156,
+      157
+     ],
+     "comment_hits": 0,
+     "via": [
+      "glob",
+      "grep"
+     ]
+    },
+    "tests/test_final_stack.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_stops.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_store.py": {
+     "hits": 9,
+     "hit_lines": [
+      67,
+      68,
+      72,
+      74,
+      90
+     ],
+     "comment_hits": 0,
+     "via": [
+      "glob",
+      "grep"
+     ]
+    },
+    "tests/test_final_verification.py": {
+     "hits": 1,
+     "hit_lines": [
+      151
+     ],
+     "comment_hits": 0,
+     "via": [
+      "glob",
+      "grep"
+     ]
+    },
+    "tests/test_final_views.py": {
+     "hits": 7,
+     "hit_lines": [
+      594,
+      595,
+      599,
+      622,
+      630
+     ],
+     "comment_hits": 0,
+     "via": [
+      "glob",
+      "grep"
+     ]
+    },
+    "tests/test_fixture_e2e.py": {
+     "hits": 1,
+     "hit_lines": [
+      7
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_harness_hint.py": {
+     "hits": 1,
+     "hit_lines": [
+      33
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_hook_passthrough.py": {
+     "hits": 2,
+     "hit_lines": [
+      40,
+      44
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_impact_gate.py": {
+     "hits": 2,
+     "hit_lines": [
+      70,
+      76
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_install_hooks_path.py": {
+     "hits": 2,
+     "hit_lines": [
+      58,
+      69
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_intent_e2e.py": {
+     "hits": 1,
+     "hit_lines": [
+      88
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_memory_gate.py": {
+     "hits": 1,
+     "hit_lines": [
+      60
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_ocr_doctor.py": {
+     "hits": 1,
+     "hit_lines": [
+      70
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_ocr_janitor.py": {
+     "hits": 2,
+     "hit_lines": [
+      99,
+      330
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_parallel_checks.py": {
+     "hits": 1,
+     "hit_lines": [
+      94
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_parallel_chunks.py": {
+     "hits": 2,
+     "hit_lines": [
+      313,
+      315
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_pre_push_resolver.py": {
+     "hits": 1,
+     "hit_lines": [
+      123
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_resolution_validity.py": {
+     "hits": 2,
+     "hit_lines": [
+      447,
+      450
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_resolver_robustness.py": {
+     "hits": 2,
+     "hit_lines": [
+      74,
+      79
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_review_gate.py": {
+     "hits": 6,
+     "hit_lines": [
+      923,
+      928,
+      1815,
+      1836,
+      1850
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_scripts_gate_hook.py": {
+     "hits": 2,
+     "hit_lines": [
+      47,
+      48
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_sim_harness.py": {
+     "hits": 2,
+     "hit_lines": [
+      496,
+      593
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_skip_logging.py": {
+     "hits": 1,
+     "hit_lines": [
+      67
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_spotter_gate.py": {
+     "hits": 1,
+     "hit_lines": [
+      69
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_state_machine.py": {
+     "hits": 1,
+     "hit_lines": [
+      62
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_t26_installer_sync_config.py": {
+     "hits": 2,
+     "hit_lines": [
+      205,
+      230
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_telemetry_wiring.py": {
+     "hits": 1,
+     "hit_lines": [
+      80
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_tier1_guard.py": {
+     "hits": 1,
+     "hit_lines": [
+      77
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_time_metrics.py": {
+     "hits": 5,
+     "hit_lines": [
+      152,
+      172,
+      182,
+      246,
+      247
+     ],
+     "comment_hits": 1,
+     "via": [
+      "grep"
+     ]
+    },
+    "tests/test_waivers.py": {
+     "hits": 1,
+     "hit_lines": [
+      81
+     ],
+     "comment_hits": 0,
+     "via": [
+      "grep"
+     ]
+    }
+   },
+   "delivers": "main"
+  },
+  {
+   "id": "R6",
+   "title": "Focused/full verification and repeat reviewer",
+   "kind": "verify",
+   "size": "small",
+   "readonly": true,
+   "depends_on": [
+    "R1",
+    "R2",
+    "R3",
+    "R4",
+    "R5"
+   ],
+   "seeds": {
+    "symbols": [],
+    "patterns": [],
+    "paths": [],
+    "globs": [
+     "tests/**/*verification*",
+     "tests/**/*final*",
+     "tests/**/*gitlab*",
+     "tests/**/*security*",
+     "tests/**/*material*"
+    ]
+   },
+   "planned": [
+    "tests/**/*security*"
+   ],
+   "excluded": {
+    "hits": 0,
+    "files": 0
+   },
+   "hits": {
+    "tests/test_final_acceptance_registry.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_complete_standalone.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_composition.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_context.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_credentials.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_dynamic.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_github_stack.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_graph.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_lenses.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_materialize.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_memory.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_observability.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_observability_integration.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_provider_github.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_provider_gitlab.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_publication.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_review_cli.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_stack.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_stops.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_store.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_verification.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    },
+    "tests/test_final_views.py": {
+     "hits": 0,
+     "hit_lines": [],
+     "comment_hits": 0,
+     "via": [
+      "glob"
+     ]
+    }
+   },
+   "delivers": "main"
+  }
+ ],
+ "files": {
+  ".github/workflows/ci.yml": {
+   "lines": 112,
+   "bytes": 3766,
+   "tokens_est": 942,
+   "tokens_narrow": 185,
+   "lang": "config",
+   "is_test": false,
+   "tests": []
+  },
+  ".kimchi/docs/review.md": {
+   "lines": 17,
+   "bytes": 3332,
+   "tokens_est": 833,
+   "tokens_narrow": 833,
+   "lang": "docs",
+   "is_test": false,
+   "tests": []
+  },
+  ".kimchi/plans/comment-consistency-checks-spec.md": {
+   "lines": 141,
+   "bytes": 8847,
+   "tokens_est": 2212,
+   "tokens_narrow": 863,
+   "lang": "docs",
+   "is_test": false,
+   "tests": []
+  },
+  "CHANGELOG.md": {
+   "lines": 2062,
+   "bytes": 131710,
+   "tokens_est": 32928,
+   "tokens_narrow": 4631,
+   "lang": "docs",
+   "is_test": false,
+   "tests": []
+  },
+  "LICENSE": {
+   "lines": 201,
+   "bytes": 11326,
+   "tokens_est": 2832,
+   "tokens_narrow": 930,
+   "lang": "other",
+   "is_test": false,
+   "tests": [],
+   "importers_n": 0,
+   "importers": []
+  },
+  "README.md": {
+   "lines": 500,
+   "bytes": 29053,
+   "tokens_est": 7264,
+   "tokens_narrow": 959,
+   "lang": "docs",
+   "is_test": false,
+   "tests": []
+  },
+  "agents/code-reviewer.md": {
+   "lines": 414,
+   "bytes": 24350,
+   "tokens_est": 6088,
+   "tokens_narrow": 2221,
+   "lang": "docs",
+   "is_test": false,
+   "tests": []
+  },
+  "agents/context-spotter.md": {
+   "lines": 88,
+   "bytes": 4058,
+   "tokens_est": 1015,
+   "tokens_narrow": 312,
+   "lang": "docs",
+   "is_test": false,
+   "tests": []
+  },
+  "agents/deep-reviewer.md": {
+   "lines": 207,
+   "bytes": 11696,
+   "tokens_est": 2924,
+   "tokens_narrow": 1342,
+   "lang": "docs",
+   "is_test": false,
+   "tests": []
+  },
+  "agents/docs-checker.md": {
+   "lines": 301,
+   "bytes": 18675,
+   "tokens_est": 4669,
+   "tokens_narrow": 1490,
+   "lang": "docs",
+   "is_test": false,
+   "tests": []
+  },
+  "docs/adr/0001-loosening-verdict-validation-for-enumerated-improvised-report-families.md": {
+   "lines": 99,
+   "bytes": 5509,
+   "tokens_est": 1378,
+   "tokens_narrow": 432,
+   "lang": "docs",
+   "is_test": false,
+   "tests": []
+  },
+  "docs/adr/0003-wave-2-environment-switch-semantics.md": {
+   "lines": 113,
+   "bytes": 6084,
+   "tokens_est": 1521,
+   "tokens_narrow": 418,
+   "lang": "docs",
+   "is_test": false,
+   "tests": []
+  },
+  "docs/adr/0006-custom-checks-and-documentation-quality-duties.md": {
+   "lines": 172,
+   "bytes": 10565,
+   "tokens_est": 2642,
+   "tokens_narrow": 477,
+   "lang": "docs",
+   "is_test": false,
+   "tests": []
+  },
+  "docs/adr/0007-race-regression-test-checks-and-finding-waivers.md": {
+   "lines": 249,
+   "bytes": 14088,
+   "tokens_est": 3522,
+   "tokens_narrow": 1245,
+   "lang": "docs",
+   "is_test": false,
+   "tests": []
+  },
+  "docs/adr/0008-explicit-final-whole-stack-review.md": {
+   "lines": 274,
+   "bytes": 19864,
+   "tokens_est": 4966,
+   "tokens_narrow": 3770,
+   "lang": "docs",
+   "is_test": false,
+   "tests": []
+  },
+  "docs/architecture-split-proposal.md": {
+   "lines": 117,
+   "bytes": 7338,
+   "tokens_est": 1835,
+   "tokens_narrow": 847,
+   "lang": "docs",
+   "is_test": false,
+   "tests": []
+  },
+  "docs/plans/restack-content-keyed-coverage.md": {
+   "lines": 314,
+   "bytes": 15358,
+   "tokens_est": 3840,
+   "tokens_narrow": 380,
+   "lang": "docs",
+   "is_test": false,
+   "tests": []
+  },
+  "docs/plans/resume-truncated-chunks.md": {
+   "lines": 545,
+   "bytes": 27838,
+   "tokens_est": 6960,
+   "tokens_narrow": 588,
+   "lang": "docs",
+   "is_test": false,
+   "tests": []
+  },
+  "docs/specs/unified-review-gate.md": {
+   "lines": 130,
+   "bytes": 18985,
+   "tokens_est": 4747,
+   "tokens_narrow": 658,
+   "lang": "docs",
+   "is_test": true,
+   "tests": [
+    "docs/specs/unified-review-gate.md"
+   ]
+  },
+  "examples/test-check/README.md": {
+   "lines": 149,
+   "bytes": 7569,
+   "tokens_est": 1893,
+   "tokens_narrow": 1143,
+   "lang": "docs",
+   "is_test": false,
+   "tests": []
+  },
+  "examples/test-check/test_check": {
+   "lines": 747,
+   "bytes": 32932,
+   "tokens_est": 8233,
+   "tokens_narrow": 1367,
+   "lang": "other",
+   "is_test": true,
+   "tests": [
+    "examples/test-check/test_check"
+   ]
+  },
+  "hooks/git/pre-push": {
+   "lines": 151,
+   "bytes": 6428,
+   "tokens_est": 1607,
+   "tokens_narrow": 330,
+   "lang": "other",
+   "is_test": false,
+   "tests": [],
+   "importers_n": 0,
+   "importers": []
+  },
+  "hooks/sh/gate-hook.sh": {
+   "lines": 677,
+   "bytes": 27791,
+   "tokens_est": 6948,
+   "tokens_narrow": 319,
+   "lang": "shell",
+   "is_test": false,
+   "tests": [
+    "tests/test_scripts_gate_hook.py",
+    "tests/test_harness_hint.py",
+    "tests/test_hook_passthrough.py",
+    "tests/test_t26_installer_sync_config.py"
+   ],
+   "importers_n": 0,
+   "importers": []
+  },
+  "schemas/demands.schema.json": {
+   "lines": 96,
+   "bytes": 2278,
+   "tokens_est": 570,
+   "tokens_narrow": 315,
+   "lang": "config",
+   "is_test": false,
+   "tests": []
+  },
+  "schemas/docsquality.schema.json": {
+   "lines": 286,
+   "bytes": 8175,
+   "tokens_est": 2044,
+   "tokens_narrow": 1973,
+   "lang": "config",
+   "is_test": false,
+   "tests": []
+  },
+  "schemas/finding.schema.json": {
+   "lines": 82,
+   "bytes": 3103,
+   "tokens_est": 776,
+   "tokens_narrow": 587,
+   "lang": "config",
+   "is_test": false,
+   "tests": []
+  },
+  "scripts/gate-hook.sh": {
+   "lines": 143,
+   "bytes": 7316,
+   "tokens_est": 1829,
+   "tokens_narrow": 397,
+   "lang": "shell",
+   "is_test": false,
+   "tests": [
+    "tests/test_scripts_gate_hook.py",
+    "tests/test_harness_hint.py",
+    "tests/test_hook_passthrough.py",
+    "tests/test_t26_installer_sync_config.py"
+   ],
+   "importers_n": 0,
+   "importers": []
+  },
+  "scripts/install-kimchi-hook.sh": {
+   "lines": 171,
+   "bytes": 7971,
+   "tokens_est": 1993,
+   "tokens_narrow": 362,
+   "lang": "shell",
+   "is_test": false,
+   "tests": [
+    "tests/test_install_hooks_path.py",
+    "tests/test_ocr_doctor.py"
+   ],
+   "importers_n": 0,
+   "importers": []
+  },
+  "scripts/ocr_calibrate.py": {
+   "lines": 574,
+   "bytes": 25030,
+   "tokens_est": 6258,
+   "tokens_narrow": 1930,
+   "lang": "python",
+   "is_test": false,
+   "tests": [
+    "tests/test_ocr_calibrate.py"
+   ],
+   "importers_n": 1,
+   "importers": [
+    "tests/test_ocr_calibrate.py"
+   ]
+  },
+  "scripts/ocr_conventions.py": {
+   "lines": 289,
+   "bytes": 11420,
+   "tokens_est": 2855,
+   "tokens_narrow": 297,
+   "lang": "python",
+   "is_test": false,
+   "tests": [
+    "tests/test_fixture_m2_convention.py",
+    "tests/test_conventions.py",
+    "tests/test_claude_profile.py"
+   ],
+   "importers_n": 3,
+   "importers": [
+    "scripts/ocr_collectors.py",
+    "tests/test_conventions.py",
+    "tests/test_fixture_m2_convention.py"
+   ]
+  },
+  "scripts/ocr_demands.py": {
+   "lines": 283,
+   "bytes": 11936,
+   "tokens_est": 2984,
+   "tokens_narrow": 401,
+   "lang": "python",
+   "is_test": false,
+   "tests": [
+    "tests/test_demands.py",
+    "tests/test_fixture_degradation.py",
+    "tests/test_gate_finding_regressions.py",
+    "tests/test_telemetry_wiring.py"
+   ],
+   "importers_n": 4,
+   "importers": [
+    "scripts/ocr_collectors.py",
+    "tests/test_demands.py",
+    "tests/test_fixture_degradation.py",
+    "tests/test_gate_finding_regressions.py"
+   ]
+  },
+  "scripts/ocr_docsquality.py": {
+   "lines": 735,
+   "bytes": 30969,
+   "tokens_est": 7743,
+   "tokens_narrow": 1486,
+   "lang": "python",
+   "is_test": false,
+   "tests": [
+    "tests/test_docsquality.py",
+    "tests/test_docs_gate.py"
+   ],
+   "importers_n": 2,
+   "importers": [
+    "scripts/review-gate.py",
+    "tests/test_docsquality.py"
+   ]
+  },
+  "scripts/ocr_doctor.py": {
+   "lines": 690,
+   "bytes": 28152,
+   "tokens_est": 7038,
+   "tokens_narrow": 317,
+   "lang": "python",
+   "is_test": false,
+   "tests": [
+    "tests/test_ocr_doctor.py"
+   ],
+   "importers_n": 1,
+   "importers": [
+    "tests/test_gate_finding_regressions.py"
+   ]
+  },
+  "scripts/ocr_electron.py": {
+   "lines": 486,
+   "bytes": 20222,
+   "tokens_est": 5056,
+   "tokens_narrow": 302,
+   "lang": "python",
+   "is_test": false,
+   "tests": [
+    "tests/test_ocr_electron.py"
+   ],
+   "importers_n": 0,
+   "importers": []
+  },
+  "scripts/ocr_index.py": {
+   "lines": 684,
+   "bytes": 27163,
+   "tokens_est": 6791,
+   "tokens_narrow": 1073,
+   "lang": "python",
+   "is_test": false,
+   "tests": [
+    "tests/test_ocr_index.py"
+   ],
+   "importers_n": 11,
+   "importers": [
+    "scripts/ocr_collectors.py",
+    "scripts/ocr_forge.py",
+    "scripts/review-gate.py",
+    "tests/test_collectors.py",
+    "tests/test_fixture_degradation.py",
+    "tests/test_fixture_m1_remount.py",
+    "tests/test_fixture_m4_pointer.py",
+    "tests/test_forge.py",
+    "tests/test_gate_finding_regressions.py",
+    "tests/test_index.py",
+    "tests/test_ocr_index.py"
+   ]
+  },
+  "scripts/ocr_janitor.py": {
+   "lines": 410,
+   "bytes": 15150,
+   "tokens_est": 3788,
+   "tokens_narrow": 287,
+   "lang": "python",
+   "is_test": false,
+   "tests": [
+    "tests/test_ocr_janitor.py"
+   ],
+   "importers_n": 1,
+   "importers": [
+    "tests/test_ocr_impact.py"
+   ]
+  },
+  "scripts/ocr_report.py": {
+   "lines": 173,
+   "bytes": 6782,
+   "tokens_est": 1696,
+   "tokens_narrow": 216,
+   "lang": "python",
+   "is_test": false,
+   "tests": [],
+   "importers_n": 0,
+   "importers": []
+  },
+  "scripts/ocr_verdict.py": {
+   "lines": 257,
+   "bytes": 11265,
+   "tokens_est": 2817,
+   "tokens_narrow": 340,
+   "lang": "python",
+   "is_test": false,
+   "tests": [
+    "tests/test_comment_gate.py",
+    "tests/test_intent_gap.py",
+    "tests/test_parallel_chunks.py",
+    "tests/test_deep_gate.py"
+   ],
+   "importers_n": 8,
+   "importers": [
+    "scripts/review-gate.py",
+    "scripts/rg_final_execution.py",
+    "scripts/rg_final_lenses.py",
+    "scripts/rg_final_store.py",
+    "tests/test_comment_gate.py",
+    "tests/test_intent_gap.py",
+    "tests/test_memory.py",
+    "tests/test_parallel_chunks.py"
+   ]
+  },
+  "scripts/review-gate.py": {
+   "lines": 14895,
+   "bytes": 700365,
+   "tokens_est": 175092,
+   "tokens_narrow": 5490,
+   "lang": "python",
+   "is_test": false,
+   "tests": [
+    "tests/test_review_gate.py"
+   ],
+   "importers_n": 2,
+   "importers": [
+    "extensions/review-gate-deny.test.mjs",
+    "scripts/ocr_profile.py"
+   ]
+  },
+  "scripts/rg_config.py": {
+   "lines": 391,
+   "bytes": 17475,
+   "tokens_est": 4369,
+   "tokens_narrow": 1520,
+   "lang": "python",
+   "is_test": false,
+   "tests": [
+    "tests/test_rg_config.py"
+   ],
+   "importers_n": 7,
+   "importers": [
+    "scripts/review-gate.py",
+    "tests/test_docs_gate.py",
+    "tests/test_executor_testcheck.py",
+    "tests/test_final_verification.py",
+    "tests/test_rg_config.py",
+    "tests/test_rg_ticket_fetch.py",
+    "tests/test_rg_tickets.py"
+   ]
+  },
+  "scripts/rg_final_acceptance.py": {
+   "lines": 256,
+   "bytes": 14230,
+   "tokens_est": 3558,
+   "tokens_narrow": 1487,
+   "lang": "python",
+   "is_test": false,
+   "tests": [
+    "tests/sim_scenarios_spec16.py",
+    "tests/test_final_acceptance_registry.py",
+    "tests/test_final_store.py",
+    "tests/test_final_views.py"
+   ],
+   "importers_n": 4,
+   "importers": [
+    "scripts/rg_final_store.py",
+    "tests/test_final_acceptance_registry.py",
+    "tests/test_final_store.py",
+    "tests/test_final_views.py"
+   ]
+  },
+  "scripts/rg_final_compose.py": {
+   "lines": 358,
+   "bytes": 14772,
+   "tokens_est": 3693,
+   "tokens_narrow": 640,
+   "lang": "python",
+   "is_test": false,
+   "tests": [
+    "tests/test_final_composition.py"
+   ],
+   "importers_n": 3,
+   "importers": [
+    "scripts/rg_final_review.py",
+    "scripts/rg_final_stack.py",
+    "tests/test_final_composition.py"
+   ]
+  },
+  "scripts/rg_final_context.py": {
+   "lines": 293,
+   "bytes": 11478,
+   "tokens_est": 2870,
+   "tokens_narrow": 1832,
+   "lang": "python",
+   "is_test": false,
+   "tests": [
+    "tests/test_final_context.py"
+   ],
+   "importers_n": 3,
+   "importers": [
+    "scripts/rg_final_review.py",
+    "scripts/rg_final_stack.py",
+    "tests/test_final_context.py"
+   ]
+  },
+  "scripts/rg_final_contract.py": {
+   "lines": 98,
+   "bytes": 15262,
+   "tokens_est": 3816,
+   "tokens_narrow": 2726,
+   "lang": "python",
+   "is_test": false,
+   "tests": [
+    "tests/test_final_store.py",
+    "tests/test_final_views.py"
+   ],
+   "importers_n": 3,
+   "importers": [
+    "scripts/rg_final_store.py",
+    "tests/test_final_store.py",
+    "tests/test_final_views.py"
+   ]
+  },
+  "scripts/rg_final_dynamic.py": {
+   "lines": 427,
+   "bytes": 17289,
+   "tokens_est": 4323,
+   "tokens_narrow": 861,
+   "lang": "python",
+   "is_test": false,
+   "tests": [
+    "tests/sim_harness.py",
+    "tests/test_final_dynamic.py"
+   ],
+   "importers_n": 5,
+   "importers": [
+    "scripts/rg_final_execution.py",
+    "scripts/rg_final_review.py",
+    "scripts/rg_final_stack.py",
+    "tests/sim_harness.py",
+    "tests/test_final_dynamic.py"
+   ]
+  },
+  "scripts/rg_final_execution.py": {
+   "lines": 418,
+   "bytes": 18216,
+   "tokens_est": 4554,
+   "tokens_narrow": 3454,
+   "lang": "python",
+   "is_test": false,
+   "tests": [],
+   "importers_n": 2,
+   "importers": [
+    "scripts/rg_final_review.py",
+    "scripts/rg_final_stack.py"
+   ]
+  },
+  "scripts/rg_final_github.py": {
+   "lines": 229,
+   "bytes": 9915,
+   "tokens_est": 2479,
+   "tokens_narrow": 910,
+   "lang": "python",
+   "is_test": false,
+   "tests": [
+    "tests/test_final_provider_github.py",
+    "tests/test_final_github_stack.py"
+   ],
+   "importers_n": 3,
+   "importers": [
+    "scripts/rg_final_provider.py",
+    "tests/test_final_github_stack.py",
+    "tests/test_final_provider_github.py"
+   ]
+  },
+  "scripts/rg_final_gitlab.py": {
+   "lines": 208,
+   "bytes": 8663,
+   "tokens_est": 2166,
+   "tokens_narrow": 1031,
+   "lang": "python",
+   "is_test": false,
+   "tests": [
+    "tests/test_final_provider_gitlab.py",
+    "tests/test_final_graph.py"
+   ],
+   "importers_n": 5,
+   "importers": [
+    "scripts/rg_final_provider.py",
+    "scripts/rg_final_review.py",
+    "scripts/rg_final_stack.py",
+    "tests/test_final_graph.py",
+    "tests/test_final_provider_gitlab.py"
+   ]
+  },
+  "scripts/rg_final_graph.py": {
+   "lines": 325,
+   "bytes": 13436,
+   "tokens_est": 3359,
+   "tokens_narrow": 321,
+   "lang": "python",
+   "is_test": false,
+   "tests": [
+    "tests/test_final_graph.py",
+    "tests/test_final_provider_github.py",
+    "tests/test_final_complete_standalone.py",
+    "tests/test_final_github_stack.py"
+   ],
+   "importers_n": 7,
+   "importers": [
+    "scripts/rg_final_compose.py",
+    "scripts/rg_final_review.py",
+    "scripts/rg_final_stack.py",
+    "tests/test_final_complete_standalone.py",
+    "tests/test_final_github_stack.py",
+    "tests/test_final_graph.py",
+    "tests/test_final_provider_github.py"
+   ]
+  },
+  "scripts/rg_final_lenses.py": {
+   "lines": 342,
+   "bytes": 14165,
+   "tokens_est": 3542,
+   "tokens_narrow": 1616,
+   "lang": "python",
+   "is_test": false,
+   "tests": [
+    "tests/test_final_complete_standalone.py",
+    "tests/test_final_lenses.py",
+    "tests/test_final_stack.py",
+    "tests/test_final_stops.py"
+   ],
+   "importers_n": 7,
+   "importers": [
+    "scripts/rg_final_execution.py",
+    "scripts/rg_final_review.py",
+    "scripts/rg_final_stack.py",
+    "tests/test_final_complete_standalone.py",
+    "tests/test_final_lenses.py",
+    "tests/test_final_stack.py",
+    "tests/test_final_stops.py"
+   ]
+  },
+  "scripts/rg_final_materialize.py": {
+   "lines": 236,
+   "bytes": 9559,
+   "tokens_est": 2390,
+   "tokens_narrow": 2238,
+   "lang": "python",
+   "is_test": false,
+   "tests": [
+    "tests/test_final_context.py",
+    "tests/test_final_materialize.py"
+   ],
+   "importers_n": 5,
+   "importers": [
+    "scripts/rg_final_dynamic.py",
+    "scripts/rg_final_review.py",
+    "scripts/rg_final_stack.py",
+    "tests/test_final_context.py",
+    "tests/test_final_materialize.py"
+   ]
+  },
+  "scripts/rg_final_memory.py": {
+   "lines": 447,
+   "bytes": 19352,
+   "tokens_est": 4838,
+   "tokens_narrow": 3388,
+   "lang": "python",
+   "is_test": false,
+   "tests": [
+    "tests/test_final_memory.py",
+    "tests/test_final_publication.py"
+   ],
+   "importers_n": 5,
+   "importers": [
+    "scripts/rg_final_review.py",
+    "scripts/rg_final_stack.py",
+    "scripts/rg_final_store.py",
+    "tests/test_final_memory.py",
+    "tests/test_final_publication.py"
+   ]
+  },
+  "scripts/rg_final_provider.py": {
+   "lines": 232,
+   "bytes": 9057,
+   "tokens_est": 2265,
+   "tokens_narrow": 303,
+   "lang": "python",
+   "is_test": false,
+   "tests": [
+    "tests/test_final_provider_github.py",
+    "tests/test_final_provider_gitlab.py",
+    "tests/test_final_graph.py",
+    "tests/test_final_complete_standalone.py"
+   ],
+   "importers_n": 10,
+   "importers": [
+    "scripts/rg_final_github.py",
+    "scripts/rg_final_gitlab.py",
+    "scripts/rg_final_graph.py",
+    "scripts/rg_final_publish.py",
+    "scripts/rg_final_review.py",
+    "scripts/rg_final_store.py",
+    "tests/test_final_complete_standalone.py",
+    "tests/test_final_graph.py",
+    "tests/test_final_provider_github.py",
+    "tests/test_final_provider_gitlab.py"
+   ]
+  },
+  "scripts/rg_final_publish.py": {
+   "lines": 319,
+   "bytes": 15609,
+   "tokens_est": 3903,
+   "tokens_narrow": 1260,
+   "lang": "python",
+   "is_test": false,
+   "tests": [
+    "tests/test_final_provider_github.py",
+    "tests/test_final_complete_standalone.py",
+    "tests/test_final_github_stack.py",
+    "tests/test_final_publication.py"
+   ],
+   "importers_n": 7,
+   "importers": [
+    "scripts/rg_final_review.py",
+    "scripts/rg_final_stack.py",
+    "tests/test_final_complete_standalone.py",
+    "tests/test_final_github_stack.py",
+    "tests/test_final_provider_github.py",
+    "tests/test_final_publication.py",
+    "tests/test_final_stack.py"
+   ]
+  },
+  "scripts/rg_final_review.py": {
+   "lines": 1796,
+   "bytes": 90675,
+   "tokens_est": 22669,
+   "tokens_narrow": 15349,
+   "lang": "python",
+   "is_test": false,
+   "tests": [
+    "tests/test_final_complete_standalone.py",
+    "tests/test_final_stops.py",
+    "tests/test_final_composition.py",
+    "tests/test_final_github_stack.py"
+   ],
+   "importers_n": 10,
+   "importers": [
+    "scripts/review-gate.py",
+    "scripts/rg_final_stack.py",
+    "tests/test_final_complete_standalone.py",
+    "tests/test_final_composition.py",
+    "tests/test_final_github_stack.py",
+    "tests/test_final_lenses.py",
+    "tests/test_final_observability_integration.py",
+    "tests/test_final_stack.py",
+    "tests/test_final_stops.py",
+    "tests/test_worker_env.py"
+   ]
+  },
+  "scripts/rg_final_stack.py": {
+   "lines": 797,
+   "bytes": 37786,
+   "tokens_est": 9447,
+   "tokens_narrow": 5002,
+   "lang": "python",
+   "is_test": false,
+   "tests": [],
+   "importers_n": 1,
+   "importers": [
+    "scripts/rg_final_review.py"
+   ]
+  },
+  "scripts/rg_final_store.py": {
+   "lines": 2730,
+   "bytes": 132204,
+   "tokens_est": 33051,
+   "tokens_narrow": 16344,
+   "lang": "python",
+   "is_test": false,
+   "tests": [
+    "tests/test_final_store.py",
+    "tests/test_final_acceptance_registry.py",
+    "tests/sim_scenarios_spec16.py",
+    "tests/test_final_complete_standalone.py"
+   ],
+   "importers_n": 20,
+   "importers": [
+    "scripts/rg_final_publish.py",
+    "scripts/rg_final_review.py",
+    "scripts/rg_final_stack.py",
+    "scripts/rg_final_views.py",
+    "tests/sim_scenarios_spec16.py",
+    "tests/test_final_acceptance_registry.py",
+    "tests/test_final_complete_standalone.py",
+    "tests/test_final_composition.py",
+    "tests/test_final_dynamic.py",
+    "tests/test_final_github_stack.py",
+    "tests/test_final_lenses.py",
+    "tests/test_final_memory.py",
+    "tests/test_final_observability_integration.py",
+    "tests/test_final_provider_github.py",
+    "tests/test_final_publication.py",
+    "tests/test_final_review_cli.py",
+    "tests/test_final_stack.py",
+    "tests/test_final_stops.py",
+    "tests/test_final_store.py",
+    "tests/test_final_views.py"
+   ]
+  },
+  "scripts/rg_final_telemetry.py": {
+   "lines": 463,
+   "bytes": 17432,
+   "tokens_est": 4358,
+   "tokens_narrow": 2721,
+   "lang": "python",
+   "is_test": false,
+   "tests": [
+    "tests/test_final_observability.py",
+    "tests/test_final_observability_integration.py"
+   ],
+   "importers_n": 5,
+   "importers": [
+    "scripts/rg_final_review.py",
+    "scripts/rg_final_stack.py",
+    "scripts/rg_final_store.py",
+    "tests/test_final_observability.py",
+    "tests/test_final_observability_integration.py"
+   ]
+  },
+  "scripts/rg_final_verification.py": {
+   "lines": 422,
+   "bytes": 18162,
+   "tokens_est": 4541,
+   "tokens_narrow": 3314,
+   "lang": "python",
+   "is_test": false,
+   "tests": [
+    "tests/test_final_verification.py"
+   ],
+   "importers_n": 3,
+   "importers": [
+    "scripts/rg_final_review.py",
+    "scripts/rg_final_stack.py",
+    "tests/test_final_verification.py"
+   ]
+  },
+  "scripts/rg_final_views.py": {
+   "lines": 450,
+   "bytes": 16415,
+   "tokens_est": 4104,
+   "tokens_narrow": 1223,
+   "lang": "python",
+   "is_test": false,
+   "tests": [
+    "tests/test_final_store.py"
+   ],
+   "importers_n": 2,
+   "importers": [
+    "scripts/review-gate.py",
+    "tests/test_final_store.py"
+   ]
+  },
+  "scripts/rg_store.py": {
+   "lines": 436,
+   "bytes": 17092,
+   "tokens_est": 4273,
+   "tokens_narrow": 500,
+   "lang": "python",
+   "is_test": false,
+   "tests": [
+    "tests/test_state_machine.py",
+    "tests/test_restack_coverage.py",
+    "tests/test_verdict_coverage.py",
+    "tests/test_verdict_intent.py"
+   ],
+   "importers_n": 19,
+   "importers": [
+    "scripts/ocr_calibrate.py",
+    "scripts/ocr_report.py",
+    "scripts/review-gate.py",
+    "scripts/rg_config.py",
+    "scripts/rg_final_materialize.py",
+    "scripts/rg_ticket_fetch.py",
+    "tests/test_async_gate.py",
+    "tests/test_fail_closed.py",
+    "tests/test_final_materialize.py",
+    "tests/test_final_review_cli.py",
+    "tests/test_parallel_chunks.py",
+    "tests/test_pre_push_resolver.py",
+    "tests/test_restack_coverage.py",
+    "tests/test_restack_incremental.py",
+    "tests/test_rg_config.py",
+    "tests/test_state_machine.py",
+    "tests/test_verdict_coverage.py",
+    "tests/test_verdict_intent.py",
+    "tests/test_verdict_intent_wiring.py"
+   ]
+  },
+  "scripts/rg_ticket_fetch.py": {
+   "lines": 405,
+   "bytes": 18121,
+   "tokens_est": 4531,
+   "tokens_narrow": 347,
+   "lang": "python",
+   "is_test": false,
+   "tests": [
+    "tests/test_rg_ticket_fetch.py"
+   ],
+   "importers_n": 5,
+   "importers": [
+    "scripts/review-gate.py",
+    "scripts/rg_final_context.py",
+    "tests/test_final_context.py",
+    "tests/test_rg_jira_fetch.py",
+    "tests/test_rg_ticket_fetch.py"
+   ]
+  },
+  "scripts/uninstall-kimchi-hook.sh": {
+   "lines": 111,
+   "bytes": 4587,
+   "tokens_est": 1147,
+   "tokens_narrow": 321,
+   "lang": "shell",
+   "is_test": false,
+   "tests": [
+    "tests/test_t26_installer_sync_config.py",
+    "tests/test_install_hooks_path.py"
+   ],
+   "importers_n": 0,
+   "importers": []
+  },
+  "skills/review/SKILL.md": {
+   "lines": 1691,
+   "bytes": 92209,
+   "tokens_est": 23053,
+   "tokens_narrow": 2032,
+   "lang": "docs",
+   "is_test": false,
+   "tests": []
+  },
+  "tests/conftest.py": {
+   "lines": 178,
+   "bytes": 7537,
+   "tokens_est": 1885,
+   "tokens_narrow": 540,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/conftest.py"
+   ]
+  },
+  "tests/fixtures/json-mode-stream.jsonl": {
+   "lines": 31,
+   "bytes": 150165,
+   "tokens_est": 37542,
+   "tokens_narrow": 37542,
+   "lang": "other",
+   "is_test": true,
+   "tests": [
+    "tests/fixtures/json-mode-stream.jsonl"
+   ]
+  },
+  "tests/fixtures/miss_categories/builders.py": {
+   "lines": 527,
+   "bytes": 19405,
+   "tokens_est": 4852,
+   "tokens_narrow": 636,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/fixtures/miss_categories/builders.py"
+   ]
+  },
+  "tests/fixtures/repos/_c4_probe/agent-spawn-evidence.jsonl": {
+   "lines": 2,
+   "bytes": 32524,
+   "tokens_est": 8131,
+   "tokens_narrow": 8131,
+   "lang": "other",
+   "is_test": true,
+   "tests": [
+    "tests/fixtures/repos/_c4_probe/agent-spawn-evidence.jsonl"
+   ]
+  },
+  "tests/fixtures/repos/clean-ts.git/hooks/pre-commit.sample": {
+   "lines": 49,
+   "bytes": 1649,
+   "tokens_est": 413,
+   "tokens_narrow": 261,
+   "lang": "other",
+   "is_test": true,
+   "tests": [
+    "tests/fixtures/repos/clean-ts.git/hooks/pre-commit.sample"
+   ]
+  },
+  "tests/fixtures/repos/clean-ts.git/hooks/pre-rebase.sample": {
+   "lines": 169,
+   "bytes": 4898,
+   "tokens_est": 1225,
+   "tokens_narrow": 790,
+   "lang": "other",
+   "is_test": true,
+   "tests": [
+    "tests/fixtures/repos/clean-ts.git/hooks/pre-rebase.sample"
+   ]
+  },
+  "tests/fixtures/repos/clean-ts.git/hooks/push-to-checkout.sample": {
+   "lines": 78,
+   "bytes": 2783,
+   "tokens_est": 696,
+   "tokens_narrow": 393,
+   "lang": "other",
+   "is_test": true,
+   "tests": [
+    "tests/fixtures/repos/clean-ts.git/hooks/push-to-checkout.sample"
+   ]
+  },
+  "tests/fixtures/repos/electron-ts.git/hooks/pre-commit.sample": {
+   "lines": 49,
+   "bytes": 1649,
+   "tokens_est": 413,
+   "tokens_narrow": 261,
+   "lang": "other",
+   "is_test": true,
+   "tests": [
+    "tests/fixtures/repos/electron-ts.git/hooks/pre-commit.sample"
+   ]
+  },
+  "tests/fixtures/repos/electron-ts.git/hooks/pre-rebase.sample": {
+   "lines": 169,
+   "bytes": 4898,
+   "tokens_est": 1225,
+   "tokens_narrow": 790,
+   "lang": "other",
+   "is_test": true,
+   "tests": [
+    "tests/fixtures/repos/electron-ts.git/hooks/pre-rebase.sample"
+   ]
+  },
+  "tests/fixtures/repos/electron-ts.git/hooks/push-to-checkout.sample": {
+   "lines": 78,
+   "bytes": 2783,
+   "tokens_est": 696,
+   "tokens_narrow": 393,
+   "lang": "other",
+   "is_test": true,
+   "tests": [
+    "tests/fixtures/repos/electron-ts.git/hooks/push-to-checkout.sample"
+   ]
+  },
+  "tests/fixtures/repos/py-app.git/hooks/pre-commit.sample": {
+   "lines": 49,
+   "bytes": 1649,
+   "tokens_est": 413,
+   "tokens_narrow": 261,
+   "lang": "other",
+   "is_test": true,
+   "tests": [
+    "tests/fixtures/repos/py-app.git/hooks/pre-commit.sample"
+   ]
+  },
+  "tests/fixtures/repos/py-app.git/hooks/pre-rebase.sample": {
+   "lines": 169,
+   "bytes": 4898,
+   "tokens_est": 1225,
+   "tokens_narrow": 790,
+   "lang": "other",
+   "is_test": true,
+   "tests": [
+    "tests/fixtures/repos/py-app.git/hooks/pre-rebase.sample"
+   ]
+  },
+  "tests/fixtures/repos/py-app.git/hooks/push-to-checkout.sample": {
+   "lines": 78,
+   "bytes": 2783,
+   "tokens_est": 696,
+   "tokens_narrow": 393,
+   "lang": "other",
+   "is_test": true,
+   "tests": [
+    "tests/fixtures/repos/py-app.git/hooks/push-to-checkout.sample"
+   ]
+  },
+  "tests/live/live_hook.py": {
+   "lines": 132,
+   "bytes": 6578,
+   "tokens_est": 1645,
+   "tokens_narrow": 387,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/live/live_hook.py"
+   ]
+  },
+  "tests/live/live_matrix.py": {
+   "lines": 319,
+   "bytes": 16701,
+   "tokens_est": 4176,
+   "tokens_narrow": 812,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/live/live_matrix.py"
+   ]
+  },
+  "tests/sim_harness.py": {
+   "lines": 912,
+   "bytes": 42119,
+   "tokens_est": 10530,
+   "tokens_narrow": 3002,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/sim_harness.py"
+   ]
+  },
+  "tests/sim_scenarios_spec14.py": {
+   "lines": 412,
+   "bytes": 14767,
+   "tokens_est": 3692,
+   "tokens_narrow": 278,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/sim_scenarios_spec14.py"
+   ]
+  },
+  "tests/sim_scenarios_spec15.py": {
+   "lines": 397,
+   "bytes": 16278,
+   "tokens_est": 4070,
+   "tokens_narrow": 1169,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/sim_scenarios_spec15.py"
+   ]
+  },
+  "tests/sim_scenarios_spec16.py": {
+   "lines": 804,
+   "bytes": 40148,
+   "tokens_est": 10037,
+   "tokens_narrow": 3970,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/sim_scenarios_spec16.py"
+   ]
+  },
+  "tests/stub_reviewer.py": {
+   "lines": 727,
+   "bytes": 34440,
+   "tokens_est": 8610,
+   "tokens_narrow": 770,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/stub_reviewer.py"
+   ]
+  },
+  "tests/test_async_gate.py": {
+   "lines": 776,
+   "bytes": 35536,
+   "tokens_est": 8884,
+   "tokens_narrow": 676,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_async_gate.py"
+   ]
+  },
+  "tests/test_conventions.py": {
+   "lines": 410,
+   "bytes": 16871,
+   "tokens_est": 4218,
+   "tokens_narrow": 319,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_conventions.py"
+   ]
+  },
+  "tests/test_deep_gate.py": {
+   "lines": 379,
+   "bytes": 17351,
+   "tokens_est": 4338,
+   "tokens_narrow": 355,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_deep_gate.py"
+   ]
+  },
+  "tests/test_demands.py": {
+   "lines": 406,
+   "bytes": 17695,
+   "tokens_est": 4424,
+   "tokens_narrow": 894,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_demands.py"
+   ]
+  },
+  "tests/test_docs_gate.py": {
+   "lines": 2001,
+   "bytes": 96959,
+   "tokens_est": 24240,
+   "tokens_narrow": 2847,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_docs_gate.py"
+   ]
+  },
+  "tests/test_docs_generator.py": {
+   "lines": 346,
+   "bytes": 15917,
+   "tokens_est": 3980,
+   "tokens_narrow": 357,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_docs_generator.py"
+   ]
+  },
+  "tests/test_docsquality.py": {
+   "lines": 569,
+   "bytes": 23982,
+   "tokens_est": 5996,
+   "tokens_narrow": 359,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_docsquality.py"
+   ]
+  },
+  "tests/test_doctor_backend.py": {
+   "lines": 99,
+   "bytes": 4393,
+   "tokens_est": 1099,
+   "tokens_narrow": 344,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_doctor_backend.py"
+   ]
+  },
+  "tests/test_executor_testcheck.py": {
+   "lines": 631,
+   "bytes": 28503,
+   "tokens_est": 7126,
+   "tokens_narrow": 701,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_executor_testcheck.py"
+   ]
+  },
+  "tests/test_fail_closed.py": {
+   "lines": 185,
+   "bytes": 7217,
+   "tokens_est": 1805,
+   "tokens_narrow": 303,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_fail_closed.py"
+   ]
+  },
+  "tests/test_final_acceptance_registry.py": {
+   "lines": 317,
+   "bytes": 14685,
+   "tokens_est": 3672,
+   "tokens_narrow": 1506,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_final_acceptance_registry.py"
+   ]
+  },
+  "tests/test_final_complete_standalone.py": {
+   "lines": 869,
+   "bytes": 36414,
+   "tokens_est": 9104,
+   "tokens_narrow": 7344,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_final_complete_standalone.py"
+   ]
+  },
+  "tests/test_final_composition.py": {
+   "lines": 496,
+   "bytes": 21930,
+   "tokens_est": 5483,
+   "tokens_narrow": 1371,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_final_composition.py"
+   ]
+  },
+  "tests/test_final_context.py": {
+   "lines": 417,
+   "bytes": 17931,
+   "tokens_est": 4483,
+   "tokens_narrow": 2559,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_final_context.py"
+   ]
+  },
+  "tests/test_final_credentials.py": {
+   "lines": 188,
+   "bytes": 7090,
+   "tokens_est": 1773,
+   "tokens_narrow": 585,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_final_credentials.py"
+   ]
+  },
+  "tests/test_final_dynamic.py": {
+   "lines": 483,
+   "bytes": 19820,
+   "tokens_est": 4955,
+   "tokens_narrow": 4022,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_final_dynamic.py"
+   ]
+  },
+  "tests/test_final_github_stack.py": {
+   "lines": 297,
+   "bytes": 12796,
+   "tokens_est": 3199,
+   "tokens_narrow": 2467,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_final_github_stack.py"
+   ]
+  },
+  "tests/test_final_graph.py": {
+   "lines": 396,
+   "bytes": 15860,
+   "tokens_est": 3965,
+   "tokens_narrow": 311,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_final_graph.py"
+   ]
+  },
+  "tests/test_final_lenses.py": {
+   "lines": 518,
+   "bytes": 20433,
+   "tokens_est": 5109,
+   "tokens_narrow": 2910,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_final_lenses.py"
+   ]
+  },
+  "tests/test_final_materialize.py": {
+   "lines": 209,
+   "bytes": 9168,
+   "tokens_est": 2292,
+   "tokens_narrow": 1075,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_final_materialize.py"
+   ]
+  },
+  "tests/test_final_memory.py": {
+   "lines": 541,
+   "bytes": 23118,
+   "tokens_est": 5780,
+   "tokens_narrow": 3772,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_final_memory.py"
+   ]
+  },
+  "tests/test_final_observability.py": {
+   "lines": 593,
+   "bytes": 19176,
+   "tokens_est": 4794,
+   "tokens_narrow": 1359,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_final_observability.py"
+   ]
+  },
+  "tests/test_final_observability_integration.py": {
+   "lines": 190,
+   "bytes": 8717,
+   "tokens_est": 2180,
+   "tokens_narrow": 1228,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_final_observability_integration.py"
+   ]
+  },
+  "tests/test_final_provider_github.py": {
+   "lines": 603,
+   "bytes": 22971,
+   "tokens_est": 5743,
+   "tokens_narrow": 591,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_final_provider_github.py"
+   ]
+  },
+  "tests/test_final_provider_gitlab.py": {
+   "lines": 322,
+   "bytes": 11658,
+   "tokens_est": 2915,
+   "tokens_narrow": 1449,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_final_provider_gitlab.py"
+   ]
+  },
+  "tests/test_final_publication.py": {
+   "lines": 673,
+   "bytes": 27107,
+   "tokens_est": 6777,
+   "tokens_narrow": 937,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_final_publication.py"
+   ]
+  },
+  "tests/test_final_review_cli.py": {
+   "lines": 789,
+   "bytes": 34606,
+   "tokens_est": 8652,
+   "tokens_narrow": 4288,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_final_review_cli.py"
+   ]
+  },
+  "tests/test_final_stack.py": {
+   "lines": 548,
+   "bytes": 24279,
+   "tokens_est": 6070,
+   "tokens_narrow": 4431,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_final_stack.py"
+   ]
+  },
+  "tests/test_final_stops.py": {
+   "lines": 441,
+   "bytes": 18215,
+   "tokens_est": 4554,
+   "tokens_narrow": 4183,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_final_stops.py"
+   ]
+  },
+  "tests/test_final_store.py": {
+   "lines": 850,
+   "bytes": 36598,
+   "tokens_est": 9150,
+   "tokens_narrow": 4328,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_final_store.py"
+   ]
+  },
+  "tests/test_final_verification.py": {
+   "lines": 443,
+   "bytes": 16262,
+   "tokens_est": 4066,
+   "tokens_narrow": 4066,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_final_verification.py"
+   ]
+  },
+  "tests/test_final_views.py": {
+   "lines": 755,
+   "bytes": 33439,
+   "tokens_est": 8360,
+   "tokens_narrow": 3200,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_final_views.py"
+   ]
+  },
+  "tests/test_fixture_e2e.py": {
+   "lines": 152,
+   "bytes": 7222,
+   "tokens_est": 1806,
+   "tokens_narrow": 262,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_fixture_e2e.py"
+   ]
+  },
+  "tests/test_fixture_m2_convention.py": {
+   "lines": 179,
+   "bytes": 8645,
+   "tokens_est": 2162,
+   "tokens_narrow": 375,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_fixture_m2_convention.py"
+   ]
+  },
+  "tests/test_harness_hint.py": {
+   "lines": 64,
+   "bytes": 2957,
+   "tokens_est": 740,
+   "tokens_narrow": 359,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_harness_hint.py"
+   ]
+  },
+  "tests/test_hook_passthrough.py": {
+   "lines": 652,
+   "bytes": 28799,
+   "tokens_est": 7200,
+   "tokens_narrow": 387,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_hook_passthrough.py"
+   ]
+  },
+  "tests/test_impact_gate.py": {
+   "lines": 308,
+   "bytes": 15042,
+   "tokens_est": 3761,
+   "tokens_narrow": 452,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_impact_gate.py"
+   ]
+  },
+  "tests/test_install_hooks_path.py": {
+   "lines": 364,
+   "bytes": 17275,
+   "tokens_est": 4319,
+   "tokens_narrow": 499,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_install_hooks_path.py"
+   ]
+  },
+  "tests/test_intent_e2e.py": {
+   "lines": 279,
+   "bytes": 12325,
+   "tokens_est": 3082,
+   "tokens_narrow": 343,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_intent_e2e.py"
+   ]
+  },
+  "tests/test_ledger_scenarios.py": {
+   "lines": 1423,
+   "bytes": 67285,
+   "tokens_est": 16822,
+   "tokens_narrow": 367,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_ledger_scenarios.py"
+   ]
+  },
+  "tests/test_memory_gate.py": {
+   "lines": 153,
+   "bytes": 6588,
+   "tokens_est": 1647,
+   "tokens_narrow": 334,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_memory_gate.py"
+   ]
+  },
+  "tests/test_ocr_doctor.py": {
+   "lines": 536,
+   "bytes": 24143,
+   "tokens_est": 6036,
+   "tokens_narrow": 350,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_ocr_doctor.py"
+   ]
+  },
+  "tests/test_ocr_janitor.py": {
+   "lines": 335,
+   "bytes": 13734,
+   "tokens_est": 3434,
+   "tokens_narrow": 533,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_ocr_janitor.py"
+   ]
+  },
+  "tests/test_parallel_checks.py": {
+   "lines": 606,
+   "bytes": 28623,
+   "tokens_est": 7156,
+   "tokens_narrow": 367,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_parallel_checks.py"
+   ]
+  },
+  "tests/test_parallel_chunks.py": {
+   "lines": 517,
+   "bytes": 23739,
+   "tokens_est": 5935,
+   "tokens_narrow": 379,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_parallel_chunks.py"
+   ]
+  },
+  "tests/test_pre_push_resolver.py": {
+   "lines": 270,
+   "bytes": 11059,
+   "tokens_est": 2765,
+   "tokens_narrow": 318,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_pre_push_resolver.py"
+   ]
+  },
+  "tests/test_resolution_validity.py": {
+   "lines": 524,
+   "bytes": 23515,
+   "tokens_est": 5879,
+   "tokens_narrow": 382,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_resolution_validity.py"
+   ]
+  },
+  "tests/test_resolver_robustness.py": {
+   "lines": 511,
+   "bytes": 24588,
+   "tokens_est": 6147,
+   "tokens_narrow": 434,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_resolver_robustness.py"
+   ]
+  },
+  "tests/test_restack_incremental.py": {
+   "lines": 372,
+   "bytes": 15191,
+   "tokens_est": 3798,
+   "tokens_narrow": 266,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_restack_incremental.py"
+   ]
+  },
+  "tests/test_review_gate.py": {
+   "lines": 3431,
+   "bytes": 148573,
+   "tokens_est": 37144,
+   "tokens_narrow": 1440,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_review_gate.py"
+   ]
+  },
+  "tests/test_scripts_gate_hook.py": {
+   "lines": 165,
+   "bytes": 7470,
+   "tokens_est": 1868,
+   "tokens_narrow": 363,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_scripts_gate_hook.py"
+   ]
+  },
+  "tests/test_segment_gate.py": {
+   "lines": 736,
+   "bytes": 38427,
+   "tokens_est": 9607,
+   "tokens_narrow": 640,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_segment_gate.py"
+   ]
+  },
+  "tests/test_sim_harness.py": {
+   "lines": 649,
+   "bytes": 30338,
+   "tokens_est": 7585,
+   "tokens_narrow": 1450,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_sim_harness.py"
+   ]
+  },
+  "tests/test_skip_logging.py": {
+   "lines": 181,
+   "bytes": 7828,
+   "tokens_est": 1957,
+   "tokens_narrow": 336,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_skip_logging.py"
+   ]
+  },
+  "tests/test_spotter_gate.py": {
+   "lines": 175,
+   "bytes": 8091,
+   "tokens_est": 2023,
+   "tokens_narrow": 359,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_spotter_gate.py"
+   ]
+  },
+  "tests/test_state_machine.py": {
+   "lines": 271,
+   "bytes": 12153,
+   "tokens_est": 3039,
+   "tokens_narrow": 348,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_state_machine.py"
+   ]
+  },
+  "tests/test_t24_lows.py": {
+   "lines": 342,
+   "bytes": 14400,
+   "tokens_est": 3600,
+   "tokens_narrow": 327,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_t24_lows.py"
+   ]
+  },
+  "tests/test_t26_installer_sync_config.py": {
+   "lines": 258,
+   "bytes": 10729,
+   "tokens_est": 2683,
+   "tokens_narrow": 583,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_t26_installer_sync_config.py"
+   ]
+  },
+  "tests/test_telemetry_wiring.py": {
+   "lines": 292,
+   "bytes": 13489,
+   "tokens_est": 3373,
+   "tokens_narrow": 359,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_telemetry_wiring.py"
+   ]
+  },
+  "tests/test_tier1_guard.py": {
+   "lines": 364,
+   "bytes": 17227,
+   "tokens_est": 4307,
+   "tokens_narrow": 367,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_tier1_guard.py"
+   ]
+  },
+  "tests/test_time_metrics.py": {
+   "lines": 342,
+   "bytes": 15522,
+   "tokens_est": 3881,
+   "tokens_narrow": 1056,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_time_metrics.py"
+   ]
+  },
+  "tests/test_waivers.py": {
+   "lines": 643,
+   "bytes": 29969,
+   "tokens_est": 7493,
+   "tokens_narrow": 3426,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_waivers.py"
+   ]
+  },
+  "tests/test_wave2_findings.py": {
+   "lines": 353,
+   "bytes": 13606,
+   "tokens_est": 3402,
+   "tokens_narrow": 299,
+   "lang": "python",
+   "is_test": true,
+   "tests": [
+    "tests/test_wave2_findings.py"
+   ]
+  }
+ },
+ "input_warnings": []
+}

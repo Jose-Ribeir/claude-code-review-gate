@@ -1,0 +1,790 @@
+{
+ "version": 1,
+ "base_sha": "bf198c33f277a9b13d71caf5702ad90facdd12ec",
+ "budget": 100000,
+ "params": {
+  "budget": 100000,
+  "overhead": 30000,
+  "hop_tokens": 1500,
+  "hops_base": 6,
+  "output_in_peak": 0.5,
+  "hops_new_small": 8,
+  "hops_new": 20,
+  "hops_new_large": 30,
+  "hops_edit": 3,
+  "hops_per_file": 3,
+  "hits_per_hop": 4,
+  "hops_verify": 15,
+  "hops_doc_per_file": 2,
+  "hops_doc_base": 6,
+  "hops_fix_per_file": 5,
+  "hops_fix_verify": 6,
+  "hops_research_per_file": 2,
+  "hops_research_base": 8,
+  "size_small_tokens": 3000,
+  "size_medium_tokens": 12000,
+  "size_large_tokens": 40000,
+  "output_factor": 1.5,
+  "price_in": 2.0,
+  "price_out": 10.0,
+  "price_cw": 2.5,
+  "price_cr": 0.2,
+  "fanout": 15,
+  "low_util": 0.25,
+  "single_max_files": 15,
+  "source": {
+   "calibration": null,
+   "calibrated": [],
+   "flags": []
+  }
+ },
+ "layers": [
+  [
+   "C1",
+   "C2",
+   "C3",
+   "C5"
+  ],
+  [
+   "C6"
+  ],
+  [
+   "C4"
+  ]
+ ],
+ "clusters": [
+  {
+   "id": "C1",
+   "title": "Stable STOP ownership and explicit stack env",
+   "wus": [
+    "R10"
+   ],
+   "layer": 0,
+   "files": [
+    {
+     "path": "scripts/rg_final_execution.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 439,
+     "tokens_est": 4782,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 19125,
+     "tokens_narrow": 2963,
+     "lang": "python",
+     "importers_n": 4,
+     "importers": [
+      "scripts/rg_final_review.py",
+      "scripts/rg_final_stack.py",
+      "tests/test_final_stops.py",
+      "tests/test_final_verification.py"
+     ],
+     "wus": [
+      "R10"
+     ]
+    },
+    {
+     "path": "scripts/rg_final_stack.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 806,
+     "tokens_est": 9578,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 38310,
+     "tokens_narrow": 2591,
+     "lang": "python",
+     "importers_n": 1,
+     "importers": [
+      "scripts/rg_final_review.py"
+     ],
+     "wus": [
+      "R10"
+     ]
+    },
+    {
+     "path": "tests/test_final_stops.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 489,
+     "tokens_est": 5034,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 20135,
+     "tokens_narrow": 4540,
+     "lang": "python",
+     "wus": [
+      "R10"
+     ]
+    },
+    {
+     "path": "tests/test_final_stack.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 770,
+     "tokens_est": 8496,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 33983,
+     "tokens_narrow": 4215,
+     "lang": "python",
+     "wus": [
+      "R10"
+     ]
+    }
+   ],
+   "tests": [
+    "tests/test_final_stops.py",
+    "tests/test_final_stack.py"
+   ],
+   "readonly": false,
+   "verify": false,
+   "research": false,
+   "isolation": "shared",
+   "siblings": [],
+   "est_tokens": 49000,
+   "est_hops": 25,
+   "est_output": 0,
+   "est_cum_input": 0,
+   "est_cost": 0.22,
+   "commit_tag": "[R10]"
+  },
+  {
+   "id": "C2",
+   "title": "Secret-safe response diagnostics and bounded Windows cleanup",
+   "wus": [
+    "R11"
+   ],
+   "layer": 0,
+   "files": [
+    {
+     "path": "scripts/rg_final_review.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 2012,
+     "tokens_est": 25121,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 100482,
+     "tokens_narrow": 13634,
+     "lang": "python",
+     "importers_n": 13,
+     "importers": [
+      "scripts/review-gate.py",
+      "scripts/rg_final_stack.py",
+      "tests/sim_harness.py",
+      "tests/test_final_complete_standalone.py",
+      "tests/test_final_composition.py",
+      "tests/test_final_github_stack.py",
+      "tests/test_final_lenses.py",
+      "tests/test_final_observability_integration.py",
+      "tests/test_final_review_cli.py",
+      "tests/test_final_stack.py",
+      "tests/test_final_stops.py",
+      "tests/test_worker_env.py",
+      "tests/test_worker_plumbing.py"
+     ],
+     "wus": [
+      "R11"
+     ]
+    },
+    {
+     "path": "tests/test_worker_plumbing.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 356,
+     "tokens_est": 3962,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 15846,
+     "tokens_narrow": 3962,
+     "lang": "python",
+     "wus": [
+      "R11"
+     ]
+    },
+    {
+     "path": "tests/test_worker_env.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 168,
+     "tokens_est": 1663,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 6649,
+     "tokens_narrow": 1554,
+     "lang": "python",
+     "wus": [
+      "R11"
+     ]
+    },
+    {
+     "path": "tests/test_process_groups.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 122,
+     "tokens_est": 1170,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 4679,
+     "tokens_narrow": 614,
+     "lang": "python",
+     "wus": [
+      "R11"
+     ]
+    },
+    {
+     "path": "tests/sim_harness.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 935,
+     "tokens_est": 10794,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 43174,
+     "tokens_narrow": 947,
+     "lang": "python",
+     "wus": [
+      "R11"
+     ]
+    },
+    {
+     "path": "tests/sim_scenarios_spec16.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 804,
+     "tokens_est": 10037,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 40148,
+     "tokens_narrow": 2734,
+     "lang": "python",
+     "wus": [
+      "R11"
+     ]
+    }
+   ],
+   "tests": [
+    "tests/test_worker_plumbing.py",
+    "tests/test_worker_env.py",
+    "tests/test_process_groups.py",
+    "tests/sim_harness.py",
+    "tests/sim_scenarios_spec16.py"
+   ],
+   "readonly": false,
+   "verify": false,
+   "research": false,
+   "isolation": "shared",
+   "siblings": [],
+   "est_tokens": 78000,
+   "est_hops": 40,
+   "est_output": 0,
+   "est_cum_input": 0,
+   "est_cost": 0.45,
+   "commit_tag": "[R11]"
+  },
+  {
+   "id": "C3",
+   "title": "GitLab global identifiers",
+   "wus": [
+    "R12"
+   ],
+   "layer": 0,
+   "files": [
+    {
+     "path": "scripts/rg_final_verification.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 606,
+     "tokens_est": 6437,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 25745,
+     "tokens_narrow": 3633,
+     "lang": "python",
+     "importers_n": 3,
+     "importers": [
+      "scripts/rg_final_review.py",
+      "scripts/rg_final_stack.py",
+      "tests/test_final_verification.py"
+     ],
+     "wus": [
+      "R12"
+     ]
+    },
+    {
+     "path": "tests/test_final_verification.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 704,
+     "tokens_est": 6424,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 25695,
+     "tokens_narrow": 6315,
+     "lang": "python",
+     "wus": [
+      "R12"
+     ]
+    }
+   ],
+   "tests": [
+    "tests/test_final_verification.py"
+   ],
+   "readonly": false,
+   "verify": false,
+   "research": false,
+   "isolation": "shared",
+   "siblings": [],
+   "est_tokens": 34000,
+   "est_hops": 18,
+   "est_output": 0,
+   "est_cum_input": 0,
+   "est_cost": 0.16,
+   "commit_tag": "[R12]"
+  },
+  {
+   "id": "C4",
+   "title": "Targeted review and full regressions",
+   "wus": [
+    "R13"
+   ],
+   "layer": 2,
+   "files": [
+    {
+     "path": "scripts/rg_final_execution.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 439,
+     "tokens_est": 4782,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 19125,
+     "tokens_narrow": 2963,
+     "lang": "python",
+     "importers_n": 4,
+     "importers": [
+      "scripts/rg_final_review.py",
+      "scripts/rg_final_stack.py",
+      "tests/test_final_stops.py",
+      "tests/test_final_verification.py"
+     ],
+     "wus": [
+      "R13"
+     ]
+    },
+    {
+     "path": "scripts/rg_final_stack.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 806,
+     "tokens_est": 9578,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 38310,
+     "tokens_narrow": 2591,
+     "lang": "python",
+     "importers_n": 1,
+     "importers": [
+      "scripts/rg_final_review.py"
+     ],
+     "wus": [
+      "R13"
+     ]
+    },
+    {
+     "path": "scripts/rg_final_review.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 2012,
+     "tokens_est": 25121,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 100482,
+     "tokens_narrow": 13634,
+     "lang": "python",
+     "importers_n": 13,
+     "importers": [
+      "scripts/review-gate.py",
+      "scripts/rg_final_stack.py",
+      "tests/sim_harness.py",
+      "tests/test_final_complete_standalone.py",
+      "tests/test_final_composition.py",
+      "tests/test_final_github_stack.py",
+      "tests/test_final_lenses.py",
+      "tests/test_final_observability_integration.py",
+      "tests/test_final_review_cli.py",
+      "tests/test_final_stack.py",
+      "tests/test_final_stops.py",
+      "tests/test_worker_env.py",
+      "tests/test_worker_plumbing.py"
+     ],
+     "wus": [
+      "R13"
+     ]
+    },
+    {
+     "path": "scripts/rg_final_verification.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 606,
+     "tokens_est": 6437,
+     "w": false,
+     "mode": "exclusive",
+     "bytes": 25745,
+     "tokens_narrow": 3633,
+     "lang": "python",
+     "importers_n": 3,
+     "importers": [
+      "scripts/rg_final_review.py",
+      "scripts/rg_final_stack.py",
+      "tests/test_final_verification.py"
+     ],
+     "wus": [
+      "R13"
+     ]
+    }
+   ],
+   "tests": [
+    "scripts/rg_final_execution.py",
+    "scripts/rg_final_stack.py",
+    "scripts/rg_final_review.py",
+    "scripts/rg_final_verification.py"
+   ],
+   "readonly": true,
+   "verify": true,
+   "research": false,
+   "isolation": "shared",
+   "siblings": [],
+   "est_tokens": 61500,
+   "est_hops": 21,
+   "est_output": 0,
+   "est_cum_input": 0,
+   "est_cost": 0.303
+  },
+  {
+   "id": "C5",
+   "title": "Recognize plain ADR and glossary domain documents",
+   "wus": [
+    "R14"
+   ],
+   "layer": 0,
+   "files": [
+    {
+     "path": "scripts/rg_final_context.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 0,
+     "tokens_est": 0,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 0,
+     "tokens_narrow": 0,
+     "lang": "python",
+     "wus": [
+      "R14"
+     ]
+    },
+    {
+     "path": "tests/test_final_context.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 0,
+     "tokens_est": 0,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 0,
+     "tokens_narrow": 0,
+     "lang": "python",
+     "wus": [
+      "R14"
+     ]
+    }
+   ],
+   "tests": [
+    "tests/test_final_context.py"
+   ],
+   "readonly": false,
+   "verify": false,
+   "research": false,
+   "isolation": "shared",
+   "siblings": [],
+   "est_tokens": 28000,
+   "est_hops": 14,
+   "est_output": 0,
+   "est_cum_input": 0,
+   "est_cost": 0.12,
+   "commit_tag": "[R14]"
+  },
+  {
+   "id": "C6",
+   "title": "Retain sanitized per-lens worker evidence",
+   "wus": [
+    "R15"
+   ],
+   "layer": 1,
+   "files": [
+    {
+     "path": "scripts/rg_final_review.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 0,
+     "tokens_est": 0,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 0,
+     "tokens_narrow": 0,
+     "lang": "python",
+     "wus": [
+      "R15"
+     ]
+    },
+    {
+     "path": "scripts/rg_final_lenses.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 0,
+     "tokens_est": 0,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 0,
+     "tokens_narrow": 0,
+     "lang": "python",
+     "wus": [
+      "R15"
+     ]
+    },
+    {
+     "path": "tests/test_final_lenses.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 0,
+     "tokens_est": 0,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 0,
+     "tokens_narrow": 0,
+     "lang": "python",
+     "wus": [
+      "R15"
+     ]
+    },
+    {
+     "path": "tests/test_worker_plumbing.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 0,
+     "tokens_est": 0,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 0,
+     "tokens_narrow": 0,
+     "lang": "python",
+     "wus": [
+      "R15"
+     ]
+    },
+    {
+     "path": "tests/test_final_observability.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 0,
+     "tokens_est": 0,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 0,
+     "tokens_narrow": 0,
+     "lang": "python",
+     "wus": [
+      "R15"
+     ]
+    },
+    {
+     "path": "tests/test_final_observability_integration.py",
+     "hits": 0,
+     "hit_lines": [],
+     "lines": 0,
+     "tokens_est": 0,
+     "w": true,
+     "mode": "exclusive",
+     "bytes": 0,
+     "tokens_narrow": 0,
+     "lang": "python",
+     "wus": [
+      "R15"
+     ]
+    }
+   ],
+   "tests": [
+    "tests/test_final_lenses.py",
+    "tests/test_worker_plumbing.py",
+    "tests/test_final_observability.py",
+    "tests/test_final_observability_integration.py"
+   ],
+   "readonly": false,
+   "verify": false,
+   "research": false,
+   "isolation": "shared",
+   "siblings": [],
+   "est_tokens": 76000,
+   "est_hops": 38,
+   "est_output": 0,
+   "est_cum_input": 0,
+   "est_cost": 0.42,
+   "commit_tag": "[R15]"
+  }
+ ],
+ "overlap": {},
+ "overlap_counts": {},
+ "interfaces": [],
+ "inferred_deps": [],
+ "coupling": {},
+ "single_agent_est": {
+  "tokens": 326500,
+  "hops": 156,
+  "files": 18,
+  "est_output": 0,
+  "est_cum_input": 0,
+  "est_cost": 1.673
+ },
+ "graph": {
+  "used": false
+ },
+ "wus": {
+  "R10": {
+   "title": "Stable STOP ownership and explicit stack env",
+   "kind": "fix",
+   "size": "medium",
+   "readonly": false,
+   "depends_on": [],
+   "planned": [],
+   "excluded_hits": 0,
+   "files": [
+    "scripts/rg_final_execution.py",
+    "scripts/rg_final_stack.py",
+    "tests/test_final_stops.py",
+    "tests/test_final_stack.py"
+   ],
+   "delivers": "main"
+  },
+  "R11": {
+   "title": "Secret-safe response diagnostics and bounded Windows cleanup",
+   "kind": "fix",
+   "size": "large",
+   "readonly": false,
+   "depends_on": [],
+   "planned": [],
+   "excluded_hits": 0,
+   "files": [
+    "scripts/rg_final_review.py",
+    "tests/test_worker_plumbing.py",
+    "tests/test_worker_env.py",
+    "tests/test_process_groups.py",
+    "tests/sim_harness.py",
+    "tests/sim_scenarios_spec16.py"
+   ],
+   "delivers": "main"
+  },
+  "R12": {
+   "title": "GitLab global identifiers",
+   "kind": "fix",
+   "size": "small",
+   "readonly": false,
+   "depends_on": [],
+   "planned": [],
+   "excluded_hits": 0,
+   "files": [
+    "scripts/rg_final_verification.py",
+    "tests/test_final_verification.py"
+   ],
+   "delivers": "main"
+  },
+  "R13": {
+   "title": "Targeted review and full regressions",
+   "kind": "verify",
+   "size": "medium",
+   "readonly": true,
+   "depends_on": [
+    "R10",
+    "R11",
+    "R12",
+    "R14",
+    "R15"
+   ],
+   "planned": [],
+   "excluded_hits": 0,
+   "files": [
+    "scripts/rg_final_execution.py",
+    "scripts/rg_final_stack.py",
+    "scripts/rg_final_review.py",
+    "scripts/rg_final_verification.py"
+   ],
+   "delivers": "main"
+  },
+  "R14": {
+   "title": "Recognize plain ADR and glossary domain documents",
+   "kind": "fix",
+   "size": "small",
+   "readonly": false,
+   "depends_on": [],
+   "planned": [],
+   "excluded_hits": 0,
+   "files": [
+    "scripts/rg_final_context.py",
+    "tests/test_final_context.py"
+   ],
+   "delivers": "main"
+  },
+  "R15": {
+   "title": "Retain sanitized per-lens worker evidence",
+   "kind": "fix",
+   "size": "medium",
+   "readonly": false,
+   "depends_on": [
+    "R11"
+   ],
+   "planned": [],
+   "excluded_hits": 0,
+   "files": [
+    "scripts/rg_final_review.py",
+    "scripts/rg_final_lenses.py",
+    "tests/test_final_lenses.py",
+    "tests/test_worker_plumbing.py",
+    "tests/test_final_observability.py",
+    "tests/test_final_observability_integration.py"
+   ],
+   "delivers": "main"
+  }
+ },
+ "input_warnings": [],
+ "warnings": [],
+ "isolation": "shared",
+ "deliverables": [
+  {
+   "name": "main",
+   "clusters": [
+    "C1",
+    "C2",
+    "C3",
+    "C5",
+    "C6",
+    "C4"
+   ],
+   "tags": [
+    "R10",
+    "R11",
+    "R12",
+    "R14",
+    "R15"
+   ],
+   "branch": "dk/bf198c33/main",
+   "base": "bf198c33f277a9b13d71caf5702ad90facdd12ec",
+   "layers": [
+    0,
+    1,
+    2
+   ],
+   "primary_files": 18
+  }
+ ]
+}

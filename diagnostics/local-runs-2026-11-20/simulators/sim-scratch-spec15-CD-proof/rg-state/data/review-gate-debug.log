@@ -1,0 +1,24 @@
+ts=2026-11-17T16:13:14Z event=phase run=7bae8f02e62ebc07 name=worktree s=0.22 ok=1
+ts=2026-11-17T16:13:14Z event=phase run=7bae8f02e62ebc07 name=plan s=0.2 files=0
+ts=2026-11-17T16:15:01Z event=call run=7bae8f02e62ebc07 kind=review outcome=ok s=107.35 manifest_bytes=333 first_event_s=0.76
+ts=2026-11-17T16:15:01Z event=phase run=7bae8f02e62ebc07 name=review s=107.39 chunks=1
+ts=2026-11-17T16:15:02Z event=phase run=7bae8f02e62ebc07 name=finish s=0.37
+ts=2026-11-17T16:15:02Z event=run run=7bae8f02e62ebc07 s=108.2 rc=0 calls=1 chunks=0
+ts=2026-11-17T16:15:09Z event=phase run=6319fe1ef5ac29c1 name=worktree s=0.27 ok=1
+ts=2026-11-17T16:15:09Z event=phase run=6319fe1ef5ac29c1 name=plan s=0.2 files=0
+ts=2026-11-17T16:17:04Z event=call run=6319fe1ef5ac29c1 kind=review outcome=ok s=114.65 manifest_bytes=975 first_event_s=0.71
+ts=2026-11-17T16:17:04Z event=phase run=6319fe1ef5ac29c1 name=review s=114.7 chunks=1
+ts=2026-11-17T16:17:04Z event=phase run=6319fe1ef5ac29c1 name=finish s=0.31
+ts=2026-11-17T16:17:04Z event=run run=6319fe1ef5ac29c1 s=115.5 rc=0 calls=1 chunks=0
+ts=2026-11-17T16:17:05Z event=phase run=02c63bc0fe84886f name=worktree s=0.27 ok=1
+ts=2026-11-17T16:17:05Z event=phase run=02c63bc0fe84886f name=plan s=0.21 files=0
+ts=2026-11-17T16:18:06Z event=call run=02c63bc0fe84886f kind=review outcome=ok s=61.01 manifest_bytes=867 first_event_s=0.75
+ts=2026-11-17T16:18:06Z event=phase run=02c63bc0fe84886f name=review s=61.07 chunks=1
+ts=2026-11-17T16:18:07Z event=phase run=02c63bc0fe84886f name=finish s=0.26
+ts=2026-11-17T16:18:07Z event=run run=02c63bc0fe84886f s=61.8 rc=0 calls=1 chunks=0
+ts=2026-11-17T16:18:17Z event=phase run=19227dcde70176c1 name=worktree s=0.16 ok=1
+ts=2026-11-17T16:18:17Z event=phase run=19227dcde70176c1 name=plan s=0.21 files=0
+ts=2026-11-17T16:19:39Z event=call run=19227dcde70176c1 kind=review outcome=ok s=81.36 manifest_bytes=867 first_event_s=0.71
+ts=2026-11-17T16:19:39Z event=phase run=19227dcde70176c1 name=review s=81.4 chunks=1
+ts=2026-11-17T16:19:39Z event=phase run=19227dcde70176c1 name=finish s=0.28
+ts=2026-11-17T16:19:39Z event=run run=19227dcde70176c1 s=82.0 rc=0 calls=1 chunks=0

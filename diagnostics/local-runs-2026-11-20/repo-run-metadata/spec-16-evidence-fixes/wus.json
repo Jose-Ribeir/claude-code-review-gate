@@ -1,0 +1,32 @@
+[
+  {
+    "id": "W1",
+    "title": "Real-static evidence mapping",
+    "kind": "fix",
+    "seeds": {
+      "symbols": ["_real_model_static", "_static_units"],
+      "patterns": ["spec16-05", "spec16-06"],
+      "paths": ["tests/sim_scenarios_spec16.py"],
+      "globs": ["tests/*registry*", "tests/*harness*"]
+    },
+    "depends_on": [],
+    "readonly": false,
+    "size": "small",
+    "delivers": "main"
+  },
+  {
+    "id": "W2",
+    "title": "Real-race evidence determinism and selector diagnostics",
+    "kind": "fix",
+    "seeds": {
+      "symbols": ["selector", "_static_units"],
+      "patterns": ["spec16", "probe", "race"],
+      "paths": ["examples/test-check/test_check", "tests/sim_scenarios_spec16.py"],
+      "globs": ["tests/*spec16*", "tests/*test_check*", "tests/*testcheck*"]
+    },
+    "depends_on": ["W1"],
+    "readonly": false,
+    "size": "small",
+    "delivers": "main"
+  }
+]

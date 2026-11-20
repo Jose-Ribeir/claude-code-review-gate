@@ -1,0 +1,5 @@
+[
+  {"id":"R7","title":"Verification parsing preserves quoted GitLab job names","kind":"fix","seeds":{"symbols":["parse_verification"],"patterns":["before_script","required"],"paths":["scripts/rg_final_verification.py"],"globs":["tests/**/*verification*"]},"depends_on":[],"delivers":"main","size":"small"},
+  {"id":"R8","title":"Real-model completion, bounded lenses, timeout cleanup","kind":"fix","seeds":{"symbols":["execute_unit","invoke_worker"],"patterns":["required-lens-failed","STOP"],"paths":["scripts/rg_final_lenses.py","scripts/rg_final_execution.py","scripts/rg_final_review.py","tests/sim_harness.py"],"globs":["tests/**/*worker*","tests/**/*lense*","tests/**/*stop*","tests/**/*sim*"]},"depends_on":[],"delivers":"main","size":"large"},
+  {"id":"R9","title":"Readonly full regressions and validation after R7/R8","kind":"verify","seeds":{"symbols":[],"patterns":[],"paths":[],"globs":["tests/**/*verification*","tests/**/*worker*","tests/**/*lense*","tests/**/*stop*","tests/**/*sim*","tests/**/*final*"]},"depends_on":["R7","R8"],"readonly":true,"delivers":"main","size":"medium"}
+]

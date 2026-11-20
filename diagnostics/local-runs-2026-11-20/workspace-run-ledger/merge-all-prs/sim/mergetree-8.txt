@@ -1,0 +1,159 @@
+fba850adc712d59dba40ed00fe4014b235cf50ef
+100644 1dfc067a8cf203c1fbf6d8f3d686e5d75dc7987a 1	scripts/review-gate.py
+100644 887fbac786346de23ec7619da042155c4cabefd7 2	scripts/review-gate.py
+100644 db7052b21559d5cd929e446b5f615b36c1816798 3	scripts/review-gate.py
+100644 0b2a774499a85f76d307b9f5fa4a1fa16fbc7aad 1	scripts/rg_config.py
+100644 9742efd5c673176887509488f8010c746589f8f2 2	scripts/rg_config.py
+100644 444ef06f26dca961a91e53eb10f654f2c866e693 3	scripts/rg_config.py
+
+Auto-merging docs/adr/0006-custom-checks-and-documentation-quality-duties.md
+Auto-merging scripts/review-gate.py
+CONFLICT (content): Merge conflict in scripts/review-gate.py
+Auto-merging scripts/rg_config.py
+CONFLICT (content): Merge conflict in scripts/rg_config.py
+Auto-merging tests/test_docs_gate.py
+exit=1
+
+=== CONFLICT HUNK PREVIEW: scripts/review-gate.py (part-8 vs main) ===
+=== conflict region for conflict8-rg (marker at line 9865), ~60 lines ===
+    if cmd_path.is_absolute() or ".." in cmd_path.parts:
+        return [], [], ("command must name a repo-relative executable (no "
+                        "absolute paths, no '..' components): %s; findings discarded"
+                        % command), {}
+    exe = str(Path(review_root) / command)
+<<<<<<< /var/folders/16/wv5gyzrx0xqdhnstgbngr6_r0000gn/T/tmp.zbp37JZkrE/ours8-rg.py
+    if not (os.path.isfile(exe) and os.access(exe, os.X_OK)):
+        return [], [], f"command not executable or missing: {command}", {}
+    # SPEC-15.1: the check's per-check answer budget, clamped to a sane
+    # guard (1..3600 s). rg_config already floors positive values at 1, so
+    # the ceiling is the only clamp needed here; an unusable value keeps
+    # the default budget.
+    try:
+        budget = min(max(float(timeout), 1.0), 3600.0)
+    except (TypeError, ValueError):
+        budget = float(_COMMAND_CHECK_TIMEOUT_S)
+    # SPEC-15.4: the resolved per-check budget reaches the executor as
+    # OCR_CHECK_TIMEOUT_S (string seconds) WITHOUT losing the base
+    # environment, so a cooperative executor can clamp its own phases to
+    # finish before this budget's kill.
+    env = dict(os.environ)
+    env["OCR_CHECK_TIMEOUT_S"] = "%g" % budget
+=======
+    # Lexical checks are not a sandbox: isfile/access/subprocess all follow
+    # symlinks, so a repo-committed symlink could point outside the tree.
+    # Resolve to the real target and require it stays inside review_root.
+    try:
+        real_exe = os.path.realpath(exe)
+        inside = os.path.realpath(str(review_root))
+        if os.path.commonpath([real_exe, inside]) != inside:
+            return [], ("resolved command escapes the review tree (symlink "
+                        "outside the repo): %s; findings discarded" % command)
+    except (OSError, ValueError):
+        return [], f"command not resolvable inside the review tree: {command}"
+    if not (os.path.isfile(real_exe) and os.access(real_exe, os.X_OK)):
+        return [], f"command not executable or missing: {command}"
+    exe = real_exe
+>>>>>>> /var/folders/16/wv5gyzrx0xqdhnstgbngr6_r0000gn/T/tmp.zbp37JZkrE/theirs8-rg.py
+    try:
+        proc = subprocess.run([exe], input=json.dumps(matched), text=True,
+                              cwd=str(review_root), capture_output=True,
+                              timeout=budget, env=env)
+    except subprocess.TimeoutExpired:
+        return [], [], f"timed out after {budget:g}s; findings discarded", {}
+    except OSError as exc:
+        return [], [], f"could not execute: {exc}", {}
+    if proc.returncode != 0:
+        return [], [], f"exit code {proc.returncode}; findings discarded", {}
+    try:
+        data = json.loads(proc.stdout or "")
+    except ValueError:
+        return [], [], "malformed output (stdout is not JSON); findings discarded", {}
+    notes, check_warnings = [], []   # gate-side degrade notes / the check's own
+    telemetry = {}
+    if isinstance(data, dict):
+        raw_telemetry = data.get("telemetry")
+        if isinstance(raw_telemetry, dict):
+            def _tele_value_ok(value):
+                # Scalars pass; a one-level object of scalars (the
+                # reproduce_results shape) passes; anything else is
+                # malformed and dropped loudly.
+
+=== CONFLICT HUNK PREVIEW: scripts/rg_config.py (part-8 vs main) ===
+=== conflict region for conflict8-rgc (marker at line 31), ~60 lines ===
+    checks          : the custom-checks surface (SPEC-14). Per check: an
+                      "enabled" switch, a "mode" of "block" or "warn", a
+                      "globs" list of repo-relative globs the check runs
+                      over, and pass-through options ("sections",
+                      "template", "sentence_cap", "sweep"). A "command"
+<<<<<<< /var/folders/16/wv5gyzrx0xqdhnstgbngr6_r0000gn/T/tmp.zbp37JZkrE/ours8-rgc.py
+                      string names a repo-relative executable (run in a later
+                      ticket); a command check also takes "parallel"
+                      (default False -- its executor may run concurrently
+                      against its own tip clone; SPEC-15.1) and "timeout"
+                      (seconds, default 60 -- its answer budget). Command
+                      checks may define new check names; other unknown names
+                      are typos and are ignored.
+=======
+                      string names a repo-relative executable the gate runs
+                      over matched changed files. Command checks may define
+                      new check names;
+                      other unknown names are typos and are ignored.
+>>>>>>> /var/folders/16/wv5gyzrx0xqdhnstgbngr6_r0000gn/T/tmp.zbp37JZkrE/theirs8-rgc.py
+
+Missing files degrade to defaults silently -- that is the normal state for
+most installs. Unreadable/invalid files, and invalid VALUES for known keys,
+degrade to defaults WITH A NOTE in "notes" (a note is for a human reading a
+report or a doctor run; the gate itself never fails on config).
+
+This module reads config; it never writes it.
+"""
+import json
+from pathlib import Path
+
+import rg_store
+
+# The tracker backends a tracker_order may name (Jira ships in the Kimchi
+# variant; the Claude variant's is GitHub/GitLab only).
+_KNOWN_TRACKERS = ("github", "gitlab", "jira")
+_ON_WORDS = {"1", "true", "yes", "on"}
+_OFF_WORDS = {"0", "false", "no", "off"}
+
+# The checks surface (SPEC-14). Built-in defaults: docs-deslop on (it applies
+# to any repo with markdown), the ADR duties off (they presuppose ADR
+# conventions a repo may not follow); everything blocks by default. Globs are
+# repo-relative; the ADR duties watch the common ADR locations.
+_ADR_GLOBS = ["docs/adr/**/*.md", "**/adr/*.md"]
+_BUILT_IN_CHECKS = {
+    "docs-deslop": {"enabled": True, "mode": "block", "globs": ["**/*.md"]},
+    "adr-wait-what": {"enabled": False, "mode": "block",
+                      "globs": list(_ADR_GLOBS)},
+    "adr-integrity": {"enabled": False, "mode": "block",
+                      "globs": list(_ADR_GLOBS)},
+    # The v2 deslop stubs (story 24), recognized and INERT in v1 (markdown
+    # only): declared disabled defaults so the toggle surface is ready for
+    # v2 without behavior change. Naming one never earns the unknown-check
+    # typo note; nothing in the gate reads or executes them in v1.
+    "commit_messages": {"enabled": False, "mode": "block", "globs": []},
+    "code_comments": {"enabled": False, "mode": "block", "globs": []},
+}
+# A user-declared command check defaults to on and empty-scoped: the
+# declaration itself is the enabling act, and how an empty glob list scopes a
+# run is the execution ticket's call (SPEC-14.4). A command check also
+# declares its execution posture (SPEC-15.1): "parallel" says its executor
+# may run concurrently against its own tip clone (scheduling lands in
+
+=== GIST: part-8 vs main conflicts ===
+Conflicted files: scripts/review-gate.py, scripts/rg_config.py.
+
+scripts/review-gate.py: OVERLAPPING-LOGIC. Both sides rewrite the same
+"command not executable or missing" return in the command-execution path.
+part-8 keeps a 3-tuple return (..., {}) and adds per-check budget/OCR_CHECK_TIMEOUT_S
+env logic; main (target) switches to a 2-tuple return and a real_exe
+variable. Same lines, and the return ARITY differs between sides — callers of
+this path may break. Highest-risk manual merge.
+
+scripts/rg_config.py: OVERLAPPING (docstring-only). Both sides edit the
+"checks" bullet of the module docstring: part-8 documents parallel/timeout
+command-check options (SPEC-15.1), main rewords the "repo-relative executable"
+sentence. Same docstring lines, no runtime code — low risk but genuinely
+overlapping text.

@@ -1,0 +1,376 @@
+{
+  "wus": [
+    {
+      "id": "S16-01A",
+      "title": "1a GitLab final-review references and provider-pinned metadata",
+      "kind": "build",
+      "seeds": {
+        "paths": [
+          "scripts/rg_final_provider.py",
+          "scripts/rg_final_gitlab.py",
+          "scripts/rg_ticket_fetch.py",
+          "tests/test_final_provider_gitlab.py",
+          "tests/conftest.py"
+        ]
+      },
+      "depends_on": [],
+      "delivers": "main",
+      "size": "small",
+      "notes": "TDD through scripted glab CLI. Normalize full URLs/numeric refs; arbitrary authors, forks, source/target SHAs and projects, descriptions/intent refs, re-fetch. Read-only provider access. Original seeds: scripts/review-gate.py, scripts/rg_store.py, scripts/ocr_verdict.py, tests normal-entrypoint stubs are covered by S16-01B/C/D."
+    },
+    {
+      "id": "S16-01B",
+      "title": "1b immutable whole-repo materialization and merge-base diffs",
+      "kind": "build",
+      "seeds": {
+        "paths": [
+          "scripts/rg_final_materialize.py",
+          "tests/test_final_materialize.py",
+          "tests/test_parallel_checks.py"
+        ]
+      },
+      "depends_on": [],
+      "delivers": "main",
+      "size": "small",
+      "notes": "TDD with temporary real Git repositories. Clean disposable trees from pinned SHAs only, full merge-base diffs and complete checkout; deterministic cleanup. Reuse clone lifecycle seam without changing pre-push behavior."
+    },
+    {
+      "id": "S16-01C",
+      "title": "1c versioned SQLite run/store/contract identity and reports",
+      "kind": "build",
+      "seeds": {
+        "paths": [
+          "scripts/rg_final_store.py",
+          "scripts/rg_final_contract.py",
+          "tests/test_final_store.py"
+        ]
+      },
+      "depends_on": [],
+      "delivers": "main",
+      "size": "small",
+      "notes": "TDD with temporary SQLite. WAL, transactions, FKs, bounded writer retries, migrations; store_instance_id, run identity, units/evidence/warnings/findings/stops/publications, versioned initial contract and machine/human reports. Preserve historical records. Read scripts/rg_store.py for the external store-root convention only; do not modify it."
+    },
+    {
+      "id": "S16-01D",
+      "title": "1d standalone final-review CLI and one correctness lens",
+      "kind": "build",
+      "seeds": {
+        "paths": [
+          "scripts/review-gate.py",
+          "scripts/rg_final_review.py",
+          "scripts/ocr_verdict.py",
+          "tests/test_final_review_cli.py",
+          "tests/stub_reviewer.py"
+        ]
+      },
+      "depends_on": [
+        "S16-01A",
+        "S16-01B",
+        "S16-01C"
+      ],
+      "delivers": "main",
+      "size": "small",
+      "notes": "Normal CLI seam with temporary real Git repos, scripted providers/workers and SQLite. One GitLab standalone item, full-range evidence, independent correctness lens, all findings through compute_verdict, reports and nonzero failures. Explicit incomplete until mandatory features exist; minimal monolith dispatch only."
+    },
+    {
+      "id": "S16-02A",
+      "title": "2a independent full static lens aggregation",
+      "kind": "build",
+      "seeds": {
+        "paths": [
+          "scripts/rg_final_lenses.py",
+          "scripts/rg_final_review.py",
+          "agents/code-reviewer.md",
+          "agents/docs-checker.md",
+          "tests/test_final_lenses.py"
+        ]
+      },
+      "depends_on": [
+        "S16-01D"
+      ],
+      "delivers": "main",
+      "size": "small",
+      "notes": "Correctness, standards, docs/domain, tests, security, compatibility/migration and intent lenses independently complete/degrade before aggregation; every result validated/falsified and judged only by compute_verdict. Missing mandatory lens means incomplete, no small-diff exemption. Read tests/test_verdict_coverage.py as a validation seam only."
+    },
+    {
+      "id": "S16-02B",
+      "title": "2b complete-repository context, intent, submodules and LFS",
+      "kind": "build",
+      "seeds": {
+        "paths": [
+          "scripts/rg_final_context.py",
+          "scripts/rg_final_materialize.py",
+          "scripts/rg_ticket_fetch.py",
+          "tests/test_final_context.py",
+          "tests/test_intent_gap.py"
+        ]
+      },
+      "depends_on": [
+        "S16-01D"
+      ],
+      "delivers": "main",
+      "size": "small",
+      "notes": "On-demand whole-repo/callers/tests plus unchanged ADR/glossary/standards; mandatory-attempt linked intent warnings, no invented requirements or prose graph edges; recursive submodules and required LFS, irrelevant binary warning only after proof, missing required content incomplete."
+    },
+    {
+      "id": "S16-03A",
+      "title": "3a declared required verification in isolated credential-free clones",
+      "kind": "build",
+      "seeds": {
+        "paths": [
+          "scripts/rg_final_verification.py",
+          "scripts/rg_config.py",
+          "tests/test_final_verification.py",
+          "tests/test_parallel_checks.py"
+        ]
+      },
+      "depends_on": [
+        "S16-02A",
+        "S16-02B"
+      ],
+      "delivers": "main",
+      "size": "small",
+      "notes": "Discover declared suites/CI without guessing; isolated dedicated clones and credential scrubbing, cleanup on every exit, exactly one failure rerun. Reproduced failure blocking evidence through verdict stream; unexecutable required suite incomplete, absent suite explicit."
+    },
+    {
+      "id": "S16-03B",
+      "title": "3b SPEC-15 dynamic checks for final-review units",
+      "kind": "build",
+      "seeds": {
+        "paths": [
+          "scripts/rg_final_dynamic.py",
+          "examples/test-check/test_check",
+          "examples/test-check/README.md",
+          "tests/test_final_dynamic.py",
+          "tests/test_executor_testcheck.py"
+        ]
+      },
+      "depends_on": [
+        "S16-02A",
+        "S16-02B"
+      ],
+      "delivers": "main",
+      "size": "small",
+      "notes": "Explicit final-review opt-in only. Reuse one-shot selector, existing tests/race detectors/ephemeral probes and exactly one rerun; separate credential-free scratch clone per unit, no probe in evidence/source, flake/uncovered/selector/probe/timeout warnings and telemetry, never required-suite degradation. Read tests/test_parallel_checks.py as a seam only; S16-03A owns edits to it."
+    },
+    {
+      "id": "S16-04A",
+      "title": "4a finding memory, SHA freshness and waiver isolation",
+      "kind": "build",
+      "seeds": {
+        "paths": [
+          "scripts/rg_final_memory.py",
+          "scripts/rg_final_store.py",
+          "tests/test_final_memory.py",
+          "tests/test_waivers.py",
+          "tests/test_memory_gate.py"
+        ]
+      },
+      "depends_on": [
+        "S16-03A",
+        "S16-03B"
+      ],
+      "delivers": "main",
+      "size": "small",
+      "notes": "Carry unresolved same-store findings with content/evidence anchors; rerun continuity, positive resolution/falsification only, stale re-fetch of full revision tuple and explicit restart. Local waiver visible but excluded from official suppression; store-boundary trust qualifiers."
+    },
+    {
+      "id": "S16-04B",
+      "title": "4b scoped structured critical stops and safe completion",
+      "kind": "build",
+      "seeds": {
+        "paths": [
+          "scripts/rg_final_execution.py",
+          "scripts/rg_final_review.py",
+          "tests/test_final_stops.py"
+        ]
+      },
+      "depends_on": [
+        "S16-03A",
+        "S16-03B"
+      ],
+      "delivers": "main",
+      "size": "small",
+      "notes": "Ordinary findings never short-circuit safe mandatory work. Supervisor maps evidence-backed STOP to affected scopes/dependents only, records skipped mandatory work and original critical finding, and returns incomplete."
+    },
+    {
+      "id": "S16-05",
+      "title": "5 GitLab final statuses, degradation and same-store run ordering",
+      "kind": "build",
+      "seeds": {
+        "paths": [
+          "scripts/rg_final_publish.py",
+          "scripts/rg_final_store.py",
+          "tests/test_final_publication.py"
+        ]
+      },
+      "depends_on": [
+        "S16-04A",
+        "S16-04B"
+      ],
+      "delivers": "main",
+      "size": "small",
+      "notes": "Scripted provider doubles only. Dedicated final status context with run/store/contract/revision identity; publish after final/trust calculation, permission loss local-only/unenforced, monotonic same-store supersession and stale-older-worker protection."
+    },
+    {
+      "id": "S16-06A",
+      "title": "6a GitLab linear graph discovery and corrected commands",
+      "kind": "build",
+      "seeds": {
+        "paths": [
+          "scripts/rg_final_graph.py",
+          "scripts/rg_final_provider.py",
+          "tests/test_final_graph.py"
+        ]
+      },
+      "depends_on": [
+        "S16-01D"
+      ],
+      "delivers": "main",
+      "size": "small",
+      "notes": "Provider source/target edges only; supplied ancestors/descendants discovery, omissions return complete corrected command. Reject duplicate/cycle/gap/branch/mixed target/root/inconsistent ordering/prose-only edges without auto-add/reorder."
+    },
+    {
+      "id": "S16-06B",
+      "title": "6b ordered combined/prospective composition and initial correctness",
+      "kind": "build",
+      "seeds": {
+        "paths": [
+          "scripts/rg_final_compose.py",
+          "scripts/rg_final_review.py",
+          "tests/test_final_composition.py"
+        ]
+      },
+      "depends_on": [
+        "S16-06A"
+      ],
+      "delivers": "main",
+      "size": "small",
+      "notes": "Ordered pinned-head composition against root target and disposable prospective current-target integration; conflict/unreproducible tree incomplete, no auto-resolution. Initial combined correctness plus cross-item/integration lens path, explicitly unenforced until S16-07."
+    },
+    {
+      "id": "S16-07",
+      "title": "7 complete GitLab individual+combined final orchestration",
+      "kind": "build",
+      "seeds": {
+        "paths": [
+          "scripts/rg_final_stack.py",
+          "scripts/rg_final_review.py",
+          "tests/test_final_stack.py"
+        ]
+      },
+      "depends_on": [
+        "S16-05",
+        "S16-06B"
+      ],
+      "delivers": "main",
+      "size": "small",
+      "notes": "All static/dynamic/required checks at individual and combined levels, linked reports, freshness/memory/scoped stops and cleanup across graph. Publish per-item final status only when both levels pass and trust permits; preserve individual defects despite combined repair."
+    },
+    {
+      "id": "S16-08",
+      "title": "8 GitHub standalone+stack/fork/status parity via common adapter",
+      "kind": "build",
+      "seeds": {
+        "paths": [
+          "scripts/rg_final_github.py",
+          "scripts/rg_final_provider.py",
+          "tests/test_final_provider_github.py",
+          "tests/test_final_github_stack.py"
+        ]
+      },
+      "depends_on": [
+        "S16-07"
+      ],
+      "delivers": "main",
+      "size": "small",
+      "notes": "Scripted gh fixtures/test doubles only. Implement metadata/revision/publication transport parity for standalone, stacks, forks and permission degradation; shared graph, scope, verdict, memory, stop, cleanup and trust semantics unchanged. Follow existing gh/glab conventions in scripts/ocr_forge.py and scripts/rg_ticket_fetch.py; do not modify ocr_forge.py."
+    },
+    {
+      "id": "S16-09A",
+      "title": "9a versioned acceptance registry and all 21 scenario definitions",
+      "kind": "build",
+      "seeds": {
+        "paths": [
+          "scripts/rg_final_acceptance.py",
+          "scripts/rg_final_store.py",
+          "tests/test_final_acceptance_registry.py",
+          "tests/sim_scenarios_spec16.py"
+        ]
+      },
+      "depends_on": [
+        "S16-08"
+      ],
+      "delivers": "main",
+      "size": "small",
+      "notes": "Database migrations seed stable keys, expected states, evidence, cleanup/warning/trust assertions and retained results for all 21 specified scenarios; scenario dispatch uses normal CLI and real-model harness seams with provider writes doubled."
+    },
+    {
+      "id": "S16-09B",
+      "title": "9b database-backed operator views and historical migrations",
+      "kind": "build",
+      "seeds": {
+        "paths": [
+          "scripts/rg_final_views.py",
+          "scripts/review-gate.py",
+          "tests/test_final_views.py"
+        ]
+      },
+      "depends_on": [
+        "S16-09A"
+      ],
+      "delivers": "main",
+      "size": "small",
+      "notes": "Contract show, acceptance list and auditable current/historical run report views from SQLite; upgrades preserve prior contract/acceptance versions. Minimal CLI dispatch; no parallel canonical Markdown manuals."
+    },
+    {
+      "id": "S16-10A",
+      "title": "10a real-model and deterministic SPEC-16 acceptance",
+      "kind": "build",
+      "seeds": {
+        "paths": [
+          "tests/sim_harness.py",
+          "tests/sim_scenarios_spec16.py",
+          "tests/test_final_review_cli.py",
+          "tests/test_sim_harness.py"
+        ]
+      },
+      "depends_on": [
+        "S16-09B"
+      ],
+      "delivers": "main",
+      "size": "small",
+      "notes": "Extend real-model harness with real Git history and deterministic recorded GitLab/GitHub metadata. Execute all 21 acceptance scenarios with no live mutation; persist evidence under run contract/acceptance versions. Full real-model+deterministic acceptance."
+    },
+    {
+      "id": "S16-10B1",
+      "title": "10b1 successor ADR and final-review observability",
+      "kind": "build",
+      "seeds": {
+        "paths": [
+          "docs/adr/0008-explicit-final-whole-stack-review.md",
+          "scripts/rg_final_telemetry.py",
+          "tests/test_final_observability.py"
+        ]
+      },
+      "depends_on": [
+        "S16-10A"
+      ],
+      "delivers": "main",
+      "size": "small",
+      "notes": "Complete structured telemetry for graph/coverage/dynamic/stale/stops/store/publication without secrets or unrelated source; successor ADR for command/store/trust/publication. Focused tests only; S16-10B2 owns full regression."
+    },
+    {
+      "id": "S16-10B2",
+      "title": "10b2 full pytest/ruff and SPEC-15/pre-push regression verification",
+      "kind": "verify",
+      "seeds": {},
+      "depends_on": [
+        "S16-10B1"
+      ],
+      "delivers": "main",
+      "size": "medium",
+      "notes": "Run complete pytest and ruff suites plus real-model/deterministic acceptance evidence and SPEC-15 regression checks. Prove unchanged pre-push defaults and no source/provider mutations. Read-only verification; do not stage .kimchi/."
+    }
+  ]
+}
