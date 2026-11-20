@@ -37,6 +37,12 @@ def _manifest(tmp_path, trace="t.trace"):
     return dg._review_manifest(tmp_path, trace)
 
 
+# An unknown harness is treated as kimchi, whose inline wait never exceeds 4 s;
+# the slower scenarios here (a 6 s generation, two pushes with a parallel
+# checker) name the claude harness so OCR_INLINE_BUDGET (30 s) applies.
+_CLAUDE = {"OCR_HARNESS": "claude"}
+
+
 def _settings_file(tmp_path, parallel):
     p = tmp_path / "settings.json"
     p.write_text(json.dumps(
@@ -105,7 +111,8 @@ def test_a_slow_summary_does_not_hold_the_review(tmp_path):
     still lands (fresh) for the next push."""
     work = _setup(tmp_path)
     decision, reason = dg._push(work, dg._env(
-        tmp_path, "t.trace", STUB_DOCS_SUMMARY_SLEEP=6, OCR_DOCS_SUMMARY_WAIT=0.5))
+        tmp_path, "t.trace", STUB_DOCS_SUMMARY_SLEEP=6, OCR_DOCS_SUMMARY_WAIT=0.5,
+        **_CLAUDE))
     assert decision == "pass", reason
     calls = dg._calls(tmp_path, "t.trace")
     gen = next(c for c in calls if c.get("docs_summary"))
@@ -152,14 +159,16 @@ def test_findings_from_the_docs_checker_still_merge_and_block_in_both_modes(tmp_
         env = dg._env(tmp_path, trace,
                       OCR_SETTINGS_FILE=_settings_file(tmp_path, parallel),
                       STUB_DOCS_FINDING=json.dumps({"content": finding}),
+                      **_CLAUDE,
                       STUB_FINDINGS_FOR=json.dumps(
                           {"app.py": {"severity": "low", "content": "a code nit"}}))
         decision, reason = dg._push(work, env)
         assert decision == "deny", (parallel, reason)
         assert finding in reason
         assert _manifest(tmp_path, trace).get("docs_checker_parallel") is parallel
-        # a fresh tip for the second round so the verdict is recomputed
-        dg._commit(work, {"app.py": dg._APP_V3 + "\n# round 2\n"})
+        if parallel:
+            # a fresh tip for the second round so the verdict is recomputed
+            dg._commit(work, {"app.py": dg._APP_V3})
 
 
 def test_no_docs_context_means_no_docs_checker_inputs(tmp_path):
