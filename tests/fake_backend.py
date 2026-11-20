@@ -30,6 +30,11 @@ Invoked as `fake_backend.py <flavor> <cli argv...>`, flavor `claude` or
                   rawtext  plain text with no JSON stream at all, exit 0
                   native-timeout  stream credential-like tails, spawn a pipe-holding
                                   child, and sleep until the native deadline
+  FAKE_MODELS     comma-separated ids `kimchi --list-models` prints (default: every
+                  kimchi default pin of the settings layer)
+  FAKE_REJECT_SUFFIX  comma-separated thinking levels (`high,max`): a kimchi
+                  `--model <id>:<level>` with one of them exits 2 with kimchi's
+                  "invalid model" error instead of answering
   FAKE_ENVELOPE   "json": claude flavor answers with the single
                   `--output-format json` result object instead of a stream.
 """
@@ -122,8 +127,17 @@ def _wrap(flavor, payload):
     return "".join(json.dumps(e) + "\n" for e in events)
 
 
+_DEFAULT_MODELS = ("kimi-k3.1-pro,deepseek-v4.1-flash-1017,glm-5.3,glm-5.3-flash,"
+                   "deepseek-v4-flash-0731,minimax-m3,gemma-4-31b")
+
+
 def main(argv):
     flavor, cli = argv[1], argv[2:]
+    if flavor == "kimchi" and cli == ["--list-models"]:
+        ids = os.environ.get("FAKE_MODELS", _DEFAULT_MODELS)
+        sys.stdout.write("Available models:\n" + "".join(
+            f"  kimchi-dev/{m.strip()}\n" for m in ids.split(",") if m.strip()))
+        return 0
     if cli == ["--version"]:
         sys.stdout.write("2.1.0 (Claude Code)\n" if flavor == "claude" else "kimchi 1.34.3\n")
         return 0
@@ -133,6 +147,12 @@ def main(argv):
             "--model --mcp-config --allow-tool --deny-tool -e --plan\n"
         )
         return 0
+    if flavor == "kimchi" and "--model" in cli and cli.index("--model") + 1 < len(cli):
+        model = cli[cli.index("--model") + 1]
+        level = model.split(":", 1)[1] if ":" in model else ""
+        if level and level in [x.strip() for x in os.environ.get("FAKE_REJECT_SUFFIX", "").split(",") if x.strip()]:
+            sys.stderr.write(f"error: invalid model '{model}': unknown thinking level '{level}'\n")
+            return 2
     rpc_id = None
     rpc_mode = "--mode" in cli and cli[cli.index("--mode") + 1] == "rpc"
     if rpc_mode:
@@ -151,6 +171,9 @@ def main(argv):
     if prompt.startswith("Sandbox self-check"):
         return 0          # the deny-extension canary: a sandboxed worker writes nothing
     scenario = os.environ.get("FAKE_SCENARIO", "")
+    if prompt.startswith("Reply with the single word"):
+        sys.stdout.write(_wrap(flavor, "OK"))     # kimchi-verify's thinking-suffix probe
+        return 0
     if scenario == "auth":
         text = _AUTH_TEXT[flavor]
         if flavor == "claude":
