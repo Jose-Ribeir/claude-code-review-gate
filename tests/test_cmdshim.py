@@ -96,7 +96,13 @@ def test_partial_review_reaches_a_batch_launcher_as_one_line(tmp_path, monkeypat
     class _Stop(BaseException):
         pass
 
+    real_popen = rg.subprocess.Popen
+
     def _popen(cmd, *a, **kw):
+        # Settings lookup shells out to git (rev-parse) before the launch;
+        # only the reviewer launch is the one under test.
+        if cmd and cmd[0] == "git":
+            return real_popen(cmd, *a, **kw)
         seen["cmd"] = cmd
         raise _Stop
 
