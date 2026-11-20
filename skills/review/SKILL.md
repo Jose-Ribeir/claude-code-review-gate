@@ -296,6 +296,13 @@ manifest JSON. The manifest fields are:
 - `tier1_model` — (v2, review manifests only) the model to spawn the §3
   code-reviewer subagent(s) with, pinned for the same reason: the allowlist
   cannot read `OCR_TIER1_MODEL`.
+- `spotter_skipped` — (review manifests, optional) `true` when the gate decided
+  this push needs no context spotter (docs-only, or a tiny change; settings
+  `behavior.spotter_skip`, off by default); `spotter_skip_reason` says why.
+  When it is `true`, skip §2c and §2d completely (no spotter, no validator, no
+  collector call, no warning about them): proceed to §3 with `demands` and
+  `evidence_bundle` absent. Absent or `false` means run §2c as usual. This never
+  affects `deep_review`: the gate's risk-glob escalation stands on its own.
 - `spotter_thinking`, `tier1_thinking`, `tier2_thinking`, `docs_checker_model`,
   `docs_checker_thinking`, `filter_model`, `filter_thinking` — (kimchi review
   manifests) the remaining persona pins from the persona-pin table in the
@@ -729,6 +736,11 @@ its own risk read) — **never findings**. The reviewer receives the demands in
 Skip this entire step in `--scan` mode (there is no diff). Proceed to §3 with
 `demands` absent.
 
+Skip it too when `manifest.spotter_skipped` is `true` (the gate decided the push
+is docs-only or tiny): spawn no spotter, run no validator, add no warning, go to
+§3 with `demands` absent. Only the spotter's own risk-score escalation is given
+up on such a push; `manifest.deep_review` still decides the deep lane (§3).
+
 **Step 1 — Model:** `manifest.spotter_model` (and `manifest.spotter_thinking`) when a manifest was given;
 otherwise the spawn inherits the session's model.
 
@@ -775,8 +787,9 @@ the context allowlist, resolved convention docs, event couples, pointer
 utterances — as one bounded `evidence_bundle` for the reviewer beside
 `impact_sites`.
 
-Skip this step in `--scan` mode, or whenever §2c produced no valid demands —
-proceed to §3 with `evidence_bundle` absent.
+Skip this step in `--scan` mode, whenever §2c produced no valid demands, or
+when `manifest.spotter_skipped` is `true` (no spotter ran, so there are no
+demands to answer) — proceed to §3 with `evidence_bundle` absent, silently.
 
 **Step 1 — Collect:** run the gate's collector once, with §2c's validated
 demands object on stdin (the bare object or the validator's wrapper output;
@@ -842,7 +855,7 @@ precomputed `file` is never re-fetched, re-truncated or retyped:
 **Escalation to the deep pass (v2 t10):** this push reviews in the **deep
 lane** when `manifest.deep_review` is `true` — the gate's deterministic risk
 globs already decided it before any review started — OR when §2c's valid
-demands carry `risk.score` at or above the threshold (`manifest.risk_threshold`
+demands (absent when `manifest.spotter_skipped` is `true`) carry `risk.score` at or above the threshold (`manifest.risk_threshold`
 when pinned there, otherwise `risk_threshold` in the project
 `.ocr/rule.json`, default **7**). Escalation only ever **raises** the tier —
 a low spotter score NEVER downgrades a `deep_review: true` manifest back to

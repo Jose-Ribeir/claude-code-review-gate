@@ -451,6 +451,37 @@ def _docs_parallel_field():
     return {"docs_checker_parallel": enabled}
 
 
+def _spotter_skip_field(code_files, changed_lines, extra_files=0):
+    """The manifest fields telling the review skill to skip the context spotter
+    (and with it the §2c demands and §2d collector hops), or {} to run it.
+
+    Applies only with behavior.spotter_skip.enabled (default OFF; OCR_SPOTTER_SKIP
+    1/0 wins over the files) and only when this push touches no code files
+    (docs-only) or at most spotter_skip.max_files files AND at most
+    max_changed_lines changed lines. `code_files` are the reviewed code files,
+    `extra_files` any other changed files the manifest carries; `changed_lines`
+    None means unknown, which never skips on size. What a skipped push gives up
+    is the spotter's risk-score escalation and its evidence bundle: the gate's
+    own risk-glob escalation (manifest `deep_review`) is untouched. Unreadable
+    settings leave the spotter running."""
+    try:
+        cfg = _settings()
+        if not cfg.behavior("spotter_skip.enabled").value:
+            return {}
+        max_files = int(cfg.behavior("spotter_skip.max_files").value)
+        max_lines = int(cfg.behavior("spotter_skip.max_changed_lines").value)
+    except Exception:
+        return {}
+    if code_files == 0:
+        return {"spotter_skipped": True, "spotter_skip_reason": "docs-only"}
+    if (changed_lines is not None and code_files + extra_files <= max_files
+            and changed_lines <= max_lines):
+        return {"spotter_skipped": True,
+                "spotter_skip_reason": "small change (%d file(s), %d changed line(s))"
+                                       % (code_files + extra_files, changed_lines)}
+    return {}
+
+
 def _claude_review_args(helpers=True):
     """The claude review worker's default argv with the caller's extras
     appended; only consulted without an OCR_CLAUDE_ARGS override (see
@@ -5962,6 +5993,14 @@ def _supervise_run(state_path, run_id):
                     manifest["docs_quality"] = deep_quality
                 if deep_docs or deep_quality:
                     manifest.update(_docs_parallel_field())
+                # review-speed 13: a small/docs-only deep push skips the spotter
+                # too; the risk-glob lane decision above is already made.
+                _deep_set = set(deep_paths)
+                manifest.update(_spotter_skip_field(
+                    len(deep_paths),
+                    None if _entries is None else sum(
+                        int(e.get("lines") or 0) for e in _entries
+                        if e["path"] in _deep_set)))
                 manifest_path = str(_async_dir(common_dir) / f"manifest-{run_id}-deep.json")
                 _write_manifest_file(manifest_path, manifest, "deep-review manifest")
                 try:
@@ -5986,7 +6025,10 @@ def _supervise_run(state_path, run_id):
                 # doc files matched): the 0.7.0 no-manifest path, unchanged.
                 docs_quality = _docs_quality_block(repo_root, review_root, base, tip,
                                                    run_dir=_run_dir(common_dir, run_id))
-                if docs_quality is None:
+                # review-speed 13: with the spotter skip enabled a docs-only push
+                # (no reviewable file) also gets a manifest, to carry the skip.
+                if docs_quality is None and not (
+                        plan == [] and _spotter_skip_field(0, 0)):
                     result, ran, raw_name = _run_review_with_retry(
                         lambda: _run_review(review_root, mode, git_dir, tip, review_range,
                                             tier=ocr_telemetry.TIER_REVIEW,
@@ -11612,6 +11654,12 @@ def _build_review_manifest(scope, chunk_items, other_changed, carry_paths,
         manifest["docs_quality"] = docs_quality
     if docs_context or docs_quality:
         manifest.update(_docs_parallel_field())
+    if k is None:
+        # A chunked run is a big push by construction: its spotter always runs.
+        manifest.update(_spotter_skip_field(
+            len(reviewed_items), sum(int(it["entry"].get("lines") or 0)
+                                     for it in reviewed_items),
+            len(manifest["carried"]) + len(manifest["other_changed"])))
     return manifest
 
 
