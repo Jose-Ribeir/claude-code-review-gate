@@ -114,8 +114,11 @@ def _claude_bin(env):
         if exe and os.path.isfile(exe):
             return exe
     import glob
+    # The home comes from the env handed in (like LOCALAPPDATA), not the
+    # process's own: expanduser("~") would look past a doctor run for another env.
+    home = env.get("USERPROFILE") or env.get("HOME") or os.path.expanduser("~")
     roots = [p for p in (env.get("LOCALAPPDATA"),
-                         os.path.join(os.path.expanduser("~"), "AppData", "Local")) if p]
+                         os.path.join(home, "AppData", "Local")) if p]
     cands = []
     for root in roots:
         cands += glob.glob(os.path.join(root, "Packages", "Claude_*", "LocalCache",
