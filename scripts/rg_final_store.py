@@ -3276,7 +3276,7 @@ class FinalStore:
                  "attempted_at": item["attempted_at"]}
                 for item in self._rows(
                     "SELECT * FROM publications WHERE run_id = ? ORDER BY attempted_at, "
-                    "publication_id", (run_id,))
+                    "rowid", (run_id,))
             ]
             run_metadata = _loads(run["metadata_json"])
             return {
