@@ -402,11 +402,36 @@ def _helper_cmds():
     return {"conventions": f"{py} {root}/scripts/ocr_conventions.py"}
 
 
+# The review-gate helper scripts a kimchi review session may run, by manifest
+# key. extensions/review-gate-deny.ts allows exactly these three scripts (exact
+# path, fixed argument grammar); every other python stays denied there.
+_KIMCHI_HELPER_SCRIPTS = {"conventions": "ocr_conventions.py",
+                          "demands": "ocr_demands.py",
+                          "collectors": "ocr_collectors.py"}
+
+
+def _kimchi_helper_cmds():
+    """The exact command prefix of each helper script the kimchi review skill
+    runs: `<python> <plugin root>/scripts/<script>` with forward slashes, the
+    path double-quoted when it holds a space (the deny extension's tokenizer
+    unquotes it; it compares the script word to its own plugin root)."""
+    root = _PLUGIN_ROOT.replace("\\", "/")
+    py = "python" if sys.platform == "win32" else "python3"
+    out = {}
+    for key, script in _KIMCHI_HELPER_SCRIPTS.items():
+        path = f"{root}/scripts/{script}"
+        out[key] = f'{py} "{path}"' if " " in path else f"{py} {path}"
+    return out
+
+
 def _helper_cmds_field():
-    """{"helper_cmds": {...}} for a manifest when the claude backend reviews
-    (its session can only run the exact allowlisted commands), else {}: under
-    kimchi the skill keeps running the helpers by their <skill_dir> path."""
-    if _current_launch().name != "claude":
+    """{"helper_cmds": {...}} for a manifest: under claude only the commands its
+    allowlist can run (see _helper_cmds); under kimchi all three helper
+    commands the deny extension admits by exact path (_kimchi_helper_cmds)."""
+    launch = _current_launch().name
+    if launch == "kimchi":
+        return {"helper_cmds": _kimchi_helper_cmds()}
+    if launch != "claude":
         return {}
     cmds = _helper_cmds()
     return {"helper_cmds": cmds} if cmds else {}

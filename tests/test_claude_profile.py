@@ -602,11 +602,11 @@ def test_helper_rule_is_exactly_the_conventions_script_and_only_for_the_review_w
     assert not any("ocr_" in a for a in docs_allowed)    # the docs worker never runs them
 
 
-def test_helper_cmds_are_given_to_the_session_only_under_claude(tiers):
+def test_helper_cmds_are_given_to_each_session_as_its_sandbox_admits(tiers):
     tiers.setenv("OCR_BACKEND", "claude")
     assert set(rg._helper_cmds_field()["helper_cmds"]) == {"conventions"}
     tiers.setenv("OCR_BACKEND", "kimchi")
-    assert rg._helper_cmds_field() == {}
+    assert set(rg._helper_cmds_field()["helper_cmds"]) == {"conventions", "demands", "collectors"}
 
 
 def test_tier_models_are_per_profile(tiers):

@@ -39,6 +39,8 @@ Invoked as `fake_backend.py <flavor> <cli argv...>`, flavor `claude` or
   FAKE_VERSION    the text `--version` prints (default: the flavor's fixed string)
   FAKE_CANARY_LEAK  1: the deny-extension canary's write SUCCEEDS (a sandbox that
                   did not engage), so the gate must deny
+  FAKE_MANIFEST_COPY  file: a copy of the review manifest (the --paths-file the
+                  prompt names) is written there, for tests that read the manifest
   FAKE_ENVELOPE   "json": claude flavor answers with the single
                   `--output-format json` result object instead of a stream.
 """
@@ -175,6 +177,11 @@ def main(argv):
                 "flavor": flavor, "argv": cli, "prompt": prompt, "cwd": os.getcwd(),
                 "env": {k: os.environ[k] for k in _ENV_NAMES if k in os.environ},
             }) + "\n")
+    copy_to = os.environ.get("FAKE_MANIFEST_COPY")
+    mf = re.search(r'--paths-file "([^"]+)"', prompt)
+    if copy_to and mf and os.path.isfile(mf.group(1)):
+        with open(mf.group(1), "rb") as src, open(copy_to, "wb") as dst:
+            dst.write(src.read())
     if prompt.startswith("Sandbox self-check"):
         if os.environ.get("FAKE_CANARY_LEAK") == "1":
             m = re.search(r"create the file (\S+) containing", prompt)

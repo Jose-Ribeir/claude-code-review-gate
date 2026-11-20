@@ -10,7 +10,8 @@
 // sets it; the supervisor strips it from everything else it spawns), the
 // extension
 //  - hard-denies the mutating tools (write/edit/web_fetch/web_search/mcp__*),
-//  - enforces a BASH ALLOWLIST (git read verbs + read-only file tools),
+//  - enforces a BASH ALLOWLIST (git read verbs + read-only file tools, plus
+//    the three review-gate helper scripts by exact path),
 //    denying everything else with a reason that says what to do instead,
 //  - passes read/grep/find/ls/lsp_*/Agent through untouched.
 // With OCR_IN_REVIEW unset it is provably inert: the handler returns
@@ -104,6 +105,96 @@ function deny(reason) {
   return { block: true, reason: reason + " " + _ADVICE }
 }
 
+// --- review-gate helper scripts (the ONLY python the sandbox runs) ---------------
+//
+// The review skill runs three of this plugin's own read-only helper scripts
+// with python: the conventions resolver, the demands validator and the evidence
+// collector. Everything else python stays denied (INTERPRETERS below).
+//
+// The allowlist is by EXACT script path, not by name or prefix: the interpreter
+// word must be exactly `python` / `python3`, the next word must be exactly
+// <plugin root>/scripts/<helper>.py (the plugin root is this extension's own
+// location, the same string the gate publishes as manifest.helper_cmds), and
+// every remaining word must match that helper's fixed argument grammar --
+// whole-word flag names only (no abbreviation, no `--flag=value`, no `--`), a
+// flag value never starts with `-`. ocr_demands.py takes NO arguments (its
+// --dump-schema PATH writes a file). `python3 -c ...`, `python3 other.py`,
+// `python3 -m ...`, `python3 <helper> --unknown`, a path that merely starts
+// with a helper path, and a `..` or symlink spelling of one all fall through
+// to the interpreter deny. A quoted heredoc is accepted ONLY as the stdin of
+// one of these exact commands (the demands validator and the collector read
+// JSON on stdin): see isAllowedHelperHeredoc.
+
+const HELPER_INTERPRETERS = new Set(["python", "python3"])
+
+// argument grammar kinds: "bool" flag, "int" value, "value" (a word not starting
+// with "-"); `positional` admits bare words not starting with "-".
+const HELPER_SCRIPTS = new Map([
+  ["ocr_conventions.py", { positional: true, flags: {
+    "--repo-root": "value", "--max-doc-lines": "int", "--max-total-lines": "int" } }],
+  ["ocr_demands.py", { positional: false, flags: {} }],
+  ["ocr_collectors.py", { positional: false, flags: {
+    "--repo-root": "value", "--changed-file": "value", "--tip": "value",
+    "--max-chars": "int", "--validate-bundle": "bool" } }],
+])
+
+function normalizeHelperPath(p) {
+  const slashed = String(p).replace(/\\/g, "/")
+  return process.platform === "win32" ? slashed.toLowerCase() : slashed
+}
+
+// Absolute path of the plugin root: extensions/../
+const _PLUGIN_ROOT = normalizeHelperPath(
+  fileURLToPath(new URL("..", import.meta.url))).replace(/\/+$/, "")
+
+const _HELPER_BY_PATH = new Map(
+  [...HELPER_SCRIPTS].map(([name, spec]) => [_PLUGIN_ROOT + "/scripts/" + name, spec]))
+
+function helperArgsMatch(spec, args) {
+  let i = 0
+  while (i < args.length) {
+    const t = args[i].text
+    const kind = Object.prototype.hasOwnProperty.call(spec.flags, t) ? spec.flags[t] : undefined
+    if (kind === "bool") { i++; continue }
+    if (kind !== undefined) {
+      const v = args[i + 1]
+      if (!v) return false
+      if (kind === "int" && !/^[0-9]{1,9}$/.test(v.text)) return false
+      if (kind === "value" && (v.text === "" || v.text.startsWith("-"))) return false
+      i += 2
+      continue
+    }
+    if (spec.positional && !t.startsWith("-")) { i++; continue }
+    return false
+  }
+  return true
+}
+
+// words: one command segment's WORD tokens. True only for an exact helper call.
+function isHelperInvocation(words) {
+  if (words.length < 2 || words[0].quoted || !HELPER_INTERPRETERS.has(words[0].text)) {
+    return false
+  }
+  const spec = _HELPER_BY_PATH.get(normalizeHelperPath(words[1].text))
+  return spec !== undefined && helperArgsMatch(spec, words.slice(2))
+}
+
+// `<exact helper command> <<'TAG'` + body + `TAG`, nothing else. The delimiter
+// is QUOTED (the body is literal: no expansion), `<<-` is refused, the last
+// line is exactly TAG and no earlier line is, so nothing can follow the body.
+function isAllowedHelperHeredoc(cmd) {
+  const nl = cmd.indexOf("\n")
+  if (nl < 0) return false
+  const m = /^(.*\S)[ \t]+<<[ \t]*(['"])([A-Za-z_][A-Za-z0-9_]{0,31})\2[ \t]*$/.exec(cmd.slice(0, nl))
+  if (!m) return false
+  const toks = tokenize(m[1])
+  if (!toks || toks.length === 0 || toks.some((t) => t.kind !== WORD)) return false
+  if (!isHelperInvocation(toks)) return false
+  const lines = cmd.slice(nl + 1).replace(/\n+$/, "").split("\n")
+  if (lines[lines.length - 1] !== m[3]) return false
+  return !lines.slice(0, -1).includes(m[3])
+}
+
 // --- shell tokenizer ------------------------------------------------------------
 //
 // Splits a command line into words and operators, tracking quoting so values
@@ -173,6 +264,7 @@ function tokenize(line) {
 // --- allowlist evaluation ---------------------------------------------------------
 
 function checkBashCommand(cmd) {
+  if (cmd.includes("<<") && isAllowedHelperHeredoc(cmd)) return undefined
   const toks = tokenize(cmd)
   if (toks === null) {
     return deny("bash command could not be parsed safely: it uses quoting, " +
@@ -247,6 +339,7 @@ function checkSegment(words) {
   if (NETWORK.has(name)) {
     return deny(name + " opens a network connection from inside the review.")
   }
+  if (isHelperInvocation(words)) return undefined // the review-gate helpers, exactly
   if (INTERPRETERS.has(name)) {
     return deny(name + " executes arbitrary code outside the sandbox (and " +
       "could spawn an unsandboxed nested agent session).")
@@ -400,4 +493,5 @@ export default function denyExtension(pi) {
 
 // Exposed for the test suite (node runs this file's erasable TypeScript
 // directly); the default export is the production entry point.
-export const _internals = { tokenize, checkBashCommand, checkSegment, checkGit, decide }
+export const _internals = { tokenize, checkBashCommand, checkSegment, checkGit, decide,
+  isHelperInvocation, isAllowedHelperHeredoc }

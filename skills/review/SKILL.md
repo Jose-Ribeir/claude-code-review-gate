@@ -508,6 +508,12 @@ After resolving the base rubric for each file, also apply:
      --repo-root "<repo root>" <changed file 1> <changed file 2> ...
    ```
 
+   When `manifest.helper_cmds.conventions` is present (Kimchi gets it too: the
+   sandbox admits only that exact command), run it verbatim in place of
+   `python3 "<skill_dir>/../../scripts/ocr_conventions.py"`, followed by the
+   same `--repo-root "<repo root>" <changed files...>` arguments and nothing
+   else (no other flags, no `-c`, no other script).
+
    The script prints `{"files": {path: text, ...}, "warnings": [...]}` on
    stdout. Append each file's text to its `language_rules`; files absent from
    the result have no applicable conventions. Copy every entry of `warnings`
@@ -761,7 +767,18 @@ gate's validator, once:
 python3 "<skill_dir>/../../scripts/ocr_demands.py"
 ```
 
-(the spotter output goes on stdin). The script prints
+(the spotter output goes on stdin). When `manifest.helper_cmds.demands` is
+present (Kimchi), run exactly that command, with NO arguments, and give the
+spotter output as a quoted heredoc on that one command -- the sandbox admits
+nothing else for this step:
+
+```
+<manifest.helper_cmds.demands> <<'DEMANDS_EOF'
+<the spotter's raw final message, verbatim>
+DEMANDS_EOF
+```
+
+The script prints
 `{"demands": <object or null>, "warnings": [...]}` on stdout and always exits
 0. The contract (`<skill_dir>/../../schemas/demands.schema.json`,
 generated from the validator) is strict and fail-closed per ADR 0001
@@ -800,7 +817,12 @@ python3 "<skill_dir>/../../scripts/ocr_collectors.py" \
   --changed-file <path> [<path> ...]
 ```
 
-(one `--changed-file` per reviewed path). The script prints
+(one `--changed-file` per reviewed path). When `manifest.helper_cmds.collectors`
+is present (Kimchi), run exactly that command in place of the
+`python3 "<skill_dir>/../../scripts/ocr_collectors.py"` prefix, with a literal
+`--repo-root .` (the session's cwd is the repo root; a `$(...)` substitution is
+refused by the sandbox) and the demands object as a quoted heredoc
+(`<<'DEMANDS_EOF'` ... `DEMANDS_EOF`) on that one command. The script prints
 `{"bundle": ..., "warnings": [...]}` on stdout and **always exits 0** — every
 degradation is data, never an exit status: every demand resolves to evidence
 (status `ok`) or an explicit `unresolved`/`unavailable` entry, oversize
