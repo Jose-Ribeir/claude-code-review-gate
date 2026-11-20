@@ -230,7 +230,7 @@ instructions.
   pointer: cap confidence on any claim that would need the missing tier,
   exactly like other unverified claims.
 
-**Context-window discipline.** Your context window is finite (kimi-k3: 262k
+**Context-window discipline.** Your context window is finite (about 262k
 tokens), and the collectors bound the bundle to their own budget BEFORE you
 see it: an oversize bundle arrives pre-degraded largest-entry-first, with
 `truncated: true` on the bundle and on each cut entry, `[cut N chars: bundle

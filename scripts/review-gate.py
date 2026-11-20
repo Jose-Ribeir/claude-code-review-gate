@@ -477,6 +477,15 @@ def _pin_thinking_arg(args, agent, backend):
     return args
 
 
+def _native_deep_model():
+    """The `--model` value of a native (rpc) deep session: the deep reviewer's
+    settings-resolved kimchi model plus its thinking level as the `:<level>`
+    suffix (`max` by default), the same pin _run_review_once puts on the
+    non-native launch. The native host builds its own argv from this value."""
+    args = ["--model", _agent_model("deep-reviewer", "kimchi")]
+    return _pin_thinking_arg(args, "deep-reviewer", "kimchi")[1]
+
+
 def _claude_docs_summary_args():
     """_claude_review_args with the docs-summary role's model pin (the claude
     counterpart of _docs_summary_model_args)."""
@@ -4682,7 +4691,7 @@ def _run_native_process(kimi, prompt, repo_root, head_sha, push_range, timeout,
         revision_tuple=(head_sha, push_range),
         input_sha256=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
         backend="kimchi",
-        model=_read_tier2_model(),
+        model=_native_deep_model(),
         deadline_at_unix=started_at + timeout,
         prompt=prompt,
         repo_root=Path(repo_root),
@@ -4823,7 +4832,7 @@ def _run_native_decomposed_review(kimi, prompt, manifest, paths_file, repo_root,
         result, raw = execute_deep_review(
             prompt, manifest, paths_file, kimi=kimi, repo_root=repo_root,
             run_id=native_run_id, async_dir=async_dir, head_sha=head_sha,
-            push_range=push_range, timeout=timeout, model=_read_tier2_model(),
+            push_range=push_range, timeout=timeout, model=_native_deep_model(),
             child_env=child_env, started_at=started_at,
             result_parser=lambda text: (
                 _extract_from_stream_json(text) or _extract_json(text)
