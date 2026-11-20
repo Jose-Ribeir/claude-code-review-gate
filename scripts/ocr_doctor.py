@@ -15,6 +15,9 @@ health check over every dependency the gate has:
   - kimchi only: the deny extension (repo layout + installed slot): nonempty
     text with the tool_call subscriber and the OCR_IN_REVIEW gate string
     (the claude worker's sandbox is its argv tool allowlist, nothing to check),
+  - settings (rg_settings): the settings files validate, no anthropic/openai
+    model is pinned for kimchi (ADR 0005), no deprecated model id is pinned,
+    and pinned kimchi ids appear in `kimchi --list-models` when obtainable,
   - hook health (with --repo): the EFFECTIVE hook path git resolves for the
     repo (core.hooksPath, repo-top-relative when relative, else the default
     hooks dir -- the common dir for a linked worktree), whether a gate hook
@@ -621,6 +624,113 @@ def check_canary_hint(add, env, backend="kimchi"):
         "/tmp/rg-canary-check.txt'")
 
 
+def _pinned_models(settings, backend):
+    """[(key, model, source)] for every model the user pinned (a settings file
+    or an OCR_* environment override); built-in defaults are not pins."""
+    out = []
+    for key, got in settings.entries():
+        if not key.endswith(".model") or got.source == "default":
+            continue
+        out.append((key, got.value, got.source))
+    for key, model, source in settings.file_models():
+        if not any(k == key and m == model for k, m, _ in out):
+            out.append((key, model, source))   # a file value an env override shadows
+    return out
+
+
+def _model_ids(text):
+    """The set of model ids named in `kimchi --list-models` output, compared
+    without a vendor prefix (`kimchi-dev/glm-5.3` == `glm-5.3`)."""
+    ids = set()
+    for tok in re.split(r"[\s,|;\"'\[\]{}]+", text or ""):
+        tok = tok.strip().lower()
+        if tok:
+            ids.add(tok.rsplit("/", 1)[-1])
+    return ids
+
+
+def check_settings(add, env, repo=None, backend=None):
+    """Settings files, the ADR 0005 provider guard, deprecated ids and pins
+    missing from the backend's model list. Read-only: it loads the files and
+    may run `kimchi --list-models` (a listing, never a model call)."""
+    import rg_settings
+    root = os.path.abspath(repo) if repo else None
+    user_path = rg_settings.user_settings_path(env)
+    try:
+        settings = rg_settings.load(root, environ=env, user_path=user_path)
+    except rg_settings.SettingsError as exc:
+        add("settings-files", "fail",
+            f"{exc} -- the gate blocks every push until this is fixed (no fallback "
+            "to defaults for an invalid settings file)")
+        return
+    paths = [("project", rg_settings.project_settings_path(root) if root else None),
+             ("user", user_path)]
+    present = [f"{label} {p}" for label, p in paths if p is not None and os.path.isfile(str(p))]
+    add("settings-files", "ok",
+        ("valid: " + "; ".join(present)) if present
+        else "no settings file (built-in defaults and OCR_* overrides apply)")
+
+    pins = _pinned_models(settings, backend)
+
+    # ADR 0005 guard. It is binding on the kimchi backend; under claude the
+    # kimchi section of a file is dormant, so it is only a warning there.
+    effective = settings.kimchi_guard_violations() if backend != "claude" else []
+    lines = [f"{label}={model} ({prov})" for label, model, prov in effective]
+    for key, model, prov, source in settings.file_guard_violations():
+        if not any(label.startswith(key) for label, _, _ in effective):
+            lines.append(f"{key}={model} ({prov}, {source})")
+    if lines and backend != "claude":
+        add("settings-guard", "fail",
+            "anthropic/openai model on the kimchi backend (ADR 0005): " + "; ".join(lines)
+            + " -- the gate denies the push; use an open model")
+    elif lines:
+        add("settings-guard", "warn",
+            "kimchi section pins an anthropic/openai model (unused under the claude "
+            "backend, but a fail as soon as kimchi is selected): " + "; ".join(lines))
+    else:
+        add("settings-guard", "ok", "no anthropic/openai model pinned for the kimchi backend")
+
+    dep_lines = []
+    today = time.strftime("%Y-%m-%d")
+    for key, model, source in pins:
+        dep = rg_settings.deprecation(model)
+        if dep:
+            when = ("retired " if dep[1] <= today else "retires ") + dep[1]
+            dep_lines.append(f"{key}={model} ({source}) is deprecated, {when}; use {dep[0]}")
+    if dep_lines:
+        add("settings-deprecated", "warn", "; ".join(dep_lines))
+    else:
+        add("settings-deprecated", "ok", f"no deprecated model id pinned ({len(pins)} pin(s))")
+
+    kimchi_pins = [(k, m, s) for k, m, s in pins if ".kimchi." in k]
+    if not kimchi_pins:
+        return
+    bin_ = _kimchi_bin(env)
+    if not bin_:
+        add("settings-models", "info",
+            "unverified: kimchi not installed, so pinned kimchi model ids were not "
+            "checked against its model list")
+        return
+    try:
+        out = _run([bin_, "--list-models"], env)
+    except Exception as exc:
+        add("settings-models", "info", f"unverified: `kimchi --list-models` could not be run ({exc})")
+        return
+    listed = _model_ids(out.stdout)
+    if out.returncode != 0 or not listed:
+        add("settings-models", "info",
+            f"unverified: `kimchi --list-models` gave no model list (exit {out.returncode})")
+        return
+    missing = [f"{k}={m} ({s})" for k, m, s in kimchi_pins
+               if m.strip().lower().rsplit("/", 1)[-1] not in listed]
+    if missing:
+        add("settings-models", "warn",
+            "pinned model id not in kimchi's model list: " + "; ".join(missing))
+    else:
+        add("settings-models", "ok",
+            f"all {len(kimchi_pins)} pinned kimchi model id(s) are in kimchi's model list")
+
+
 def run_checks(repo=None, env=None, repo_ext=None, installed_ext=None,
                hook_dir=None):
     """Every doctor check, in report order. Returns the list of check dicts:
@@ -641,6 +751,7 @@ def run_checks(repo=None, env=None, repo_ext=None, installed_ext=None,
     elif backend is not None:
         check_kimchi(add, env)
         check_deny_ext(add, env, repo_ext=repo_ext, installed_ext=installed_ext)
+    check_settings(add, env, repo=repo, backend=backend)
     check_hooks(add, env, repo=repo, hook_dir=hook_dir)
     check_store(add, env)
     check_states(add, env)

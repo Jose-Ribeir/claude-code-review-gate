@@ -187,6 +187,23 @@ def model_provider(model):
 
 # --- errors, results ------------------------------------------------------------
 
+# --- deprecated model ids -------------------------------------------------------
+# bare model id (vendor prefix ignored) -> (replacement, retirement date). Only
+# the exact id matches: `deepseek-v4.1-flash-1017` is the replacement, not a
+# deprecated variant. The doctor warns on any of these pinned in a settings file
+# or an environment override; the built-in defaults are ticket 02's to change.
+DEPRECATED_MODELS = {
+    "kimi-k3": ("kimi-k3.1-pro", "2026-12-17"),
+    "deepseek-v4.1-flash": ("deepseek-v4.1-flash-1017", "2026-12-02"),
+}
+
+
+def deprecation(model):
+    """(replacement, retirement date) when `model` is a deprecated id, else None."""
+    ident = (model or "").strip().lower().rsplit("/", 1)[-1]
+    return DEPRECATED_MODELS.get(ident)
+
+
 class SettingsError(Exception):
     """A settings file (or a value being set) is invalid. `problems` lists each
     one; str() is the whole human-readable message."""
@@ -201,13 +218,20 @@ Resolved = namedtuple("Resolved", "value source")
 _MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+\[\]\-]*$")
 
 
-def user_settings_path():
+def user_settings_path(environ=None):
     """The user-level file: ~/.config/review-gate/settings.json unless
     OCR_SETTINGS_FILE relocates it. None only when no home directory can be
-    determined (then there is simply no user file)."""
-    override = os.environ.get("OCR_SETTINGS_FILE", "").strip()
+    determined (then there is simply no user file). `environ` (default: the
+    process environment) lets the doctor resolve the path for the environment
+    it was handed."""
+    env = os.environ if environ is None else environ
+    override = (env.get("OCR_SETTINGS_FILE") or "").strip()
     if override:
         return Path(override)
+    if environ is not None:
+        home = (env.get("USERPROFILE") or env.get("HOME") or "").strip()
+        if home:
+            return Path(home) / ".config" / "review-gate" / "settings.json"
     try:
         return Path.home() / ".config" / "review-gate" / "settings.json"
     except (RuntimeError, KeyError):
@@ -548,12 +572,15 @@ class Settings:
         return out
 
 
-def load(repo_root=None, environ=None):
+def load(repo_root=None, environ=None, user_path=None):
     """Load and validate the project and user files. Raises SettingsError for
     an unreadable or invalid file; missing files are fine. `repo_root` None
-    skips the project file."""
+    skips the project file. `user_path` overrides where the user file is
+    looked for (the doctor resolves it from the environment it was handed;
+    `environ` alone only feeds the env-override layer)."""
     project_path = project_settings_path(repo_root) if repo_root else None
-    user_path = user_settings_path()
+    if user_path is None:
+        user_path = user_settings_path()
     return Settings(_read_file(project_path, "project"),
                     _read_file(user_path, "user"),
                     project_path, user_path, environ)
