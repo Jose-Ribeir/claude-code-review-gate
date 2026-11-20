@@ -25,6 +25,7 @@ Invoked as `fake_backend.py <flavor> <cli argv...>`, flavor `claude` or
                   env names a launch test cares about). Absent -> no trace.
   FAKE_SCENARIO   "" (default) delegate to the stub reviewer;
                   auth     print the CLI's logged-out error (FAKE_AUTH_RC, default 1)
+                  notloggedin  print the CLI's "Not logged in" error (rc 1)
                   garbage  a well-formed stream whose text holds no verdict
                   crash    exit 3 with a stderr message and no stdout
                   rawtext  plain text with no JSON stream at all, exit 0
@@ -193,6 +194,14 @@ def main(argv):
         else:
             sys.stdout.write(text + "\n")
         return int(os.environ.get("FAKE_AUTH_RC", "1"))
+    if scenario == "notloggedin":
+        text = "Not logged in · Please run /login"
+        if flavor == "claude":
+            sys.stdout.write(json.dumps({"type": "result", "subtype": "success",
+                                         "is_error": True, "result": text}) + "\n")
+        else:
+            sys.stdout.write(text + "\n")
+        return 1
     if scenario == "garbage":
         sys.stdout.write(_wrap(flavor, "I looked at the change and it seems fine."))
         return 0

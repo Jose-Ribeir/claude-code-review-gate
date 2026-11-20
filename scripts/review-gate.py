@@ -3594,6 +3594,12 @@ def _find_claude():
     for root in roots:
         cands += glob.glob(os.path.join(root, "Packages", "Claude_*", "LocalCache",
                                         "Roaming", "Claude", "claude-code", "*", "claude.exe"))
+        # The desktop app's per-version install:
+        # Claude-Data/claude_<id>/claude-code/<version>/<hash>/claude.exe
+        cands += glob.glob(os.path.join(root, "Claude-Data", "claude_*", "claude-code",
+                                        "*", "*", "claude.exe"))
+        cands += glob.glob(os.path.join(root, "Claude-Data", "claude_*", "claude-code",
+                                        "*", "claude.exe"))
     if cands:
         cands.sort(key=lambda f: os.path.getmtime(f), reverse=True)
         return cands[0]
@@ -3608,6 +3614,7 @@ _AUTH_MARKERS = (
     "authentication_error",
     "invalid api key",
     "please run /login",
+    "not logged in",
     # Keep these as full phrases. A bare "credentials" substring also matches
     # unrelated crash text that merely mentions the word, and a wrong auth hint
     # is worse than none -- it sends people to re-login over a real bug.
@@ -3732,8 +3739,12 @@ def _auth_hint(output, launch=None):
     low = (output or "").lower()
     if not any(m in low for m in _AUTH_MARKERS):
         return ""
+    not_logged_in = (
+        f"  The child `{(launch or _KIMCHI_LAUNCH).label}` process the gate spawned is NOT LOGGED IN.\n"
+        if "not logged in" in low else "")
     return (
-        "  This is a CREDENTIALS failure, not a review failure -- the review never ran.\n"
+        not_logged_in
+        + "  This is a CREDENTIALS failure, not a review failure -- the review never ran.\n"
         "  Fix it : run `claude` in an interactive terminal and log in via /login,\n"
         "    then retry. The headless session the gate spawns cannot complete an\n"
         "    OAuth flow itself (no terminal to hand the browser callback to).\n"

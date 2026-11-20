@@ -120,6 +120,10 @@ def _claude_bin(env):
     for root in roots:
         cands += glob.glob(os.path.join(root, "Packages", "Claude_*", "LocalCache",
                                         "Roaming", "Claude", "claude-code", "*", "claude.exe"))
+        cands += glob.glob(os.path.join(root, "Claude-Data", "claude_*", "claude-code",
+                                        "*", "*", "claude.exe"))
+        cands += glob.glob(os.path.join(root, "Claude-Data", "claude_*", "claude-code",
+                                        "*", "claude.exe"))
     if cands:
         cands.sort(key=lambda f: os.path.getmtime(f), reverse=True)
         return cands[0]

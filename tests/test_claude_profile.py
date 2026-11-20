@@ -274,6 +274,17 @@ def test_expired_credentials_say_so_and_never_read_as_a_review_problem(repo, tmp
     assert ("Kimchi Studio" in detail) == (profile == "kimchi")
 
 
+@pytest.mark.parametrize("profile", PROFILES)
+def test_a_child_that_is_not_logged_in_says_so_and_how_to_fix_it(repo, tmp_path, profile):
+    tip = _commit(repo)
+    env = _backend_env(tmp_path, OCR_BACKEND=profile, FAKE_SCENARIO="notloggedin")
+    assert _push(repo, env)[0] == "deny"
+    detail = str(_wait_state(repo, tip, {"failed"}).get("detail"))
+    assert "NOT LOGGED IN" in detail and f"`{profile}`" in detail
+    assert "/login" in detail and "interactive terminal" in detail
+    assert _verdict_record(repo, tip) is None
+
+
 def test_a_usage_limit_blocks_with_the_limit_message(repo, tmp_path):
     tip = _commit(repo)
     env = _backend_env(tmp_path, OCR_BACKEND="claude", STUB_VERDICT="limit")
@@ -411,6 +422,25 @@ def test_find_claude_falls_back_to_the_newest_desktop_bundled_exe(clean, tmp_pat
     clean.setenv("LOCALAPPDATA", str(tmp_path))
     clean.setenv("USERPROFILE", str(tmp_path / "none"))
     assert rg._find_claude() == str(new)
+
+
+def test_find_claude_finds_the_desktop_app_per_version_install(clean, tmp_path):
+    # %LOCALAPPDATA%/Claude-Data/claude_<id>/claude-code/<version>/<hash>/claude.exe
+    root = tmp_path / "Claude-Data" / "claude_abc123" / "claude-code"
+    old, new = root / "2.1.321" / "7689cf83002b" / "claude.exe", root / "2.1.325" / "bb79f03fa3c4" / "claude.exe"
+    for p, mtime in ((old, 1000), (new, 2000)):
+        p.parent.mkdir(parents=True)
+        p.write_text("x")
+        os.utime(p, (mtime, mtime))
+    clean.setattr(rg.shutil, "which", lambda name: None)
+    clean.setenv("LOCALAPPDATA", str(tmp_path))
+    clean.setenv("USERPROFILE", str(tmp_path / "none"))
+    assert rg._find_claude() == str(new)                     # newest install wins
+    # An explicit override still beats the discovered install.
+    exe = tmp_path / "override-claude"
+    exe.write_text("x")
+    clean.setenv("OCR_CLAUDE_BIN", str(exe))
+    assert rg._find_claude() == str(exe)
 
 
 def test_the_claude_launch_is_selected_by_name_and_skips_the_canary(clean, monkeypatch):
