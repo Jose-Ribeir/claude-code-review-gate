@@ -167,7 +167,7 @@ class TestFastLaneE2E:
         assert decision == "pass", reason
         tier1 = [r for r in _tier_records(work) if r["tier"] == "tier1"]
         assert len(tier1) == 1
-        assert tier1[0]["model"] == "kimi-k3"
+        assert tier1[0]["model"] == "kimchi-dev/kimi-k3.1-pro"
         # The stub's stream-json result event carries total_cost_usd 0.0421.
         assert tier1[0]["cost_usd"] == 0.0421
         assert tier1[0]["seconds"] is not None
@@ -188,7 +188,7 @@ class TestDeepLaneE2E:
         recs = _tier_records(work)
         tier2 = [r for r in recs if r["tier"] == "tier2"]
         assert len(tier2) == 1
-        assert tier2[0]["model"] == "kimi-k3"
+        assert tier2[0]["model"] == "kimchi-dev/kimi-k3.1-pro"
         assert tier2[0]["cost_usd"] == 0.0421
         # The deep pass replaces the tier-1 review: no tier1 record lands.
         assert [r for r in recs if r["tier"] == "tier1"] == []
@@ -267,7 +267,7 @@ class TestDemandsCli:
         assert len(recs) == 1
         rec = recs[0]
         assert rec["tier"] == "spotter"
-        assert rec["model"] == "deepseek-v4-flash"
+        assert rec["model"] == "deepseek-v4.1-flash-1017"
         assert rec["token_estimate"] == len(_VALID_DEMANDS) // 4
 
     def test_spotter_model_comes_from_config(self, tmp_path):
