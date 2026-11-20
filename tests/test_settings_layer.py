@@ -157,7 +157,7 @@ def test_set_value_round_trips_and_rejects_a_bad_value(tmp_path, user_file):
 
 def test_behavior_defaults_are_the_documented_values(tmp_path):
     s = rg_settings.load(tmp_path, NO_ENV)
-    assert s.behavior("inline_wait_seconds.hook").value == 600
+    assert s.behavior("inline_wait_seconds.hook").value == 300
     assert s.behavior("inline_wait_seconds.git").value == 300
     assert s.behavior("spotter_skip.enabled").value is True
     assert s.behavior("spotter_skip.max_files").value == 3

@@ -34,7 +34,7 @@ settings_schema(); a test keeps the two in step):
         }
       },
       "behavior": {
-        "inline_wait_seconds": {"hook": 600, "git": 300},
+        "inline_wait_seconds": {"hook": 300, "git": 300},
         "spotter_skip": {"enabled": true, "max_files": 3, "max_changed_lines": 60},
         "canary_cache": {"enabled": true, "ttl_days": 7},
         "docs_checker_parallel": {"enabled": true}
@@ -109,10 +109,11 @@ DEFAULT_THINKING = {
 
 # behavior key -> (default, kind, minimum). kind: "bool" or "int".
 BEHAVIOR = {
-    # Seconds the hook (claude) / git pre-push (git mode) waits inline for the
-    # review before answering "still running". Defaults are today's
-    # OCR_INLINE_BUDGET / OCR_INLINE_BUDGET_GIT values.
-    "inline_wait_seconds.hook": (600, "int", 0),
+    # Seconds the claude hook / git pre-push (git mode) waits inline for the
+    # review before answering "still running" (a push is DENIED on timeout,
+    # never allowed). A KIMCHI hook ignores the hook value: kimchi kills a bash
+    # hook at 5 s, so it keeps a fixed 3 s wait (OCR_INLINE_BUDGET, max 4).
+    "inline_wait_seconds.hook": (300, "int", 0),
     "inline_wait_seconds.git": (300, "int", 0),
     # Skip the spotter for a tiny change (at most max_files files AND at most
     # max_changed_lines changed lines).

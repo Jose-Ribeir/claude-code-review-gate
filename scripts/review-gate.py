@@ -568,11 +568,15 @@ ASYNC_DIR = "review-gate-async"
 # Kimchi kills a bash hook after 5 s; the hook-mode join budget must sit
 # safely below that (the bash adapter itself takes some of the window).
 _INLINE_BUDGET_DEFAULT = 3
-# hooks/hooks.json's PreToolUse timeout is 900 s and the app wall is ~975 s;
-# a budget at or above the hooks timeout would let Claude Code kill the hook
-# (treated as non-blocking, i.e. fail-open) before the budget deny fires.
+# The kimchi hook-mode wait never exceeds this.
 _INLINE_BUDGET_MAX = 4
 _INLINE_BUDGET_MIN = 1
+# Claude hook mode waits up to 300 s by default. hooks/hooks.json's PreToolUse
+# timeout is 900 s and the app wall is ~975 s; a budget at or above the hooks
+# timeout would let Claude Code kill the hook (treated as non-blocking, i.e.
+# fail-open) before the budget deny fires, so the setting is capped below it.
+_INLINE_BUDGET_HOOK_DEFAULT = 300
+_INLINE_BUDGET_HOOK_MAX = 840
 # Under the Bash tool's 600 s ceiling, for a terminal push made through Claude.
 _INLINE_BUDGET_GIT_DEFAULT = 300
 POLL_S = 1.0
@@ -738,29 +742,71 @@ _GIT_ENV_SCRUB = (
 _HOOK_T0 = time.time()
 
 
-def _inline_budget(mode):
-    """Seconds this hook may wait for the review before denying with 'retry'.
+def _hook_is_kimchi(repo_root=None):
+    """True when a hook-mode call was fired by the kimchi harness (whose hooks
+    die at 5 s). The adapter's OCR_HARNESS hint decides; without one, the
+    backend the review will use does. Unknown or unselectable -> kimchi: the
+    short wait is the safe side (deny sooner, the re-push joins)."""
+    hint = os.environ.get("OCR_HARNESS", "").strip()
+    if hint:
+        profile = ocr_profile.PROFILES.get(ocr_profile._normalise(hint))
+        if profile is not None:
+            return profile.name == "kimchi"
+    try:
+        return ocr_profile.select_backend(repo_root=repo_root).name == "kimchi"
+    except Exception:  # noqa: BLE001 -- a wait choice must never raise
+        return True
 
-    Hook mode: OCR_INLINE_BUDGET (default 600, clamped so it can never reach
-    hooks.json's timeout). Git mode: OCR_INLINE_BUDGET_GIT (default 300) when
-    stderr is not a terminal -- i.e. the push is running inside Claude's Bash
-    tool, whose hard ceiling is 600 s -- and the full reviewer timeout when it
-    is, because a human at a terminal can simply wait.
+
+def _inline_wait_setting(dotted, default, root):
+    """(seconds, source) of a behavior.inline_wait_seconds.* knob: environment
+    over settings file over built-in default. An unreadable settings file
+    falls back to the default here -- the provider guard that runs right after
+    reports the invalid file as a denial."""
+    try:
+        got = _settings(root).behavior(dotted)
+        return int(got.value), got.source
+    except (ReviewGateError, ValueError, TypeError):
+        return default, "default"
+
+
+def _inline_budget_info(mode, repo_root=None):
+    """(seconds, source) this hook may wait for the review before denying with
+    'retry'.
+
+    Claude hook mode: behavior.inline_wait_seconds.hook (default 300; env
+    OCR_INLINE_BUDGET wins), capped below hooks.json's 900 s timeout. Kimchi
+    hook mode: OCR_INLINE_BUDGET only, default 3 and never above 4 -- kimchi
+    kills a bash hook at 5 s -- and the deny-then-re-push flow does the rest.
+    Git mode: behavior.inline_wait_seconds.git (default 300; env
+    OCR_INLINE_BUDGET_GIT wins) when stderr is not a terminal -- i.e. the push
+    is running inside Claude's Bash tool, whose hard ceiling is 600 s -- and
+    the full reviewer timeout when it is, because a human at a terminal can
+    simply wait. A timeout always DENIES; it never allows.
     """
     if mode == "git":
         try:
             if sys.stderr is not None and sys.stderr.isatty():
-                return TIMEOUT
+                return TIMEOUT, "terminal"
         except Exception:
             pass
-        name, default = "OCR_INLINE_BUDGET_GIT", _INLINE_BUDGET_GIT_DEFAULT
-    else:
-        name, default = "OCR_INLINE_BUDGET", _INLINE_BUDGET_DEFAULT
-    try:
-        val = int(os.environ.get(name, "") or default)
-    except ValueError:
-        val = default
-    return max(_INLINE_BUDGET_MIN, min(_INLINE_BUDGET_MAX, val))
+        val, src = _inline_wait_setting(
+            "inline_wait_seconds.git", _INLINE_BUDGET_GIT_DEFAULT, repo_root)
+        return max(_INLINE_BUDGET_MIN, val), src
+    if _hook_is_kimchi(repo_root):
+        try:
+            val = int(os.environ.get("OCR_INLINE_BUDGET", "") or _INLINE_BUDGET_DEFAULT)
+        except ValueError:
+            val = _INLINE_BUDGET_DEFAULT
+        src = "env:OCR_INLINE_BUDGET" if os.environ.get("OCR_INLINE_BUDGET") else "default"
+        return max(_INLINE_BUDGET_MIN, min(_INLINE_BUDGET_MAX, val)), src
+    val, src = _inline_wait_setting(
+        "inline_wait_seconds.hook", _INLINE_BUDGET_HOOK_DEFAULT, repo_root)
+    return max(_INLINE_BUDGET_MIN, min(_INLINE_BUDGET_HOOK_MAX, val)), src
+
+
+def _inline_budget(mode, repo_root=None):
+    return _inline_budget_info(mode, repo_root)[0]
 
 # 0.5.5's in-progress marker. Superseded by the async state file (see
 # ASYNC_DIR), which carries a heartbeat instead of a bare timestamp and so can
@@ -15821,7 +15867,7 @@ def _main_inner(argv, mode):
         "remote": remote_name, "remote_url": rg_store.remote_url(repo_root, remote_name),
     }
     meta.update(inc_meta)
-    budget = _inline_budget(mode)
+    budget = _inline_budget(mode, repo_root)
     try:
         # Provider guard: refuse a misconfigured review model BEFORE any
         # review state is claimed, a supervisor spawned, or a token flows

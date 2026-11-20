@@ -80,6 +80,10 @@ def cmd_show(args):
     width = max(len(k) for k, _ in rows)
     for key, got in rows:
         print("%-*s = %-34s [%s]" % (width, key, _display(got.value), got.source))
+    print("inline wait: a claude hook uses behavior.inline_wait_seconds.hook, a git push "
+          "uses behavior.inline_wait_seconds.git (a terminal push waits the full review "
+          "timeout); a kimchi hook keeps a fixed short wait (OCR_INLINE_BUDGET, default 3 s, "
+          "max 4) because kimchi kills a hook at 5 s. A timeout always denies the push.")
     return 0
 
 
