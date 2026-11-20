@@ -163,12 +163,22 @@ def test_behavior_defaults_are_the_documented_values(tmp_path):
     s = rg_settings.load(tmp_path, NO_ENV)
     assert s.behavior("inline_wait_seconds.hook").value == 300
     assert s.behavior("inline_wait_seconds.git").value == 300
-    assert s.behavior("spotter_skip.enabled").value is True
+    # Shipped OFF until the cross-file recall scenarios ran on a real kimchi.
+    assert s.behavior("spotter_skip.enabled").value is False
     assert s.behavior("spotter_skip.max_files").value == 3
     assert s.behavior("spotter_skip.max_changed_lines").value == 60
     assert s.behavior("canary_cache.enabled").value is True
     assert s.behavior("canary_cache.ttl_days").value == 7
     assert s.behavior("docs_checker_parallel.enabled").value is True
+
+
+def test_the_boolean_behavior_switches_follow_their_environment_variable(tmp_path):
+    s = rg_settings.load(tmp_path, {"OCR_SPOTTER_SKIP": "1", "OCR_CANARY_CACHE": "off"})
+    assert (s.behavior("spotter_skip.enabled").value,
+            s.behavior("spotter_skip.enabled").source) == (True, "env:OCR_SPOTTER_SKIP")
+    assert s.behavior("canary_cache.enabled").value is False
+    junk = rg_settings.load(tmp_path, {"OCR_SPOTTER_SKIP": "maybe"})
+    assert junk.behavior("spotter_skip.enabled").source == "default"
 
 
 def test_every_key_resolves_with_a_source(tmp_path):

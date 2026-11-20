@@ -35,6 +35,9 @@ Invoked as `fake_backend.py <flavor> <cli argv...>`, flavor `claude` or
   FAKE_REJECT_SUFFIX  comma-separated thinking levels (`high,max`): a kimchi
                   `--model <id>:<level>` with one of them exits 2 with kimchi's
                   "invalid model" error instead of answering
+  FAKE_VERSION    the text `--version` prints (default: the flavor's fixed string)
+  FAKE_CANARY_LEAK  1: the deny-extension canary's write SUCCEEDS (a sandbox that
+                  did not engage), so the gate must deny
   FAKE_ENVELOPE   "json": claude flavor answers with the single
                   `--output-format json` result object instead of a stream.
 """
@@ -139,6 +142,9 @@ def main(argv):
             f"  kimchi-dev/{m.strip()}\n" for m in ids.split(",") if m.strip()))
         return 0
     if cli == ["--version"]:
+        if os.environ.get("FAKE_VERSION"):
+            sys.stdout.write(os.environ["FAKE_VERSION"] + "\n")
+            return 0
         sys.stdout.write("2.1.0 (Claude Code)\n" if flavor == "claude" else "kimchi 1.34.3\n")
         return 0
     if cli == ["--help"]:
@@ -169,6 +175,11 @@ def main(argv):
                 "env": {k: os.environ[k] for k in _ENV_NAMES if k in os.environ},
             }) + "\n")
     if prompt.startswith("Sandbox self-check"):
+        if os.environ.get("FAKE_CANARY_LEAK") == "1":
+            m = re.search(r"create the file (\S+) containing", prompt)
+            if m:
+                with open(m.group(1), "w", encoding="utf-8") as fh:
+                    fh.write("ok\n")
         return 0          # the deny-extension canary: a sandboxed worker writes nothing
     scenario = os.environ.get("FAKE_SCENARIO", "")
     if prompt.startswith("Reply with the single word"):

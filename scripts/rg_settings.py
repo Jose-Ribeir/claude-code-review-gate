@@ -35,7 +35,7 @@ settings_schema(); a test keeps the two in step):
       },
       "behavior": {
         "inline_wait_seconds": {"hook": 300, "git": 300},
-        "spotter_skip": {"enabled": true, "max_files": 3, "max_changed_lines": 60},
+        "spotter_skip": {"enabled": false, "max_files": 3, "max_changed_lines": 60},
         "canary_cache": {"enabled": true, "ttl_days": 7},
         "docs_checker_parallel": {"enabled": true}
       }
@@ -46,7 +46,8 @@ relocation): OCR_SETTINGS_FILE (user file path), OCR_SPOTTER_MODEL,
 OCR_TIER1_MODEL, OCR_TIER2_MODEL, OCR_CLAUDE_SPOTTER_MODEL,
 OCR_CLAUDE_TIER1_MODEL, OCR_CLAUDE_TIER2_MODEL, OCR_MODEL, OCR_CLAUDE_MODEL,
 OCR_DOCS_SUMMARY_MODEL, OCR_CLAUDE_DOCS_SUMMARY_MODEL, OCR_INLINE_BUDGET,
-OCR_INLINE_BUDGET_GIT. Decision record: ADR 0005 (tier models, provider
+OCR_INLINE_BUDGET_GIT, OCR_SPOTTER_SKIP and OCR_CANARY_CACHE (1/0, win over
+the files). Decision record: ADR 0005 (tier models, provider
 guard) and its successor for this layer.
 
 This module reads and (through set_value) writes settings files; it never
@@ -116,9 +117,11 @@ BEHAVIOR = {
     # hook at 5 s, so it keeps a fixed 3 s wait (OCR_INLINE_BUDGET, max 4).
     "inline_wait_seconds.hook": (300, "int", 0),
     "inline_wait_seconds.git": (300, "int", 0),
-    # Skip the spotter for a tiny change (at most max_files files AND at most
-    # max_changed_lines changed lines).
-    "spotter_skip.enabled": (True, "bool", None),
+    # Skip the spotter for a docs-only push or a tiny change (at most max_files
+    # files AND at most max_changed_lines changed lines). OFF by default until
+    # the cross-file recall scenarios were run on a real kimchi (ticket 13);
+    # turn it on with: settings set behavior.spotter_skip.enabled true
+    "spotter_skip.enabled": (False, "bool", None),
     "spotter_skip.max_files": (3, "int", 0),
     "spotter_skip.max_changed_lines": (60, "int", 0),
     # Remember a passed deny-extension canary for ttl_days days.
@@ -131,7 +134,11 @@ BEHAVIOR = {
 _BEHAVIOR_ENV = {
     "inline_wait_seconds.hook": "OCR_INLINE_BUDGET",
     "inline_wait_seconds.git": "OCR_INLINE_BUDGET_GIT",
+    "spotter_skip.enabled": "OCR_SPOTTER_SKIP",
+    "canary_cache.enabled": "OCR_CANARY_CACHE",
 }
+_BOOL_TRUE = ("1", "true", "yes", "on")
+_BOOL_FALSE = ("0", "false", "no", "off")
 
 # --- environment overrides ------------------------------------------------------
 # (agent, backend) -> ordered [(VAR, rule)]. rule: "any" accepts any non-blank
@@ -490,11 +497,19 @@ class Settings:
         var = _BEHAVIOR_ENV.get(dotted)
         if var:
             raw = (self._environ.get(var) or "").strip()
-            try:
-                if raw:
-                    return Resolved(int(raw), "env:" + var)
-            except ValueError:
-                pass            # an unusable env value is ignored, as it always was
+            if BEHAVIOR[dotted][1] == "bool":
+                # The environment wins over every file: 1/true/yes/on or
+                # 0/false/no/off; anything else is ignored.
+                if raw.lower() in _BOOL_TRUE:
+                    return Resolved(True, "env:" + var)
+                if raw.lower() in _BOOL_FALSE:
+                    return Resolved(False, "env:" + var)
+            else:
+                try:
+                    if raw:
+                        return Resolved(int(raw), "env:" + var)
+                except ValueError:
+                    pass        # an unusable env value is ignored, as it always was
         group, knob = dotted.split(".")
         return (self._file_value("behavior", group, knob)
                 or Resolved(BEHAVIOR[dotted][0], "default"))

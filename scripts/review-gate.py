@@ -589,6 +589,95 @@ def _canary_probe(kimi, args, child_env):
             "tool to create /tmp/rg-canary-check.txt' (the write must be "
             "blocked with a read-only reason).")
 
+# --- canary cache (review-speed 09) ---------------------------------------------
+# One passed canary is remembered for behavior.canary_cache.ttl_days (default 7)
+# in the gate's state dir, keyed on everything that can change what the probe
+# proves: the kimchi CLI version, the deny extension's content hash and the
+# canary's model id. A failed canary is never written. Any trouble reading,
+# parsing or writing the cache is a MISS: the probe just runs, as before.
+
+_CANARY_CACHE_VERSION = 1
+
+
+def _canary_cache_settings():
+    """(enabled, ttl_seconds) from the settings layer; (False, 0) when the
+    settings cannot be read (the safe side: run the canary)."""
+    try:
+        cfg = _settings()
+        enabled = bool(cfg.behavior("canary_cache.enabled").value)
+        ttl = int(cfg.behavior("canary_cache.ttl_days").value) * 86400
+    except Exception:
+        return False, 0
+    return enabled, ttl
+
+
+def _canary_key(kimi, model, child_env):
+    """The cache key dict, or None when any part cannot be determined (an
+    unknown version or an unreadable extension must never be cached)."""
+    try:
+        kw = dict(env=child_env, stdin=subprocess.DEVNULL,
+                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=15)
+        if sys.platform == "win32":
+            kw["creationflags"] = _WIN_FLAGS
+        proc = subprocess.run([kimi, "--version"], **kw)
+        version = proc.stdout.decode("utf-8", "replace").strip()
+        if proc.returncode != 0 or not version:
+            return None
+        with open(_DENY_EXT, "rb") as fh:
+            ext_sha = hashlib.sha256(fh.read()).hexdigest()
+    except Exception:
+        return None
+    return {"kimchi_version": version, "deny_extension_sha256": ext_sha,
+            "model": model or ""}
+
+
+def _canary_cache_path(key):
+    digest = hashlib.sha256(
+        json.dumps(key, sort_keys=True).encode("utf-8")).hexdigest()[:32]
+    return rg_store.store_root() / "canary-cache" / (digest + ".json")
+
+
+def _canary_cache_hit(key, ttl_seconds):
+    """True iff a passed canary for exactly `key` was recorded within the
+    lifetime. Corrupt, partial, foreign or future-dated entries are misses."""
+    try:
+        data = json.loads(_canary_cache_path(key).read_text(encoding="utf-8"))
+        if (not isinstance(data, dict) or data.get("v") != _CANARY_CACHE_VERSION
+                or data.get("key") != key or data.get("passed") is not True):
+            return False
+        age = time.time() - float(data["passed_at"])
+        return 0 <= age < ttl_seconds
+    except Exception:
+        return False
+
+
+def _canary_cache_store(key):
+    """Record a PASSED canary (best effort: a write failure only costs the
+    next push another probe)."""
+    try:
+        path = _canary_cache_path(key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp-%d" % os.getpid())
+        tmp.write_text(json.dumps({"v": _CANARY_CACHE_VERSION, "passed": True,
+                                   "passed_at": time.time(), "key": key}),
+                       encoding="utf-8")
+        os.replace(str(tmp), str(path))
+    except Exception:
+        pass
+
+
+def _canary_checked(kimi, args, child_env, model):
+    """Run the canary unless a cached pass still covers it. Raises what
+    _canary_probe raises; only a probe that returned normally is cached."""
+    enabled, ttl = _canary_cache_settings()
+    key = _canary_key(kimi, model, child_env) if enabled and ttl > 0 else None
+    if key is not None and _canary_cache_hit(key, ttl):
+        return
+    _canary_probe(kimi, args, child_env)
+    if key is not None:
+        _canary_cache_store(key)
+
+
 def _env_int(name, default, floor=None):
     """int(os.environ.get(name)) with a default for unset/empty/non-numeric
     values and an optional floor. One definition for every OCR_* integer knob
@@ -4245,8 +4334,8 @@ def _worker_invocation(default_args, missing_message, repo_root=None):
         _canary_state["probed"] = True
         # The canary's model is its own settings agent (default: the session
         # model), not whichever caller got here first.
-        _canary_probe(kimi, _pin_model_arg(list(args), "canary", launch.name),
-                      child_env)
+        _canary_checked(kimi, _pin_model_arg(list(args), "canary", launch.name),
+                        child_env, _agent_model("canary", launch.name))
     inv = _Invocation((kimi, stub, args, child_env, scrubbed))
     inv.launch = launch
     return inv
