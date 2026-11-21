@@ -279,6 +279,37 @@ class NativeScheduler:
             "details": {"error": error, "publication": "rejected"},
         })
 
+    def _record_execution_completion(self, entry, artifact, error):
+        """Record start/end/duration for completed work that publishes no artifact.
+
+        Artifact-publishing tasks get their completed event (with timing) from the
+        artifact commit; required-test and probe execution has no artifact, so its
+        timing is recorded here to keep every task's duration in the store.
+        """
+        if self._store is None:
+            return error
+        task = entry.definition.task
+        try:
+            self._store.record_native_event({
+                "schema": "native-review-event/v1",
+                "event_id": _event_id(task, "completed"),
+                "event_type": "completed",
+                "identity": task.identity(),
+                "transport": self._engine(entry).transport,
+                "native_session_id": artifact.native_session_id,
+                "timing": {
+                    "occurred_at_unix": artifact.finished_at_unix,
+                    "started_at_unix": artifact.started_at_unix,
+                    "finished_at_unix": artifact.finished_at_unix,
+                    "duration_seconds": artifact.duration_seconds,
+                },
+                "details": {"outcome": "completed"},
+            })
+        except Exception as exc:
+            suffix = f"native timing event failed: {exc}"
+            return f"{error}; {suffix}" if error else suffix
+        return error
+
     def _completed(self, entry, completion):
         with self._lock:
             if entry.state != "running" or entry.callback_received:
@@ -294,6 +325,7 @@ class NativeScheduler:
                 not entry.definition.publish_artifact:
             output = artifact.payload.get("execution_result")
             artifact = None
+            error = self._record_execution_completion(entry, source_artifact, error)
         if completion.state == "completed" and artifact is not None:
             try:
                 if self._store is None:

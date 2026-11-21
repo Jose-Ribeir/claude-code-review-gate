@@ -370,6 +370,10 @@ class NativeExecutor:
         self._record(
             task, "started", started_at, native_session_id=session.native_session_id,
             started=started_at,
+            details=(
+                {} if task.timeout_seconds is None
+                else {"timeout_seconds": task.timeout_seconds}
+            ),
         )
         handle = NativeSessionHandle(
             task=task,

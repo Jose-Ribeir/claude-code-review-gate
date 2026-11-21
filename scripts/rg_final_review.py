@@ -1663,6 +1663,7 @@ def run_final_review(reference, *, repo_root=None, provider=None, store_path=Non
             "dynamic_checks": deepcopy(executions[unit_id].dynamic)
             if executions[unit_id] else None,
             "publication": publication,
+            "timings": store.machine_report(run_id)["timings"],
         }
         marker = (f"\nStage: {COMPLETE_STAGE}\n" + (
             "Completion: COMPLETE - final state and provider trust are reported separately.\n"
