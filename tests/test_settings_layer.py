@@ -44,6 +44,15 @@ def _agent(agent, backend, model=None, thinking=None):
     return {"agents": {agent: {backend: entry}}}
 
 
+@pytest.fixture(autouse=True)
+def _no_leaked_backend_selection(monkeypatch):
+    """The gate remembers the backend a worker call last selected in a
+    thread-local. In-process tests that run earlier in this thread leave it
+    set (to claude), and `_tier_model` / `_agent_model` then resolve for that
+    backend whatever OCR_BACKEND says. Start every test here with none."""
+    monkeypatch.delattr(rg._backend_local, "selection", raising=False)
+
+
 @pytest.fixture
 def user_file(tmp_path):
     """The user-level settings file the autouse conftest fixture points at."""

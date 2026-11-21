@@ -1804,6 +1804,11 @@ def test_unset_env_names_are_matched_case_insensitively_on_windows(monkeypatch, 
     # pathlib cannot build the repo-config Path the selection reads. Backend
     # selection is not what this test is about.
     monkeypatch.setenv("OCR_BACKEND", "kimchi")
+    # The settings layer builds pathlib Paths too, which a faked "nt" cannot
+    # do on POSIX. Load them while os.name is still real and hand the loaded
+    # object to the run.
+    loaded = review_gate._settings(str(tmp_path))
+    monkeypatch.setattr(review_gate, "_settings", lambda root=None: loaded)
     monkeypatch.setattr(review_gate.os, "name", "nt")
     monkeypatch.setenv("SOME_CLAUDE_MARKER", "1")
     monkeypatch.setenv("OCR_UNSET_ENV", "some_claude_marker")

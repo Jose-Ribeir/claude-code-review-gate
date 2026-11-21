@@ -651,7 +651,7 @@ def set_value(key, value, scope="user", repo_root=None):
         raise SettingsError("scope must be 'user' or 'project', got %r" % (scope,),
                             ["bad scope %r" % (scope,)])
     doc = _read_file(path, scope)
-    parts = _split_key(key)
+    _split_key(key)      # an unknown key raises here, before anything is written
     steps = list(key.split("."))      # agents.<agent>.<backend>.<field> | behavior.<g>.<k>
     node = doc
     for part in steps[:-1]:
