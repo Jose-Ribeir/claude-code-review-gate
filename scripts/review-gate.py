@@ -7057,6 +7057,7 @@ def _supervise_run(state_path, run_id):
             intent=intent_extra,
             coverage=_record_coverage(repo_root, base, tip),
             branch=branch, content_keyed=not _coverage_v1())
+        _mark_record_incomplete(remote_id, tip, result)
     except Exception:
         pass
     record = _record_review(git_dir, tip, branch, mode, verdict, advisory, blocked, result, raw_name)
@@ -14481,7 +14482,31 @@ def _same_remote(rec, remote):
     return str(rec.get("remote") or "") == str(remote or "")
 
 
-def _join_records(repo_root, remote, base, passes_only=True):
+def _mark_record_incomplete(remote_id, tip, result):
+    """Flag the just-written verdict record `incomplete` when the review left
+    files unreviewed (`unreviewed` / `unreviewed_truncated` on the result), so
+    no later push treats its commits as covered (R05: only a run that really
+    reviewed its range joins). Best effort: the verdict itself is already
+    stored, and a missing flag only means the older, wider join behaviour."""
+    if not isinstance(result, dict):
+        return
+    if not (result.get("unreviewed") or result.get("unreviewed_truncated")):
+        return
+    rec = rg_store.load_verdict(remote_id, tip)
+    if rec is None:
+        return
+    rec["incomplete"] = True
+    rg_store._write_json(rg_store.verdict_path(remote_id, tip), rec)
+
+
+def _record_incomplete(rec):
+    """True for a record whose review finished but left files unreviewed (a
+    chunk the reviewer gave up on, or a truncated diff). It never joins: its
+    verdict says nothing about those files, so its commits are not covered."""
+    return bool(rec.get("incomplete"))
+
+
+def _join_records(repo_root, remote, base, passes_only=True, with_incomplete=False):
     """The verdict records a join may consult: passes, not blocked, whose
     reviewed range contains this push's (record base is an ancestor of the
     push base, per _record_range_within -- A4, no vacuous authorizations).
@@ -14490,6 +14515,11 @@ def _join_records(repo_root, remote, base, passes_only=True):
     review still reviewed its commits, so the incremental range may treat
     their content as covered -- the prior verdict then combines worst-of,
     never adopted as a pass. The allow-path join always stays passes-only.
+
+    Only a COMPLETED review leaves a record at all: a run that timed out or
+    failed writes none, so it can never join. A record that finished with
+    files left unreviewed is marked incomplete and is skipped here too
+    (with_incomplete=True lists it, for the explain output only).
     """
     out = []
     for rec in rg_store.records_for_remote(remote):
@@ -14500,6 +14530,8 @@ def _join_records(repo_root, remote, base, passes_only=True):
         if not _same_remote(rec, remote):
             continue
         if passes_only and (str(rec.get("verdict") or "") != "pass" or rec.get("blocked")):
+            continue
+        if _record_incomplete(rec) and not with_incomplete:
             continue
         if not _record_range_within(repo_root, rec, base):
             continue
@@ -14850,6 +14882,60 @@ def _incremental_view(repo_root, remote_id, base, tip):
     return IncrementalView(commits=uncovered, span=f"{span_base}..{tip}", range=rng)
 
 
+def _join_explain(repo_root, remote_id, base, tip):
+    """(lines, facts): which earlier runs were joined for base..tip, and why.
+
+    A joined run is a COMPLETED review whose range reaches this push's base and
+    whose commits (by patch-id or SHA) appear in it -- a pass, a warn or a
+    block alike. A run that timed out or failed leaves no record; one that
+    finished with files unreviewed is named as not joined. Read-only: it spawns
+    no review and writes nothing. Never raises ([] / {} when nothing applies).
+    """
+    try:
+        cs = compute_coverage_set(repo_root, base, tip)
+        if cs is None:
+            return [], {}
+        all_recs = _join_records(repo_root, remote_id, base, passes_only=False,
+                                 with_incomplete=True)
+        total = len(cs.commits)
+        lines, joined, skipped = [], [], []
+        for rec in all_recs:
+            pids = set(p for p in (rec.get("patch_ids") or []) if isinstance(p, str))                 if int(rec.get("protocol_version") or 0) == 2 else set()
+            shas = set(str(c) for c in (rec.get("commits") or []) if c)
+            n = sum(1 for sha in cs.commits
+                    if sha in shas or (cs.patch_ids.get(sha) and cs.patch_ids[sha] in pids))
+            if not n:
+                continue
+            rtip = str(rec.get("tip") or "")
+            if rec.get("blocked"):
+                kind = "blocked"
+            else:
+                kind = str(rec.get("verdict") or "completed")
+            if _record_incomplete(rec):
+                skipped.append({"tip": rtip, "verdict": kind, "commits": n})
+                lines.append(
+                    "not joined: run at %s finished (%s) but left files unreviewed, "
+                    "so its %d commit(s) are not treated as covered" % (rtip[:12], kind, n))
+                continue
+            joined.append({"tip": rtip, "verdict": kind, "commits": n})
+            carried = " its findings are carried and re-verified at the new tip;"                 if (rec.get("blocked") or (rec.get("reasons") and kind != "pass")) else ""
+            lines.append(
+                "joined: %s run at %s covers %d of %d commit(s) --%s a completed "
+                "review counts as already-reviewed work" % (kind, rtip[:12], n, total, carried))
+        if not all_recs or not (joined or skipped):
+            return ["joined runs: none (no earlier completed review covers a commit "
+                    "in this range; a run that timed out or failed never joins)"], {}
+        view = _incremental_view(repo_root, remote_id, base, tip)
+        if view is not None:
+            lines.append(
+                "review scope: %d new commit(s) after the joined run(s); old files they "
+                "touch are re-reviewed whole" % len(view.commits))
+        return lines, {"join_runs": joined, "join_not_joined": skipped,
+                       "join_new_commits": len(view.commits) if view is not None else None}
+    except Exception:
+        return [], {}
+
+
 def _extends_recorded_tip(repo_root, remote_id, base, tip):
     """True when a joinable record's tip is an ancestor of this push's tip.
 
@@ -14918,6 +15004,18 @@ def _incremental_entries(repo_root, commits):
     return entries
 
 
+def _file_in_covered_work(full_entry, inc_entry):
+    """True when a covered (already-reviewed) commit also changed this file.
+
+    `full_entry` is the file's whole-range diff entry, `inc_entry` the uncovered
+    commits' own. Both diffs start at a blob: the range's base blob versus the
+    blob just before the first uncovered touch. They differ exactly when covered
+    work changed the file in between; equal blobs mean only the fix touched it,
+    and the fix's own diff is then already the whole story.
+    """
+    return str(full_entry.get("old_oid") or "") != str(inc_entry.get("old_oid") or "")
+
+
 def _incremental_plan(plan, inc_entries):
     """The plan of an incremental run: only the uncovered commits' files.
 
@@ -14940,7 +15038,13 @@ def _incremental_plan(plan, inc_entries):
     for item in plan:
         path = item["entry"]["path"]
         e = inc_entries.get(path)
-        if e is not None:
+        if e is not None and _file_in_covered_work(item["entry"], e):
+            # R05: an OLD file the fix touches -- covered commits changed it
+            # too -- is re-reviewed WHOLE: its full push-range diff, not just
+            # the fix's hunk, so a bug that spans old and new hunks is seen.
+            out.append(dict(item, mode="full", from_oid="", miss_reason="none",
+                            whole_file=True))
+        elif e is not None:
             e = dict(e)
             out.append(dict(item, entry=e, inc_entry=e, mode="full",
                             from_oid="", miss_reason="none"))
@@ -16236,6 +16340,12 @@ def _print_range(repo_root=None):
         # name guess). Only when the lookup was actually attempted: the choice
         # may cost a CLI probe that a fast-forward or no-remote push never needs.
         d = rb.detail or {}
+        if not _coverage_v1():
+            jlines, _jf = _join_explain(
+                repo_root, rg_store.remote_url(repo_root, d.get("remote") or "origin"),
+                base, tip)
+            for line in jlines:
+                _warn("  " + line)
         if (d.get("lookup") or {}).get("status") not in ("not-run", "no-branch", "no-remote", None):
             try:
                 _warn("  " + rg_mr_consult.describe_forge(
@@ -16689,7 +16799,15 @@ def _main_inner(argv, mode):
         # record exists (the supervisor writes it at the end of the run).
         view = _incremental_view(repo_root, remote_id, base, tip)
         if view is not None:
-            inc_meta = {"inc_commits": list(view.commits),
+            # R05/R01: say which earlier runs joined and why (stderr, the run
+            # record and the debug log carry the same facts as --print-range).
+            _jlines, _jfacts = _join_explain(repo_root, remote_id, base, tip)
+            for _l in _jlines:
+                _warn("review-gate: " + _l)
+            if _jlines:
+                _debug_log("join tip=%s %s" % (tip[:12], " | ".join(_jlines)))
+            inc_meta = {"join_explain": _jlines, **_jfacts,
+                        "inc_commits": list(view.commits),
                         "inc_range": view.range,
                         "inc_span": view.span,
                         # A linear extension (the recorded tip is an ancestor:
