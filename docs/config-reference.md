@@ -73,6 +73,7 @@ guard); the claude backend is exempt.
       "claude": {"model": "haiku"}
     }
   },
+  "forge": {"name": "gitlab", "host": "git.example.org"},
   "behavior": {
     "inline_wait_seconds": {"hook": 300, "git": 300},
     "spotter_skip": {"enabled": false, "max_files": 3, "max_changed_lines": 60},
@@ -122,6 +123,30 @@ Notes:
   `kimi-k3.1-pro` (retires 2026-12-17), and bare `deepseek-v4.1-flash` by
   `deepseek-v4.1-flash-1017` (retires 2026-12-02). Only the exact id matches.
 
+### `forge` keys
+
+| Key | Default | Meaning |
+|---|---|---|
+| `forge.name` | not set (detect) | `github` or `gitlab`. Pins the forge the merge-request lookup talks to for the origin remote. |
+| `forge.host` | not set (any host) | Limits the `forge.name` pin to one host (`git.example.org`, optionally `:port`). A remote on any other host is detected as usual. |
+
+The forge for a remote host is chosen in this order, first match wins:
+
+1. `forge.name` (and `forge.host`, when set) from the project or user settings file.
+2. A known public host: `github.com` is github, `gitlab.com` is gitlab.
+3. A host that `glab auth status` (checked first) or `gh auth status` says it
+   is logged in to. Each call is bounded at 5 s; a missing or slow CLI counts
+   as "not logged in".
+4. A guess from the host name: a name containing `github` is github, one
+   containing `gitlab` is gitlab.
+
+If none applies the forge is "not recognised" and the merge-request lookup is
+skipped with a reason line; this is never a failure. The settings command
+(`show`) and the doctor print the effective forge for `origin` and which of
+these steps chose it (`setting`, `logged-in host` or `name guess`), for example
+`forge: gitlab [setting: forge.name=gitlab for git.example.org in <file>]`.
+Set it with `py scripts/rg_settings_cli.py set forge.name gitlab`.
+
 ### `behavior` knobs
 
 | Key | Default | Env override | Meaning |
@@ -158,16 +183,19 @@ py scripts/rg_settings_cli.py validate
 host as `/review-gate:settings` (`commands/settings.md`).
 
 - `show` (the default) prints every effective value for every agent x backend
-  model and thinking level and every behavior knob, with its source
-  (`env:<VAR>`, `project:<path>`, `user:<path>` or `default`) and which files
-  exist. `--json` gives the same as data.
+  model and thinking level, `forge.name` / `forge.host` (`(not set: detected)`
+  when unset) and every behavior knob, with its source (`env:<VAR>`,
+  `project:<path>`, `user:<path>` or `default`) and which files exist. The last
+  line is `effective forge for origin`, with the chosen forge and its source
+  (see `forge` keys above). `--json` gives the same as data.
 - `set` validates before writing and writes nothing on error (exit 1). It
   writes the user file unless `--project` is given, rejects Anthropic/OpenAI
   models on `agents.*.kimchi.model`, warns on deprecated ids, and says when a
   higher-precedence source still wins. It never overwrites an invalid file.
   Example: `py scripts/rg_settings_cli.py set behavior.spotter_skip.enabled true --user`.
 - `validate` checks the project and user files and reports each problem.
-- `scripts/ocr_doctor.py` also checks the settings (invalid files, the
+- `scripts/ocr_doctor.py` also reports the effective forge for `origin` and its
+  source (an info line, never a failure) and checks the settings (invalid files, the
   provider guard, deprecated ids and, when kimchi is installed, pins against
   `kimchi --list-models`). `scripts/kimchi-verify.sh` runs the real-kimchi
   checks (every pin against the model list, the `:high` and `:max` suffixes, a
@@ -180,6 +208,54 @@ appends entries to the built-in risk globs, so an empty list keeps the default
 escalation (migrations, auth, payments, concurrency and the like go to the deep
 lane) while ordinary source changes use the fast lane. The earlier `["**"]`
 forced every push into the deep lane.
+
+## Review range and waivers
+
+### Review range explanation
+
+`py scripts/review-gate.py --print-range` prints the range a push of `HEAD`
+would review on stdout and explains it on stderr, changing nothing in the
+repository or the state store (the merge-request lookup runs live and the
+24 h cache is neither read nor written):
+
+- the base and `rule -- reason`: `fast-forward`, `mr-target`, `boundary`,
+  `boundary-chain`, `already-on-remote` or `unevaluable`;
+- the commit count and changed-line count;
+- the merge-request lookup status, the forge command and the MR target branch;
+- the target-branch fetch line and the target-ref freshness line;
+- the earlier completed runs the push would join, and the forge choice
+  (`forge: ...`) when a lookup was attempted.
+
+`boundary-chain` is the rule used when the target branch was merged into the
+branch: the commits no remote ref holds start at several boundaries that lie
+on one line of history, and the newest one is the base, so the target
+branch's own commits are not counted as the branch's. Boundaries on separate
+lines keep the wider merge-base (it over-reviews, never skips).
+
+Before it takes the merge-base against the MR target, the gate fetches that one
+branch into `refs/remotes/<remote>/<target>` (no other ref, no tags, no
+working tree). The fetch is bounded at 10 s and fails open: a failure or
+timeout prints a `WARNING: could not fetch ...` line, uses the local ref and
+may give a wider range.
+
+A completed review joins whether it passed or **blocked**: a blocked run still
+reviewed its commits, so they count as covered, and old files the fix touches
+are re-reviewed whole. A run that timed out or failed writes no record and
+never joins; one that finished with files unreviewed is named as not joined.
+`OCR_BASE_V1=1` restores the old base selection; `OCR_COVERAGE_V1=1` restores
+the old SHA-only join.
+
+### Waiver identity for test findings
+
+A test finding's waiver anchor and finding id ignore run-dependent tokens in
+its evidence (run times, durations, timestamps), so the same failure keeps one
+id across runs. The exact list of ignored token types, and what is deliberately
+not ignored, is in the
+[ADR 0007 addendum](adr/0007-race-regression-test-checks-and-finding-waivers.md#addendum-2026-11-21-run-dependent-tokens-in-test-evidence).
+`review-gate.py waive --list` marks each waiver that no finding of the last
+recorded verdict matches with `NO LONGER MATCHES`. Waivers and test-finding
+ids created before this change stop matching once and must be granted again;
+reviewer-finding ids are unchanged.
 
 ## Related environment surface (pre-existing)
 
@@ -195,6 +271,15 @@ design**: nothing lands in `bypasses.jsonl`, and the forge's own audit
 trail is the only evidence. The recorded bypass is the
 `OCR_FAIL_OPEN` / `review.failOpen` path. All bypass records live in
 the state store with timestamp, mechanism, remote, ref, and tip.
+
+A git-mode push that goes through `OCR_FAIL_OPEN` also writes an
+**unverified** entry (`kind`, `remote`, `ref`, `base`, `tip`, `reason`, `ts`) to
+`<store>/unverified/`, one file per remote, ref and tip. It sits beside, never
+inside, `verdicts/`, so it can never count as a reviewed commit. The next
+git-mode push on that branch prints a warning on stderr naming the base (up to
+the last three entries, with a count of older ones): an earlier base was never
+reviewed. The warning never blocks and does not change the exit code; an entry
+for the tip being pushed now is not reported.
 
 ## Installer flags
 

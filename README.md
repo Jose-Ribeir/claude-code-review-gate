@@ -200,6 +200,32 @@ that went unreviewed, so exceptions can be accounted for after the fact.
 runs at all and **no telemetry entry can be written** — that escape is
 undetectable by design, stated here rather than faked as detection.
 
+A git-mode push that goes through `OCR_FAIL_OPEN=1` is also recorded as
+**unverified** (base, tip, time, reason) under `<store>/unverified/`. The next
+git-mode push on that branch prints a warning that an earlier base was never
+reviewed. It is information only and never blocks. See
+[docs/config-reference.md](docs/config-reference.md).
+
+### Which range a push reviews
+
+`python3 scripts/review-gate.py --print-range` prints the range the gate would
+review for `HEAD` and explains it on stderr: the base with its rule and reason
+(`fast-forward`, `mr-target`, `boundary`, `boundary-chain`, ...), the merge-request
+lookup status, the target-branch fetch line and the commit and line counts. It
+changes nothing. When the target branch was merged into yours the newest chained
+boundary is the base (`boundary-chain`). Before taking the merge-base against the
+MR target the gate fetches that one branch (bounded at 10 s, fail-open: a failed
+fetch warns and uses the local ref). A completed run that blocked still counts as
+having reviewed its commits, so a re-push after a fix reviews only what is new
+plus the old files the fix touches. Details:
+[docs/config-reference.md](docs/config-reference.md#review-range-explanation).
+
+The forge the merge-request lookup talks to is chosen from `forge.name` /
+`forge.host` in the settings file, then the hosts `glab` / `gh` is logged in to,
+then a host-name guess; `rg_settings_cli.py show` and the doctor print the
+choice and its source
+([`forge` keys](docs/config-reference.md#forge-keys)).
+
 ## Modes and environment
 
 - default: block confident high-severity findings (any high-severity finding
@@ -501,6 +527,13 @@ telemetry list what was waived; the findings log keeps every finding
   like the verdict store. Waivers apply to every finding class (reviewer,
   deep reviewer, docs checker, command checks) and only filter what
   `compute_verdict` sees; they never alter the verdict rule.
+- A test finding's id and waiver ignore run-dependent tokens in its evidence
+  (times, durations, timestamps), so the same failure keeps one id across runs;
+  the exact list is in the
+  [ADR 0007 addendum](docs/adr/0007-race-regression-test-checks-and-finding-waivers.md#addendum-2026-11-21-run-dependent-tokens-in-test-evidence).
+  `waive --list` marks a waiver that no finding of the last recorded verdict
+  matches with `NO LONGER MATCHES`. Existing waivers and test-finding ids change
+  once with this release and must be granted again.
 
 ## Relationship to upstream
 
