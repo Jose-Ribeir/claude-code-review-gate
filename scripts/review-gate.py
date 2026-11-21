@@ -1381,10 +1381,16 @@ class ReviewBase(NamedTuple):
               None means unknown (the range could not be evaluated, so it is
               assumed to carry commits -- fail closed).
     reason    one line saying how the base was chosen, for logs and telemetry.
+    rule      the same decision as a short token: fast-forward, mr-target,
+              boundary, boundary-chain, already-on-remote, unevaluable.
+    detail    the facts behind the choice (merge-request lookup status, target
+              branch freshness, ...); see _explain_base. Never read to decide.
     """
     base_sha: str
     commits: Optional[int]
     reason: str
+    rule: str = ""
+    detail: Optional[dict] = None
 
     @property
     def has_commits(self):
@@ -1513,7 +1519,7 @@ def _depth_prompt_note():
 _LARGE_DIFF_LINES = 5000
 
 
-def _mr_consult(remote_id, branch):
+def _mr_consult(remote_id, branch, repo_root=None):
     """pg5 -- (MrContext | None, first_seen) for (remote, branch).
 
     first_seen is consulted BEFORE find_open_mr: it needs the cache's PRIOR
@@ -1525,8 +1531,8 @@ def _mr_consult(remote_id, branch):
     if not remote_id or not branch:
         return None, False
     try:
-        first = rg_mr_consult.first_seen(remote_id, branch)
-        ctx = rg_mr_consult.find_open_mr(remote_id, branch)
+        first = rg_mr_consult.first_seen(remote_id, branch, repo_root=repo_root)
+        ctx = rg_mr_consult.find_open_mr(remote_id, branch, repo_root=repo_root)
     except Exception:
         return None, False
     return ctx, bool(first)
@@ -1580,7 +1586,7 @@ def _mr_consistency_findings(remote_id, ctx, repo_root, base, tip):
     if changed_lines > _LARGE_DIFF_LINES:
         try:
             overlap = rg_mr_consult.cross_mr_path_overlap(
-                remote_id, paths, exclude_iid=ctx.iid)
+                remote_id, paths, exclude_iid=ctx.iid, repo_root=repo_root)
         except Exception:
             overlap = {}
         if overlap:
@@ -1594,31 +1600,171 @@ def _mr_consistency_findings(remote_id, ctx, repo_root, base, tip):
     return findings
 
 
-def _mr_target_base(remote, tip, branch, repo_root):
+def _ls_remote_sha(remote, ref, repo_root, timeout=10):
+    """(sha, note): the commit the remote itself holds for `ref`, read-only.
+    sha "" with a note when it could not be read (never raises, bounded by
+    `timeout` so a slow network cannot hang a push)."""
+    try:
+        proc = subprocess.run(
+            ["git", "ls-remote", remote, ref], cwd=repo_root, capture_output=True,
+            text=True, encoding="utf-8", errors="replace", timeout=timeout,
+            env=dict(os.environ, GIT_TERMINAL_PROMPT="0"),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except subprocess.TimeoutExpired:
+        return "", "git ls-remote timed out after %ss" % timeout
+    except Exception as exc:
+        return "", "git ls-remote could not run (%s)" % type(exc).__name__
+    if proc.returncode != 0:
+        first = (proc.stderr or "").strip().splitlines()
+        return "", "git ls-remote exited %d%s" % (
+            proc.returncode, " (%s)" % first[0][:160] if first else "")
+    sha = (proc.stdout or "").split("\t", 1)[0].strip()
+    if not _SHA40.fullmatch(sha):
+        return "", "the remote has no %s" % ref
+    return sha, ""
+
+
+def _target_ref_freshness(remote, target, local_sha, repo_root):
+    """{"state": fresh|stale|unknown, "line": one human line} for the local
+    refs/remotes/<remote>/<target> against what the remote itself holds. A
+    stale ref widens the range; the fix is a fetch, never done here."""
+    ref = "refs/heads/" + target
+    remote_sha, note = _ls_remote_sha(remote, ref, repo_root)
+    if not remote_sha:
+        return {"state": "unknown", "line": "target branch freshness unknown: " + note}
+    if remote_sha == local_sha:
+        return {"state": "fresh",
+                "line": "local %s/%s is up to date with the remote" % (remote, target)}
+    _o, rc = _git(["cat-file", "-e", remote_sha + "^{commit}"], cwd=repo_root)
+    if rc == 0:
+        _o, rc = _git(["merge-base", "--is-ancestor", remote_sha, local_sha], cwd=repo_root)
+        if rc == 0:  # the remote is BEHIND the local ref: nothing to fetch
+            return {"state": "fresh", "line": "local %s/%s is not behind the remote"
+                    % (remote, target)}
+    return {"state": "stale",
+            "line": ("WARNING: local %s/%s (%s) looks STALE -- the remote's %s is at %s, "
+                     "so the range may be too large. Run: git fetch %s %s")
+                    % (remote, target, local_sha[:8], target, remote_sha[:8], remote, target)}
+
+
+_TARGET_FETCH_TIMEOUT = 10  # seconds; a slow network must never hang a push
+
+
+def _fetch_target_ref(remote, target, repo_root, timeout=None):
+    """Fetch the ONE branch `target` into refs/remotes/<remote>/<target>, so the
+    merge-base is taken against what the remote holds now and a stale local ref
+    does not widen the range. Touches only that tracking ref (no other remote
+    ref, no tags, no working tree, no submodules, no gc). Bounded by `timeout`
+    and fail-open: never raises, and a failure only means the local ref is used
+    as it is. Returns {"state": fetched|unchanged|failed, "line": one line}."""
+    timeout = _TARGET_FETCH_TIMEOUT if timeout is None else timeout
+    ref = "refs/remotes/%s/%s" % (remote, target)
+    where = "%s/%s" % (remote, target)
+
+    def failed(why):
+        return {"state": "failed",
+                "line": ("WARNING: could not fetch %s (%s) -- using the local %s, which "
+                         "may be stale, so the range may be too large. Run: git fetch %s %s")
+                        % (where, why, where, remote, target)}
+
+    if not remote or remote.startswith("-") or not target or target.startswith("-"):
+        return failed("no usable remote or branch name")
+    try:
+        before, _rc = _git(["rev-parse", "--verify", "--quiet", ref + "^{commit}"], cwd=repo_root)
+        proc = subprocess.run(
+            ["git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "fetch", "--quiet",
+             "--no-tags", "--no-recurse-submodules", remote,
+             "+refs/heads/%s:%s" % (target, ref)],
+            cwd=repo_root, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=timeout, stdin=subprocess.DEVNULL,
+            env=dict(os.environ, GIT_TERMINAL_PROMPT="0"),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except subprocess.TimeoutExpired:
+        return failed("git fetch timed out after %ss" % timeout)
+    except Exception as exc:
+        return failed("git fetch could not run: %s" % type(exc).__name__)
+    if proc.returncode != 0:
+        first = (proc.stderr or "").strip().splitlines()
+        return failed("git fetch exited %d%s" % (
+            proc.returncode, ": " + first[-1][:160] if first else ""))
+    after, _rc = _git(["rev-parse", "--verify", "--quiet", ref + "^{commit}"], cwd=repo_root)
+    if before and before == after:
+        return {"state": "unchanged",
+                "line": "fetched %s before the merge-base: already up to date" % where}
+    return {"state": "fetched",
+            "line": "fetched %s before the merge-base: %s -> %s"
+                    % (where, (before or "none")[:8], (after or "none")[:8])}
+
+
+def _mr_target_base(remote, tip, branch, repo_root, trace=None, fresh_lookup=False):
     """pg5 -- the MR-target step of the review-base resolution order (spec
     "Review base resolution order": open MR/PR target branch -> the legacy
     fast-forward/boundary fallbacks). Returns the merge-base of the pushed tip
     with the target branch's remote-tracking ref, or "" to leave the legacy
     chain byte-identical (no branch, no context, no local ref for the target
-    -- anything degraded answers ""). Never raises."""
+    -- anything degraded answers ""). Never raises.
+
+    `trace` (a dict) is filled with WHY: "lookup" (rg_mr_consult.lookup_open_mr
+    info), "target", "target_ref", "stale", "mr_note". It never changes the
+    answer. fresh_lookup=True runs the forge command live and leaves the 24h
+    cache alone (--print-range)."""
+    trace = trace if trace is not None else {}
     if not branch:
+        trace["lookup"] = {"status": "no-branch", "line": "MR lookup skipped: the pushed "
+                           "ref is not a branch, so there is no MR to look up"}
         return ""
     try:
         name = (remote or "").strip()
         if not name:
+            trace["lookup"] = {"status": "no-remote", "line": "MR lookup skipped: no "
+                               "remote name for this push"}
             return ""
         remote_id = rg_store.remote_url(repo_root, name)
-        target = rg_mr_consult.target_branch(remote_id, branch) if remote_id else ""
-    except Exception:
+        if not remote_id:
+            trace["lookup"] = {"status": "no-remote", "line": "MR lookup skipped: remote "
+                               "%r has no URL" % name}
+            return ""
+        ctx, info = rg_mr_consult.lookup_open_mr(
+            remote_id, branch, use_cache=not fresh_lookup, write_cache=not fresh_lookup,
+            repo_root=repo_root)
+        trace["lookup"] = info
+        target = (ctx.target_branch if ctx is not None else "") or ""
+    except Exception as exc:
+        trace["lookup"] = {"status": "error", "line": "MR lookup failed: %s" % type(exc).__name__}
         return ""
     if not target:
         return ""
+    trace["target"] = target
+    # Stories 5-7: fetch the target branch (and only it) so a stale local ref
+    # does not widen the range. --print-range only explains: it changes nothing,
+    # so it reports the freshness instead of fetching.
+    if fresh_lookup:
+        trace["fetch"] = {"state": "skipped", "line": "target branch not fetched: "
+                          "--print-range changes nothing in the repository"}
+    else:
+        trace["fetch"] = _fetch_target_ref(name, target, repo_root)
+        if trace["fetch"]["state"] == "failed":
+            _warn(trace["fetch"]["line"])
     ref = "refs/remotes/%s/%s" % (name, target)
     out, rc = _git(["rev-parse", "--verify", "--quiet", ref + "^{commit}"], cwd=repo_root)
     if rc != 0 or not _SHA40.fullmatch(out or ""):
+        trace["mr_note"] = "no local %s ref for the MR target; falling back" % ref
         return ""
+    trace["target_ref"] = ref
+    trace["target_sha"] = out
+    try:
+        fetch = trace["fetch"]
+        if fetch["state"] in ("fetched", "unchanged"):  # just read from the remote
+            trace["stale"] = {"state": "fresh", "line": fetch["line"]}
+        elif fetch["state"] == "failed":  # the remote is unreachable: do not ask it again
+            trace["stale"] = {"state": "unknown", "line": fetch["line"]}
+        else:
+            trace["stale"] = _target_ref_freshness(name, target, out, repo_root)
+    except Exception:
+        trace["stale"] = {"state": "unknown", "line": "target branch freshness unknown"}
     mb, rc = _git(["merge-base", out, tip], cwd=repo_root)
     if rc != 0 or not _SHA40.fullmatch(mb or ""):
+        trace["mr_note"] = "no merge-base of %s with the pushed tip; falling back" % ref
         return ""
     return mb
 
@@ -1641,7 +1787,28 @@ def _mr_consistency_reason(mode, ctx, findings):
         "nor an existing verdict exempts this push.\n" + _bypass_hint(mode))
 
 
-def resolve_review_base(remote, tip, remote_sha=None, repo_root=None, branch=None):
+# The latest ReviewBase decided per tip sha, so the code that builds the run
+# record (and --print-range) can report WHY without re-deciding.
+_BASE_DECISIONS = {}
+
+
+def resolve_review_base(remote, tip, remote_sha=None, repo_root=None, branch=None,
+                        fresh_lookup=False):
+    """_resolve_review_base, with the decision's rule and facts attached
+    (ReviewBase.rule / .detail) and remembered in _BASE_DECISIONS[tip].
+    fresh_lookup=True is the read-only --print-range: the forge command runs
+    live and the lookup cache is neither read nor written."""
+    trace = {"branch": branch or "", "remote": remote or "",
+             "fresh_lookup": bool(fresh_lookup)}
+    rb = _resolve_review_base(remote, tip, remote_sha, repo_root, branch,
+                              trace, fresh_lookup)
+    rb = rb._replace(rule=trace.get("rule", ""), detail=trace)
+    _BASE_DECISIONS[trace.get("tip") or tip or ""] = rb
+    return rb
+
+
+def _resolve_review_base(remote, tip, remote_sha, repo_root, branch, trace,
+                         fresh_lookup):
     """The commit a push is reviewed against: ReviewBase(base_sha, commits, reason).
 
     One answer for git mode, hook mode and the skill's --unpushed. The base is
@@ -1658,9 +1825,10 @@ def resolve_review_base(remote, tip, remote_sha=None, repo_root=None, branch=Non
        base: diffing against a commit that is not an ancestor reverts whatever
        the other side gained, which is how phantom deletions got reviewed.
        The boundary commit(s) of that set are the base: one -> it; several
-       (main merged into the child, criss-cross) -> their octopus merge-base,
-       else the parent of the oldest commit; none (root commit, shallow graft)
-       -> _EMPTY_TREE.
+       forming a chain (main merged into the child: the fork point, then
+       main's tip) -> the newest; several on separate lines (stacked parents,
+       criss-cross) -> their octopus merge-base, else the parent of the oldest
+       commit; none (root commit, shallow graft) -> _EMPTY_TREE.
     3. A rev-list error means the range is unevaluable: assume it carries
        commits and review everything (_EMPTY_TREE). Over-reviewing costs a
        review; under-reviewing costs the gate.
@@ -1672,8 +1840,10 @@ def resolve_review_base(remote, tip, remote_sha=None, repo_root=None, branch=Non
         full, rc = _git(["rev-parse", "--verify", "--quiet", (tip or "HEAD") + "^{commit}"],
                         cwd=repo_root)
         if rc != 0 or not full:
+            trace["rule"] = "unevaluable"
             return ReviewBase(_EMPTY_TREE, None, "tip does not name a commit")
         tip = full
+    trace["tip"] = tip
     remote_ok = ""
     if remote_sha and remote_sha != _ZERO_SHA:
         _o, rc = _git(["cat-file", "-e", remote_sha + "^{commit}"], cwd=repo_root)
@@ -1684,6 +1854,9 @@ def resolve_review_base(remote, tip, remote_sha=None, repo_root=None, branch=Non
         if rc == 0:
             out, rc = _git(["rev-list", "--count", f"{remote_ok}..{tip}"], cwd=repo_root)
             n = int(out) if rc == 0 and out.isdigit() else None
+            trace["rule"] = "fast-forward"
+            trace["lookup"] = {"status": "not-run", "line": "MR lookup not needed: the push is a "
+                               "fast-forward of the remote ref, which decides the base"}
             return ReviewBase(remote_ok, n, "fast-forward of the remote ref")
     # pg5 -- MR/PR-target step: for a pushed branch whose open MR targets a
     # known target branch, the review covers only what the push adds on top of
@@ -1691,10 +1864,11 @@ def resolve_review_base(remote, tip, remote_sha=None, repo_root=None, branch=Non
     # piece's content -- story 9). Any consult degradation leaves this "" and
     # the fallbacks below are byte-identical. Fast-forward above still wins:
     # the remote ref scopes the range exactly and nothing is re-reviewed.
-    mr_base = _mr_target_base(remote, tip, branch, repo_root)
+    mr_base = _mr_target_base(remote, tip, branch, repo_root, trace, fresh_lookup)
     if mr_base:
         out, rc = _git(["rev-list", "--count", f"{mr_base}..{tip}"], cwd=repo_root)
         n = int(out) if rc == 0 and out.isdigit() else None
+        trace["rule"] = "mr-target"
         return ReviewBase(mr_base, n, "open MR/PR target branch (pg5)")
     args = ["rev-list", tip, "--topo-order", "--reverse", "--boundary",
             "--not", "--remotes=" + (remote or "origin")]
@@ -1702,6 +1876,7 @@ def resolve_review_base(remote, tip, remote_sha=None, repo_root=None, branch=Non
         args.append(remote_ok)
     out, rc = _git(args, cwd=repo_root)
     if rc != 0:
+        trace["rule"] = "unevaluable"
         return ReviewBase(_EMPTY_TREE, None, "rev-list failed; reviewing everything")
     commits, boundaries = [], []
     for line in out.splitlines():
@@ -1714,10 +1889,27 @@ def resolve_review_base(remote, tip, remote_sha=None, repo_root=None, branch=Non
         elif line not in commits:
             commits.append(line)
     if not commits:
+        trace["rule"] = "already-on-remote"
         return ReviewBase(tip, 0, "every commit is already on " + (remote or "origin"))
+    trace["rule"] = "boundary"
     if len(boundaries) == 1:
         return ReviewBase(boundaries[0], len(commits), "boundary of the commits no remote ref holds")
     if len(boundaries) > 1:
+        # A chain -- the fork point, then main's tip merged into the branch --
+        # is one line of history: its newest boundary already holds everything
+        # older, so it is the base and main's work is not counted as the
+        # branch's. Boundaries on SEPARATE lines (a stack with its parent
+        # published, a criss-cross) keep the merge-base across them: that is
+        # the documented limit -- a stacked or squash-merged parent has no
+        # single right answer, and the wider range over-reviews, never skips.
+        heads, rc = _git(["merge-base", "--independent"] + boundaries, cwd=repo_root)
+        if rc == 0 and len(heads.split()) == 1 and _SHA40.fullmatch(heads.strip()):
+            newest = heads.strip()
+            out, rc = _git(["rev-list", "--count", f"{newest}..{tip}"], cwd=repo_root)
+            n = int(out) if rc == 0 and out.isdigit() else len(commits)
+            trace["rule"] = "boundary-chain"
+            return ReviewBase(newest, n, "newest of chained boundaries (the target branch "
+                              "was merged into this branch)")
         mb, rc = _git(["merge-base", "--octopus"] + boundaries, cwd=repo_root)
         if rc == 0 and _SHA40.fullmatch(mb or ""):
             return ReviewBase(mb, len(commits), "merge-base of several boundaries")
@@ -1747,19 +1939,78 @@ def _push_remote(repo_root=None):
     return "origin", ""
 
 
-def _head_range(repo_root=None):
+def _head_range(repo_root=None, branch=None, fresh_lookup=False):
     """(range, ReviewBase) for what HEAD would send to its own upstream.
 
     The range is "<base>..<HEAD>", with an ancestor base; "" when HEAD is
     unresolvable. Used where no ref list is available: --print-range, and the
-    git adapter when git handed it nothing to read.
+    git adapter when git handed it nothing to read. `branch` names the pushed
+    branch for the resolver's MR-target step (a real push always has it);
+    --print-range passes it with fresh_lookup so it takes the path a push takes.
     """
     tip = _head_sha(repo_root)
     if not tip:
         return "", ReviewBase(_EMPTY_TREE, None, "no HEAD")
     remote, rsha = _push_remote(repo_root)
-    rb = resolve_review_base(remote, tip, rsha or None, repo_root)
+    rb = resolve_review_base(remote, tip, rsha or None, repo_root, branch=branch,
+                             fresh_lookup=fresh_lookup)
     return f"{rb.base_sha}..{tip}", rb
+
+
+def _base_facts(repo_root, tip, base, commits=None):
+    """The explanation of the base chosen for `tip`, as a flat JSON-safe dict
+    for the run record: base_reason / base_rule / base_commits / base_lines plus
+    the merge-request lookup and target-freshness facts. {} when the decision
+    for this tip and base was not made by resolve_review_base (OCR_BASE_V1).
+    Never raises; the forge was already asked, nothing is asked here."""
+    try:
+        rb = _BASE_DECISIONS.get(tip)
+        if rb is None or rb.base_sha != base:
+            return {}
+        d = rb.detail or {}
+        lookup = d.get("lookup") or {}
+        stale = d.get("stale") or {}
+        fetch = d.get("fetch") or {}
+        if commits is None:
+            commits = rb.commits
+        elif str(commits).isdigit():
+            commits = int(commits)
+        _paths, lines = _mr_diff_facts(repo_root, base, tip)
+        return {
+            "base_reason": rb.reason, "base_rule": rb.rule,
+            "base_commits": commits, "base_lines": lines,
+            "mr_lookup_status": str(lookup.get("status") or ""),
+            "mr_lookup_line": str(lookup.get("line") or ""),
+            "mr_lookup_command": str(lookup.get("command") or ""),
+            "mr_target": str(d.get("target") or ""),
+            "target_ref_state": str(stale.get("state") or "not-checked"),
+            "target_ref_line": str(stale.get("line") or d.get("mr_note") or ""),
+            "target_fetch_state": str(fetch.get("state") or "not-run"),
+            "target_fetch_line": str(fetch.get("line") or ""),
+        }
+    except Exception:
+        return {}
+
+
+def _base_facts_lines(f):
+    """The human rendering of _base_facts, one entry per line."""
+    out = [
+        "base:    %s" % f.get("base_sha", ""),
+        "rule:    %s -- %s" % (f.get("base_rule") or "?", f.get("base_reason") or "?"),
+        "commits: %s" % ("unknown" if f.get("base_commits") is None else f["base_commits"]),
+        "changed lines: %s" % f.get("base_lines", 0),
+    ]
+    if f.get("mr_lookup_line"):
+        out.append(f["mr_lookup_line"])
+    if f.get("mr_lookup_command"):
+        out.append("forge command: %s" % f["mr_lookup_command"])
+    if f.get("mr_target"):
+        out.append("MR target branch: %s" % f["mr_target"])
+    if f.get("target_fetch_line") and f["target_fetch_line"] != f.get("target_ref_line"):
+        out.append(f["target_fetch_line"])
+    if f.get("target_ref_line"):
+        out.append(f["target_ref_line"])
+    return out
 
 
 def _extra_ref_carries(local_sha, remote, branch_tips, repo_root=None):
@@ -3866,6 +4117,38 @@ def _metric_log(event, **fields):
         pass
 
 
+def _warn_unverified_bases(remote_id, ref, tip):
+    """R06: warn that an earlier push on this branch went through the fail-open
+    switch, naming the base it left unreviewed. Pure information: it never
+    returns a verdict, never raises and never touches the exit code -- the
+    record is a memory, not a second gate. An entry for the tip being pushed
+    right now is the bypass this very push is repeating, so it is not news."""
+    try:
+        entries = [e for e in rg_store.list_unverified(remote_id, ref)
+                   if str(e.get("tip") or "") != str(tip or "")]
+        if not entries:
+            return
+        lines = []
+        for e in entries[-3:]:
+            ts = e.get("ts")
+            when = (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(ts)))
+                    if isinstance(ts, (int, float)) else "?")
+            lines.append(
+                f"  - base {_sanitize(str(e.get('base') or '?'), 40)} "
+                f"(pushed tip {_sanitize(str(e.get('tip') or '?'), 40)[:12]}, {when}, "
+                f"why={_sanitize(str(e.get('reason') or '?'), 60)})")
+        more = len(entries) - len(lines)
+        sys.stderr.write(
+            "review-gate: WARNING - an earlier push on this branch went through "
+            "the fail-open switch, so an earlier base was never reviewed:\n"
+            + "\n".join(lines) + "\n"
+            + (f"  (+{more} older unverified push(es) in the review-gate store)\n" if more > 0 else "")
+            + "This is a warning only; this push is not affected.\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+
 def _log_gate_skipped(why, mode="", repo_root="", push_range="",
                       remote_id="", ref=""):
     """A gate_skipped telemetry line for an OCR_FAIL_OPEN bypass the gate honored.
@@ -3900,6 +4183,10 @@ def _log_gate_skipped(why, mode="", repo_root="", push_range="",
         mechanism = _fail_open_mechanism()                             # pg5
         try:
             rg_store.record_bypass(remote_id, ref, tip, mechanism, why)
+        except Exception:
+            pass
+        try:   # R06: remember the base this push left unreviewed
+            rg_store.record_unverified(remote_id, ref, base, tip, why)
         except Exception:
             pass
         try:
@@ -6806,6 +7093,7 @@ def _supervise_run(state_path, run_id):
             intent=intent_extra,
             coverage=_record_coverage(repo_root, base, tip),
             branch=branch, content_keyed=not _coverage_v1())
+        _mark_record_incomplete(remote_id, tip, result)
     except Exception:
         pass
     record = _record_review(git_dir, tip, branch, mode, verdict, advisory, blocked, result, raw_name)
@@ -7326,10 +7614,17 @@ def _finding_id(f):
     """Stable sha256 id for a finding (path, existing_code, content)."""
     # String findings hash exactly as before; a malformed one (numeric or
     # list field, straight from reviewer JSON) is coerced, not crashed on.
+    content = f.get("content") or ""
+    if str(f.get("evidence_source") or "") in _EVIDENCE_SOURCES:
+        # A test finding quotes a run's output, whose times differ on every
+        # run: hash the same normalized evidence the waiver anchor binds to
+        # so the same failure keeps one id. Reviewer findings (no
+        # evidence_source) hash their content verbatim, byte-for-byte as before.
+        content = "\n".join(_normalize_evidence_text(content)) or content
     raw = "\x00".join(str(v) for v in (
         f.get("path") or "",
         f.get("existing_code") or "",
-        f.get("content") or "",
+        content,
     ))
     return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()
 
@@ -7519,17 +7814,83 @@ def _dismiss_finding(argv):
 
 # --- SPEC-15.2: granular finding waivers --------------------------------------
 
+# Run-dependent tokens a test run's output carries that say nothing about WHICH
+# failure it is. Stripped (replaced by _RUN_TOKEN) before a test finding's
+# evidence is fingerprinted, so the same failure keeps one identity across runs.
+# Deliberately narrow: only times, durations and timestamps -- never bare
+# numbers, line numbers, or expected/actual values. The exact list is
+# documented in ADR 0007 (addendum, "Run-dependent tokens").
+_RUN_TOKEN = "<T>"
+_MONTHS = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*"
+_TS_ZONE = r"(?:\s?(?:Z|UTC|GMT|[+-]\d{2}:?\d{2}))?"
+# A duration: "0.41s", "3 seconds", "120ms", "1m 3s", "1h 2m 3s", "0:00:03".
+_DUR = (r"(?:(?<![\w.:])(?:\d+h\s*)?(?:\d+m(?:in)?\s*)?\d+(?:[.,]\d+)?\s*"
+        r"(?:ms|msecs?|milliseconds?|s|secs?|seconds?)\b"
+        r"|(?<![\w.:])\d+:\d{2}:\d{2}(?:[.,]\d+)?(?![\w:]))")
+_RUN_TOKEN_RES = tuple((re.compile(p, re.IGNORECASE), r) for p, r in (
+    # 1. Timestamps: ISO-8601 date+time, RFC-2822 / syslog style date+time.
+    (r"(?<![\w.])\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?" + _TS_ZONE
+     + r"(?![\w:])", _RUN_TOKEN),
+    (r"(?<![\w.])(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*,?\s+)?"
+     r"(?:\d{1,2}\s+" + _MONTHS + r"\s+\d{4}|" + _MONTHS
+     + r"\s+\d{1,2}(?:,\s*\d{4})?)\s+\d{2}:\d{2}:\d{2}(?:[.,]\d+)?"
+     + _TS_ZONE + r"(?![\w:])", _RUN_TOKEN),
+    # 2. A clock time only as a line-start log prefix, or inside brackets.
+    (r"^[\[(]?\d{2}:\d{2}:\d{2}(?:[.,]\d+)?[\])]?(?![\w:])", _RUN_TOKEN),
+    (r"[\[(]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?[\])]", _RUN_TOKEN),
+    # 3. Epoch stamps behind an explicit timestamp-like key.
+    (r"\b(timestamp|epoch|ts|time)\b([\"']?\s*[:=]\s*)\d{9,13}(?:\.\d+)?\b",
+     r"\1\2" + _RUN_TOKEN),
+    # 4. Pytest --durations lines: "0.41s call tests/t.py::test_x".
+    (r"^" + _DUR + r"(?=\s+(?:call|setup|teardown)\b)", _RUN_TOKEN),
+    # 5. A duration after a time word: "in 3.21s", "took 2 seconds",
+    #    "elapsed: 1m 3s", "Time: 0:00:03", "duration=120ms" (unit required).
+    (r"\b(in|took|taken|elapsed|duration|runtime|time)\b(\s*[:=]?\s*(?:~|about\s+)?)"
+     + _DUR, r"\1\2" + _RUN_TOKEN),
+    # 6. A bracketed duration: "(0.41s)", "[12 ms]", "(0:00:03)".
+    (r"([\[(]\s*)" + _DUR + r"(\s*[\])])", r"\1" + _RUN_TOKEN + r"\2"),
+    # 7. Elapsed/seconds fields: a JSON key (double quotes only: a Python
+    #    dict repr in an assertion diff is a VALUE, not a field), a key with
+    #    a unit suffix, or a plain elapsed/seconds key with a colon.
+    (r"(\"[\w-]*(?:elapsed|duration|runtime|seconds|secs)[\w-]*\"\s*:\s*)"
+     r"-?\d+(?:\.\d+)?(?:e[+-]?\d+)?(?![\w.])", r"\1" + _RUN_TOKEN),
+    (r"\b((?:elapsed|duration|runtime|time|wall_?time|took)_(?:s|ms|secs?|"
+     r"seconds|millis)\s*[:=]\s*)-?\d+(?:\.\d+)?(?![\w.])",
+     r"\1" + _RUN_TOKEN),
+    (r"\b((?:elapsed|seconds|secs)\s*:\s*)-?\d+(?:\.\d+)?(?![\w.])",
+     r"\1" + _RUN_TOKEN),
+))
+
+
+def _normalize_evidence_text(content):
+    """The evidence lines a test finding is fingerprinted on: each line
+    stripped, runs of whitespace collapsed, blank lines dropped, and the
+    run-dependent tokens (_RUN_TOKEN_RES: timestamps, durations, elapsed/
+    seconds fields) replaced by a fixed marker. Every other character --
+    line numbers, expected/actual values, assertion text -- is untouched."""
+    lines = []
+    for raw in str(content or "").splitlines():
+        line = " ".join(raw.split())
+        if not line:
+            continue
+        for rx, repl in _RUN_TOKEN_RES:
+            line = rx.sub(repl, line)
+        lines.append(line)
+    return lines
+
+
 def _evidence_fingerprint(content):
     """A deterministic fingerprint of a command-check finding's EVIDENCE
     (the quoted output in `content`), normalized the way ocr_impact's
-    signature search normalizes text: each line stripped, runs of
-    whitespace collapsed, blank lines dropped. "" when nothing remains
-    (no content at all) -- the caller fails closed on that, exactly like a
-    missing path or signature."""
-    lines = [" ".join(line.split())
-              for line in str(content or "").splitlines()]
-    lines = [line for line in lines if line]
-    if not lines:
+    signature search normalizes text -- each line stripped, runs of
+    whitespace collapsed, blank lines dropped -- and with run-dependent
+    tokens (times, durations, timestamps) removed, so the same failure
+    hashes the same on every run (_normalize_evidence_text). "" when
+    nothing remains (no content at all, or nothing but run-dependent
+    tokens) -- the caller fails closed on that, exactly like a missing
+    path or signature."""
+    lines = _normalize_evidence_text(content)
+    if not lines or not "".join(lines).replace(_RUN_TOKEN, "").strip():
         return ""
     return hashlib.sha256("\n".join(lines)
                            .encode("utf-8", "replace")).hexdigest()[:16]
@@ -7737,6 +8098,26 @@ def _waiver_list(repo_root, common_dir):
     if not ledger:
         sys.stdout.write("no waivers recorded for this repository.\n")
         return 0
+    git_dir = _git_dir(repo_root)
+    head, findings, _at = _last_verdict(git_dir)
+    # Which ledger anchors a finding of the last recorded verdict (blocking OR
+    # waived) still produces today. A waiver granted under an older fingerprint
+    # rule (before run-dependent tokens were stripped from test evidence), or
+    # for code/evidence that has since changed, matches none of them: mark it,
+    # so the user knows to re-grant it. None = cannot tell (nothing recorded, or
+    # the record was truncated) -> nothing is marked.
+    current = None
+    try:
+        entries = _read_history(git_dir, 1) if git_dir else []
+        last = entries[-1] if entries else {}
+        if head and not last.get("truncated"):
+            seen = list(findings) + [w for w in last.get("waived") or []
+                                     if isinstance(w, dict)]
+            current = {_waiver_anchor(repo_root, head, f) for f in seen}
+            current.discard("")
+    except Exception:  # noqa: BLE001 -- the marker is advice; --list never fails
+        current = None
+    unmatched = 0
     for e in ledger:
         when = e.get("waived_at")
         try:
@@ -7745,15 +8126,26 @@ def _waiver_list(repo_root, common_dir):
             when = str(when or "?")
         note = (f"  note: {_sanitize(str(e.get('note') or ''), 120)}"
                 if e.get("note") else "")
+        stale = ""
+        if current is not None and str(e.get("sid") or "") not in current:
+            unmatched += 1
+            stale = ("  [NO LONGER MATCHES: no finding of the last recorded verdict "
+                     "has this anchor; if it is still blocking, re-grant it with "
+                     "`waive <finding-id>`]")
         sys.stdout.write(
             f"  {_sanitize(str(e.get('sid') or '?'), 16)}  "
-            f"{_sanitize(str(e.get('finding_id') or '?'), 80)}  waived {when}{note}\n")
-    git_dir = _git_dir(repo_root)
-    head, findings, _at = _last_verdict(git_dir)
+            f"{_sanitize(str(e.get('finding_id') or '?'), 80)}  waived {when}{note}"
+            f"{stale}\n")
     active, suppressed = _waiver_counts(repo_root, common_dir, head, findings)
     sys.stdout.write(
         f"{active} active waiver(s), {suppressed} finding(s) suppressed in the last "
         "recorded verdict.\n")
+    if unmatched:
+        sys.stdout.write(
+            f"{unmatched} waiver(s) no longer match any finding of the last recorded "
+            "verdict (e.g. granted before run-dependent times were stripped from test "
+            "evidence, or the finding changed or was fixed): re-grant with `waive` if "
+            "the finding still blocks.\n")
     return 0
 
 
@@ -14198,12 +14590,33 @@ def _coverage_batch(repo_root, base, tip, commits):
     return patch_ids, sha_only
 
 
+_COVERAGE_MEMO = {}
+
+
 def compute_coverage_set(repo_root, base, tip):
     """CoverageSet for base..tip, or None when it cannot be enumerated.
 
     Fail closed: an unreadable range or tip tree yields None, never a
     partial set that could authorize half a range.
+
+    Memoized per (repo, base, tip): the same push asks for it in the join, the
+    incremental view and the join explanation, and every call is a handful of
+    git processes spent out of the hook's short inline budget. The answer is a
+    function of two commit ids, so it cannot go stale; a failure is never cached.
     """
+    key = (str(repo_root), str(base or ""), str(tip or ""))
+    hit = _COVERAGE_MEMO.get(key)
+    if hit is not None:
+        return hit
+    cs = _compute_coverage_set(repo_root, base, tip)
+    if cs is not None:
+        if len(_COVERAGE_MEMO) > 64:
+            _COVERAGE_MEMO.clear()
+        _COVERAGE_MEMO[key] = cs
+    return cs
+
+
+def _compute_coverage_set(repo_root, base, tip):
     commits = rg_store.record_commits(repo_root, base, tip)
     tip_tree = _tip_tree(repo_root, tip)
     if not commits or not tip_tree:
@@ -14230,7 +14643,31 @@ def _same_remote(rec, remote):
     return str(rec.get("remote") or "") == str(remote or "")
 
 
-def _join_records(repo_root, remote, base, passes_only=True):
+def _mark_record_incomplete(remote_id, tip, result):
+    """Flag the just-written verdict record `incomplete` when the review left
+    files unreviewed (`unreviewed` / `unreviewed_truncated` on the result), so
+    no later push treats its commits as covered (R05: only a run that really
+    reviewed its range joins). Best effort: the verdict itself is already
+    stored, and a missing flag only means the older, wider join behaviour."""
+    if not isinstance(result, dict):
+        return
+    if not (result.get("unreviewed") or result.get("unreviewed_truncated")):
+        return
+    rec = rg_store.load_verdict(remote_id, tip)
+    if rec is None:
+        return
+    rec["incomplete"] = True
+    rg_store._write_json(rg_store.verdict_path(remote_id, tip), rec)
+
+
+def _record_incomplete(rec):
+    """True for a record whose review finished but left files unreviewed (a
+    chunk the reviewer gave up on, or a truncated diff). It never joins: its
+    verdict says nothing about those files, so its commits are not covered."""
+    return bool(rec.get("incomplete"))
+
+
+def _join_records(repo_root, remote, base, passes_only=True, with_incomplete=False):
     """The verdict records a join may consult: passes, not blocked, whose
     reviewed range contains this push's (record base is an ancestor of the
     push base, per _record_range_within -- A4, no vacuous authorizations).
@@ -14239,6 +14676,11 @@ def _join_records(repo_root, remote, base, passes_only=True):
     review still reviewed its commits, so the incremental range may treat
     their content as covered -- the prior verdict then combines worst-of,
     never adopted as a pass. The allow-path join always stays passes-only.
+
+    Only a COMPLETED review leaves a record at all: a run that timed out or
+    failed writes none, so it can never join. A record that finished with
+    files left unreviewed is marked incomplete and is skipped here too
+    (with_incomplete=True lists it, for the explain output only).
     """
     out = []
     for rec in rg_store.records_for_remote(remote):
@@ -14249,6 +14691,8 @@ def _join_records(repo_root, remote, base, passes_only=True):
         if not _same_remote(rec, remote):
             continue
         if passes_only and (str(rec.get("verdict") or "") != "pass" or rec.get("blocked")):
+            continue
+        if _record_incomplete(rec) and not with_incomplete:
             continue
         if not _record_range_within(repo_root, rec, base):
             continue
@@ -14599,6 +15043,61 @@ def _incremental_view(repo_root, remote_id, base, tip):
     return IncrementalView(commits=uncovered, span=f"{span_base}..{tip}", range=rng)
 
 
+def _join_explain(repo_root, remote_id, base, tip, view=None):
+    """(lines, facts): which earlier runs were joined for base..tip, and why.
+
+    A joined run is a COMPLETED review whose range reaches this push's base and
+    whose commits (by patch-id or SHA) appear in it -- a pass, a warn or a
+    block alike. A run that timed out or failed leaves no record; one that
+    finished with files unreviewed is named as not joined. Read-only: it spawns
+    no review and writes nothing. Never raises ([] / {} when nothing applies).
+    """
+    try:
+        cs = compute_coverage_set(repo_root, base, tip)
+        if cs is None:
+            return [], {}
+        all_recs = _join_records(repo_root, remote_id, base, passes_only=False,
+                                 with_incomplete=True)
+        total = len(cs.commits)
+        lines, joined, skipped = [], [], []
+        for rec in all_recs:
+            pids = set(p for p in (rec.get("patch_ids") or []) if isinstance(p, str))                 if int(rec.get("protocol_version") or 0) == 2 else set()
+            shas = set(str(c) for c in (rec.get("commits") or []) if c)
+            n = sum(1 for sha in cs.commits
+                    if sha in shas or (cs.patch_ids.get(sha) and cs.patch_ids[sha] in pids))
+            if not n:
+                continue
+            rtip = str(rec.get("tip") or "")
+            if rec.get("blocked"):
+                kind = "blocked"
+            else:
+                kind = str(rec.get("verdict") or "completed")
+            if _record_incomplete(rec):
+                skipped.append({"tip": rtip, "verdict": kind, "commits": n})
+                lines.append(
+                    "not joined: run at %s finished (%s) but left files unreviewed, "
+                    "so its %d commit(s) are not treated as covered" % (rtip[:12], kind, n))
+                continue
+            joined.append({"tip": rtip, "verdict": kind, "commits": n})
+            carried = " its findings are carried and re-verified at the new tip;"                 if (rec.get("blocked") or (rec.get("reasons") and kind != "pass")) else ""
+            lines.append(
+                "joined: %s run at %s covers %d of %d commit(s) --%s a completed "
+                "review counts as already-reviewed work" % (kind, rtip[:12], n, total, carried))
+        if not all_recs or not (joined or skipped):
+            return ["joined runs: none (no earlier completed review covers a commit "
+                    "in this range; a run that timed out or failed never joins)"], {}
+        if view is None:
+            view = _incremental_view(repo_root, remote_id, base, tip)
+        if view is not None:
+            lines.append(
+                "review scope: %d new commit(s) after the joined run(s); old files they "
+                "touch are re-reviewed whole" % len(view.commits))
+        return lines, {"join_runs": joined, "join_not_joined": skipped,
+                       "join_new_commits": len(view.commits) if view is not None else None}
+    except Exception:
+        return [], {}
+
+
 def _extends_recorded_tip(repo_root, remote_id, base, tip):
     """True when a joinable record's tip is an ancestor of this push's tip.
 
@@ -14667,6 +15166,18 @@ def _incremental_entries(repo_root, commits):
     return entries
 
 
+def _file_in_covered_work(full_entry, inc_entry):
+    """True when a covered (already-reviewed) commit also changed this file.
+
+    `full_entry` is the file's whole-range diff entry, `inc_entry` the uncovered
+    commits' own. Both diffs start at a blob: the range's base blob versus the
+    blob just before the first uncovered touch. They differ exactly when covered
+    work changed the file in between; equal blobs mean only the fix touched it,
+    and the fix's own diff is then already the whole story.
+    """
+    return str(full_entry.get("old_oid") or "") != str(inc_entry.get("old_oid") or "")
+
+
 def _incremental_plan(plan, inc_entries):
     """The plan of an incremental run: only the uncovered commits' files.
 
@@ -14689,7 +15200,13 @@ def _incremental_plan(plan, inc_entries):
     for item in plan:
         path = item["entry"]["path"]
         e = inc_entries.get(path)
-        if e is not None:
+        if e is not None and _file_in_covered_work(item["entry"], e):
+            # R05: an OLD file the fix touches -- covered commits changed it
+            # too -- is re-reviewed WHOLE: its full push-range diff, not just
+            # the fix's hunk, so a bug that spans old and new hunks is seen.
+            out.append(dict(item, mode="full", from_oid="", miss_reason="none",
+                            whole_file=True))
+        elif e is not None:
             e = dict(e)
             out.append(dict(item, entry=e, inc_entry=e, mode="full",
                             from_oid="", miss_reason="none"))
@@ -15892,14 +16409,16 @@ def _huge_range_reason(count, limit):
     )
 
 
-def _refuse_huge_range(mode, allow, count, limit, repo_root="", push_range=""):
+def _refuse_huge_range(mode, allow, count, limit, repo_root="", push_range="",
+                       remote_id="", ref=""):
     """Block an unbounded (_EMPTY_TREE-base) push past OCR_FULL_HISTORY_LIMIT.
 
     Honors OCR_FAIL_OPEN like every sibling refusal: a requested bypass warns
     and allows; otherwise the push fails closed with the remedy text.
     """
     if _fail_open_requested():
-        _log_gate_skipped("huge_range", mode, repo_root, push_range)
+        _log_gate_skipped("huge_range", mode, repo_root, push_range,
+                          remote_id=remote_id, ref=ref)
         _warn(_huge_range_reason(count, limit) + _bypass_hint(mode))
         allow()
     _fail_closed(mode, _huge_range_reason(count, limit) + _bypass_hint(mode))
@@ -15966,12 +16485,37 @@ def _print_range(repo_root=None):
                     return 0
         sys.stderr.write("[review-gate] --print-range: no upstream to compare HEAD with\n")
         return 1
-    rng, rb = _head_range(repo_root)
+    # The path a real push takes: the current branch names the MR lookup, which
+    # runs live (the 24h cache is neither read nor written) so the forge
+    # command and its result are shown. No review call, no state written.
+    rng, rb = _head_range(repo_root, branch=_branch(repo_root), fresh_lookup=True)
     if not rng:
         sys.stderr.write("[review-gate] --print-range: no HEAD commit in this directory\n")
         return 1
     sys.stdout.write(rng + "\n")
     _warn(f"range base: {rb.reason}")
+    base, _sep, tip = rng.partition("..")
+    facts = _base_facts(repo_root, tip, base)
+    if facts:
+        facts["base_sha"] = base
+        for line in _base_facts_lines(facts):
+            _warn("  " + line)
+        # Which forge was chosen and why (the setting, a logged-in host, or the
+        # name guess). Only when the lookup was actually attempted: the choice
+        # may cost a CLI probe that a fast-forward or no-remote push never needs.
+        d = rb.detail or {}
+        if not _coverage_v1():
+            jlines, _jf = _join_explain(
+                repo_root, rg_store.remote_url(repo_root, d.get("remote") or "origin"),
+                base, tip)
+            for line in jlines:
+                _warn("  " + line)
+        if (d.get("lookup") or {}).get("status") not in ("not-run", "no-branch", "no-remote", None):
+            try:
+                _warn("  " + rg_mr_consult.describe_forge(
+                    repo_root, d.get("remote") or "origin")["line"])
+            except Exception:
+                pass
     return 0
 
 
@@ -16328,6 +16872,8 @@ def _main_inner(argv, mode):
     # invalidates the unbacked state so the review restarts.
     force = os.environ.get("OCR_FORCE_REVIEW", "").strip().lower() in ("1", "true", "yes")
     remote_id = rg_store.remote_url(repo_root, remote_name)
+    if mode == "git":
+        _warn_unverified_bases(remote_id, push_ref, tip)   # R06: never blocks
     backing = _verdict_backing(common_dir, tip, base, remote_id, repo_root, push_range)
     if backing == "corrupt":
         if _fail_open_requested():
@@ -16349,7 +16895,7 @@ def _main_inner(argv, mode):
     # push that earned the verdict (story 11). Consult degradation is only an
     # advisory here; it is never a block (story 25).
     if push_range and ".." in push_range and branch:
-        mr_ctx, mr_first = _mr_consult(remote_id, branch)
+        mr_ctx, mr_first = _mr_consult(remote_id, branch, repo_root)
         if mr_ctx is None:
             _warn(f"review-gate: no MR context for {branch} on "
                   f"{remote_name or 'origin'} (no open MR, or the consult was "
@@ -16419,7 +16965,15 @@ def _main_inner(argv, mode):
         # record exists (the supervisor writes it at the end of the run).
         view = _incremental_view(repo_root, remote_id, base, tip)
         if view is not None:
-            inc_meta = {"inc_commits": list(view.commits),
+            # R05/R01: say which earlier runs joined and why (stderr, the run
+            # record and the debug log carry the same facts as --print-range).
+            _jlines, _jfacts = _join_explain(repo_root, remote_id, base, tip, view=view)
+            for _l in _jlines:
+                _warn("review-gate: " + _l)
+            if _jlines:
+                _debug_log("join tip=%s %s" % (tip[:12], " | ".join(_jlines)))
+            inc_meta = {"join_explain": _jlines, **_jfacts,
+                        "inc_commits": list(view.commits),
                         "inc_range": view.range,
                         "inc_span": view.span,
                         # A linear extension (the recorded tip is an ancestor:
@@ -16450,7 +17004,8 @@ def _main_inner(argv, mode):
         # An unevaluable count (git rev-list --count failed) fails closed too:
         # the guard exists to refuse the unbounded push, and a push it cannot
         # count is a push it cannot show to be bounded.
-        _refuse_huge_range(mode, allow, count, limit, repo_root, push_range)
+        _refuse_huge_range(mode, allow, count, limit, repo_root, push_range,
+                           remote_id=remote_id, ref=push_ref)
 
     meta = {
         "tip": tip, "branch": branch, "base": base, "range": push_range,
@@ -16459,6 +17014,14 @@ def _main_inner(argv, mode):
         "remote": remote_name, "remote_url": rg_store.remote_url(repo_root, remote_name),
     }
     meta.update(inc_meta)
+    # Why this base (spec stories 14, 17): the rule, counts and merge-request
+    # lookup facts go into the run record and the debug log.
+    _facts = _base_facts(repo_root, tip, base, count) if push_range else {}
+    if _facts:
+        meta.update(_facts)
+        _debug_log("range tip=%s base=%s %s" % (
+            tip[:12], (base or "")[:12],
+            " ".join("%s=%r" % (k, v) for k, v in _facts.items())))
     budget = _inline_budget(mode, repo_root)
     try:
         # Provider guard: refuse a misconfigured review model BEFORE any

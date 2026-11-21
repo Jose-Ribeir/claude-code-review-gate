@@ -33,6 +33,7 @@ settings_schema(); a test keeps the two in step):
           "claude": {"model": "haiku"}
         }
       },
+      "forge": {"name": "gitlab", "host": "git.example.org"},
       "behavior": {
         "inline_wait_seconds": {"hook": 300, "git": 300},
         "spotter_skip": {"enabled": false, "max_files": 3, "max_changed_lines": 60},
@@ -68,6 +69,15 @@ AGENTS = ("spotter", "code-reviewer", "deep-reviewer", "docs-checker",
           "canary")
 BACKENDS = ("claude", "kimchi")
 THINKING_LEVELS = ("off", "low", "medium", "high", "max")
+
+# The forge the remote lookups talk to. `forge.name` pins it (github or gitlab);
+# `forge.host` optionally limits the pin to one host (a remote on any other host
+# is then detected as usual). With no `forge.name` the gate asks the forge CLI
+# which hosts it is logged in to, then falls back to the host-name guess (see
+# rg_mr_consult.resolve_forge). There is no default: unset means "detect".
+FORGES = ("github", "gitlab")
+FORGE_FIELDS = ("name", "host")
+_HOST_NAME = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9.\-]*[A-Za-z0-9])?(:[0-9]{1,5})?$")
 
 # The gate's role names for the three manifest tiers, and the agent each is.
 TIER_AGENTS = {"spotter": "spotter", "tier1": "code-reviewer",
@@ -269,11 +279,12 @@ def all_keys():
     for agent in AGENTS:
         for backend in BACKENDS:
             keys += [_model_key(agent, backend), _thinking_key(agent, backend)]
-    return keys + ["behavior." + k for k in BEHAVIOR]
+    return keys + ["forge." + f for f in FORGE_FIELDS] + ["behavior." + k for k in BEHAVIOR]
 
 
 def _split_key(key):
-    """('agents', agent, backend, field) | ('behavior', dotted) or SettingsError."""
+    """('agents', agent, backend, field) | ('behavior', dotted) | ('forge', field)
+    or SettingsError."""
     parts = str(key).split(".")
     if parts[0] == "agents" and len(parts) == 4:
         _, agent, backend, field = parts
@@ -281,9 +292,11 @@ def _split_key(key):
             return ("agents", agent, backend, field)
     if parts[0] == "behavior" and ".".join(parts[1:]) in BEHAVIOR:
         return ("behavior", ".".join(parts[1:]))
+    if parts[0] == "forge" and len(parts) == 2 and parts[1] in FORGE_FIELDS:
+        return ("forge", parts[1])
     raise SettingsError(
         "unknown settings key %r; valid keys look like "
-        "agents.<agent>.<backend>.model|thinking or behavior.<knob>; run the "
+        "agents.<agent>.<backend>.model|thinking, forge.name|host or behavior.<knob>; run the "
         "settings command with no arguments to list them" % (key,),
         ["unknown key %r" % (key,)])
 
@@ -307,6 +320,17 @@ def _check_thinking(value):
     return None
 
 
+def _check_forge(field, value):
+    if field == "name":
+        if not isinstance(value, str) or value not in FORGES:
+            return "must be one of %s, got %r" % (", ".join(FORGES), value)
+        return None
+    if not isinstance(value, str) or not _HOST_NAME.match(value):
+        return ("must be a host name such as git.example.org (no scheme, path or "
+                "spaces), got %r" % (value,))
+    return None
+
+
 def _check_behavior(dotted, value):
     default, kind, minimum = BEHAVIOR[dotted]
     if kind == "bool":
@@ -321,6 +345,8 @@ def validate_value(key, value):
     parts = _split_key(key)
     if parts[0] == "agents":
         problem = (_check_model(value) if parts[3] == "model" else _check_thinking(value))
+    elif parts[0] == "forge":
+        problem = _check_forge(parts[1], value)
     else:
         problem = _check_behavior(parts[1], value)
     if problem:
@@ -350,8 +376,10 @@ def validate_document(doc):
             _validate_agents(body, problems)
         elif top == "behavior":
             _validate_behavior(body, problems)
+        elif top == "forge":
+            _validate_forge(body, problems)
         else:
-            problems.append("unknown top-level key %r (expected agents, behavior)" % top)
+            problems.append("unknown top-level key %r (expected agents, forge, behavior)" % top)
     return problems
 
 
@@ -385,6 +413,20 @@ def _validate_agents(body, problems):
                     continue
                 if problem:
                     problems.append("%s.%s: %s" % (where, field, problem))
+
+
+def _validate_forge(body, problems):
+    if not isinstance(body, dict):
+        problems.append("forge: must be an object with name and/or host")
+        return
+    for field, value in body.items():
+        if field not in FORGE_FIELDS:
+            problems.append("forge.%s: unknown key (expected %s)"
+                            % (field, ", ".join(FORGE_FIELDS)))
+            continue
+        problem = _check_forge(field, value)
+        if problem:
+            problems.append("forge.%s: %s" % (field, problem))
 
 
 def _validate_behavior(body, problems):
@@ -514,11 +556,19 @@ class Settings:
         return (self._file_value("behavior", group, knob)
                 or Resolved(BEHAVIOR[dotted][0], "default"))
 
+    def forge(self, field):
+        """Resolved(value | None, source) for forge.name / forge.host. Unset is
+        (None, "default"): the gate detects the forge instead."""
+        _split_key("forge." + field)
+        return (self._file_value("forge", field) or Resolved(None, "default"))
+
     def get(self, key):
         """Resolved for any key from all_keys()."""
         parts = _split_key(key)
         if parts[0] == "behavior":
             return self.behavior(parts[1])
+        if parts[0] == "forge":
+            return self.forge(parts[1])
         _, agent, backend, field = parts
         return self.model(agent, backend) if field == "model" else self.thinking(agent, backend)
 
@@ -545,7 +595,7 @@ class Settings:
         verdict). Empty when no file pins an agent."""
         pairs = []
         for key in all_keys():
-            if key.startswith("behavior."):
+            if key.startswith(("behavior.", "forge.")):
                 continue
             got = self.get(key)
             if got.source.startswith(("project:", "user:")):
@@ -614,8 +664,8 @@ def parse_cli_value(key, text):
     """The typed value for `text` typed on a command line: JSON for the bool
     and integer knobs, the bare string for models and thinking levels."""
     parts = _split_key(key)
-    if parts[0] == "agents":
-        return text
+    if parts[0] in ("agents", "forge"):
+        return text.strip() if parts[0] == "forge" else text
     kind = BEHAVIOR[parts[1]][1]
     word = text.strip().lower()
     if kind == "bool":
@@ -687,6 +737,12 @@ def settings_schema():
     }
     backends = {"type": "object", "additionalProperties": False,
                 "properties": {b: {"$ref": "#/definitions/agentEntry"} for b in BACKENDS}}
+    forge = {"type": "object", "additionalProperties": False, "properties": {
+        "name": {"enum": list(FORGES),
+                 "description": "The forge of the origin remote; omit to detect it."},
+        "host": {"type": "string", "pattern": _HOST_NAME.pattern,
+                 "description": "Limit forge.name to this host; omit to apply it to any host."},
+    }}
     behavior = {}
     for dotted, (default, kind, minimum) in BEHAVIOR.items():
         group, knob = dotted.split(".")
@@ -710,6 +766,7 @@ def settings_schema():
             "$schema": {"type": "string"},
             "agents": {"type": "object", "additionalProperties": False,
                        "properties": {a: {"$ref": "#/definitions/backends"} for a in AGENTS}},
+            "forge": forge,
             "behavior": {"type": "object", "additionalProperties": False,
                          "properties": behavior},
         },

@@ -705,3 +705,118 @@ def test_main_end_to_end_with_a_fake_gate(tmp_path, capsys):
     # The gate hook the run used is the one the installer materialized.
     hook = (root / "hooks" / "pre-push").read_text()
     assert "review-gate.py" in hook
+
+
+# --------------------------------------------------------------------------
+# Frozen target: pinned commit, independent clone, ref-level delta
+# --------------------------------------------------------------------------
+
+def _run_main(tmp_path, target, monkeypatch=None, before_scratch=None):
+    """Run main() on `target`; `before_scratch()` fires after the start
+    snapshot and before the clone, i.e. while the run is going."""
+    sc_mod = tmp_path / "scen.py"
+    sc_mod.write_text(
+        "from sim_harness import CommitSpec, Scenario\n"
+        "SCENARIOS = [Scenario(name='ok', description='d', expect='pass',\n"
+        "  commits=[CommitSpec(message='c', write={'f.py': 'z = 1\\n'})])]\n")
+    root = tmp_path / "scratch"
+    if before_scratch:
+        real = sim.make_scratch
+
+        def wrapped(*a, **kw):
+            before_scratch()
+            return real(*a, **kw)
+        monkeypatch.setattr(sim, "make_scratch", wrapped)
+    rc = sim.main(["--repo", str(target), "--scenarios", str(sc_mod),
+                   "--workdir", str(root), "--gate-scripts", _fake_gate_scripts(tmp_path),
+                   "--inline-budget", "0"])
+    return rc, json.loads((root / "results.json").read_text()), root
+
+
+def test_report_records_the_pinned_commit_and_the_untouched_target(tmp_path, capsys):
+    target = _toy_repo(tmp_path)
+    head = _git(["rev-parse", "HEAD"], target)
+    rc, data, _root = _run_main(tmp_path, target)
+    assert rc == 0, capsys.readouterr().out
+    assert data["pinned_commit"] == head
+    assert data["target_untouched"] is True
+    assert "target_mutation" not in data
+
+
+def test_scratch_is_cloned_from_the_pinned_commit_even_if_the_source_moved(tmp_path):
+    target = _toy_repo(tmp_path)
+    pinned = _git(["rev-parse", "HEAD"], target)
+    (target / "app.py").write_text("print('v2')\n")
+    _git(["commit", "-qam", "newer"], target)
+    scratch = sim.make_scratch(target, tmp_path / "scratch", pinned=pinned)
+    assert scratch.pinned_commit == pinned
+    assert _git(["rev-parse", "HEAD"], scratch.work) == pinned
+    assert _git(["rev-parse", "--abbrev-ref", "HEAD"], scratch.work) == "main"
+    assert (scratch.work / "app.py").read_text() == "print('v1')\n"
+
+
+def test_scratch_shares_no_files_with_the_source(tmp_path):
+    target = _toy_repo(tmp_path)
+    scratch = sim.make_scratch(target, tmp_path / "scratch")
+    objects = scratch.work / ".git" / "objects"
+    assert not (objects / "info" / "alternates").exists()
+    files = [p for p in objects.rglob("*") if p.is_file()]
+    assert files
+
+    def ident(p):
+        st = os.stat(p)
+        return (st.st_dev, st.st_ino)
+
+    assert all(os.stat(p).st_nlink == 1 for p in files), "an object file is hardlinked"
+    source_ids = {ident(p) for p in (target / ".git" / "objects").rglob("*") if p.is_file()}
+    assert not source_ids & {ident(p) for p in files}
+
+
+def test_a_source_commit_during_the_run_is_reported_as_source_moved(tmp_path, monkeypatch, capsys):
+    target = _toy_repo(tmp_path)
+    before = _git(["rev-parse", "HEAD"], target)
+
+    def user_commits():
+        (target / "app.py").write_text("print('v2')\n")
+        _git(["commit", "-qam", "user commit"], target)
+
+    rc, data, _root = _run_main(tmp_path, target, monkeypatch, user_commits)
+    after = _git(["rev-parse", "HEAD"], target)
+    assert data["pinned_commit"] == before
+    assert data["target_untouched"] is False and rc == 1
+    mut = data["target_mutation"]
+    assert mut["kind"] == "source moved"
+    assert mut["harness_writes"] == []
+    assert {"ref": "refs/heads/main", "before": before, "after": after} in mut["refs"]
+    assert {"ref": "HEAD", "before": before, "after": after} in mut["refs"]
+    assert "refs/heads/main" in mut["message"] and before in mut["message"]
+    assert "target mutated" not in mut["message"]
+    assert "WARNING SOURCE MOVED" in capsys.readouterr().out
+
+
+def test_a_harness_write_to_the_target_is_not_reported_as_a_source_move(tmp_path, monkeypatch):
+    target = _toy_repo(tmp_path)
+
+    def harness_bug():
+        sim._git(["update-ref", "refs/heads/oops", "HEAD"], target)
+
+    rc, data, _root = _run_main(tmp_path, target, monkeypatch, harness_bug)
+    assert data["target_untouched"] is False and rc == 1
+    mut = data["target_mutation"]
+    assert mut["kind"] == "target mutated"
+    assert mut["harness_writes"] == ["git update-ref refs/heads/oops HEAD"]
+    assert [r["ref"] for r in mut["refs"]] == ["refs/heads/oops"]
+    assert mut["refs"][0]["before"] is None
+
+
+def test_ref_delta_always_names_the_ref(tmp_path):
+    target = _toy_repo(tmp_path)
+    before = sim.repo_snapshot(target)
+    _git(["branch", "side"], target)
+    change = sim.describe_target_change(before, sim.repo_snapshot(target))
+    assert change["refs"] == [{"ref": "refs/heads/side", "before": None,
+                               "after": before["head"]}]
+    assert "refs changed" not in change["message"]
+    with pytest.raises(sim.SimError, match="refs/heads/side"):
+        sim.assert_repo_unchanged(before, sim.repo_snapshot(target))
+    assert sim.describe_target_change(before, before) is None

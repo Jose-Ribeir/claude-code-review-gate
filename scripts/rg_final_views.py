@@ -275,6 +275,7 @@ def _run_summary(manifest):
         "target_project": manifest["stack"]["target_project"],
         "root_target_ref": manifest["stack"]["root_target_ref"],
         "revisions": manifest["revisions"],
+        "slowest_lens": manifest["timings"]["slowest_lens"],
         "units": [{
             "unit_id": unit["unit_id"],
             "unit_key": unit["unit_key"],
@@ -327,6 +328,12 @@ def _report_list(args, store):
                 f"{item['source_project']} {item['source_ref']}@{item['source_sha']} -> "
                 f"{item['target_project']} {item['target_ref']}@{item['target_sha']}"
             )
+        slowest = run["slowest_lens"]
+        lines.append(
+            "Slowest lens: not recorded" if slowest is None else
+            f"Slowest lens: {slowest['name']} ({slowest['unit_key']}): "
+            f"{slowest['duration_seconds']:.3f}s"
+        )
         lines.append("Units:")
         for unit in run["units"]:
             lines.append(

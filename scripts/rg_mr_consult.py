@@ -39,6 +39,7 @@ import re
 import shutil
 import subprocess
 import time
+from collections import namedtuple
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from urllib.parse import quote
@@ -74,13 +75,9 @@ _HTTP_RE = re.compile(r"^(?:https?|ssh|git)://(?:[^@/]+@)?([^/:]+)(?::\d+)?/(.+)
 _SCP_RE = re.compile(r"^(?:[^@/ ]+@)?([^:/]+):(.+)$")
 
 
-def _provider(remote_url):
-    """(provider, host, slug) for a remote URL, or None when unsupported.
-
-    HTTPS/SSH GitHub -> ("github", host, "owner/repo"); gitlab.com and
-    self-hosted GitLab (host contains 'gitlab') -> ("gitlab", ...); any other
-    host has no supported CLI and is simply "no context".
-    """
+def _parse_remote(remote_url):
+    """(host, slug) for a remote URL (host lower-cased), or None when it is not
+    an https/ssh/scp-style URL with a path."""
     url = str(remote_url or "").strip()
     if not url:
         return None
@@ -93,12 +90,172 @@ def _provider(remote_url):
     slug = path.strip("/")
     if not slug:
         return None
-    host = host.lower()
-    if "github" in host:
-        return "github", host, slug
-    if "gitlab" in host:
-        return "gitlab", host, slug
+    return host.lower(), slug
+
+
+# --- which forge a host is -------------------------------------------------------
+# The order, first hit wins:
+#   1. the settings: forge.name (limited to forge.host when that is set);
+#   2. the hosts the forge CLI is logged in to (`glab auth status`, then
+#      `gh auth status`), so a self-hosted GitLab with a plain name needs no
+#      configuration once glab works;
+#   3. the host-name guess: "github" / "gitlab" in the host name.
+# github.com and gitlab.com are known without asking a CLI (the settings still
+# win). Every step is fail-open: an unreadable settings file, a missing CLI, a
+# timeout or odd output just moves on to the next step.
+
+SOURCE_SETTING = "setting"
+SOURCE_LOGGED_IN = "logged-in host"
+SOURCE_GUESS = "name guess"
+SOURCE_NONE = "none"
+
+_PUBLIC_HOSTS = {"github.com": "github", "gitlab.com": "gitlab"}
+_FORGE_CLI = {"github": "gh", "gitlab": "glab"}
+_LOGGED_IN_RE = re.compile(r"[Ll]ogged in to\s+([^\s,;()]+)")
+_login_cache = {}       # (cli, PATH) -> frozenset of hosts; one probe per process
+
+
+class ForgeChoice(namedtuple("ForgeChoice", "provider source detail")):
+    """The forge picked for a host. provider is "github", "gitlab" or None;
+    source is "setting", "logged-in host", "name guess" or "none"; detail is
+    one human sentence saying why."""
+
+    @property
+    def line(self):
+        if self.provider is None:
+            return "forge: not recognised (%s)" % self.detail
+        return "forge: %s [%s: %s]" % (self.provider, self.source, self.detail)
+
+
+def _find_repo_root(start=None):
+    """The nearest directory at or above `start` (default: the current one)
+    that holds a .git entry, or None."""
+    try:
+        here = Path(start or os.getcwd()).resolve()
+    except OSError:
+        return None
+    for cand in (here, *here.parents):
+        if (cand / ".git").exists():
+            return str(cand)
     return None
+
+
+def _auth_output(cli, timeout, path=None, env=None):
+    """The combined stdout+stderr of `<cli> auth status`, or "" when it cannot
+    run. The exit code is ignored on purpose: glab exits non-zero when ANY
+    configured host fails while still listing the healthy ones."""
+    spawn, _note = _resolve_spawn([cli, "auth", "status"], path=path)
+    if spawn is None:
+        return ""
+    try:
+        proc = subprocess.run(spawn, capture_output=True, text=True, timeout=timeout,
+                              env=env, encoding="utf-8", errors="replace")
+    except (subprocess.SubprocessError, OSError):
+        return ""
+    return "%s\n%s" % (proc.stdout or "", proc.stderr or "")
+
+
+def _logged_in_hosts(cli, runner, timeout, environ=None):
+    """The (lower-cased) hosts `cli` says it is logged in to; empty when the
+    CLI is missing, slow or prints nothing recognisable. Cached per process."""
+    env = os.environ if environ is None else environ
+    key = (cli, env.get("PATH", ""))
+    cached = _login_cache.get(key)
+    if cached is not None:
+        return cached
+    try:
+        if runner is None or runner is _run_cli:
+            raw = _auth_output(cli, timeout, path=env.get("PATH"),
+                               env=dict(env) if environ is not None else None)
+        else:
+            raw, _note = runner([cli, "auth", "status"], env_extra=None, timeout=timeout)
+    except Exception:
+        raw = ""
+    hosts = frozenset(h.strip(".:").lower() for h in _LOGGED_IN_RE.findall(raw or ""))
+    _login_cache[key] = hosts
+    return hosts
+
+
+def _settings_choice(host, repo_root):
+    """A ForgeChoice from forge.name/forge.host, or None (not set, set for a
+    different host, or the settings cannot be read)."""
+    try:
+        import rg_settings
+        settings = rg_settings.load(repo_root or _find_repo_root())
+        name = settings.forge("name")
+        if not name.value:
+            return None
+        pinned = settings.forge("host")
+        if pinned.value and pinned.value.lower().rsplit(":", 1)[0] != host.lower():
+            return None
+        scope = " for %s" % pinned.value if pinned.value else ""
+        return ForgeChoice(name.value, SOURCE_SETTING,
+                           "forge.name=%s%s in %s" % (name.value, scope, name.source))
+    except Exception:
+        # An invalid settings file is reported by the settings command and the
+        # doctor; a lookup just detects the forge instead.
+        return None
+
+
+def resolve_forge(host, *, repo_root=None, runner=None, timeout=None, environ=None):
+    """ForgeChoice for `host`: setting, then logged-in hosts, then name guess.
+    Never raises."""
+    host = str(host or "").lower()
+    timeout = MR_TIMEOUT if timeout is None else timeout
+    try:
+        choice = _settings_choice(host, repo_root)
+        if choice is not None:
+            return choice
+        if host in _PUBLIC_HOSTS:
+            return ForgeChoice(_PUBLIC_HOSTS[host], SOURCE_GUESS,
+                               "%s is a known public host" % host)
+        for provider in ("gitlab", "github"):
+            cli = _FORGE_CLI[provider]
+            if host in _logged_in_hosts(cli, runner, timeout, environ):
+                return ForgeChoice(provider, SOURCE_LOGGED_IN,
+                                   "%s is logged in to %s" % (cli, host))
+        if "github" in host:
+            return ForgeChoice("github", SOURCE_GUESS, "%s contains 'github'" % host)
+        if "gitlab" in host:
+            return ForgeChoice("gitlab", SOURCE_GUESS, "%s contains 'gitlab'" % host)
+    except Exception:
+        pass
+    return ForgeChoice(None, SOURCE_NONE,
+                       "%s is not a pinned host, not one glab/gh is logged in to, and "
+                       "its name does not say github or gitlab" % host)
+
+
+def describe_forge(repo_root, remote="origin", *, runner=None, timeout=None, environ=None):
+    """{"remote", "host", "provider", "source", "detail", "line"} for a repo's
+    remote, for the settings command and the doctor. Never raises."""
+    url = ""
+    try:
+        url = rg_store.remote_url(repo_root, remote) if repo_root else ""
+    except Exception:
+        pass
+    parsed = _parse_remote(url) if url and url != remote else None
+    if parsed is None:
+        detail = ("no %s remote" % remote) if not url or url == remote \
+            else "cannot read a host from %r" % url
+        return {"remote": url, "host": "", "provider": None, "source": SOURCE_NONE,
+                "detail": detail, "line": "forge: not recognised (%s)" % detail}
+    choice = resolve_forge(parsed[0], repo_root=repo_root, runner=runner,
+                           timeout=timeout, environ=environ)
+    return {"remote": url, "host": parsed[0], "provider": choice.provider,
+            "source": choice.source, "detail": choice.detail, "line": choice.line}
+
+
+def _provider(remote_url, repo_root=None, runner=None, timeout=None):
+    """(provider, host, slug) for a remote URL, or None when no forge is
+    recognised for its host (see resolve_forge for how that is decided)."""
+    parsed = _parse_remote(remote_url)
+    if parsed is None:
+        return None
+    host, slug = parsed
+    choice = resolve_forge(host, repo_root=repo_root, runner=runner, timeout=timeout)
+    if choice.provider is None:
+        return None
+    return choice.provider, host, slug
 
 
 def _cli_env_extra(provider, host):
@@ -130,12 +287,12 @@ def _sh_on_windows():
     return None
 
 
-def _resolve_spawn(argv):
+def _resolve_spawn(argv, path=None):
     """(list argv, None) or (None, note). Resolves the CLI on PATH; on
     Windows a `name.cmd` marker with a sibling `name.sh` (the conftest shim
     layout) runs through Git for Windows' sh, since CreateProcess cannot
     execute a bare shim name and cmd.exe would mangle api-path arguments."""
-    exe = shutil.which(argv[0])
+    exe = shutil.which(argv[0], path=path)
     if exe is None:
         return None, f"{argv[0]} not found on PATH"
     if exe.lower().endswith(".cmd") and os.path.isfile(exe[:-4] + ".sh"):
@@ -217,12 +374,14 @@ def _ctx_from_glab(item):
                      web_url=str(item.get("web_url") or ""))
 
 
-def _live_lookup(remote_url, branch, runner, timeout):
+def _live_lookup(remote_url, branch, runner, timeout, repo_root=None):
     """(MrContext | None, note | None). (None, None) = searched, no open MR
     (cacheable negative); (None, note) = degraded, never cached."""
-    parsed = _provider(remote_url)
+    parsed = _provider(remote_url, repo_root, runner, timeout)
     if parsed is None:
-        return None, f"remote {remote_url!r} is neither GitHub nor GitLab"
+        return None, (f"remote {remote_url!r} is neither GitHub nor GitLab "
+                      "(name the forge with `rg_settings_cli.py set forge.name "
+                      "gitlab|github`, or log in with glab/gh)")
     provider, host, slug = parsed
     env_extra = _cli_env_extra(provider, host)
     out, note = runner(_list_cmd(provider, slug, branch),
@@ -323,46 +482,117 @@ def _write_entry(path, now, ctx):
 
 # --- the public seam -----------------------------------------------------------------
 
+def _note_status(note):
+    """The machine token for a degraded-lookup note (see lookup_open_mr)."""
+    text = str(note or "")
+    if "neither GitHub nor GitLab" in text:
+        return "unrecognised-host"
+    if "not found on PATH" in text:
+        return "no-cli"
+    if "timed out" in text:
+        return "timeout"
+    if "unrecognised JSON" in text:
+        return "bad-json"
+    if "payload was unusable" in text:
+        return "bad-payload"
+    return "cli-failed"
+
+
+def _lookup_command(remote_url, branch, repo_root=None, runner=None, timeout=None):
+    """The forge command a live lookup runs, as one display string ("" when the
+    remote is not a supported forge)."""
+    parsed = _provider(remote_url, repo_root, runner, timeout)
+    if parsed is None:
+        return ""
+    provider, host, slug = parsed
+    env_extra = _cli_env_extra(provider, host)
+    prefix = "".join("%s=%s " % kv for kv in sorted(env_extra.items()))
+    return prefix + " ".join(str(a) for a in _list_cmd(provider, slug, branch))
+
+
+def _lookup_info(status, source, command, ctx, note, branch):
+    """The info dict lookup_open_mr returns: status token, one human `line`."""
+    if status == "mr-found":
+        line = "open MR/PR !%d for %s targets %s" % (
+            ctx.iid, branch, ctx.target_branch or "(unnamed target)")
+    elif status == "no-open-mr":
+        line = "MR lookup: the forge lists no open MR/PR for branch %s" % branch
+    elif status in ("no-cli", "unrecognised-host"):
+        line = "MR lookup skipped: %s" % note
+    else:
+        line = "MR lookup failed: %s" % note
+    return {"status": status, "source": source, "command": command,
+            "note": str(note or ""), "line": line,
+            "iid": ctx.iid if ctx is not None else 0,
+            "target": (ctx.target_branch if ctx is not None else "") or ""}
+
+
+def lookup_open_mr(remote_url, branch, *, use_cache=True, write_cache=True,
+                   runner=None, cache_dir=None, now=None, timeout=None,
+                   repo_root=None):
+    """(MrContext | None, info): find_open_mr plus WHY the answer is what it is.
+
+    info["status"] is one of mr-found, no-open-mr, no-cli, cli-failed, timeout,
+    bad-json, bad-payload, unrecognised-host, error. info["line"] is the one
+    reason line to show a person, info["command"] the forge command a live
+    lookup runs ("" on a cache hit or an unsupported host), info["source"]
+    "cache" or "live". use_cache=False always runs the command;
+    write_cache=False leaves the 24h cache untouched (the read-only
+    --print-range). repo_root (default: the repository around the current
+    directory) is where the project settings file is read for the forge choice.
+    Never raises.
+    """
+    command = ""
+    try:
+        env = _fetch_env(runner, cache_dir, now, timeout)
+        path = _cache_path(_cache_root(env.cache_dir), remote_url, branch)
+        if use_cache:
+            entry = _read_entry(path)
+            if entry is not None and env.now - entry["fetched_at"] < MR_TTL:
+                if entry["kind"] == "none":
+                    return None, _lookup_info("no-open-mr", "cache", "", None, "", branch)
+                ctx = _entry_context(entry)
+                if ctx is not None:
+                    return ctx, _lookup_info("mr-found", "cache", "", ctx, "", branch)
+                # corrupt positive: fall through to a refetch
+        command = _lookup_command(remote_url, branch, repo_root, env.runner, env.timeout)
+        ctx, note = _live_lookup(remote_url, branch, env.runner, env.timeout, repo_root)
+        if note is not None:
+            return None, _lookup_info(_note_status(note), "live", command, None,
+                                      note, branch)
+        if write_cache:
+            _write_entry(path, env.now, ctx)
+        status = "mr-found" if ctx is not None else "no-open-mr"
+        return ctx, _lookup_info(status, "live", command, ctx, "", branch)
+    except Exception as exc:
+        return None, _lookup_info("error", "live", command, None,
+                                  "lookup raised %s" % type(exc).__name__, branch)
+
+
 def find_open_mr(remote_url, branch, *, runner=None, cache_dir=None, now=None,
-                 timeout=None):
+                 timeout=None, repo_root=None):
     """The open MR/PR whose source branch is `branch`, or None.
 
     None means "no context": no MR, unsupported forge, missing CLI, offline,
     timeout -- all indistinguishable by design. 24h-cached in both directions
-    (hits and negatives). Never raises.
+    (hits and negatives). Never raises. lookup_open_mr says which of those it was.
     """
-    try:
-        env = _fetch_env(runner, cache_dir, now, timeout)
-        path = _cache_path(_cache_root(env.cache_dir), remote_url, branch)
-        entry = _read_entry(path)
-        if entry is not None and env.now - entry["fetched_at"] < MR_TTL:
-            if entry["kind"] == "none":
-                return None
-            ctx = _entry_context(entry)
-            if ctx is not None:
-                return ctx
-            # corrupt positive: fall through to a refetch
-        ctx, note = _live_lookup(remote_url, branch, env.runner, env.timeout)
-        if note is not None:
-            return None
-        _write_entry(path, env.now, ctx)
-        return ctx
-    except Exception:
-        return None
+    return lookup_open_mr(remote_url, branch, runner=runner, cache_dir=cache_dir,
+                          now=now, timeout=timeout, repo_root=repo_root)[0]
 
 
 def target_branch(remote_url, branch, *, runner=None, cache_dir=None, now=None,
-                  timeout=None):
+                  timeout=None, repo_root=None):
     """The MR's target branch for the base resolver, or None (no context)."""
     ctx = find_open_mr(remote_url, branch, runner=runner, cache_dir=cache_dir,
-                       now=now, timeout=timeout)
+                       now=now, timeout=timeout, repo_root=repo_root)
     if ctx is None or not ctx.target_branch:
         return None
     return ctx.target_branch
 
 
 def first_seen(remote_url, branch, *, runner=None, cache_dir=None, now=None,
-               timeout=None):
+               timeout=None, repo_root=None):
     """True exactly when the cache holds a PRIOR NEGATIVE for (remote, branch)
     and a live lookup NOW finds an MR -- the retroactive discovery flag the
     caller announces as "MR first seen".
@@ -378,7 +608,7 @@ def first_seen(remote_url, branch, *, runner=None, cache_dir=None, now=None,
         if entry is not None and entry["kind"] == "mr":
             return False
         had_negative = entry is not None and entry["kind"] == "none"
-        ctx, note = _live_lookup(remote_url, branch, env.runner, env.timeout)
+        ctx, note = _live_lookup(remote_url, branch, env.runner, env.timeout, repo_root)
         if note is not None:
             return False
         _write_entry(path, env.now, ctx)
@@ -569,19 +799,20 @@ def _mr_files(provider, raw):
 
 
 def cross_mr_path_overlap(remote_url, paths, exclude_iid=None, *, runner=None,
-                          timeout=None):
+                          timeout=None, repo_root=None):
     """{mr web_url: [overlapping paths]} for every OTHER open MR whose diff
     touches any of `paths` ("the whole series smuggled into one MR" is
     structurally visible here). The pushed MR's own iid is excluded (its file
     list is never fetched). Every CLI failure degrades to {} or a skipped MR.
-    Never raises.
+    `repo_root` is the pushed repository: its forge setting (not the current
+    directory's) decides which forge the remote is. Never raises.
     """
     try:
-        parsed = _provider(remote_url)
+        env = _fetch_env(runner=runner, timeout=timeout)
+        parsed = _provider(remote_url, repo_root, env.runner, env.timeout)
         if parsed is None:
             return {}
         provider, host, slug = parsed
-        env = _fetch_env(runner=runner, timeout=timeout)
         runner, timeout = env.runner, env.timeout
         wanted = {str(p).replace("\\", "/") for p in (paths or [])}
         if not wanted:

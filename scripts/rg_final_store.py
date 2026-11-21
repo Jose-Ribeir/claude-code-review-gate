@@ -1706,6 +1706,70 @@ class FinalStore:
             )
         ]
 
+    @staticmethod
+    def _native_timings(native_tasks, unit_keys):
+        """Per-lens, required-test and probe timing derived from native task events."""
+        kinds = {"execution:required_tests": "required_tests",
+                 "execution:dynamic_tests": "dynamic_probe"}
+        terminal = ("completed", "timeout", "failed", "cancelled")
+        entries = []
+        for task in native_tasks:
+            identity = task["identity"]
+            stage = identity["stage"]
+            if stage in kinds:
+                kind = kinds[stage]
+            elif stage.startswith("lens:"):
+                kind = "lens"
+            else:
+                continue
+            events = task["events"]
+            started_event = next((e for e in events if e["event_type"] == "started"), None)
+            end_event = next((e for e in events if e["event_type"] in terminal
+                              and e["timing"]["finished_at_unix"] is not None), None)
+            started = finished = duration = None
+            if end_event is not None:
+                timing = end_event["timing"]
+                started, finished = timing["started_at_unix"], timing["finished_at_unix"]
+                duration = timing["duration_seconds"]
+            if started is None and started_event is not None:
+                started = started_event["timing"]["started_at_unix"]
+            if duration is None and started is not None and finished is not None:
+                duration = finished - started
+            limit = None
+            if started_event is not None:
+                limit = started_event["details"].get("timeout_seconds")
+            if started is None:
+                # Never launched (skipped, or fenced by another task's timeout or a
+                # cancel): there is nothing to time, and it did not itself time out.
+                outcome = "not-started"
+            elif end_event is None:
+                outcome = "not-finished"
+            else:
+                outcome = end_event["event_type"]
+            entries.append({
+                "unit_id": identity["unit_id"],
+                "unit_key": unit_keys.get(identity["unit_id"]),
+                "kind": kind,
+                "name": identity["lens"],
+                "task_id": identity["task_id"],
+                "outcome": outcome,
+                "timed_out": outcome == "timeout",
+                "started_at_unix": started,
+                "finished_at_unix": finished,
+                "duration_seconds": duration,
+                "timeout_seconds": limit,
+            })
+        lenses = [e for e in entries if e["kind"] == "lens" and e["duration_seconds"] is not None]
+        slowest = max(lenses, key=lambda e: e["duration_seconds"], default=None)
+        return {
+            "entries": entries,
+            "slowest_lens": None if slowest is None else {
+                key: slowest[key] for key in (
+                    "unit_id", "unit_key", "name", "outcome", "duration_seconds",
+                    "timeout_seconds")
+            },
+        }
+
     def register_native_task(self, task):
         """Register immutable supervisor-owned native identity idempotently."""
         normalized = _native_task(task)
@@ -3279,6 +3343,7 @@ class FinalStore:
                     "rowid", (run_id,))
             ]
             run_metadata = _loads(run["metadata_json"])
+            native_tasks = self._native_tasks_public(run_id)
             return {
                 "schema": REPORT_SCHEMA,
                 "store": self.store_identity(),
@@ -3311,7 +3376,9 @@ class FinalStore:
                 "units": [self._unit_manifest(item, individual_ids, publications) for item in selected],
                 "all_unit_ids": all_unit_ids,
                 "publications": publications,
-                "native_tasks": self._native_tasks_public(run_id),
+                "native_tasks": native_tasks,
+                "timings": self._native_timings(
+                    native_tasks, {item["unit_id"]: item["unit_key"] for item in units}),
             }
 
     def machine_report(self, run_id, unit_id=None):
@@ -3421,6 +3488,29 @@ class FinalStore:
             f"{item['error'] or 'no error'} {self._details(item['details'])}"
             for item in unassociated
         ) or lines.append("- none recorded")
+        timings = report["timings"]
+        if timings["entries"]:
+            lines.extend(("", "## Timing", ""))
+            slowest = timings["slowest_lens"]
+            lines.append(
+                "Slowest lens: none recorded" if slowest is None else
+                f"Slowest lens: {slowest['name']} ({slowest['unit_key']}): "
+                f"{slowest['duration_seconds']:.3f}s"
+            )
+            for item in timings["entries"]:
+                limit = (
+                    "" if item["timeout_seconds"] is None
+                    else f"; limit={item['timeout_seconds']}s"
+                )
+                span = (
+                    "not recorded" if item["duration_seconds"] is None
+                    else f"{item['duration_seconds']:.3f}s"
+                )
+                lines.append(
+                    f"- {item['unit_key']} {item['kind']} {item['name']}: {item['outcome']}; "
+                    f"start={item['started_at_unix']}; end={item['finished_at_unix']}; "
+                    f"duration={span}{limit}"
+                )
         if report["native_tasks"]:
             lines.extend(("", "## Native task lifecycle", ""))
             for task in report["native_tasks"]:

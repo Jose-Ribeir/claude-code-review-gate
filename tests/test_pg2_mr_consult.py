@@ -31,6 +31,20 @@ import rg_mr_consult  # noqa: E402
 from rg_mr_consult import MrContext  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_forge_state(tmp_path, monkeypatch):
+    """Which forge a host is can come from the process: the per-process
+    logged-in-hosts cache, or a project settings file found from the current
+    directory. Start every test with neither, so no earlier test in the same
+    pytest process (or the checkout this suite runs from) decides the forge."""
+    rg_mr_consult._login_cache.clear()
+    here = tmp_path / "cwd"
+    here.mkdir()
+    monkeypatch.chdir(here)
+    yield
+    rg_mr_consult._login_cache.clear()
+
+
 GH_URL = "https://github.com/acme/proj.git"
 GH_SSH_URL = "git@github.com:acme/proj.git"
 GLAB_URL = "https://gitlab.com/acme/proj.git"
@@ -192,7 +206,9 @@ def test_unsupported_forge_is_no_context_without_a_cli_call(tmp_path, monkeypatc
     canned = _write_shim(tmp_path, monkeypatch, "gh", _gh_routes())
     assert rg_mr_consult.find_open_mr("https://bitbucket.org/acme/proj.git",
                                       BRANCH) is None
-    assert _calls(canned) == []
+    # Asking the CLI which hosts it is logged in to is the one allowed call;
+    # no MR lookup runs for a host nothing recognises.
+    assert [c for c in _calls(canned) if "auth status" not in c] == []
 
 
 def test_no_open_mr_returns_none_and_the_negative_is_cached(tmp_path, monkeypatch):

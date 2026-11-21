@@ -54,6 +54,7 @@ import time
 
 import ocr_impact
 import ocr_index
+import rg_mr_consult
 
 FORGE_TIMEOUT = 3.0          # hard per-call subprocess bound (spec)
 MAX_GREP_HITS = 10
@@ -257,20 +258,34 @@ def _save_negcache(repo_root, cache):
 # Tier 4: live forge call (gh / glab by remote, hard timeout, cached negatives)
 # ---------------------------------------------------------------------------
 
-def _forge_cli(run):
-    """Autodetect the forge CLI from the origin remote: github.com -> gh;
-    gitlab.com and self-hosted GitLab (host contains 'gitlab') -> glab. Any
+def _forge_cli(run, repo_root=None):
+    """Pick the forge CLI for the origin remote: the settings (forge.name /
+    forge.host), then the hosts gh/glab are logged in to, then the host-name
+    guess (rg_mr_consult.resolve_forge). github -> gh, gitlab -> glab. Any
     other host (Bitbucket, Codeberg, ...) has no supported CLI: return
     (None, url) so the caller skips the forge tier with a warning."""
     url, rc = run(["remote", "get-url", "origin"])
     url = url.strip()
     if rc != 0 or not url:
         return None, None
-    if "github.com" in url:
-        return "gh", url
-    if "gitlab" in url:
-        return "glab", url
-    return None, url
+    parsed = rg_mr_consult._parse_remote(url)
+    if parsed is None:
+        return None, url
+    choice = rg_mr_consult.resolve_forge(parsed[0], repo_root=repo_root)
+    return {"github": "gh", "gitlab": "glab"}.get(choice.provider), url
+
+
+def _forge_env(cli, url):
+    """The environment for a forge CLI call: GH_HOST / GITLAB_HOST pointing at
+    a self-hosted instance so the search does not go to the public one."""
+    parsed = rg_mr_consult._parse_remote(url)
+    extra = {}
+    if parsed:
+        provider = "github" if cli == "gh" else "gitlab"
+        extra = rg_mr_consult._cli_env_extra(provider, parsed[0])
+    env = dict(os.environ)
+    env.update(extra)
+    return env
 
 
 def _forge_cmd(cli, name):
@@ -327,7 +342,7 @@ def _forge_lookup(repo_root, run, target, timeout, negcache, warnings):
     tier never ran), the string 'unavailable' (degraded), or None (searched,
     nothing found). Appends degradation reasons to warnings."""
     name = _basename(target)
-    cli, url = _forge_cli(run)
+    cli, url = _forge_cli(run, repo_root)
     if cli is None:
         if url:
             # Unsupported host: no tier engaged at all, so the walk simply
@@ -336,8 +351,9 @@ def _forge_lookup(repo_root, run, target, timeout, negcache, warnings):
             # local-only coverage; the warning says why. The tier did not
             # run, so it must not be reported as searched.
             warnings.append("forge: origin remote %s is neither GitHub nor "
-                            "GitLab; forge tier skipped, local tiers only"
-                            % url)
+                            "GitLab; forge tier skipped, local tiers only (name "
+                            "the forge with `rg_settings_cli.py set forge.name "
+                            "gitlab|github`, or log in with glab/gh)" % url)
             return "skipped"
         warnings.append("forge: no origin remote configured; forge tier "
                         "skipped, local tiers only")
@@ -362,7 +378,8 @@ def _forge_lookup(repo_root, run, target, timeout, negcache, warnings):
     try:
         proc = subprocess.run(_forge_cmd(cli, name), cwd=repo_root,
                               capture_output=True, text=True,
-                              encoding="utf-8", errors="replace", timeout=timeout)
+                              encoding="utf-8", errors="replace", timeout=timeout,
+                              env=_forge_env(cli, url))
     except subprocess.TimeoutExpired:
         remember("timeout")
         warnings.append("forge: %s lookup exceeded %.1fs hard timeout; degraded "

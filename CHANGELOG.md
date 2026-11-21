@@ -6,6 +6,38 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Review range, forge and bypass visibility (fix/gate-remediation)
+
+#### Added
+- **Forge setting.** `forge.name` (`github` or `gitlab`) and `forge.host` in the
+  settings file pin the forge of the origin remote. Choice order: the setting,
+  then a host `glab` / `gh` is logged in to, then a host-name guess (`gitlab` /
+  `github` in the name). `rg_settings_cli.py show` and the doctor print the
+  effective forge and which step chose it.
+- **Unverified-push record.** A git-mode push through `OCR_FAIL_OPEN` writes an
+  entry (base, tip, time, reason) to `<store>/unverified/`; the next git-mode
+  push on the branch warns that an earlier base was never reviewed. Warning
+  only, never blocking, and never counted as covered.
+- **Range explanation.** `review-gate.py --print-range` shows the base rule and
+  reason, the merge-request lookup status, the target fetch line, the counts
+  and the runs a push would join.
+- **`boundary-chain` base rule.** When the target branch was merged into the
+  branch, the newest chained boundary is the review base, so the target's
+  commits are not reviewed as the branch's.
+- **`waive --list` marks stale waivers** (`NO LONGER MATCHES`) when no finding
+  of the last recorded verdict carries the waiver's anchor.
+
+#### Changed
+- **The MR target branch is fetched before the merge-base** (that branch only,
+  10 s, fail-open: a failure warns and uses the local ref).
+- **A completed blocked run joins.** Its commits count as covered; old files the
+  fix touches are re-reviewed whole. A timed-out, failed or incomplete run never
+  joins. `OCR_COVERAGE_V1=1` restores the old join.
+- **Test-finding waiver identity ignores run-dependent tokens** (times,
+  durations, timestamps; exact list in the ADR 0007 addendum). Existing waivers
+  and test-finding ids change once and must be granted again; reviewer-finding
+  ids are unchanged.
+
 ### Review speed and reliability (fix/review-speed)
 
 #### Changed

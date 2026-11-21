@@ -103,7 +103,7 @@ class NativeScheduler:
     def _run_state(self, run_id):
         return self._runs.setdefault(run_id, {
             "closed": False, "finalized": False, "cancelled": None, "cleaning": False,
-            "stopped": set(),
+            "stopped": set(), "finalized_event": threading.Event(),
         })
 
     def submit(self, definition: SchedulerTask, *, on_finalize=None, on_complete=None):
@@ -279,6 +279,37 @@ class NativeScheduler:
             "details": {"error": error, "publication": "rejected"},
         })
 
+    def _record_execution_completion(self, entry, artifact, error):
+        """Record start/end/duration for completed work that publishes no artifact.
+
+        Artifact-publishing tasks get their completed event (with timing) from the
+        artifact commit; required-test and probe execution has no artifact, so its
+        timing is recorded here to keep every task's duration in the store.
+        """
+        if self._store is None:
+            return error
+        task = entry.definition.task
+        try:
+            self._store.record_native_event({
+                "schema": "native-review-event/v1",
+                "event_id": _event_id(task, "completed"),
+                "event_type": "completed",
+                "identity": task.identity(),
+                "transport": self._engine(entry).transport,
+                "native_session_id": artifact.native_session_id,
+                "timing": {
+                    "occurred_at_unix": artifact.finished_at_unix,
+                    "started_at_unix": artifact.started_at_unix,
+                    "finished_at_unix": artifact.finished_at_unix,
+                    "duration_seconds": artifact.duration_seconds,
+                },
+                "details": {"outcome": "completed"},
+            })
+        except Exception as exc:
+            suffix = f"native timing event failed: {exc}"
+            return f"{error}; {suffix}" if error else suffix
+        return error
+
     def _completed(self, entry, completion):
         with self._lock:
             if entry.state != "running" or entry.callback_received:
@@ -294,6 +325,7 @@ class NativeScheduler:
                 not entry.definition.publish_artifact:
             output = artifact.payload.get("execution_result")
             artifact = None
+            error = self._record_execution_completion(entry, source_artifact, error)
         if completion.state == "completed" and artifact is not None:
             try:
                 if self._store is None:
@@ -357,6 +389,7 @@ class NativeScheduler:
                     run["cancelled"] if entry.state != "completed" else "run-closed",
                 )
             run["finalized"] = True
+            run["finalized_event"].set()
             for entry in entries:
                 entry.finalized = True
                 if run["cancelled"] is None and entry.eligible and \
@@ -459,6 +492,17 @@ class NativeScheduler:
             self._run_state(run_id)["closed"] = True
         self._drain()
         return self._maybe_finalize(run_id)
+
+    def wait_finalized(self, run_id, timeout):
+        """Block until the run's finalization events are recorded, or the bound elapses.
+
+        A task's completion wakes its waiter before its worker thread records the
+        run finalization, so a caller that tears down the store right after the
+        waiter returns must wait here to avoid writing to a closed store.
+        """
+        with self._lock:
+            event = self._run_state(run_id)["finalized_event"]
+        return event.wait(timeout)
 
     def snapshot(self, run_id):
         with self._lock:

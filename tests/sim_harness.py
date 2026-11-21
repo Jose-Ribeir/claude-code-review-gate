@@ -117,6 +117,7 @@ class Scratch:
     branch: str       # the pushed branch (the clone's initial branch)
     hooks: Path       # gate hooks dir materialized by the repo's own installer
     gitconfig: Path   # GIT_CONFIG_GLOBAL redirect (the real one is never touched)
+    pinned_commit: str = ""   # the target commit the scratch was cloned from
 
 
 @dataclass
@@ -131,7 +132,37 @@ class ScenarioResult:
     failures: list = field(default_factory=list)
 
 
+# Git subcommands that only READ a repository. The target guard below treats
+# any other subcommand run with cwd inside the target as a harness write.
+_READ_ONLY_GIT = frozenset({"rev-parse", "for-each-ref", "status", "log", "show",
+                            "cat-file", "ls-files", "diff", "ls-remote"})
+_TARGET_GUARD = {"target": None, "writes": []}
+
+
+def guard_target(target):
+    """Start recording every non-read git command the harness runs inside
+    `target` (None stops). Returns the (initially empty) list of recorded
+    writes; main() reports it so a harness write is told apart from the
+    source repo moving under the run."""
+    _TARGET_GUARD["target"] = None if target is None else Path(target).resolve()
+    _TARGET_GUARD["writes"] = []
+    return _TARGET_GUARD["writes"]
+
+
+def _note_target_write(args, cwd):
+    guarded = _TARGET_GUARD["target"]
+    if guarded is None or not args or args[0] in _READ_ONLY_GIT:
+        return
+    try:
+        inside = Path(cwd).resolve().is_relative_to(guarded)
+    except OSError:
+        return
+    if inside:
+        _TARGET_GUARD["writes"].append("git " + " ".join(args))
+
+
 def _git(args, cwd, env=None, check=True):
+    _note_target_write(args, cwd)
     proc = subprocess.run(["git"] + args, cwd=str(cwd), env=env,
                           capture_output=True, text=True)
     if check and proc.returncode != 0:
@@ -158,16 +189,50 @@ def repo_snapshot(repo):
     return {"head": head, "refs": refs, "status": status}
 
 
-def assert_repo_unchanged(before, after):
-    diffs = []
+def ref_delta(before, after):
+    """Ref-level difference between two repo_snapshot() results, as a list of
+    {"ref", "before", "after"} (HEAD first, then refs by name). A ref that
+    did not exist on one side has None there."""
+    rows = []
     if before["head"] != after["head"]:
-        diffs.append(f"HEAD moved: {before['head']} -> {after['head']}")
-    if before["refs"] != after["refs"]:
-        diffs.append("refs changed")
-    if before["status"] != after["status"]:
-        diffs.append("working-tree status changed")
-    if diffs:
-        raise SimError("the target repository was mutated: " + "; ".join(diffs))
+        rows.append({"ref": "HEAD", "before": before["head"], "after": after["head"]})
+    for name in sorted(set(before["refs"]) | set(after["refs"])):
+        old, new = before["refs"].get(name), after["refs"].get(name)
+        if old != new:
+            rows.append({"ref": name, "before": old, "after": new})
+    return rows
+
+
+def describe_target_change(before, after, harness_writes=()):
+    """None when the target is unchanged. Otherwise a dict whose "kind" is
+    "source moved" (a ref moved or the working tree changed while the harness
+    wrote nothing to the target -- the maintainer committed during the run) or
+    "target mutated" (the harness itself ran a write command in the target).
+    "refs" always names every ref that differs, with both values."""
+    refs = ref_delta(before, after)
+    status_changed = before["status"] != after["status"]
+    writes = list(harness_writes)
+    if not (refs or status_changed or writes):
+        return None
+    kind = "target mutated" if writes else "source moved"
+    parts = [f"{r['ref']}: {r['before']} -> {r['after']}" for r in refs]
+    if status_changed:
+        parts.append("working-tree status changed")
+    if writes:
+        parts.append("harness wrote to the target: " + "; ".join(writes))
+    if kind == "source moved":
+        lead = ("the source repository moved during the run (the run used the pinned "
+                "commit, so it stays valid but may not be comparable)")
+    else:
+        lead = "the harness mutated the target repository"
+    return {"kind": kind, "message": f"{lead}: " + "; ".join(parts),
+            "refs": refs, "status_changed": status_changed, "harness_writes": writes}
+
+
+def assert_repo_unchanged(before, after):
+    change = describe_target_change(before, after)
+    if change:
+        raise SimError("the target repository was mutated: " + change["message"])
 
 
 # --------------------------------------------------------------------------
@@ -203,8 +268,11 @@ def assert_remote_isolation(scratch, env=None):
                     raise SimError(f"remote {name!r} {kind} escapes the scratch root: {url!r}")
 
 
-def make_scratch(target, root, branch=None, seed_files=None, seed_executables=None):
-    """Clone `target` into root/work, seed an optional baseline commit, rewrite
+def make_scratch(target, root, branch=None, seed_files=None, seed_executables=None,
+                 pinned=None):
+    """Clone `target` -- at the pinned commit (default: its HEAD right now),
+    with no hardlinks, so the scratch shares no files with the source and a
+    later commit in the source cannot reach it -- into root/work, seed an optional baseline commit, rewrite
     every remote to a local bare fake origin, and push the baseline with
     --no-verify (before the gate hook is installed). Paths listed in
     `seed_executables` are chmod +x before the baseline commit so a seeded
@@ -215,7 +283,13 @@ def make_scratch(target, root, branch=None, seed_files=None, seed_executables=No
         raise SimError(f"not a git repository: {target}")
     root.mkdir(parents=True, exist_ok=True)
     work, origin = root / "work", root / "origin.git"
-    _git(["clone", "--no-hardlinks", "--quiet", str(target), str(work)], root)
+    pinned = pinned or _git(["rev-parse", "HEAD"], target).stdout.strip()
+    source_branch = _git(["rev-parse", "--abbrev-ref", "HEAD"], target).stdout.strip()
+    _git(["clone", "--no-hardlinks", "--no-checkout", "--quiet", str(target), str(work)], root)
+    if source_branch and source_branch != "HEAD":
+        _git(["checkout", "-q", "-B", source_branch, pinned], work)
+    else:
+        _git(["checkout", "-q", "--detach", pinned], work)
     if seed_files:
         for rel, text in seed_files.items():
             p = work / rel
@@ -238,7 +312,8 @@ def make_scratch(target, root, branch=None, seed_files=None, seed_executables=No
                  ("commit.gpgsign", "false")):
         _git(["config", k, v], work)
     scratch = Scratch(root=root, work=work, origin=origin, branch=head_branch,
-                      hooks=root / "hooks", gitconfig=root / "gitconfig")
+                      hooks=root / "hooks", gitconfig=root / "gitconfig",
+                      pinned_commit=pinned)
     assert_remote_isolation(scratch)
     _git(["push", "--no-verify", "-q", "-u", "origin", f"HEAD:{head_branch}"], work)
     return scratch
@@ -888,10 +963,14 @@ def main(argv=None):
     if seed_files:
         print(f"[sim] seeded into the scratch baseline: {', '.join(sorted(seed_files))}")
 
+    harness_writes = guard_target(target)
     before = repo_snapshot(target)
+    report["pinned_commit"] = before["head"]
+    print(f"[sim] pinned target commit: {before['head']}")
     scratch = make_scratch(target, root, branch=args.branch or None,
                            seed_files=seed_files,
-                           seed_executables=seed_executables)
+                           seed_executables=seed_executables,
+                           pinned=before["head"])
     hook = install_gate_hook(scratch, args.gate_scripts)
     print(f"[sim] gate hook installed via the repo installer: {hook}")
     env = push_env(scratch, args.gate_scripts, inline_budget=args.inline_budget)
@@ -929,12 +1008,12 @@ def main(argv=None):
           f"{report['docs_summary_cache']['exists']} "
           f"({report['docs_summary_cache']['bytes']} bytes)")
 
-    try:
-        assert_repo_unchanged(before, repo_snapshot(target))
-        report["target_untouched"] = True
-    except SimError as exc:
-        report["target_untouched"] = False
-        report["target_mutation"] = str(exc)
+    change = describe_target_change(before, repo_snapshot(target), harness_writes)
+    guard_target(None)
+    report["target_untouched"] = change is None
+    if change:
+        report["target_mutation"] = change
+        print(f"[sim] WARNING {change['kind'].upper()}: {change['message']}")
     print(f"[sim] original repository untouched: {report['target_untouched']}")
 
     out_path = root / "results.json"
