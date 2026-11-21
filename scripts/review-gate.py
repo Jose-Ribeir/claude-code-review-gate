@@ -1519,7 +1519,7 @@ def _depth_prompt_note():
 _LARGE_DIFF_LINES = 5000
 
 
-def _mr_consult(remote_id, branch):
+def _mr_consult(remote_id, branch, repo_root=None):
     """pg5 -- (MrContext | None, first_seen) for (remote, branch).
 
     first_seen is consulted BEFORE find_open_mr: it needs the cache's PRIOR
@@ -1531,8 +1531,8 @@ def _mr_consult(remote_id, branch):
     if not remote_id or not branch:
         return None, False
     try:
-        first = rg_mr_consult.first_seen(remote_id, branch)
-        ctx = rg_mr_consult.find_open_mr(remote_id, branch)
+        first = rg_mr_consult.first_seen(remote_id, branch, repo_root=repo_root)
+        ctx = rg_mr_consult.find_open_mr(remote_id, branch, repo_root=repo_root)
     except Exception:
         return None, False
     return ctx, bool(first)
@@ -1725,7 +1725,8 @@ def _mr_target_base(remote, tip, branch, repo_root, trace=None, fresh_lookup=Fal
                                "%r has no URL" % name}
             return ""
         ctx, info = rg_mr_consult.lookup_open_mr(
-            remote_id, branch, use_cache=not fresh_lookup, write_cache=not fresh_lookup)
+            remote_id, branch, use_cache=not fresh_lookup, write_cache=not fresh_lookup,
+            repo_root=repo_root)
         trace["lookup"] = info
         target = (ctx.target_branch if ctx is not None else "") or ""
     except Exception as exc:
@@ -16231,6 +16232,16 @@ def _print_range(repo_root=None):
         facts["base_sha"] = base
         for line in _base_facts_lines(facts):
             _warn("  " + line)
+        # Which forge was chosen and why (the setting, a logged-in host, or the
+        # name guess). Only when the lookup was actually attempted: the choice
+        # may cost a CLI probe that a fast-forward or no-remote push never needs.
+        d = rb.detail or {}
+        if (d.get("lookup") or {}).get("status") not in ("not-run", "no-branch", "no-remote", None):
+            try:
+                _warn("  " + rg_mr_consult.describe_forge(
+                    repo_root, d.get("remote") or "origin")["line"])
+            except Exception:
+                pass
     return 0
 
 
@@ -16608,7 +16619,7 @@ def _main_inner(argv, mode):
     # push that earned the verdict (story 11). Consult degradation is only an
     # advisory here; it is never a block (story 25).
     if push_range and ".." in push_range and branch:
-        mr_ctx, mr_first = _mr_consult(remote_id, branch)
+        mr_ctx, mr_first = _mr_consult(remote_id, branch, repo_root)
         if mr_ctx is None:
             _warn(f"review-gate: no MR context for {branch} on "
                   f"{remote_name or 'origin'} (no open MR, or the consult was "

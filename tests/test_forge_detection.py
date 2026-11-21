@@ -195,6 +195,59 @@ def test_a_project_setting_in_the_repo_is_read(forge, capsys):
     assert "open MR/PR !7 for feat targets main" in err, err
 
 
+def test_print_range_says_which_forge_was_chosen_and_why(forge, capsys):
+    work, canned = forge["repo"], forge["canned"]
+    tip = _feat_tip(work)
+    (canned / "auth").write_text(AUTH_OUT)
+    (canned / "out").write_text(_glab_mr(tip))
+    rc, out, err = _print_range(work, capsys)
+    assert rc == 0, err
+    assert "  forge: gitlab [logged-in host: glab is logged in to git.corp.example]" in err, err
+
+
+def test_print_range_says_when_no_forge_is_recognised(forge, capsys):
+    work = forge["repo"]
+    _feat_tip(work)
+    rc, out, err = _print_range(work, capsys)
+    assert rc == 0, err
+    assert "  forge: not recognised (git.corp.example is not a pinned host" in err, err
+
+
+def _pin_forge_in_repo(work):
+    (work / ".ocr").mkdir(exist_ok=True)
+    (work / ".ocr" / "settings.json").write_text(
+        json.dumps({"forge": {"name": "gitlab", "host": "git.corp.example"}}), encoding="utf-8")
+
+
+def test_the_pushed_repos_setting_is_read_from_another_working_directory(
+        forge, tmp_path, monkeypatch, capsys):
+    """The gate is handed the repo root; the current directory (a git hook can
+    run anywhere) must not decide which settings file is read."""
+    work, canned = forge["repo"], forge["canned"]
+    tip = _feat_tip(work)
+    (canned / "out").write_text(_glab_mr(tip))
+    _pin_forge_in_repo(work)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    rc, out, err = _print_range(work, capsys)
+    assert rc == 0, err
+    assert "open MR/PR !7 for feat targets main" in err, err
+
+
+def test_the_push_consult_reads_the_pushed_repos_setting_too(forge, tmp_path, monkeypatch):
+    """_mr_consult (the pre-push consistency check) gets the same repo root."""
+    work, canned = forge["repo"], forge["canned"]
+    tip = _feat_tip(work)
+    (canned / "out").write_text(_glab_mr(tip))
+    _pin_forge_in_repo(work)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    ctx, _first = rg._mr_consult(PLAIN_URL, "feat", str(work))
+    assert ctx is not None and ctx.iid == 7
+
+
 def test_github_origin_behaves_as_before_without_asking_glab(forge, capsys):
     work, canned = forge["repo"], forge["canned"]
     forge["url"] = "https://github.com/acme/proj.git"
