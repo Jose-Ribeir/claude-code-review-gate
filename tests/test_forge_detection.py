@@ -368,3 +368,26 @@ def test_minimal_path_still_has_no_forge_cli():
     """The suite's own premise: a forge CLI is only ever the stub."""
     import shutil
     assert shutil.which("glab", path=minimal_path()) is None
+
+
+def test_the_large_diff_overlap_tier_reads_the_pushed_repos_setting_too(forge, tmp_path, monkeypatch):
+    """cross_mr_path_overlap takes the pushed repo's root: its forge setting
+    names the host, so the open-MR list is fetched from another directory too."""
+    work, canned = forge["repo"], forge["canned"]
+    _pin_forge_in_repo(work)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    calls = canned / "calls.log"
+
+    def api_calls():
+        lines = calls.read_text().splitlines() if calls.exists() else []
+        return [ln for ln in lines if " auth " not in ln]
+
+    # no repo root: the host is unrecognised from here, so the tier stays blind
+    assert rg_mr_consult.cross_mr_path_overlap(PLAIN_URL, ["a.py"], exclude_iid=1) == {}
+    assert api_calls() == []
+    rg_mr_consult._login_cache.clear()
+    rg_mr_consult.cross_mr_path_overlap(PLAIN_URL, ["a.py"], exclude_iid=1,
+                                        repo_root=str(work))
+    assert api_calls(), "the pushed repo's forge setting was not applied"

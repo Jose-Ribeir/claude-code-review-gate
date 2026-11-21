@@ -1586,7 +1586,7 @@ def _mr_consistency_findings(remote_id, ctx, repo_root, base, tip):
     if changed_lines > _LARGE_DIFF_LINES:
         try:
             overlap = rg_mr_consult.cross_mr_path_overlap(
-                remote_id, paths, exclude_iid=ctx.iid)
+                remote_id, paths, exclude_iid=ctx.iid, repo_root=repo_root)
         except Exception:
             overlap = {}
         if overlap:

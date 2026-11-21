@@ -799,16 +799,17 @@ def _mr_files(provider, raw):
 
 
 def cross_mr_path_overlap(remote_url, paths, exclude_iid=None, *, runner=None,
-                          timeout=None):
+                          timeout=None, repo_root=None):
     """{mr web_url: [overlapping paths]} for every OTHER open MR whose diff
     touches any of `paths` ("the whole series smuggled into one MR" is
     structurally visible here). The pushed MR's own iid is excluded (its file
     list is never fetched). Every CLI failure degrades to {} or a skipped MR.
-    Never raises.
+    `repo_root` is the pushed repository: its forge setting (not the current
+    directory's) decides which forge the remote is. Never raises.
     """
     try:
         env = _fetch_env(runner=runner, timeout=timeout)
-        parsed = _provider(remote_url, None, env.runner, env.timeout)
+        parsed = _provider(remote_url, repo_root, env.runner, env.timeout)
         if parsed is None:
             return {}
         provider, host, slug = parsed
