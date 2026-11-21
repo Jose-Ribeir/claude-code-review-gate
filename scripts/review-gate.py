@@ -4117,6 +4117,38 @@ def _metric_log(event, **fields):
         pass
 
 
+def _warn_unverified_bases(remote_id, ref, tip):
+    """R06: warn that an earlier push on this branch went through the fail-open
+    switch, naming the base it left unreviewed. Pure information: it never
+    returns a verdict, never raises and never touches the exit code -- the
+    record is a memory, not a second gate. An entry for the tip being pushed
+    right now is the bypass this very push is repeating, so it is not news."""
+    try:
+        entries = [e for e in rg_store.list_unverified(remote_id, ref)
+                   if str(e.get("tip") or "") != str(tip or "")]
+        if not entries:
+            return
+        lines = []
+        for e in entries[-3:]:
+            ts = e.get("ts")
+            when = (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(ts)))
+                    if isinstance(ts, (int, float)) else "?")
+            lines.append(
+                f"  - base {_sanitize(str(e.get('base') or '?'), 40)} "
+                f"(pushed tip {_sanitize(str(e.get('tip') or '?'), 40)[:12]}, {when}, "
+                f"why={_sanitize(str(e.get('reason') or '?'), 60)})")
+        more = len(entries) - len(lines)
+        sys.stderr.write(
+            "review-gate: WARNING - an earlier push on this branch went through "
+            "the fail-open switch, so an earlier base was never reviewed:\n"
+            + "\n".join(lines) + "\n"
+            + (f"  (+{more} older unverified push(es) in the review-gate store)\n" if more > 0 else "")
+            + "This is a warning only; this push is not affected.\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+
 def _log_gate_skipped(why, mode="", repo_root="", push_range="",
                       remote_id="", ref=""):
     """A gate_skipped telemetry line for an OCR_FAIL_OPEN bypass the gate honored.
@@ -4151,6 +4183,10 @@ def _log_gate_skipped(why, mode="", repo_root="", push_range="",
         mechanism = _fail_open_mechanism()                             # pg5
         try:
             rg_store.record_bypass(remote_id, ref, tip, mechanism, why)
+        except Exception:
+            pass
+        try:   # R06: remember the base this push left unreviewed
+            rg_store.record_unverified(remote_id, ref, base, tip, why)
         except Exception:
             pass
         try:
@@ -16269,14 +16305,16 @@ def _huge_range_reason(count, limit):
     )
 
 
-def _refuse_huge_range(mode, allow, count, limit, repo_root="", push_range=""):
+def _refuse_huge_range(mode, allow, count, limit, repo_root="", push_range="",
+                       remote_id="", ref=""):
     """Block an unbounded (_EMPTY_TREE-base) push past OCR_FULL_HISTORY_LIMIT.
 
     Honors OCR_FAIL_OPEN like every sibling refusal: a requested bypass warns
     and allows; otherwise the push fails closed with the remedy text.
     """
     if _fail_open_requested():
-        _log_gate_skipped("huge_range", mode, repo_root, push_range)
+        _log_gate_skipped("huge_range", mode, repo_root, push_range,
+                          remote_id=remote_id, ref=ref)
         _warn(_huge_range_reason(count, limit) + _bypass_hint(mode))
         allow()
     _fail_closed(mode, _huge_range_reason(count, limit) + _bypass_hint(mode))
@@ -16730,6 +16768,8 @@ def _main_inner(argv, mode):
     # invalidates the unbacked state so the review restarts.
     force = os.environ.get("OCR_FORCE_REVIEW", "").strip().lower() in ("1", "true", "yes")
     remote_id = rg_store.remote_url(repo_root, remote_name)
+    if mode == "git":
+        _warn_unverified_bases(remote_id, push_ref, tip)   # R06: never blocks
     backing = _verdict_backing(common_dir, tip, base, remote_id, repo_root, push_range)
     if backing == "corrupt":
         if _fail_open_requested():
@@ -16860,7 +16900,8 @@ def _main_inner(argv, mode):
         # An unevaluable count (git rev-list --count failed) fails closed too:
         # the guard exists to refuse the unbounded push, and a push it cannot
         # count is a push it cannot show to be bounded.
-        _refuse_huge_range(mode, allow, count, limit, repo_root, push_range)
+        _refuse_huge_range(mode, allow, count, limit, repo_root, push_range,
+                           remote_id=remote_id, ref=push_ref)
 
     meta = {
         "tip": tip, "branch": branch, "base": base, "range": push_range,

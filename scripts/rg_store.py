@@ -633,6 +633,13 @@ def invalidate_ref(remote, ref):
             removed += 1
         except OSError as exc:
             _warn(f"could not delete verdict {path.name} for {ref} ({exc})")
+    # A retired ref's unverified memory goes with it (not counted: the return
+    # value is the verdicts removed).
+    try:
+        for rec in list_unverified(remote, ref):
+            os.unlink(_unverified_path(remote, ref, rec.get("tip")))
+    except Exception:
+        pass
     return removed
 
 
@@ -667,3 +674,72 @@ def record_bypass(remote, ref, tip, mechanism, reason):
     except Exception as exc:
         _warn(f"could not record bypass ({mechanism}) for "
               f"({remote}, {ref}, {tip}): {exc}")
+
+
+# --- unverified bases (a push the fail-open switch let through) ---------------
+#
+# A bypassed push leaves the commits it sent never reviewed. The gate remembers
+# that here, in its own directory beside (never inside) verdicts/: the coverage
+# join reads verdicts/ only, so an unverified entry can never count as covered.
+# The entry is a memory, not a gate -- the next push warns from it and nothing
+# ever blocks on it.
+
+_UNVERIFIED_DIR = "unverified"
+
+
+def _norm_ref(ref):
+    ref = str(ref or "")
+    return ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ref
+
+
+def _unverified_path(remote, ref, tip):
+    key = hashlib.sha256(_norm_ref(ref).encode("utf-8", "replace")).hexdigest()[:8]
+    return store_root() / _UNVERIFIED_DIR / f"{_remote_key(remote)}-{key}-{tip}.json"
+
+
+def record_unverified(remote, ref, base, tip, reason):
+    """Write one "unverified" entry (base, tip, time, reason) for a push that
+    went through the fail-open switch. Idempotent per (remote, ref, tip). A
+    write failure warns and never raises: it must not break the allow the
+    operator asked for. Returns True when the entry was written."""
+    if not tip:
+        return False
+    entry = {
+        "kind": "unverified",
+        "remote": str(remote or ""),
+        "ref": _norm_ref(ref),
+        "base": str(base or ""),
+        "tip": str(tip),
+        "reason": str(reason or ""),
+        "ts": _now(),
+    }
+    try:
+        _write_json(_unverified_path(remote, ref, tip), entry)
+        return True
+    except Exception as exc:
+        _warn(f"could not record unverified push ({remote}, {ref}, {tip}): {exc}")
+        return False
+
+
+def list_unverified(remote, ref=None):
+    """Every unverified entry for `remote` (and, when given, `ref` in either
+    spelling), oldest first. An unreadable entry is skipped: a warning memory
+    that cannot be read is a missing warning, never an exception."""
+    out = []
+    try:
+        prefix = _remote_key(remote) + "-"
+        paths = sorted((store_root() / _UNVERIFIED_DIR).glob(prefix + "*.json"))
+    except Exception:
+        return out
+    for path in paths:
+        try:
+            rec = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(rec, dict) or rec.get("kind") != "unverified":
+            continue
+        if ref is not None and _norm_ref(rec.get("ref")) != _norm_ref(ref):
+            continue
+        out.append(rec)
+    out.sort(key=lambda r: (r.get("ts") or 0, str(r.get("tip") or "")))
+    return out
