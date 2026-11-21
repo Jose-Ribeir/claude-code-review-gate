@@ -18,6 +18,8 @@ from rg_native_executor import NativeExecutor, NativeTask
 from rg_native_scheduler import NativeScheduler, SchedulerTask
 from rg_run_lifecycle import RunDeadline, RunDeadlineExpired, run_timeout_from_env
 
+CANCELLATION_FINALIZE_WAIT_SECONDS = 5.0
+
 
 class NativeStandaloneExecution:
     """Submit eligible lens and execution tasks without an artificial unit barrier."""
@@ -273,5 +275,11 @@ class NativeStandaloneExecution:
         self._closed = True
         try:
             self.scheduler.cancel_run(self.deadline.run_id)
+            # Cancelled workers record their own finalization after their waiter
+            # wakes; the store must stay open until they have, bounded so a runner
+            # that ignores cancellation cannot hold teardown forever.
+            self.scheduler.wait_finalized(
+                self.deadline.run_id, CANCELLATION_FINALIZE_WAIT_SECONDS,
+            )
         finally:
             self.deadline.close()

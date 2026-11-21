@@ -14,6 +14,7 @@ import rg_final_native  # noqa: E402
 import rg_final_review  # noqa: E402
 from rg_execution_ownership import run_owned_process  # noqa: E402
 from rg_final_store import FinalStore  # noqa: E402
+from rg_native_scheduler import NativeScheduler  # noqa: E402
 from test_native_executor import _DeadlineTimer  # noqa: E402
 from test_final_complete_standalone import standalone  # noqa: E402, F401
 from test_final_complete_standalone import Provider, item  # noqa: E402
@@ -61,6 +62,25 @@ def test_required_work_uses_independent_bounded_execution_slots(standalone):  # 
 
 
 def test_execution_expiry_kills_owned_process_group_and_records_timeout(standalone):  # noqa: F811
+    _assert_execution_expiry_records_timeout(standalone)
+
+
+def test_expiry_teardown_waits_for_worker_to_record_finalization(standalone):  # noqa: F811
+    # A task's completion wakes its waiter before its worker thread records the
+    # run finalization. Hold the worker in that window: teardown must not close
+    # the store underneath it (the CI race, made deterministic).
+    real_finalize = NativeScheduler._maybe_finalize
+
+    def slow_worker_finalize(self, run_id):
+        if threading.current_thread().name.startswith("native-execution-"):
+            time.sleep(0.5)
+        return real_finalize(self, run_id)
+
+    standalone.monkeypatch.setattr(NativeScheduler, "_maybe_finalize", slow_worker_finalize)
+    _assert_execution_expiry_records_timeout(standalone)
+
+
+def _assert_execution_expiry_records_timeout(standalone):  # noqa: F811
     timer = _DeadlineTimer()
     real_deadline = rg_final_native.RunDeadline
 
@@ -128,12 +148,17 @@ def test_execution_expiry_kills_owned_process_group_and_records_timeout(standalo
                     os.kill(descendant, 0)
                 except ProcessLookupError:
                     break
+                except OSError:
+                    if os.name != "nt":  # Windows reports a dead pid as WinError 87
+                        raise
+                    break
                 time.sleep(0.05)
             else:
                 raise AssertionError("required-test descendant outlived run cancellation")
     finally:
         if descendant_path.exists():
             try:
-                os.kill(int(descendant_path.read_text()), signal.SIGKILL)
-            except ProcessLookupError:
+                os.kill(int(descendant_path.read_text()),
+                        getattr(signal, "SIGKILL", signal.SIGTERM))
+            except OSError:  # already gone (ProcessLookupError, or WinError 87 on Windows)
                 pass

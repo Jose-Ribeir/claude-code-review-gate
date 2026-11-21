@@ -103,7 +103,7 @@ class NativeScheduler:
     def _run_state(self, run_id):
         return self._runs.setdefault(run_id, {
             "closed": False, "finalized": False, "cancelled": None, "cleaning": False,
-            "stopped": set(),
+            "stopped": set(), "finalized_event": threading.Event(),
         })
 
     def submit(self, definition: SchedulerTask, *, on_finalize=None, on_complete=None):
@@ -357,6 +357,7 @@ class NativeScheduler:
                     run["cancelled"] if entry.state != "completed" else "run-closed",
                 )
             run["finalized"] = True
+            run["finalized_event"].set()
             for entry in entries:
                 entry.finalized = True
                 if run["cancelled"] is None and entry.eligible and \
@@ -459,6 +460,17 @@ class NativeScheduler:
             self._run_state(run_id)["closed"] = True
         self._drain()
         return self._maybe_finalize(run_id)
+
+    def wait_finalized(self, run_id, timeout):
+        """Block until the run's finalization events are recorded, or the bound elapses.
+
+        A task's completion wakes its waiter before its worker thread records the
+        run finalization, so a caller that tears down the store right after the
+        waiter returns must wait here to avoid writing to a closed store.
+        """
+        with self._lock:
+            event = self._run_state(run_id)["finalized_event"]
+        return event.wait(timeout)
 
     def snapshot(self, run_id):
         with self._lock:
