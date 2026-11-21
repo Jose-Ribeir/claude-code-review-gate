@@ -107,7 +107,10 @@ diff is exactly the net change.
 3. **Pick the base from the result.**
    - No commits: allow, and log the reason.
    - One boundary: that boundary is the base.
-   - Several boundaries (main merged into the child, criss-cross):
+   - Several boundaries forming a chain (main merged into the child: the fork
+     point, then main's tip): the **newest** boundary (rule `boundary-chain`),
+     so main's work is not counted as the branch's.
+   - Several boundaries on separate lines (stacked parents, criss-cross):
      `merge-base --octopus` of the boundaries. If that fails, use the parent of
      the first commit.
    - No boundary (root commit, shallow graft): `_EMPTY_TREE`.
@@ -266,6 +269,26 @@ fixture:
 - `test_priors_from_a_non_ancestor_branch_are_not_replayed`
 - `test_identical_blob_carry_still_works_across_branches`
 
+## Documented limit: stacked and squash-merged parents
+
+There is no single safe base for these, and the gate does not try to find one:
+
+- **A stacked child whose parent is not published** (or was published and then
+  pruned): no remote ref holds the parent's commits, so the range contains them
+  and the child is reviewed on top of the parent's work.
+- **A squash-merged parent**: main holds the parent's content under a new
+  commit, so the child's own commits still look unpublished and the parent's
+  commits are in the range again.
+- **Boundaries on separate lines** (a published parent plus main merged in) use
+  the merge-base across them, which may include the older line's work.
+
+All of these over-review and never skip: the range is wider than the child's
+own change, and nothing the push carries is left out. `--print-range` prints
+the rule and the counts so the width is visible before the push. Merging main
+into the branch is NOT part of this limit: that chain is handled by the
+`boundary-chain` rule, and an open merge-request's target branch is fetched
+before its merge-base is taken.
+
 ## Open decisions (with recommendations)
 
 | Decision | Recommendation |
@@ -273,7 +296,7 @@ fixture:
 | Treat commits on `refs/remotes/<remote>/*` as reviewed | **Yes.** This is consistent with existing-ref behaviour. |
 | Parent metadata or config for the base | **No.** It is either redundant or unsafe. |
 | Reviewed-ledger refs for stacks that aren't pushed yet | **Later**, on demand. |
-| Several boundaries | Octopus merge-base, falling back to the first commit's parent (over-review). |
+| Several boundaries | Chain: the newest boundary. Separate lines: octopus merge-base, falling back to the first commit's parent (over-review). |
 | Empty review set | Allow, and log the reason. |
 | Resolver failed twice | **Block** with a distinct message, not a warning. Reviewer override is the escape. |
 | Records written before PR5 (no `source_tip`) | Keep them eligible until TTL expiry. |

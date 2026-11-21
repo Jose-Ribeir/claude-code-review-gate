@@ -146,7 +146,11 @@ def test_stacked_child_reviews_only_its_own_commits_hook_mode(repo):
     assert _diff_names(repo, info["range"]) == {"b1.txt": "A"}
 
 
-def test_main_merged_into_child_over_reviews_but_never_deletes(repo):
+def test_main_merged_into_child_reviews_only_the_childs_own_changes(repo):
+    # R02: this test used to pin the OVER-review (base == fork, so main's commit
+    # rode along). The boundaries here are a chain -- the fork point, then main's
+    # tip that was merged in -- so the newest one is the base and main's work is
+    # no longer counted as the child's.
     fork = _sha(repo, "HEAD")
     _git(["switch", "-q", "-c", "child"], cwd=repo)
     _commit(repo, "k1.txt")
@@ -157,14 +161,12 @@ def test_main_merged_into_child_over_reviews_but_never_deletes(repo):
 
     rng = rg._range_for_refs([(tip, ZERO)], str(repo), "origin")
     base, _ = _split(rng)
-    # Two boundaries (the fork point and main's tip): the octopus merge-base.
-    assert base == fork
+    assert base == m1 and base != fork   # newest boundary: main's tip, not the fork point
     names = _diff_names(repo, rng)
-    assert "k1.txt" in names
-    assert names.get("voice.txt") == "A"  # over-review: main's commit rides along...
-    assert not [n for n, st in names.items() if st == "D"]  # ...but nothing is "deleted"
+    assert names == {"k1.txt": "A"}      # voice.txt is main's: no longer rides along
     assert subprocess.run(["git", "merge-base", "--is-ancestor", base, tip], cwd=repo).returncode == 0
-    assert m1 != base
+    rb = rg.resolve_review_base("origin", tip, None, str(repo))
+    assert rb.rule == "boundary-chain" and rb.commits == 2  # k1 and the merge commit
 
 
 def test_squash_merged_parent_falls_back_to_merge_base(repo):

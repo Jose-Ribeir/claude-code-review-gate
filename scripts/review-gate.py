@@ -1382,7 +1382,7 @@ class ReviewBase(NamedTuple):
               assumed to carry commits -- fail closed).
     reason    one line saying how the base was chosen, for logs and telemetry.
     rule      the same decision as a short token: fast-forward, mr-target,
-              boundary, already-on-remote, unevaluable.
+              boundary, boundary-chain, already-on-remote, unevaluable.
     detail    the facts behind the choice (merge-request lookup status, target
               branch freshness, ...); see _explain_base. Never read to decide.
     """
@@ -1647,6 +1647,55 @@ def _target_ref_freshness(remote, target, local_sha, repo_root):
                     % (remote, target, local_sha[:8], target, remote_sha[:8], remote, target)}
 
 
+_TARGET_FETCH_TIMEOUT = 10  # seconds; a slow network must never hang a push
+
+
+def _fetch_target_ref(remote, target, repo_root, timeout=None):
+    """Fetch the ONE branch `target` into refs/remotes/<remote>/<target>, so the
+    merge-base is taken against what the remote holds now and a stale local ref
+    does not widen the range. Touches only that tracking ref (no other remote
+    ref, no tags, no working tree, no submodules, no gc). Bounded by `timeout`
+    and fail-open: never raises, and a failure only means the local ref is used
+    as it is. Returns {"state": fetched|unchanged|failed, "line": one line}."""
+    timeout = _TARGET_FETCH_TIMEOUT if timeout is None else timeout
+    ref = "refs/remotes/%s/%s" % (remote, target)
+    where = "%s/%s" % (remote, target)
+
+    def failed(why):
+        return {"state": "failed",
+                "line": ("WARNING: could not fetch %s (%s) -- using the local %s, which "
+                         "may be stale, so the range may be too large. Run: git fetch %s %s")
+                        % (where, why, where, remote, target)}
+
+    if not remote or remote.startswith("-") or not target or target.startswith("-"):
+        return failed("no usable remote or branch name")
+    try:
+        before, _rc = _git(["rev-parse", "--verify", "--quiet", ref + "^{commit}"], cwd=repo_root)
+        proc = subprocess.run(
+            ["git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "fetch", "--quiet",
+             "--no-tags", "--no-recurse-submodules", remote,
+             "+refs/heads/%s:%s" % (target, ref)],
+            cwd=repo_root, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=timeout, stdin=subprocess.DEVNULL,
+            env=dict(os.environ, GIT_TERMINAL_PROMPT="0"),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except subprocess.TimeoutExpired:
+        return failed("git fetch timed out after %ss" % timeout)
+    except Exception as exc:
+        return failed("git fetch could not run: %s" % type(exc).__name__)
+    if proc.returncode != 0:
+        first = (proc.stderr or "").strip().splitlines()
+        return failed("git fetch exited %d%s" % (
+            proc.returncode, ": " + first[-1][:160] if first else ""))
+    after, _rc = _git(["rev-parse", "--verify", "--quiet", ref + "^{commit}"], cwd=repo_root)
+    if before and before == after:
+        return {"state": "unchanged",
+                "line": "fetched %s before the merge-base: already up to date" % where}
+    return {"state": "fetched",
+            "line": "fetched %s before the merge-base: %s -> %s"
+                    % (where, (before or "none")[:8], (after or "none")[:8])}
+
+
 def _mr_target_base(remote, tip, branch, repo_root, trace=None, fresh_lookup=False):
     """pg5 -- the MR-target step of the review-base resolution order (spec
     "Review base resolution order": open MR/PR target branch -> the legacy
@@ -1685,6 +1734,16 @@ def _mr_target_base(remote, tip, branch, repo_root, trace=None, fresh_lookup=Fal
     if not target:
         return ""
     trace["target"] = target
+    # Stories 5-7: fetch the target branch (and only it) so a stale local ref
+    # does not widen the range. --print-range only explains: it changes nothing,
+    # so it reports the freshness instead of fetching.
+    if fresh_lookup:
+        trace["fetch"] = {"state": "skipped", "line": "target branch not fetched: "
+                          "--print-range changes nothing in the repository"}
+    else:
+        trace["fetch"] = _fetch_target_ref(name, target, repo_root)
+        if trace["fetch"]["state"] == "failed":
+            _warn(trace["fetch"]["line"])
     ref = "refs/remotes/%s/%s" % (name, target)
     out, rc = _git(["rev-parse", "--verify", "--quiet", ref + "^{commit}"], cwd=repo_root)
     if rc != 0 or not _SHA40.fullmatch(out or ""):
@@ -1693,7 +1752,13 @@ def _mr_target_base(remote, tip, branch, repo_root, trace=None, fresh_lookup=Fal
     trace["target_ref"] = ref
     trace["target_sha"] = out
     try:
-        trace["stale"] = _target_ref_freshness(name, target, out, repo_root)
+        fetch = trace["fetch"]
+        if fetch["state"] in ("fetched", "unchanged"):  # just read from the remote
+            trace["stale"] = {"state": "fresh", "line": fetch["line"]}
+        elif fetch["state"] == "failed":  # the remote is unreachable: do not ask it again
+            trace["stale"] = {"state": "unknown", "line": fetch["line"]}
+        else:
+            trace["stale"] = _target_ref_freshness(name, target, out, repo_root)
     except Exception:
         trace["stale"] = {"state": "unknown", "line": "target branch freshness unknown"}
     mb, rc = _git(["merge-base", out, tip], cwd=repo_root)
@@ -1759,9 +1824,10 @@ def _resolve_review_base(remote, tip, remote_sha, repo_root, branch, trace,
        base: diffing against a commit that is not an ancestor reverts whatever
        the other side gained, which is how phantom deletions got reviewed.
        The boundary commit(s) of that set are the base: one -> it; several
-       (main merged into the child, criss-cross) -> their octopus merge-base,
-       else the parent of the oldest commit; none (root commit, shallow graft)
-       -> _EMPTY_TREE.
+       forming a chain (main merged into the child: the fork point, then
+       main's tip) -> the newest; several on separate lines (stacked parents,
+       criss-cross) -> their octopus merge-base, else the parent of the oldest
+       commit; none (root commit, shallow graft) -> _EMPTY_TREE.
     3. A rev-list error means the range is unevaluable: assume it carries
        commits and review everything (_EMPTY_TREE). Over-reviewing costs a
        review; under-reviewing costs the gate.
@@ -1828,6 +1894,21 @@ def _resolve_review_base(remote, tip, remote_sha, repo_root, branch, trace,
     if len(boundaries) == 1:
         return ReviewBase(boundaries[0], len(commits), "boundary of the commits no remote ref holds")
     if len(boundaries) > 1:
+        # A chain -- the fork point, then main's tip merged into the branch --
+        # is one line of history: its newest boundary already holds everything
+        # older, so it is the base and main's work is not counted as the
+        # branch's. Boundaries on SEPARATE lines (a stack with its parent
+        # published, a criss-cross) keep the merge-base across them: that is
+        # the documented limit -- a stacked or squash-merged parent has no
+        # single right answer, and the wider range over-reviews, never skips.
+        heads, rc = _git(["merge-base", "--independent"] + boundaries, cwd=repo_root)
+        if rc == 0 and len(heads.split()) == 1 and _SHA40.fullmatch(heads.strip()):
+            newest = heads.strip()
+            out, rc = _git(["rev-list", "--count", f"{newest}..{tip}"], cwd=repo_root)
+            n = int(out) if rc == 0 and out.isdigit() else len(commits)
+            trace["rule"] = "boundary-chain"
+            return ReviewBase(newest, n, "newest of chained boundaries (the target branch "
+                              "was merged into this branch)")
         mb, rc = _git(["merge-base", "--octopus"] + boundaries, cwd=repo_root)
         if rc == 0 and _SHA40.fullmatch(mb or ""):
             return ReviewBase(mb, len(commits), "merge-base of several boundaries")
@@ -1888,6 +1969,7 @@ def _base_facts(repo_root, tip, base, commits=None):
         d = rb.detail or {}
         lookup = d.get("lookup") or {}
         stale = d.get("stale") or {}
+        fetch = d.get("fetch") or {}
         if commits is None:
             commits = rb.commits
         elif str(commits).isdigit():
@@ -1902,6 +1984,8 @@ def _base_facts(repo_root, tip, base, commits=None):
             "mr_target": str(d.get("target") or ""),
             "target_ref_state": str(stale.get("state") or "not-checked"),
             "target_ref_line": str(stale.get("line") or d.get("mr_note") or ""),
+            "target_fetch_state": str(fetch.get("state") or "not-run"),
+            "target_fetch_line": str(fetch.get("line") or ""),
         }
     except Exception:
         return {}
@@ -1921,6 +2005,8 @@ def _base_facts_lines(f):
         out.append("forge command: %s" % f["mr_lookup_command"])
     if f.get("mr_target"):
         out.append("MR target branch: %s" % f["mr_target"])
+    if f.get("target_fetch_line") and f["target_fetch_line"] != f.get("target_ref_line"):
+        out.append(f["target_fetch_line"])
     if f.get("target_ref_line"):
         out.append(f["target_ref_line"])
     return out
