@@ -42,6 +42,24 @@
         }
       }
     },
+    "forge": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "enum": [
+            "github",
+            "gitlab"
+          ],
+          "description": "The forge of the origin remote; omit to detect it."
+        },
+        "host": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9.\\-]*[A-Za-z0-9])?(:[0-9]{1,5})?$",
+          "description": "Limit forge.name to this host; omit to apply it to any host."
+        }
+      }
+    },
     "behavior": {
       "type": "object",
       "additionalProperties": false,

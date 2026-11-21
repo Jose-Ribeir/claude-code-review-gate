@@ -656,6 +656,22 @@ def _model_ids(text):
     return ids
 
 
+def check_forge(add, env, root):
+    """The forge the origin remote resolves to and where that came from. Info
+    only: an unrecognised host is not a failure, the merge-request lookup just
+    skips with a reason line. Asks `glab auth status` / `gh auth status` (each
+    bounded at 5 s) when the settings do not pin the forge."""
+    if not root:
+        return
+    import rg_mr_consult
+    info = rg_mr_consult.describe_forge(root, environ=env)
+    add("forge", "info",
+        "origin %s: %s" % (info["remote"] or "(none)", info["line"][len("forge: "):])
+        + ("" if info["provider"] or not info["host"] else
+           " -- set it with `rg_settings_cli.py set forge.name gitlab|github` or log in "
+           "with glab/gh"))
+
+
 def check_settings(add, env, repo=None, backend=None):
     """Settings files, the ADR 0005 provider guard, deprecated ids and pins
     missing from the backend's model list. Read-only: it loads the files and
@@ -676,6 +692,8 @@ def check_settings(add, env, repo=None, backend=None):
     add("settings-files", "ok",
         ("valid: " + "; ".join(present)) if present
         else "no settings file (built-in defaults and OCR_* overrides apply)")
+
+    check_forge(add, env, root)
 
     pins = _pinned_models(settings, backend)
 

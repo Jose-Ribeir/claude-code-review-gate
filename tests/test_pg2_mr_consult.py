@@ -192,7 +192,9 @@ def test_unsupported_forge_is_no_context_without_a_cli_call(tmp_path, monkeypatc
     canned = _write_shim(tmp_path, monkeypatch, "gh", _gh_routes())
     assert rg_mr_consult.find_open_mr("https://bitbucket.org/acme/proj.git",
                                       BRANCH) is None
-    assert _calls(canned) == []
+    # Asking the CLI which hosts it is logged in to is the one allowed call;
+    # no MR lookup runs for a host nothing recognises.
+    assert [c for c in _calls(canned) if "auth status" not in c] == []
 
 
 def test_no_open_mr_returns_none_and_the_negative_is_cached(tmp_path, monkeypatch):

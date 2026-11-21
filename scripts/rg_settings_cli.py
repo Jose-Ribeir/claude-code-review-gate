@@ -3,7 +3,9 @@
 
     rg_settings_cli.py [show] [--repo PATH] [--json]
         every agent x backend model and thinking level and every behavior knob,
-        each with where its value came from (env / project / user / default)
+        each with where its value came from (env / project / user / default),
+        and the forge the origin remote resolves to (setting / logged-in host /
+        name guess)
     rg_settings_cli.py set <key> <value> [--project | --user] [--repo PATH]
         validate then write one value (default scope: user)
     rg_settings_cli.py validate [--repo PATH]
@@ -19,6 +21,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import rg_mr_consult  # noqa: E402
 import rg_settings  # noqa: E402
 
 
@@ -47,6 +50,13 @@ def _display(value):
     if isinstance(value, bool):
         return "true" if value else "false"
     return str(value)
+
+
+def _forge_line(root):
+    """One line: the forge the origin remote resolves to and where that came from."""
+    info = rg_mr_consult.describe_forge(root)
+    where = info["remote"] or "no origin remote"
+    return "effective forge for origin (%s): %s" % (where, info["line"][len("forge: "):])
 
 
 def _describe_files(root):
@@ -79,7 +89,10 @@ def cmd_show(args):
         print("  " + line)
     width = max(len(k) for k, _ in rows)
     for key, got in rows:
-        print("%-*s = %-34s [%s]" % (width, key, _display(got.value), got.source))
+        shown = ("(not set: detected)" if key.startswith("forge.") and got.value is None
+                 else _display(got.value))
+        print("%-*s = %-34s [%s]" % (width, key, shown, got.source))
+    print(_forge_line(root))
     print("inline wait: a claude hook uses behavior.inline_wait_seconds.hook, a git push "
           "uses behavior.inline_wait_seconds.git (a terminal push waits the full review "
           "timeout); a kimchi hook keeps a fixed short wait (OCR_INLINE_BUDGET, default 3 s, "
@@ -155,7 +168,8 @@ def main(argv=None):
     p_show.add_argument("--repo", default=None, metavar="PATH")
     p_show.add_argument("--json", action="store_true")
     p_set = sub.add_parser("set", help="set one value")
-    p_set.add_argument("key", help="agents.<agent>.<backend>.model|thinking or behavior.<group>.<knob>")
+    p_set.add_argument("key", help="agents.<agent>.<backend>.model|thinking, "
+                                   "forge.name|host or behavior.<group>.<knob>")
     p_set.add_argument("value")
     scope = p_set.add_mutually_exclusive_group()
     scope.add_argument("--project", action="store_true", help="write <repo>/.ocr/settings.json")
