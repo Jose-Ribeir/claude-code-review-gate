@@ -14450,12 +14450,33 @@ def _coverage_batch(repo_root, base, tip, commits):
     return patch_ids, sha_only
 
 
+_COVERAGE_MEMO = {}
+
+
 def compute_coverage_set(repo_root, base, tip):
     """CoverageSet for base..tip, or None when it cannot be enumerated.
 
     Fail closed: an unreadable range or tip tree yields None, never a
     partial set that could authorize half a range.
+
+    Memoized per (repo, base, tip): the same push asks for it in the join, the
+    incremental view and the join explanation, and every call is a handful of
+    git processes spent out of the hook's short inline budget. The answer is a
+    function of two commit ids, so it cannot go stale; a failure is never cached.
     """
+    key = (str(repo_root), str(base or ""), str(tip or ""))
+    hit = _COVERAGE_MEMO.get(key)
+    if hit is not None:
+        return hit
+    cs = _compute_coverage_set(repo_root, base, tip)
+    if cs is not None:
+        if len(_COVERAGE_MEMO) > 64:
+            _COVERAGE_MEMO.clear()
+        _COVERAGE_MEMO[key] = cs
+    return cs
+
+
+def _compute_coverage_set(repo_root, base, tip):
     commits = rg_store.record_commits(repo_root, base, tip)
     tip_tree = _tip_tree(repo_root, tip)
     if not commits or not tip_tree:
@@ -14882,7 +14903,7 @@ def _incremental_view(repo_root, remote_id, base, tip):
     return IncrementalView(commits=uncovered, span=f"{span_base}..{tip}", range=rng)
 
 
-def _join_explain(repo_root, remote_id, base, tip):
+def _join_explain(repo_root, remote_id, base, tip, view=None):
     """(lines, facts): which earlier runs were joined for base..tip, and why.
 
     A joined run is a COMPLETED review whose range reaches this push's base and
@@ -14925,7 +14946,8 @@ def _join_explain(repo_root, remote_id, base, tip):
         if not all_recs or not (joined or skipped):
             return ["joined runs: none (no earlier completed review covers a commit "
                     "in this range; a run that timed out or failed never joins)"], {}
-        view = _incremental_view(repo_root, remote_id, base, tip)
+        if view is None:
+            view = _incremental_view(repo_root, remote_id, base, tip)
         if view is not None:
             lines.append(
                 "review scope: %d new commit(s) after the joined run(s); old files they "
@@ -16801,7 +16823,7 @@ def _main_inner(argv, mode):
         if view is not None:
             # R05/R01: say which earlier runs joined and why (stderr, the run
             # record and the debug log carry the same facts as --print-range).
-            _jlines, _jfacts = _join_explain(repo_root, remote_id, base, tip)
+            _jlines, _jfacts = _join_explain(repo_root, remote_id, base, tip, view=view)
             for _l in _jlines:
                 _warn("review-gate: " + _l)
             if _jlines:

@@ -22,7 +22,10 @@ sys.path.insert(0, _HERE)
 sys.path.insert(0, _SCRIPTS)
 import rg_store  # noqa: E402
 from test_pg4_carry_forward import (  # noqa: E402,F401
-    ZERO, _commit, _env, _git, _git_mode, _rid, _sha, _trace, repo)
+    ZERO, _commit, _env, _git, _git_mode, _rid, _sha, _trace)
+import test_pg4_carry_forward as _pg4  # noqa: E402
+
+repo = _pg4.repo   # the shared fixture; assigned (not imported) so tests may take it as a parameter
 
 FINDING = json.dumps({"f1.py": {"severity": "high", "content": "earlier high finding"}})
 
@@ -204,6 +207,29 @@ def test_a_run_that_left_files_unreviewed_does_not_join(repo, tmp_path):
     rg_store.record_verdict(remote, tip, base, "pass", False, "", commits)
     rg._mark_record_incomplete(remote, tip, {"unreviewed": [], "findings": []})
     assert not rg_store.load_verdict(remote, tip).get("incomplete")
+
+
+def test_a_gate_run_that_left_files_unreviewed_is_flagged_and_does_not_join(repo, tmp_path):
+    """Through the gate: a review whose diff for f1.py was truncated (an
+    over-the-cap file, segmenting off) finishes with f1.py unreviewed; its
+    record is flagged incomplete, and the push after a fix reviews the whole
+    range instead of joining it."""
+    _git(["switch", "-q", "-c", "feat"], cwd=repo)
+    _commit(repo, "f1.py", chr(10).join(f"value_{i} = {i}" for i in range(1600)))
+    first_tip = _commit(repo, "f2.py")
+    proc, out = _push(repo, _env(tmp_path, OCR_SEGMENT="0"))
+    assert proc.returncode == 0, out
+    rec = rg_store.load_verdict(_rid(repo), first_tip)
+    assert rec is not None and rec.get("incomplete") is True, rec
+    fix_tip = _edit(repo, "f3.py", "the fix" + chr(10))
+    proc, out = _push(repo, _env(tmp_path))
+    assert proc.returncode == 0, out
+    last = _reviews(tmp_path)[-1]
+    assert last["range"] == f"{_sha(repo, 'main')}..{fix_tip}", last["range"]
+    # the range is the whole branch (no join); files already reviewed clean are
+    # carried per file, the truncated f1.py is not
+    assert {"f1.py", "f3.py"} <= set(_paths(last)), _paths(last)
+    assert "joined: " not in out, out
 
 
 # --- the explain output ---------------------------------------------------------------
