@@ -31,6 +31,20 @@ import rg_mr_consult  # noqa: E402
 from rg_mr_consult import MrContext  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_forge_state(tmp_path, monkeypatch):
+    """Which forge a host is can come from the process: the per-process
+    logged-in-hosts cache, or a project settings file found from the current
+    directory. Start every test with neither, so no earlier test in the same
+    pytest process (or the checkout this suite runs from) decides the forge."""
+    rg_mr_consult._login_cache.clear()
+    here = tmp_path / "cwd"
+    here.mkdir()
+    monkeypatch.chdir(here)
+    yield
+    rg_mr_consult._login_cache.clear()
+
+
 GH_URL = "https://github.com/acme/proj.git"
 GH_SSH_URL = "git@github.com:acme/proj.git"
 GLAB_URL = "https://gitlab.com/acme/proj.git"
