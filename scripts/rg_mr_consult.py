@@ -323,32 +323,100 @@ def _write_entry(path, now, ctx):
 
 # --- the public seam -----------------------------------------------------------------
 
+def _note_status(note):
+    """The machine token for a degraded-lookup note (see lookup_open_mr)."""
+    text = str(note or "")
+    if "neither GitHub nor GitLab" in text:
+        return "unrecognised-host"
+    if "not found on PATH" in text:
+        return "no-cli"
+    if "timed out" in text:
+        return "timeout"
+    if "unrecognised JSON" in text:
+        return "bad-json"
+    if "payload was unusable" in text:
+        return "bad-payload"
+    return "cli-failed"
+
+
+def _lookup_command(remote_url, branch):
+    """The forge command a live lookup runs, as one display string ("" when the
+    remote is not a supported forge)."""
+    parsed = _provider(remote_url)
+    if parsed is None:
+        return ""
+    provider, host, slug = parsed
+    env_extra = _cli_env_extra(provider, host)
+    prefix = "".join("%s=%s " % kv for kv in sorted(env_extra.items()))
+    return prefix + " ".join(str(a) for a in _list_cmd(provider, slug, branch))
+
+
+def _lookup_info(status, source, command, ctx, note, branch):
+    """The info dict lookup_open_mr returns: status token, one human `line`."""
+    if status == "mr-found":
+        line = "open MR/PR !%d for %s targets %s" % (
+            ctx.iid, branch, ctx.target_branch or "(unnamed target)")
+    elif status == "no-open-mr":
+        line = "MR lookup: the forge lists no open MR/PR for branch %s" % branch
+    elif status in ("no-cli", "unrecognised-host"):
+        line = "MR lookup skipped: %s" % note
+    else:
+        line = "MR lookup failed: %s" % note
+    return {"status": status, "source": source, "command": command,
+            "note": str(note or ""), "line": line,
+            "iid": ctx.iid if ctx is not None else 0,
+            "target": (ctx.target_branch if ctx is not None else "") or ""}
+
+
+def lookup_open_mr(remote_url, branch, *, use_cache=True, write_cache=True,
+                   runner=None, cache_dir=None, now=None, timeout=None):
+    """(MrContext | None, info): find_open_mr plus WHY the answer is what it is.
+
+    info["status"] is one of mr-found, no-open-mr, no-cli, cli-failed, timeout,
+    bad-json, bad-payload, unrecognised-host, error. info["line"] is the one
+    reason line to show a person, info["command"] the forge command a live
+    lookup runs ("" on a cache hit or an unsupported host), info["source"]
+    "cache" or "live". use_cache=False always runs the command;
+    write_cache=False leaves the 24h cache untouched (the read-only
+    --print-range). Never raises.
+    """
+    command = ""
+    try:
+        env = _fetch_env(runner, cache_dir, now, timeout)
+        path = _cache_path(_cache_root(env.cache_dir), remote_url, branch)
+        if use_cache:
+            entry = _read_entry(path)
+            if entry is not None and env.now - entry["fetched_at"] < MR_TTL:
+                if entry["kind"] == "none":
+                    return None, _lookup_info("no-open-mr", "cache", "", None, "", branch)
+                ctx = _entry_context(entry)
+                if ctx is not None:
+                    return ctx, _lookup_info("mr-found", "cache", "", ctx, "", branch)
+                # corrupt positive: fall through to a refetch
+        command = _lookup_command(remote_url, branch)
+        ctx, note = _live_lookup(remote_url, branch, env.runner, env.timeout)
+        if note is not None:
+            return None, _lookup_info(_note_status(note), "live", command, None,
+                                      note, branch)
+        if write_cache:
+            _write_entry(path, env.now, ctx)
+        status = "mr-found" if ctx is not None else "no-open-mr"
+        return ctx, _lookup_info(status, "live", command, ctx, "", branch)
+    except Exception as exc:
+        return None, _lookup_info("error", "live", command, None,
+                                  "lookup raised %s" % type(exc).__name__, branch)
+
+
 def find_open_mr(remote_url, branch, *, runner=None, cache_dir=None, now=None,
                  timeout=None):
     """The open MR/PR whose source branch is `branch`, or None.
 
     None means "no context": no MR, unsupported forge, missing CLI, offline,
     timeout -- all indistinguishable by design. 24h-cached in both directions
-    (hits and negatives). Never raises.
+    (hits and negatives). Never raises. lookup_open_mr says which of those it was.
     """
-    try:
-        env = _fetch_env(runner, cache_dir, now, timeout)
-        path = _cache_path(_cache_root(env.cache_dir), remote_url, branch)
-        entry = _read_entry(path)
-        if entry is not None and env.now - entry["fetched_at"] < MR_TTL:
-            if entry["kind"] == "none":
-                return None
-            ctx = _entry_context(entry)
-            if ctx is not None:
-                return ctx
-            # corrupt positive: fall through to a refetch
-        ctx, note = _live_lookup(remote_url, branch, env.runner, env.timeout)
-        if note is not None:
-            return None
-        _write_entry(path, env.now, ctx)
-        return ctx
-    except Exception:
-        return None
+    return lookup_open_mr(remote_url, branch, runner=runner, cache_dir=cache_dir,
+                          now=now, timeout=timeout)[0]
 
 
 def target_branch(remote_url, branch, *, runner=None, cache_dir=None, now=None,
