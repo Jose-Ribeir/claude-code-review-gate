@@ -7614,10 +7614,17 @@ def _finding_id(f):
     """Stable sha256 id for a finding (path, existing_code, content)."""
     # String findings hash exactly as before; a malformed one (numeric or
     # list field, straight from reviewer JSON) is coerced, not crashed on.
+    content = f.get("content") or ""
+    if str(f.get("evidence_source") or "") in _EVIDENCE_SOURCES:
+        # A test finding quotes a run's output, whose times differ on every
+        # run: hash the same normalized evidence the waiver anchor binds to
+        # so the same failure keeps one id. Reviewer findings (no
+        # evidence_source) hash their content verbatim, byte-for-byte as before.
+        content = "\n".join(_normalize_evidence_text(content)) or content
     raw = "\x00".join(str(v) for v in (
         f.get("path") or "",
         f.get("existing_code") or "",
-        f.get("content") or "",
+        content,
     ))
     return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()
 
@@ -7807,17 +7814,83 @@ def _dismiss_finding(argv):
 
 # --- SPEC-15.2: granular finding waivers --------------------------------------
 
+# Run-dependent tokens a test run's output carries that say nothing about WHICH
+# failure it is. Stripped (replaced by _RUN_TOKEN) before a test finding's
+# evidence is fingerprinted, so the same failure keeps one identity across runs.
+# Deliberately narrow: only times, durations and timestamps -- never bare
+# numbers, line numbers, or expected/actual values. The exact list is
+# documented in ADR 0007 (addendum, "Run-dependent tokens").
+_RUN_TOKEN = "<T>"
+_MONTHS = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*"
+_TS_ZONE = r"(?:\s?(?:Z|UTC|GMT|[+-]\d{2}:?\d{2}))?"
+# A duration: "0.41s", "3 seconds", "120ms", "1m 3s", "1h 2m 3s", "0:00:03".
+_DUR = (r"(?:(?<![\w.:])(?:\d+h\s*)?(?:\d+m(?:in)?\s*)?\d+(?:[.,]\d+)?\s*"
+        r"(?:ms|msecs?|milliseconds?|s|secs?|seconds?)\b"
+        r"|(?<![\w.:])\d+:\d{2}:\d{2}(?:[.,]\d+)?(?![\w:]))")
+_RUN_TOKEN_RES = tuple((re.compile(p, re.IGNORECASE), r) for p, r in (
+    # 1. Timestamps: ISO-8601 date+time, RFC-2822 / syslog style date+time.
+    (r"(?<![\w.])\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?" + _TS_ZONE
+     + r"(?![\w:])", _RUN_TOKEN),
+    (r"(?<![\w.])(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*,?\s+)?"
+     r"(?:\d{1,2}\s+" + _MONTHS + r"\s+\d{4}|" + _MONTHS
+     + r"\s+\d{1,2}(?:,\s*\d{4})?)\s+\d{2}:\d{2}:\d{2}(?:[.,]\d+)?"
+     + _TS_ZONE + r"(?![\w:])", _RUN_TOKEN),
+    # 2. A clock time only as a line-start log prefix, or inside brackets.
+    (r"^[\[(]?\d{2}:\d{2}:\d{2}(?:[.,]\d+)?[\])]?(?![\w:])", _RUN_TOKEN),
+    (r"[\[(]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?[\])]", _RUN_TOKEN),
+    # 3. Epoch stamps behind an explicit timestamp-like key.
+    (r"\b(timestamp|epoch|ts|time)\b([\"']?\s*[:=]\s*)\d{9,13}(?:\.\d+)?\b",
+     r"\1\2" + _RUN_TOKEN),
+    # 4. Pytest --durations lines: "0.41s call tests/t.py::test_x".
+    (r"^" + _DUR + r"(?=\s+(?:call|setup|teardown)\b)", _RUN_TOKEN),
+    # 5. A duration after a time word: "in 3.21s", "took 2 seconds",
+    #    "elapsed: 1m 3s", "Time: 0:00:03", "duration=120ms" (unit required).
+    (r"\b(in|took|taken|elapsed|duration|runtime|time)\b(\s*[:=]?\s*(?:~|about\s+)?)"
+     + _DUR, r"\1\2" + _RUN_TOKEN),
+    # 6. A bracketed duration: "(0.41s)", "[12 ms]", "(0:00:03)".
+    (r"([\[(]\s*)" + _DUR + r"(\s*[\])])", r"\1" + _RUN_TOKEN + r"\2"),
+    # 7. Elapsed/seconds fields: a JSON key (double quotes only: a Python
+    #    dict repr in an assertion diff is a VALUE, not a field), a key with
+    #    a unit suffix, or a plain elapsed/seconds key with a colon.
+    (r"(\"[\w-]*(?:elapsed|duration|runtime|seconds|secs)[\w-]*\"\s*:\s*)"
+     r"-?\d+(?:\.\d+)?(?:e[+-]?\d+)?(?![\w.])", r"\1" + _RUN_TOKEN),
+    (r"\b((?:elapsed|duration|runtime|time|wall_?time|took)_(?:s|ms|secs?|"
+     r"seconds|millis)\s*[:=]\s*)-?\d+(?:\.\d+)?(?![\w.])",
+     r"\1" + _RUN_TOKEN),
+    (r"\b((?:elapsed|seconds|secs)\s*:\s*)-?\d+(?:\.\d+)?(?![\w.])",
+     r"\1" + _RUN_TOKEN),
+))
+
+
+def _normalize_evidence_text(content):
+    """The evidence lines a test finding is fingerprinted on: each line
+    stripped, runs of whitespace collapsed, blank lines dropped, and the
+    run-dependent tokens (_RUN_TOKEN_RES: timestamps, durations, elapsed/
+    seconds fields) replaced by a fixed marker. Every other character --
+    line numbers, expected/actual values, assertion text -- is untouched."""
+    lines = []
+    for raw in str(content or "").splitlines():
+        line = " ".join(raw.split())
+        if not line:
+            continue
+        for rx, repl in _RUN_TOKEN_RES:
+            line = rx.sub(repl, line)
+        lines.append(line)
+    return lines
+
+
 def _evidence_fingerprint(content):
     """A deterministic fingerprint of a command-check finding's EVIDENCE
     (the quoted output in `content`), normalized the way ocr_impact's
-    signature search normalizes text: each line stripped, runs of
-    whitespace collapsed, blank lines dropped. "" when nothing remains
-    (no content at all) -- the caller fails closed on that, exactly like a
-    missing path or signature."""
-    lines = [" ".join(line.split())
-              for line in str(content or "").splitlines()]
-    lines = [line for line in lines if line]
-    if not lines:
+    signature search normalizes text -- each line stripped, runs of
+    whitespace collapsed, blank lines dropped -- and with run-dependent
+    tokens (times, durations, timestamps) removed, so the same failure
+    hashes the same on every run (_normalize_evidence_text). "" when
+    nothing remains (no content at all, or nothing but run-dependent
+    tokens) -- the caller fails closed on that, exactly like a missing
+    path or signature."""
+    lines = _normalize_evidence_text(content)
+    if not lines or not "".join(lines).replace(_RUN_TOKEN, "").strip():
         return ""
     return hashlib.sha256("\n".join(lines)
                            .encode("utf-8", "replace")).hexdigest()[:16]
@@ -8025,6 +8098,26 @@ def _waiver_list(repo_root, common_dir):
     if not ledger:
         sys.stdout.write("no waivers recorded for this repository.\n")
         return 0
+    git_dir = _git_dir(repo_root)
+    head, findings, _at = _last_verdict(git_dir)
+    # Which ledger anchors a finding of the last recorded verdict (blocking OR
+    # waived) still produces today. A waiver granted under an older fingerprint
+    # rule (before run-dependent tokens were stripped from test evidence), or
+    # for code/evidence that has since changed, matches none of them: mark it,
+    # so the user knows to re-grant it. None = cannot tell (nothing recorded, or
+    # the record was truncated) -> nothing is marked.
+    current = None
+    try:
+        entries = _read_history(git_dir, 1) if git_dir else []
+        last = entries[-1] if entries else {}
+        if head and not last.get("truncated"):
+            seen = list(findings) + [w for w in last.get("waived") or []
+                                     if isinstance(w, dict)]
+            current = {_waiver_anchor(repo_root, head, f) for f in seen}
+            current.discard("")
+    except Exception:  # noqa: BLE001 -- the marker is advice; --list never fails
+        current = None
+    unmatched = 0
     for e in ledger:
         when = e.get("waived_at")
         try:
@@ -8033,15 +8126,26 @@ def _waiver_list(repo_root, common_dir):
             when = str(when or "?")
         note = (f"  note: {_sanitize(str(e.get('note') or ''), 120)}"
                 if e.get("note") else "")
+        stale = ""
+        if current is not None and str(e.get("sid") or "") not in current:
+            unmatched += 1
+            stale = ("  [NO LONGER MATCHES: no finding of the last recorded verdict "
+                     "has this anchor; if it is still blocking, re-grant it with "
+                     "`waive <finding-id>`]")
         sys.stdout.write(
             f"  {_sanitize(str(e.get('sid') or '?'), 16)}  "
-            f"{_sanitize(str(e.get('finding_id') or '?'), 80)}  waived {when}{note}\n")
-    git_dir = _git_dir(repo_root)
-    head, findings, _at = _last_verdict(git_dir)
+            f"{_sanitize(str(e.get('finding_id') or '?'), 80)}  waived {when}{note}"
+            f"{stale}\n")
     active, suppressed = _waiver_counts(repo_root, common_dir, head, findings)
     sys.stdout.write(
         f"{active} active waiver(s), {suppressed} finding(s) suppressed in the last "
         "recorded verdict.\n")
+    if unmatched:
+        sys.stdout.write(
+            f"{unmatched} waiver(s) no longer match any finding of the last recorded "
+            "verdict (e.g. granted before run-dependent times were stripped from test "
+            "evidence, or the finding changed or was fixed): re-grant with `waive` if "
+            "the finding still blocks.\n")
     return 0
 
 

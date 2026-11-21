@@ -234,6 +234,72 @@ class — reviewer, deep reviewer, docs checker, command checks alike.
 - Promotion of a built-in test-check duty is deferred until dogfooding
   defends defaults (a later ADR, per the ADR 0006 bar).
 
+## Addendum (2026-11-21): run-dependent tokens in test evidence
+
+Status: accepted. Amends "Evidence binding" in section 6.
+
+**Problem.** A test finding quotes the run's output, which carries run times
+("1 failed in 0.41s"). The evidence fingerprint hashed them, so the same
+failure got a new waiver anchor, and a new finding id, on every run; a waiver
+never matched twice.
+
+**Decision.** Before a finding with an `evidence_source` is fingerprinted (the
+waiver anchor's evidence part) or hashed into its `_finding_id`, its evidence
+text is normalized: each line stripped, whitespace collapsed, blank lines
+dropped (unchanged), and **only** the run-dependent tokens below replaced by a
+fixed marker. Nothing else is touched: line numbers, expected/actual values,
+test names and assertion text keep their digits, so a different failure, or a
+changed assertion message, is still a different id. Fail-closed rules are
+unchanged (no path, no signature, or no evidence, including evidence that is
+nothing but run-dependent tokens, yields an anchor that never matches).
+Reviewer findings (no `evidence_source`) are not normalized: their ids and
+anchors are byte-for-byte what they were. The ledger format and the commands
+are unchanged.
+
+**Ignored token types (the exact list; case-insensitive).** Defined in
+`_RUN_TOKEN_RES` in `scripts/review-gate.py`; extend the list there and here.
+
+1. ISO-8601 date and time: `2026-11-21T10:11:12.345Z`, `2026-11-21 10:11:12+01:00`.
+2. RFC-2822 / syslog-style date and time: `Sat, 21 Nov 2026 10:11:12 GMT`,
+   `Nov 21 10:11:12`.
+3. A clock time `HH:MM:SS[.fff]` only as a line-start log prefix or inside
+   brackets/parentheses (`[10:11:12]`); a clock time elsewhere is left alone.
+4. An epoch stamp of 9 to 13 digits behind a `timestamp`, `epoch`, `ts` or
+   `time` key (`timestamp: 1763719872`).
+5. Pytest `--durations` lines: the leading duration of `0.41s call tests/t.py::x`
+   (also `setup`, `teardown`).
+6. A duration after `in`, `took`, `taken`, `elapsed`, `duration`, `runtime` or
+   `time` (optionally with `:` or `=`): `1 failed in 3.21s`, `Ran 1 test in
+   0.002s`, `took 2 seconds`, `Time: 0:00:03`, `elapsed=120ms`. A duration is a
+   number with a unit (`ms`, `msec`, `milliseconds`, `s`, `sec`, `seconds`,
+   optionally led by `Nh` / `Nm` as in `1m 3s`), or `H:MM:SS[.fff]`. A bare
+   number after these words (`assert x in 5`) is not a duration.
+7. A bracketed duration: `(0.41s)`, `[12 ms]`, `(0:00:03)`.
+8. Elapsed/seconds fields: a double-quoted JSON key containing `elapsed`,
+   `duration`, `runtime`, `seconds` or `secs` with a numeric value
+   (`"elapsed": 0.41`); a key `elapsed_`/`duration_`/`runtime_`/`time_`/
+   `walltime_`/`took_` plus a unit suffix (`s`, `ms`, `sec`, `secs`, `seconds`,
+   `millis`) with `:` or `=` (`elapsed_s=0.41`); a plain `elapsed:`, `seconds:`
+   or `secs:` with a number.
+
+**Not ignored** (deliberately, they can be part of the failure): bare numbers,
+line numbers, dates without a time of day, a clock time in the middle of a
+line, single-quoted or `=`-keyed values (`{'duration': 5}`, `sleep(seconds=5)`
+are expected/actual values), temp directories, process ids, random seeds,
+memory addresses, and durations without a unit. A failure whose evidence varies
+in those still gets a new id on each run: that is the conservative side.
+
+**Consequences.** A waiver granted before this change for evidence that
+carried a run-dependent token stops matching once and must be granted again
+(accepted; the ledger is machine-local, no migration). Evidence that carried
+none of these tokens hashes exactly as before and keeps its waiver. `waive
+--list` marks each ledger entry whose anchor no finding of the last recorded
+verdict has (`NO LONGER MATCHES`) and ends with a count, so a user knows to
+re-grant; the marker is advice, never a failure, and is skipped when the
+recorded verdict was truncated. The finding id shown by the gate and used by
+`waive`/`--dismiss` for a test finding now hashes the normalized evidence too,
+so it is stable across runs; reviewer-finding ids are unchanged.
+
 ## References
 
 - SPEC-15 ticket: `.kimchi/tracker/tickets/spec-15-race-regression-checks.md`
